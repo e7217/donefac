@@ -7,6 +7,8 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { Download, Loader2, RotateCcw, Users, WifiOff } from 'lucide-react';
 import type { CollaborationSession } from '../../shared/collaboration';
 import type { DocPage, RichContent } from '../../shared/types';
+import { documentPlainText } from '../../shared/document-nodes';
+import { decorateDocumentExtensions } from './DocumentBlocks';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { api } from '../lib/api';
 import { CollaborationClient, hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
@@ -101,7 +103,7 @@ function LiveBinding({ client, readOnly, onEditor, onContent }: CollaborativeEdi
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
-      ...createEditorExtensions({ collaboration: true }),
+      ...decorateDocumentExtensions(createEditorExtensions({ collaboration: true })),
       Collaboration.configure({ document: client.doc, field: 'default' }),
       Placeholder.configure({ placeholder: '함께 내용을 작성하세요.' }),
     ],
@@ -109,8 +111,8 @@ function LiveBinding({ client, readOnly, onEditor, onContent }: CollaborativeEdi
     editable: !readOnly,
     enableContentCheck: true,
     editorProps: { attributes: { class: 'docs-prose docs-live-prose', 'aria-label': '공동 편집 문서 본문' } },
-    onUpdate: ({ editor: instance }) => onContent(instance.getJSON() as RichContent, instance.getText()),
-    onCreate: ({ editor: instance }) => onContent(instance.getJSON() as RichContent, instance.getText()),
+    onUpdate: ({ editor: instance }) => onContent(instance.getJSON() as RichContent, documentPlainText(instance.getJSON() as RichContent)),
+    onCreate: ({ editor: instance }) => onContent(instance.getJSON() as RichContent, documentPlainText(instance.getJSON() as RichContent)),
     onContentError: ({ disableCollaboration }) => {
       client.fail('지원하지 않는 문서 형식을 발견해 편집을 중단했습니다. 복구 데이터를 보존하고 문서 형식을 확인해주세요.');
       disableCollaboration();

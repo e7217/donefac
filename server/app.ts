@@ -11,6 +11,7 @@ import { PlanningService, PlanningError } from './planning.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
+import { DocumentContentService, DocumentContentError, normalizeDocumentContent, hasVersionTwoNodes } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { createCalendarMath } from '../shared/calendar.js';
@@ -28,15 +29,7 @@ const isDate = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{
 const date = (v: unknown, label: string) => v === null || v === '' || v === undefined ? null : isDate(v) ? v : fail(`${label}: YYYY-MM-DD 형식의 날짜가 필요합니다.`);
 function dateRange(start: string | null, end: string | null) { if (start && end && start > end) fail('종료일은 시작일보다 빠를 수 없습니다.'); }
 function checkVersion(current: {version: number}, value: unknown) { if (!Number.isInteger(value)) fail('expectedVersion이 필요합니다.'); if (current.version !== value) fail('다른 작업자가 변경했습니다. 새로고침 후 다시 시도해 주세요.',409,{currentVersion:current.version}); }
-function rich(v: any): RichContent {
-  let count = 0;
-  function walk(n: any, depth: number) {
-    if (++count > 30000 || depth > 60 || !n || typeof n !== 'object' || typeof n.type !== 'string') fail('문서 내용 형식이 올바르지 않습니다.');
-    if (n.text !== undefined && typeof n.text !== 'string') fail('문서 텍스트 형식이 올바르지 않습니다.');
-    if (n.content !== undefined) { if (!Array.isArray(n.content)) fail('문서 블록 형식이 올바르지 않습니다.'); n.content.forEach((c: any) => walk(c,depth+1)); }
-  }
-  if (v?.type !== 'doc') fail('문서 루트는 doc 형식이어야 합니다.'); walk(v,0); return v;
-}
+function rich(value: unknown): RichContent { return normalizeDocumentContent(value).content; }
 function shiftDate(value: string, days: number, working: boolean): string {
   const d = new Date(`${value}T00:00:00Z`), sign = Math.sign(days); let remain = Math.abs(days);
   while (remain) { d.setUTCDate(d.getUTCDate()+sign); if (!working || ![0,6].includes(d.getUTCDay())) remain--; }
@@ -51,7 +44,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   if (options.seed !== false) seed(store);
   const issueSchemas=new IssueSchemaService(store);
   const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
-  const collaboration=new CollaborationService(store);
+  const documentContent=new DocumentContentService(store);
+  const collaboration=new CollaborationService(store,documentContent);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
@@ -94,9 +88,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
     workflows.validateIssue(i,previous,options);return i;
   };
-  const validateDocument = (d: DocPage) => {
+  const validateDocument = (d: DocPage, previous?: DocPage, options: {allowMissing?: boolean;skipReferences?:boolean} = {}) => {
     d.title=text(d.title,'문서 제목',300);if(d.projectId!==null)get('projects',d.projectId);get('users',d.authorId);
-    d.content=rich(d.content);d.plainText=plain(d.content);if(!['draft','published'].includes(d.status))fail('문서 상태를 확인해 주세요.');
+    const normalized=documentContent.normalize(d.content);d.content=normalized.content;d.plainText=normalized.plainText;if(!options.skipReferences)documentContent.validate(d.id,d.content,previous?.content,options);if(!['draft','published'].includes(d.status))fail('문서 상태를 확인해 주세요.');
     if(typeof d.icon!=='string'||d.icon.length>20)fail('아이콘을 확인해 주세요.');
     let parentId=d.parentId;const visited=new Set([d.id]);
     while(parentId){if(visited.has(parentId))fail('문서 트리에 순환 관계가 있습니다.');visited.add(parentId);const p=get<DocPage>('documents',parentId);if(p.projectId!==d.projectId)fail('상위 문서는 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
@@ -166,13 +160,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     const updated=store.transaction(()=>{const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release','cycleId','moduleId','releaseId','customFields'];const i=validateIssue({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),...planning.resolveIssueFields(req.body,old.projectId,old),version:old.version+1,updatedAt:now()},old);i.completedAt=done(i)?(old.completedAt||now()):null;store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.filter(k=>k in req.body).join(', ')}`);return i;});res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const i=get<Issue>('issues',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(i,Number(v));if(store.all<Issue>('issues').some(x=>x.parentId===i.id))fail('하위 티켓을 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('issue',i.id);cleanup.push(...deleteAttachmentRows('issue',i.id));for(const milestone of scheduleArtifacts.detachIssue(i.id))activity(req,'milestone',milestone.id,'연결 업무 삭제',`${i.key} 연결 해제`);store.remove('issues',i.id);activity(req,'issue',i.id,'티켓 삭제',i.key);});cleanupAttachments(cleanup);res.json({ok:true});});
-  app.post('/api/documents',(req,res)=>{const timestamp=now(),authorId=actor(req);const d=validateDocument({id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,content:req.body.content||{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp});store.transaction(()=>{store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);});res.status(201).json(d);});
+  app.post('/api/documents',(req,res)=>{const timestamp=now(),authorId=actor(req);const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};store.transaction(()=>{validateDocument(d);store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);});res.status(201).json(d);});
   app.patch('/api/documents/:id',(req,res)=>{
     const bodyChanged=Object.hasOwn(req.body,'content');
     const updated=store.transaction(()=>{
       const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
       const fields=['projectId','parentId','title','content','icon','status'];
-      let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()});
+      let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
       store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
       revision(d,actor(req),nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);return d;
@@ -183,7 +177,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.delete('/api/documents/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const d=get<DocPage>('documents',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(d,Number(v));if(store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('document',d.id);cleanup.push(...deleteAttachmentRows('document',d.id));store.remove('documents',d.id);activity(req,'document',d.id,'문서 삭제',d.title);});collaboration.reset(String(req.params.id),'문서가 삭제되었습니다.');cleanupAttachments(cleanup);res.json({ok:true});});
   app.get('/api/documents/:id/revisions',(req,res)=>{get('documents',req.params.id);res.json(store.all<any>('revisions').filter(r=>r.documentId===req.params.id).sort((a,b)=>b.version-a.version));});
   app.post('/api/documents/:id/restore',(req,res)=>{
-    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d={...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()};store.put('documents',d);d=collaboration.replaceBody(d);revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});
+    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d=validateDocument({...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});store.put('documents',d);d=collaboration.replaceBody(d,{allowMissing:true});revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});
     collaboration.reset(updated.id,'문서 이력에서 복구되었습니다.');res.json(updated);
   });
   app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
@@ -240,7 +234,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
-    const payload={schemaVersion:6,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
+    const payload={schemaVersion:7,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+attachments.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=attachments.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -248,12 +242,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5,6].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~6)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6,7].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~7)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
+    if(data.schemaVersion<7)for(const document of [...data.documents,...data.revisions]){const content=rich(document.content);if(hasVersionTwoNodes(content))fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');}
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
+    data.documents=data.documents.map((document:DocPage)=>({...document,...documentContent.normalize(document.content)}));
+    const firstDocument=data.documents[0] as DocPage|undefined;documentContent.validate(firstDocument?.id||uid(),firstDocument?.content||{type:'doc',content:[{type:'paragraph'}]},undefined,{allowMissing:true,documents:data.documents,issues:data.issues});
     const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents);
     const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
@@ -284,7 +281,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       for(const d of data.documents)store.put('documents',d);
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
       const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
-      for(const d of data.documents){validateDocument(d);if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
+      for(const d of data.documents){validateDocument(d,undefined,{allowMissing:true,skipReferences:true});if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       for(const d of data.dependencies){validateDependency(d,data.dependencies);store.put('dependencies',d);}
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
       for(const c of data.comments){if(!['issue','document'].includes(c.resourceType))fail('잘못된 댓글 대상입니다.');get(c.resourceType==='issue'?'issues':'documents',c.resourceId);get('users',c.authorId);text(c.body,'댓글',20000);store.put('comments',c);}
@@ -344,7 +341,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   });
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

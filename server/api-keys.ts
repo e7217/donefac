@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
 import type { ApiKeyCreated, ApiKeyRecord, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, User } from '../shared/types.js';
 import { Store } from './store.js';
+import { normalizeDocumentContent } from './document-content.js';
+import { contentReferences } from '../shared/document-nodes.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -123,12 +125,21 @@ export class ApiKeyService {
     if (!id || /[\/\\\u0000-\u001f]/.test(id) || id === '.' || id === '..') fail(400, '대상 ID 형식이 올바르지 않습니다.');
     return id;
   }
-  private references(key: ApiKeyRecord, request: Request, projectId: unknown, type: 'issue' | 'document') {
+  private references(key: ApiKeyRecord, request: Request, projectId: unknown, type: 'issue' | 'document', previous?: Issue | DocPage) {
     this.allowedProject(key, projectId);
     const body = request.body as Record<string, unknown>;
     if (body.parentId !== undefined && body.parentId !== null && body.parentId !== '') this.resource(key, type === 'issue' ? 'issues' : 'documents', body.parentId);
     if (type === 'issue') for (const field of ['cycleId', 'moduleId', 'releaseId']) {
       if (body[field] !== undefined && body[field] !== null && body[field] !== '') this.resource(key, 'planning_items', body[field]);
+    }
+    if (type === 'document' && Object.hasOwn(body, 'content')) {
+      const { content } = normalizeDocumentContent(body.content);
+      const historical = new Set(previous && 'content' in previous ? contentReferences(previous.content).map(reference => `${reference.type}:${reference.kind}:${reference.id}`) : []);
+      for (const reference of contentReferences(content)) {
+        const table = reference.type === 'issue' ? 'issues' : 'documents';
+        if (!this.store.get(table, reference.id) && historical.has(`${reference.type}:${reference.kind}:${reference.id}`)) continue;
+        this.resource(key, table, reference.id);
+      }
     }
   }
 
@@ -206,7 +217,7 @@ export class ApiKeyService {
         const version = request.body.expectedVersion ?? fromQuery;
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
-      } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document');
+      } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
     } else if (request.method === 'POST' && path === '/api/comments') {
       this.query(request, []);
       if (!['issue', 'document'].includes(request.body.resourceType)) fail(400, '댓글 대상을 확인해 주세요.');

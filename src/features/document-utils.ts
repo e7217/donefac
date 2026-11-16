@@ -1,4 +1,5 @@
 import type { RichContent } from '../../shared/types';
+import { documentPlainText } from '../../shared/document-nodes';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
 const heading = (text: string): RichContent => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
@@ -21,11 +22,19 @@ export function templateContent(id: string): RichContent {
   return { type: 'doc', content: sections[id] ? sections[id].flatMap(([title, body]) => [heading(title), paragraph(body)]) : [paragraph()] };
 }
 
-export function contentText(node: RichContent): string {
-  if (node.type === 'text') return node.text || '';
-  if (node.type === 'hardBreak') return '\n';
-  const block = ['paragraph', 'heading', 'codeBlock', 'listItem', 'taskItem', 'tableRow'].includes(node.type);
-  return (node.content || []).map(contentText).join('') + (block ? '\n' : '');
+export function contentText(node: RichContent): string { return documentPlainText(node); }
+
+function summaryHtml(node: RichContent): string {
+  const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  if (node.type === 'hardBreak') return '<br>';
+  if (node.type !== 'text') return (node.content || []).map(summaryHtml).join('');
+  let text = escape(node.text || '');
+  for (const mark of node.marks || []) {
+    const tag = ({bold:'strong',italic:'em',strike:'s',code:'code',underline:'u'} as Record<string,string>)[mark.type];
+    if (tag) text = `<${tag}>${text}</${tag}>`;
+    if (mark.type === 'link' && /^(?:https?:\/\/|mailto:|#|\/)/i.test(String(mark.attrs?.href || ''))) text = `<a href="${escape(String(mark.attrs?.href))}">${text}</a>`;
+  }
+  return text;
 }
 
 export function contentMarkdown(node: RichContent): string {
@@ -46,6 +55,12 @@ export function contentMarkdown(node: RichContent): string {
     case 'paragraph': return inline() + '\n\n';
     case 'heading': return '#'.repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1))) + ' ' + inline() + '\n\n';
     case 'hardBreak': return '  \n';
+    case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
+    case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
+    case 'documentInclude': return `> 문서 포함: [${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
+    case 'details': return `<details>\n${inline()}</details>\n\n`;
+    case 'detailsSummary': return `<summary>${summaryHtml(node)}</summary>\n\n`;
+    case 'detailsContent': return inline();
     case 'horizontalRule': return '\n---\n\n';
     case 'codeBlock': return '```' + (node.attrs?.language || '') + '\n' + contentText(node).trimEnd() + '\n```\n\n';
     case 'blockquote': return inline().trim().split('\n').map(line => '> ' + line).join('\n') + '\n\n';

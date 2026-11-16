@@ -4,6 +4,7 @@ import { TableKit } from '@tiptap/extension-table';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import Image from '@tiptap/extension-image';
+import { documentNodeExtensions } from './document-nodes.js';
 
 /** Identical document schema on the server and browser; no editor or DOM needed. */
 export function createEditorExtensions(options: { collaboration?: boolean } = {}): AnyExtension[] {
@@ -13,6 +14,7 @@ export function createEditorExtensions(options: { collaboration?: boolean } = {}
     TaskList,
     TaskItem.configure({nested:true}),
     Image.configure({allowBase64:false}),
+    ...documentNodeExtensions(),
   ];
 }
 export function createEditorSchema() { return getSchema(createEditorExtensions()); }

@@ -1,5 +1,7 @@
 import * as Y from 'yjs';
+import { yDocToProsemirrorJSON } from 'y-prosemirror';
 import { COLLABORATION_SCHEMA, type CollaborationPeer, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration';
+import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
 
 export type CollaborationPhase = 'connecting' | 'connected' | 'offline' | 'recovery' | 'error';
@@ -10,6 +12,62 @@ export interface CollaborationView {
 interface PendingCache { epoch: string; schemaVersion: number; update: string; pending: true; updatedAt: string }
 const REMOTE = Symbol('server-update');
 const CACHE = Symbol('pending-cache');
+const MAX_CACHE_STATE = 16 * 1024 * 1024;
+const MAX_CACHE_DOCUMENT = 8 * 1024 * 1024;
+const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
+
+/** A known old cache is rendered only after validation in a disposable document.
+ * Its original bytes remain untouched until an explicit discard or saved copy. */
+function validateLegacyPending(update: string): Uint8Array {
+  if (typeof update !== 'string' || !update.length || update.length > Math.ceil(MAX_CACHE_STATE / 3) * 4) throw new Error('편집 보관 데이터 크기가 올바르지 않습니다.');
+  const bytes = decodeBytes(update);
+  if (bytes.length > MAX_CACHE_STATE || encodeBytes(bytes) !== update) throw new Error('편집 보관 데이터 형식이 올바르지 않습니다.');
+  const candidate = new Y.Doc();
+  try {
+    Y.applyUpdate(candidate, bytes);
+    for (const name of candidate.share.keys()) if (name !== 'default') throw new Error('지원하지 않는 공동 편집 루트입니다.');
+    const root = candidate.getXmlFragment('default');
+    if ((root as unknown as { _map: Map<unknown, unknown> })._map.size) throw new Error('지원하지 않는 공동 편집 루트 속성입니다.');
+    const content: unknown = yDocToProsemirrorJSON(candidate, 'default');
+    if (new TextEncoder().encode(JSON.stringify(content)).length > MAX_CACHE_DOCUMENT) throw new Error('보관한 문서가 너무 큽니다.');
+    const schema = createEditorSchema();
+    const object = (value: unknown): Record<string, unknown> => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('문서 구조가 올바르지 않습니다.');
+      return value as Record<string, unknown>;
+    };
+    const attributes = (value: unknown, spec: Record<string, unknown> | undefined) => {
+      if (value === undefined) return {};
+      const result = object(value);
+      if (Object.keys(result).some(key => !Object.hasOwn(spec || {}, key))) throw new Error('지원하지 않는 문서 속성입니다.');
+      return result;
+    };
+    let count = 0;
+    const check = (value: unknown, depth: number) => {
+      if (++count > 30000 || depth > 60) throw new Error('문서 중첩 한도를 초과했습니다.');
+      const node = object(value);
+      if (typeof node.type !== 'string' || versionTwoNodes.has(node.type) || !schema.nodes[node.type]) throw new Error('이전 문서 형식에 없는 블록입니다.');
+      const attrs = attributes(node.attrs, schema.nodes[node.type].spec.attrs);
+      if (node.marks !== undefined && !Array.isArray(node.marks)) throw new Error('문서 서식이 올바르지 않습니다.');
+      for (const value of Array.isArray(node.marks) ? node.marks : []) {
+        const mark = object(value);
+        if (typeof mark.type !== 'string' || !schema.marks[mark.type]) throw new Error('지원하지 않는 문서 서식입니다.');
+        const attrs = attributes(mark.attrs, schema.marks[mark.type].spec.attrs);
+        if (mark.type === 'link' && typeof attrs.href === 'string' && /^(?:javascript|vbscript|data):/i.test(attrs.href.trim())) throw new Error('지원하지 않는 링크 형식입니다.');
+      }
+      if (node.type === 'image' && typeof attrs.src === 'string' && !/^(?:https?:\/\/|\/)/i.test(attrs.src)) throw new Error('지원하지 않는 이미지 형식입니다.');
+      if (node.type === 'heading' && (typeof attrs.level !== 'number' || ![1, 2, 3].includes(attrs.level))) throw new Error('지원하지 않는 제목 단계입니다.');
+      if (node.content !== undefined) {
+        if (!Array.isArray(node.content)) throw new Error('문서 블록 목록이 올바르지 않습니다.');
+        for (const child of node.content) check(child, depth + 1);
+      }
+    };
+    check(content, 0);
+    const document = schema.nodeFromJSON(content);
+    if (document.type !== schema.topNodeType) throw new Error('문서 루트가 올바르지 않습니다.');
+    document.check();
+    return bytes;
+  } finally { candidate.destroy(); }
+}
 const prefix = (actorId: string, documentId: string) => `teamspace:collaboration-pending:${actorId}:${documentId}:`;
 const key = (actorId: string, documentId: string, epoch: string) => `${prefix(actorId, documentId)}${epoch}:${COLLABORATION_SCHEMA}`;
 export function hasPendingCollaboration(actorId: string, documentId: string): boolean {
@@ -40,6 +98,8 @@ export class CollaborationClient {
   private acknowledgedSequence = 0;
   private requestSequence = 0;
   private unreadableCache = false;
+  private legacyRecovery = false;
+  private selectedCacheKey: string | null = null;
   private inFlight = new Map<string, number>();
   private serverVector: Uint8Array = new Uint8Array();
   private state: CollaborationView;
@@ -72,6 +132,7 @@ export class CollaborationClient {
   private loadPending() {
     try {
       let candidate: PendingCache | null = null;
+      let candidateKey: string | null = null;
       for (let index = 0; index < localStorage.length; index++) {
         const storedKey = localStorage.key(index);
         if (!storedKey?.startsWith(prefix(this.actorId, this.documentId))) continue;
@@ -79,9 +140,19 @@ export class CollaborationClient {
         if (!stored) continue;
         const parsed = JSON.parse(stored) as PendingCache;
         if (!parsed.pending || !parsed.update || !parsed.epoch) continue;
-        if (!candidate || parsed.updatedAt > candidate.updatedAt) candidate = parsed;
+        if (!candidate || parsed.updatedAt > candidate.updatedAt) { candidate = parsed; candidateKey = storedKey; }
       }
       if (!candidate) return;
+      this.selectedCacheKey = candidateKey;
+      if (candidate.schemaVersion === 1 && COLLABORATION_SCHEMA === 2) {
+        if (typeof candidate.epoch !== 'string' || candidate.epoch.length > 200 || candidate.pending !== true) throw new Error('이전 편집 보관 정보가 올바르지 않습니다.');
+        const update = validateLegacyPending(candidate.update);
+        Y.applyUpdate(this.doc, update, CACHE);
+        this.legacyRecovery = true;
+        this.localSequence = 1;
+        this.state = { ...this.state, epoch: candidate.epoch, phase: 'recovery', ready: true, pending: true, error: '이전 문서 형식의 편집을 읽기 전용으로 복구했습니다. 원본 문서에 자동으로 합치지 않으니 사본으로 보관해주세요.' };
+        return;
+      }
       if (candidate.schemaVersion !== COLLABORATION_SCHEMA) {
         this.unreadableCache = true;
         this.state = { ...this.state, phase: 'error', error: '이전에 보관한 편집의 문서 형식이 다릅니다. 원본 데이터를 내려받아 복구해주세요.' };
@@ -97,7 +168,7 @@ export class CollaborationClient {
   }
 
   private persistPending() {
-    if (this.unreadableCache) return;
+    if (this.unreadableCache || this.legacyRecovery) return;
     try {
       if (this.localSequence > this.acknowledgedSequence) {
         const cached: PendingCache = { epoch: this.state.epoch, schemaVersion: COLLABORATION_SCHEMA, update: encodeBytes(Y.encodeStateAsUpdate(this.doc)), pending: true, updatedAt: new Date().toISOString() };
@@ -108,7 +179,7 @@ export class CollaborationClient {
   }
 
   private onUpdate = (_update: Uint8Array, origin: unknown) => {
-    if (this.disposed || origin === CACHE) return;
+    if (this.disposed || this.legacyRecovery || origin === CACHE) return;
     if (origin !== REMOTE) {
       this.localSequence++;
       this.persistPending();
@@ -227,7 +298,8 @@ export class CollaborationClient {
     const ownPrefix = prefix(this.actorId, this.documentId);
     if (allEpochs) {
       for (const storedKey of Object.keys(localStorage)) if (storedKey.startsWith(ownPrefix)) localStorage.removeItem(storedKey);
-    } else localStorage.removeItem(key(this.actorId, this.documentId, this.state.epoch));
+    } else localStorage.removeItem(this.selectedCacheKey || key(this.actorId, this.documentId, this.state.epoch));
+    this.selectedCacheKey = null;
     this.acknowledgedSequence = this.localSequence;
     this.unreadableCache = false;
     this.setState({});

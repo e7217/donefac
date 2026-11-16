@@ -1,11 +1,8 @@
 import { Store } from './store.js';
 import type { Issue, DocPage, RichContent } from '../shared/types.js';
 
-export function plain(content: RichContent): string {
-  if (content.text) return content.text;
-  const parts = (content.content || []).map(plain);
-  return parts.join(['paragraph', 'heading', 'listItem', 'tableRow', 'doc', 'bulletList', 'orderedList'].includes(content.type) ? '\n' : '');
-}
+export { documentPlainText as plain } from '../shared/document-nodes.js';
+import { documentPlainText as plain } from '../shared/document-nodes.js';
 export function seed(s: Store) {
   if (s.all('projects').length || s.all('users').length) return;
   s.transaction(() => {

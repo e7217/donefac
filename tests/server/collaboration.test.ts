@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { COLLABORATION_SCHEMA } from '../../shared/collaboration.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,7 +38,7 @@ class Peer {
 async function peer(f:Awaited<ReturnType<typeof fixture>>,documentId:string,actorId:string,epoch:string|null,options:{schemaVersion?:number;state?:Uint8Array}={}){
   const p=new Peer(`${f.base.replace('http:','ws:')}/api/collaboration?${new URLSearchParams({documentId,actorId})}`);await once(p.ws,'open');
   if(options.state)Y.applyUpdate(p.doc,options.state);
-  p.send({type:'hello',epoch,schemaVersion:options.schemaVersion??1,stateVector:Buffer.from(Y.encodeStateVector(p.doc)).toString('base64')});
+  p.send({type:'hello',epoch,schemaVersion:options.schemaVersion??COLLABORATION_SCHEMA,stateVector:Buffer.from(Y.encodeStateVector(p.doc)).toString('base64')});
   return p;
 }
 async function connected(f:Awaited<ReturnType<typeof fixture>>,documentId:string,actorId:string,epoch:string|null,options:{state?:Uint8Array}={}){
@@ -104,7 +105,7 @@ test('invalid, oversized and unsupported-schema edits never mutate the canonical
       const bad=new Y.Doc();Y.applyUpdate(bad,initial);mutate(bad);a.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.from(Y.encodeStateAsUpdate(bad,vector)).toString('base64')});assert.equal((await a.p.next('error')).code,'INVALID_SCHEMA');bad.destroy();
     }
     const unchanged=(await f.request(`/documents/${s.document.id}/collaboration`)).data;assert.equal(unchanged.document.version,s.document.version);assert.equal(unchanged.document.plainText,'원본');
-    const wrong=await peer(f,s.document.id,'user-seo',s.epoch,{schemaVersion:2});peers.push(wrong);assert.equal((await wrong.next('error')).code,'SCHEMA_MISMATCH');assert.equal(await wrong.closed,4400);
+    const wrong=await peer(f,s.document.id,'user-seo',s.epoch,{schemaVersion:COLLABORATION_SCHEMA+1});peers.push(wrong);assert.equal((await wrong.next('error')).code,'SCHEMA_MISMATCH');assert.equal(await wrong.closed,4400);
     text(a.p).insert(0,'정상');const accepted=await sendUpdate(a.p,s.epoch,Y.encodeStateAsUpdate(a.p.doc,vector));assert.equal(accepted.document.plainText,'정상원본');assert.equal(accepted.document.version,s.document.version+1);
   }finally{peers.forEach(p=>p.dispose());await f.close();f.remove();}
 });
@@ -119,7 +120,7 @@ test('restore and native import rotate epochs and reject old offline edits; reje
     const stale=await peer(f,id,'user-min',s.epoch);peers.push(stale);assert.equal((await stale.next('reset')).epoch,reset.epoch);assert.equal(await stale.closed,4409);
     const fresh=await connected(f,id,'user-seo',reset.epoch);peers.push(fresh.p);assert.equal(text(fresh.p).toString(),'원본');
     fresh.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.from(offline).toString('base64')});assert.equal((await fresh.p.next('reset')).epoch,reset.epoch);assert.equal(await fresh.p.closed,4409);
-    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,6);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
+    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,7);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
     const mismatch=structuredClone(exported);mismatch.documents.find((d:any)=>d.id===id).content={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'불일치 내용'}]}]};const rejected=await f.request('/import','POST',{data:mismatch});assert.equal(rejected.status,422);assert.equal((await f.request(`/documents/${id}/collaboration`)).data.epoch,reset.epoch);live.p.send({type:'ping'});assert.equal((await live.p.next('pong')).type,'pong');
     const imported=await f.request('/import','POST',{data:exported});assert.equal(imported.status,200);const importedReset=await live.p.next('reset');assert.notEqual(importedReset.epoch,reset.epoch);assert.equal(await live.p.closed,4409);const latest=(await f.request(`/documents/${id}/collaboration`)).data;assert.equal(latest.epoch,importedReset.epoch);assert.equal(latest.document.plainText,'원본');assert.ok(latest.document.version>restored.data.version);
     const old=await peer(f,id,'user-min',reset.epoch);peers.push(old);assert.equal((await old.next('reset')).epoch,latest.epoch);assert.equal(await old.closed,4409);

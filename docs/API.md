@@ -64,6 +64,31 @@ curl --fail-with-body \
 
 삭제할 때는 `?expectedVersion=3`처럼 전달한다. 하위 업무·문서가 있으면 삭제를 거절한다. 문서 `content`는 Tiptap JSON이며, 공동 편집 문서의 본문 교체는 편집 세대를 바꾸므로 의도한 전체 교체에만 사용한다.
 
+## 문서 참조·포함·접기
+
+문서 본문에는 다음 블록을 넣을 수 있다. `issueReference`는 `issueId`, `documentReference`와 `documentInclude`는 `documentId`를 사용하며, `label`은 대상이 없어졌을 때 표시할 이름이다. 모든 대상은 키의 프로젝트 범위 안에 있어야 한다. 포함 원문의 내용을 현재 문서에 복사하지 않으며, 조회 응답도 참조 ID를 유지한다.
+
+```json
+{
+  "expectedVersion": 5,
+  "content": {
+    "type": "doc",
+    "content": [
+      {"type": "issueReference", "attrs": {"issueId": "업무 ID", "label": "검증 업무"}},
+      {"type": "documentInclude", "attrs": {"documentId": "원문 ID", "label": "설계 원문"}},
+      {"type": "details", "content": [
+        {"type": "detailsSummary", "content": [{"type": "text", "text": "검토 근거"}]},
+        {"type": "detailsContent", "content": [
+          {"type": "paragraph", "content": [{"type": "text", "text": "접혀 있어도 본문에 보존됩니다."}]}
+        ]}
+      ]}
+    ]
+  }
+}
+```
+
+자기 자신 또는 순환하는 문서 포함, 새로 지정한 누락 대상, 잘못된 블록 구조는 저장하지 않는다. 삭제된 대상의 기존 참조는 유지할 수 있다. 접기·펼치기는 화면 상태이며 JSON에 `open` 같은 속성을 추가하지 않는다. 문서 본문 한도는 8MiB·30,000개 노드·60단계다. Markdown 내보내기는 내부 참조 주소와 접힌 본문을 보존하며 원문 포함을 링크로 표현한다.
+
 ## 사용자 정의 필드
 
 유형·필드 설정은 관리 화면에서 저장하고 자동화 API에서는 조회한다. 티켓의 `customFields`는 필드 ID를 키로 사용하는 객체다. 아래 값은 해당 ID와 입력 종류를 프로젝트에 먼저 등록했을 때의 예시다.

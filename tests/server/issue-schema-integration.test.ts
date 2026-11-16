@@ -61,7 +61,7 @@ test('scoped automation reads definitions and writes typed values through the sa
   }finally{await f.close();}
 });
 
-test('native schema6 preserves type/option IDs, archived history, workflow and view references; bad imports roll back and legacy5 resets definitions',async()=>{
+test('native current backup preserves type/option IDs, archived history, workflow and view references; bad imports roll back and legacy5 resets definitions',async()=>{
   const f=await fixture();try{
     const initial=(await f.call<WorkspaceSnapshot>('/workspace')).data,calendar=initial.calendars!.find(value=>value.projectId==='project-neo')!;
     assert.equal((await f.call('/projects/project-neo/calendar','PATCH',{...calendar,expectedVersion:calendar.version,exceptions:[{date:'2026-12-25',isWorking:false,label:'회사 휴무'}]})).status,200);
@@ -75,7 +75,7 @@ test('native schema6 preserves type/option IDs, archived history, workflow and v
     const savedWorkflow=await f.call('/projects/project-neo/workflow','PATCH',{...workflow,expectedVersion:workflow.version,fieldRules:[{issueType:'incident',statusId:'done',requiredFields:['custom:evidence']}]});assert.equal(savedWorkflow.status,200,JSON.stringify(savedWorkflow.data));
     const view=await f.call<SavedView>('/views','POST',{projectId:'project-neo',name:'장애 모아보기',layout:'list',filters:{query:'',status:'all',assigneeId:'all',type:'incident'}});assert.equal(view.status,201);
     schema=(await f.call<ProjectIssueSchema>(path,'PATCH',{...schema,expectedVersion:schema.version,issueTypes:schema.issueTypes.map(type=>type.id==='incident'?{...type,archived:true}:type),fields:schema.fields.map(field=>field.id==='severity'?{...field,options:field.options.map(option=>option.id==='major'?{...option,archived:true}:option)}:field)})).data;
-    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,6);
+    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,7);
     const bad=structuredClone(backup);bad.issueSchemas=bad.issueSchemas!.filter(value=>value.projectId!=='project-neo');
     const before=(await f.call<WorkspaceSnapshot>('/workspace')).data;assert.equal((await f.call('/import','POST',{data:bad})).status,400);assert.deepEqual((await f.call('/workspace')).data,before);
     const badUser=structuredClone(backup);badUser.issues.find(issue=>issue.id===made.data.id)!.customFields={...values,reviewed:'false'};assert.equal((await f.call('/import','POST',{data:badUser})).status,400);assert.deepEqual((await f.call('/workspace')).data,before);

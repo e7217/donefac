@@ -50,6 +50,7 @@ export interface Issue {
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export interface RichContent { type: string; content?: RichContent[]; text?: string; attrs?: Record<string, unknown>; marks?: {type: string; attrs?: Record<string, unknown>}[] }
+export interface ContentReference { type: 'issue' | 'document'; id: string; kind: 'reference' | 'include'; label: string }
 export interface DocPage {
   id: string; projectId: string | null; parentId: string | null; title: string;
   content: RichContent; plainText: string; icon: string; status: 'draft' | 'published';

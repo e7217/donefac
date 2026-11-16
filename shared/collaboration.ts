@@ -1,7 +1,7 @@
 import type { DocPage } from './types';
 
 /** Persistent schema/version and transport contract shared by local clients and server. */
-export const COLLABORATION_SCHEMA = 1;
+export const COLLABORATION_SCHEMA = 2;
 export interface CollaborationPeer { id: string; actorId: string; name: string; color: string }
 export interface CollaborationSession {
   enabled: boolean;

@@ -1,0 +1,110 @@
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test';
+import type { Attachment, DocPage, DocRevision, Issue, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import { contentReferences } from '../../shared/document-nodes';
+
+const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
+const doc = (...content: RichContent[]): RichContent => ({ type: 'doc', content });
+const include = (page: DocPage): RichContent => ({ type: 'documentInclude', attrs: { documentId: page.id, label: page.title } });
+const details = (summary: string, text: string): RichContent => ({ type: 'details', content: [{ type: 'detailsSummary', content: [{ type: 'text', text: summary }] }, { type: 'detailsContent', content: [paragraph(text)] }] });
+type Fixture = { requests: APIRequestContext; workspace: WorkspaceSnapshot; prefix: string; source: DocPage; target: DocPage; backlink: DocPage; issue: Issue; imagePath: string };
+const test = base.extend<{ blocks: Fixture }>({
+  blocks: [async ({ playwright, baseURL }, provide) => {
+    const requests = await playwright.request.newContext({ baseURL }); const prefix = `문서 블록 ${randomUUID().slice(0, 8)}`;
+    try {
+      const workspace = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+      const createDoc = async (suffix: string, content = doc(paragraph())) => { const response = await requests.post('/api/documents', { data: { projectId: workspace.projects[0].id, title: `${prefix} ${suffix}`, content } }); expect(response.status()).toBe(201); return await response.json() as DocPage; };
+      const issueResponse = await requests.post('/api/issues', { data: { projectId: workspace.projects[0].id, title: `${prefix} 연결 업무` } }); expect(issueResponse.status()).toBe(201); const issue = await issueResponse.json() as Issue;
+      const source = await createDoc('편집 문서', doc(paragraph('작성 중인 문서'))), target = await createDoc('포함 원본');
+      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
+      const upload = await requests.post(`/api/attachments?resourceType=document&resourceId=${target.id}&filename=fixture.png`, { headers: { 'Content-Type': 'application/octet-stream', 'X-File-Type': 'image/png' }, data: png }); expect(upload.status()).toBe(201); const attachment = await upload.json() as Attachment, imagePath = `/api/attachments/${attachment.id}/content?inline=1`;
+      const rich = doc(
+        { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: '포함된 원본의 제목' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: '서식 있는 포함 본문', marks: [{ type: 'bold' }, { type: 'italic' }, { type: 'underline' }, { type: 'strike' }] }, { type: 'hardBreak' }, { type: 'text', text: '내부 링크', marks: [{ type: 'link', attrs: { href: '#/all/issues?issue=' + issue.id } }] }] },
+        { type: 'blockquote', content: [paragraph('인용한 결정 사항')] }, { type: 'codeBlock', content: [{ type: 'text', text: 'const ready = true;' }] },
+        { type: 'bulletList', content: [{ type: 'listItem', content: [paragraph('글머리 항목')] }] }, { type: 'orderedList', attrs: { start: 3 }, content: [{ type: 'listItem', content: [paragraph('번호 항목')] }] },
+        { type: 'taskList', content: [{ type: 'taskItem', attrs: { checked: true }, content: [paragraph('완료한 확인')] }] },
+        { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableHeader', content: [paragraph('검토 항목')] }, { type: 'tableHeader', content: [paragraph('결과')] }] }, { type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph('문서 표시')] }, { type: 'tableCell', content: [paragraph('정상')] }] }] },
+        { type: 'image', attrs: { src: imagePath, alt: '합성 포함 이미지' } }, { type: 'horizontalRule' }, details('원본의 접기 영역', '읽기 전용 접기 본문'),
+        { type: 'issueReference', attrs: { issueId: issue.id, label: `${issue.key} ${issue.title}` } },
+      );
+      const patched = await requests.patch(`/api/documents/${target.id}`, { data: { expectedVersion: target.version, content: rich } }); expect(patched.status()).toBe(200); const richTarget = await patched.json() as DocPage;
+      const backlink = await createDoc('역참조 문서', doc({ type: 'documentReference', attrs: { documentId: source.id, label: source.title } }));
+      expect((await requests.post('/api/resource-links', { data: { issueId: issue.id, documentId: source.id, kind: 'related' } })).status()).toBe(201);
+      await provide({ requests, workspace, prefix, source, target: richTarget, backlink, issue, imagePath });
+    } finally {
+      try { const response = await requests.get('/api/workspace', { timeout: 5000 }); if (response.ok()) { const snapshot = await response.json() as WorkspaceSnapshot; for (const page of snapshot.documents.filter(page => page.title.startsWith(prefix))) await requests.delete(`/api/documents/${page.id}?expectedVersion=${page.version}`, { timeout: 5000 }); for (const issue of snapshot.issues.filter(issue => issue.title.startsWith(prefix))) await requests.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`, { timeout: 5000 }); } }
+      finally { await requests.dispose(); }
+    }
+  }, { timeout: 30_000 }],
+});
+const snapshot = async (fixture: Fixture) => await (await fixture.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+const currentDoc = async (fixture: Fixture, id = fixture.source.id) => (await snapshot(fixture)).documents.find(page => page.id === id)!;
+async function open(page: Page, fixture: Fixture, id = fixture.source.id) { await page.goto(`/#/${fixture.source.projectId}/documents/${id}`); await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toBeVisible(); }
+async function choose(page: Page, kind: '업무 참조' | '문서 참조' | '문서 포함', title: string) { await page.getByRole('button', { name: `${kind} 삽입`, exact: true }).click(); const chooser = page.getByRole('dialog', { name: `${kind} 삽입`, exact: true }); await chooser.getByLabel('참조할 항목 검색', { exact: true }).fill(title); await chooser.locator('.doc-reference-results button').filter({ hasText: title }).click(); await expect(chooser).toHaveCount(0); }
+
+test('참조와 포함을 삽입해 실제 서식을 표시하고 이름·상태 갱신 및 연결·내보내기를 보존한다', async ({ page, blocks: f }) => {
+  await open(page, f); await choose(page, '업무 참조', f.issue.title); await choose(page, '문서 참조', f.target.title); await choose(page, '문서 포함', f.target.title);
+  const included = page.locator('.docs-prose .doc-reference-node .doc-included-content').first();
+  await expect(included.getByRole('heading', { name: '포함된 원본의 제목', exact: true })).toBeVisible(); for (const tag of ['strong', 'em', 'u', 's']) await expect(included.locator(tag).filter({ hasText: '서식 있는 포함 본문' })).toBeVisible(); await expect(included.locator('blockquote')).toContainText('인용한 결정 사항'); await expect(included.locator('pre code')).toHaveText('const ready = true;'); await expect(included.locator('table')).toContainText('검토 항목'); await expect(included.getByRole('checkbox', { name: '완료된 할 일', exact: true })).toBeChecked(); await expect(included.locator('img')).toHaveAttribute('src', f.imagePath); await expect.poll(() => included.locator('img').evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1);
+  expect(await included.evaluate(element => (element as HTMLElement).isContentEditable)).toBe(false);
+  const renamed = `${f.prefix} 최신 업무 제목`; expect((await f.requests.patch(`/api/issues/${f.issue.id}`, { data: { expectedVersion: f.issue.version, title: renamed, status: 'in_progress' } })).status()).toBe(200);
+  const localText = '새로고침에도 남는 로컬 본문'; await page.locator('.docs-prose > p').last().click(); await page.keyboard.insertText(localText);
+  expect((await f.requests.patch(`/api/documents/${f.target.id}`, { data: { expectedVersion: f.target.version, title: `${f.prefix} 최신 포함 원본`, content: doc(...(f.target.content.content || []), paragraph('원본에 새로 추가한 본문')) } })).status()).toBe(200);
+  await page.getByRole('button', { name: '참조 새로고침', exact: true }).click(); await expect(page.locator('.docs-prose')).toContainText(localText); await expect(included).toContainText('원본에 새로 추가한 본문'); await expect(included).toContainText(`${f.prefix} 최신 포함 원본`);
+  const card = page.locator('.docs-prose .doc-reference-node > .doc-reference-card.issue'); await expect(card).toContainText(renamed); await expect(card).toContainText('진행 중');
+  await page.locator('.docs-save-button').click(); await expect(page.locator('.docs-save-state')).toHaveText('저장됨'); const saved = await currentDoc(f); expect(contentReferences(saved.content).map(ref => [ref.type, ref.kind, ref.id])).toEqual([['issue', 'reference', f.issue.id], ['document', 'reference', f.target.id], ['document', 'include', f.target.id]]); expect(saved.plainText).toContain(f.issue.id); expect(saved.plainText).not.toContain('서식 있는 포함 본문');
+  await page.getByRole('button', { name: '연결', exact: true }).click(); await expect(page.locator('.docs-linked-issue')).toHaveCount(1); await expect(page.locator('.docs-reference-list').filter({ hasText: '본문에서 참조하는 문서' })).toContainText(`${f.prefix} 최신 포함 원본`); await expect(page.locator('.docs-reference-list').filter({ hasText: '이 문서를 참조하는 문서' })).toContainText(f.backlink.title); await expect(page.locator('.docs-reference-list').filter({ hasText: '본문의 업무 참조' })).toContainText(renamed);
+  await page.getByRole('button', { name: '문서 내보내기', exact: true }).click(); const downloadEvent = page.waitForEvent('download'); await page.getByRole('button', { name: '문서 JSON 내보내기', exact: true }).click(); const download = await downloadEvent, path = await download.path(); expect(path).not.toBeNull(); const exported = JSON.parse(readFileSync(path!, 'utf8')) as { schemaVersion: number; document: DocPage }; expect(exported.schemaVersion).toBe(2); expect(contentReferences(exported.document.content)).toHaveLength(3);
+  await page.reload(); await expect(page.locator('.doc-included-content')).toContainText('서식 있는 포함 본문'); await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+});
+
+test('접기 상태는 저장을 만들지 않고 요약에서 Enter로 본문을 편집하며 해제해도 내용을 유지한다', async ({ page, blocks: f }) => {
+  const saved = await f.requests.patch(`/api/documents/${f.source.id}`, { data: { expectedVersion: f.source.version, content: doc(details('배포 확인', '승인 조건')) } }); expect(saved.status()).toBe(200); const baseDoc = await saved.json() as DocPage;
+  await open(page, f); const block = page.locator('.docs-prose details[data-teamspace-node="details"]'), summary = block.locator('summary'); await expect(block).toHaveAttribute('open', ''); await summary.click(); await expect(block).not.toHaveAttribute('open', ''); await expect(page.locator('.docs-save-state')).toHaveText('저장됨'); expect((await currentDoc(f)).version).toBe(baseDoc.version);
+  await page.getByRole('button', { name: '접기 블록 모두 펼치기', exact: true }).click(); await expect(block).toHaveAttribute('open', ''); await summary.click(); await summary.press('End'); await summary.press('Enter'); await page.keyboard.insertText('키보드 본문 추가'); await expect(block.locator('[data-teamspace-details-content]')).toContainText('키보드 본문 추가');
+  await page.locator('.docs-save-button').click(); await expect(page.locator('.docs-save-state')).toHaveText('저장됨'); expect((await currentDoc(f)).content.content?.[0].attrs || {}).not.toHaveProperty('open');
+  await block.locator('[data-teamspace-details-content] p').first().click(); await page.getByRole('button', { name: '접기 블록 해제', exact: true }).click(); await expect(page.locator('.docs-prose details')).toHaveCount(0); await expect(page.locator('.docs-prose')).toContainText('배포 확인'); await expect(page.locator('.docs-prose')).toContainText('승인 조건'); await page.locator('.docs-save-button').click(); await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+  await page.getByRole('button', { name: '접기 블록 삽입', exact: true }).click(); await expect(page.locator('.docs-prose details')).toHaveCount(1); await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+});
+
+test('본문 참조의 탐색 취소는 초안을 보존하고 삭제된 대상은 저장된 이름으로 표시한다', async ({ page, blocks: f }) => {
+  const body = doc({ type: 'documentReference', attrs: { documentId: f.target.id, label: f.target.title } }, include(f.target), { type: 'issueReference', attrs: { issueId: f.issue.id, label: `${f.issue.key} ${f.issue.title}` } }); expect((await f.requests.patch(`/api/documents/${f.source.id}`, { data: { expectedVersion: f.source.version, content: body } })).status()).toBe(200);
+  await open(page, f); const title = page.getByRole('textbox', { name: '문서 제목', exact: true }); await title.fill(`${f.prefix} 취소 시 보존`);
+  const target = page.getByRole('button', { name: `참조 문서 열기 ${f.target.title}`, exact: true }); page.once('dialog', dialog => dialog.dismiss()); await target.click(); await expect(title).toHaveValue(`${f.prefix} 취소 시 보존`);
+  let confirmations = 0; const accept = async (dialog: import('@playwright/test').Dialog) => { confirmations++; await dialog.accept(); }; page.on('dialog', accept); await target.click(); await expect(title).toHaveValue(f.target.title); page.off('dialog', accept); expect(confirmations).toBe(1);
+  await page.locator('.docs-tree-link').filter({ hasText: f.source.title }).click(); await expect(title).toHaveValue(`${f.prefix} 취소 시 보존`); await page.locator('.docs-save-button').click(); await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+  expect((await f.requests.delete(`/api/documents/${f.target.id}?expectedVersion=${f.target.version}`)).status()).toBe(200); expect((await f.requests.delete(`/api/issues/${f.issue.id}?expectedVersion=${f.issue.version}`)).status()).toBe(200); await page.reload(); await expect(page.locator('.doc-include-notice')).toContainText('포함 문서를 찾을 수 없습니다'); await expect(page.getByRole('button', { name: `찾을 수 없는 문서 ${f.target.title}`, exact: true })).toBeDisabled(); await expect(page.getByRole('button', { name: `찾을 수 없는 업무 ${f.issue.key} ${f.issue.title}`, exact: true })).toBeDisabled();
+});
+
+test('포함 렌더러는 순환·깊이·전체 표시 한도를 명시하며 유효하지 않은 포함을 선택할 수 없다', async ({ page, blocks: f }) => {
+  const nestingErrors: string[] = []; page.on('console', message => { if (message.type() === 'error' && /In HTML|cannot be a descendant|cannot be a child|cannot contain/.test(message.text())) nestingErrors.push(message.text()); });
+  let next = f.target; const chain: DocPage[] = [];
+  for (let index = 0; index < 7; index++) { const response = await f.requests.post('/api/documents', { data: { projectId: f.source.projectId, title: `${f.prefix} 연결 단계 ${index}`, content: doc(include(next)) } }); expect(response.status()).toBe(201); next = await response.json() as DocPage; chain.push(next); }
+  const largeResponse = await f.requests.post('/api/documents', { data: { projectId: f.source.projectId, title: `${f.prefix} 많은 내용`, content: doc({ type: 'table', content: Array.from({ length: 1200 }, (_, index) => ({ type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph(`합성 긴 표 ${index}`)] }, { type: 'tableCell', content: [paragraph('값')] }] })) }) } }); expect(largeResponse.status()).toBe(201); const large = await largeResponse.json() as DocPage;
+  expect((await f.requests.patch(`/api/documents/${f.source.id}`, { data: { expectedVersion: f.source.version, content: doc(include(next), include(large)) } })).status()).toBe(200);
+  // A read-only snapshot fixture simulates corrupt legacy/external data. No invalid graph is written to SQLite.
+  await page.route('**/api/workspace', async route => { const response = await route.fetch(); const data = await response.json() as WorkspaceSnapshot; data.documents.find(value => value.id === chain[chain.length - 1].id)!.content = doc(include(f.source)); await route.fulfill({ response, json: data }); });
+  await open(page, f); await expect(page.locator('.doc-include-notice').filter({ hasText: '순환 문서 포함' })).toBeVisible(); await expect(page.locator('.doc-include-notice').filter({ hasText: '표시 한도' })).toBeVisible(); await page.unroute('**/api/workspace'); await page.reload(); await expect(page.locator('.doc-include-notice').filter({ hasText: '깊이 제한' })).toBeVisible(); expect(nestingErrors).toEqual([]);
+  await page.getByRole('button', { name: '문서 포함 삽입', exact: true }).click(); const chooser = page.getByRole('dialog', { name: '문서 포함 삽입', exact: true }); await chooser.getByLabel('참조할 항목 검색', { exact: true }).fill(f.source.title); await expect(chooser.locator('.doc-reference-results button').filter({ hasText: f.source.title })).toBeDisabled();
+});
+
+test('두 공동 편집자가 새 블록을 동기화하고 접기 표시를 로컬에만 바꾸며 복구 후에도 새 스키마가 유지된다', async ({ page, browser, baseURL, blocks: f }) => {
+  expect((await f.requests.post(`/api/documents/${f.source.id}/collaboration/enable`, { data: { expectedVersion: f.source.version } })).status()).toBe(200);
+  const [actorA, actorB] = f.workspace.users; await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorA.id);
+  const second = await browser.newContext({ baseURL }); await second.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorB.id); const peer = await second.newPage(); let sent = 0;
+  page.on('websocket', socket => socket.on('framesent', frame => { try { if (JSON.parse(String(frame.payload)).type === 'update') sent++; } catch { /* Other frames are irrelevant to the no-write toggle assertion. */ } }));
+  try {
+    await open(page, f); await open(peer, f); await expect(page.locator('.docs-collaboration-presence')).toContainText('2명 접속');
+    await Promise.all([choose(page, '업무 참조', f.issue.title), choose(peer, '문서 포함', f.target.title)]);
+    for (const client of [page, peer]) { await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(1); await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-included-content')).toHaveCount(1); await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); }
+    await page.getByRole('button', { name: '접기 블록 삽입', exact: true }).click(); await expect(peer.locator('.docs-live-prose details.doc-details-block')).toHaveCount(1); await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); const before = await currentDoc(f), beforeFrames = sent;
+    await page.locator('.docs-live-prose details.doc-details-block > summary').click(); await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))); expect(sent).toBe(beforeFrames); expect((await currentDoc(f)).version).toBe(before.version); await expect(peer.locator('.docs-live-prose details.doc-details-block')).toHaveAttribute('open', '');
+    const revisionResponse = page.waitForResponse(response => response.url().endsWith(`/api/documents/${f.source.id}/checkpoint`) && response.request().method() === 'POST'); await page.getByRole('button', { name: '버전 기록', exact: true }).click(); const revision = await (await revisionResponse).json() as DocRevision;
+    await page.locator('.docs-live-prose .doc-reference-node[data-teamspace-node="issueReference"]').hover(); await page.locator('.docs-live-prose .doc-reference-node[data-teamspace-node="issueReference"]').getByRole('button', { name: '참조 블록 삭제', exact: true }).click(); await expect(peer.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(0); await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    const current = await currentDoc(f); expect((await f.requests.post(`/api/documents/${current.id}/restore`, { data: { expectedVersion: current.version, revisionId: revision.id } })).status()).toBe(200);
+    for (const client of [page, peer]) { await expect(client.locator('.docs-collaboration-recovery')).toBeVisible(); client.once('dialog', dialog => dialog.accept()); await client.getByRole('button', { name: '최신 문서 열기', exact: true }).click(); await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(1); }
+    const continuation = '복구 후 이어쓰기'; await page.locator('.docs-live-prose > p').last().click(); await page.keyboard.press('End'); await page.keyboard.insertText(continuation); await expect(peer.locator('.docs-live-prose')).toContainText(continuation); for (const client of [page, peer]) await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); const persisted = await currentDoc(f); expect(persisted.plainText).toContain(continuation); expect(contentReferences(persisted.content)).toHaveLength(2); await page.locator('.docs-paper-scroll').evaluate(element => { element.scrollTop = 0; }); mkdirSync('docs/screenshots', { recursive: true }); await page.screenshot({ path: 'docs/screenshots/document-blocks.png', fullPage: true });
+  } finally { await second.close(); }
+});

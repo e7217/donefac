@@ -5,12 +5,13 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror';
 import { createEditorSchema } from '../shared/editor-schema.js';
-import { COLLABORATION_SCHEMA, type CollaborationPeer, type CollaborationSession, type CollaborationServerMessage } from '../shared/collaboration.js';
+import { COLLABORATION_SCHEMA, type CollaborationPeer, type CollaborationSession, type CollaborationServerMessage,type CollaborationClientMessage } from '../shared/collaboration.js';
 import type { DocPage, DocRevision, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
+import { DocumentContentService,DocumentContentError,normalizeDocumentContent,hasVersionTwoNodes } from './document-content.js';
 
 export const MAX_COLLABORATION_UPDATE=1024*1024;
-const MAX_STATE=16*1024*1024,MAX_DOCUMENT=8*1024*1024;
+const MAX_STATE=16*1024*1024;
 const schema=createEditorSchema();
 const iso=()=>new Date().toISOString();
 export class CollaborationError extends Error { constructor(public status:number,message:string,public code='INVALID_COLLABORATION'){super(message);} }
@@ -26,25 +27,8 @@ function base64(value:unknown,max:number) {
   if(bytes.toString('base64')!==value)invalid('공동 편집 데이터의 base64 형식이 올바르지 않습니다.');
   return bytes;
 }
-function normalizeContent(value:unknown):{content:RichContent;plainText:string} {
-  if(Buffer.byteLength(JSON.stringify(value))>MAX_DOCUMENT)invalid('문서 내용이 공동 편집 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
-  let count=0;
-  const check=(node:any,depth:number)=>{
-    if(++count>30000||depth>60||!node||typeof node!=='object'||typeof node.type!=='string')invalid('공동 편집 문서 구조가 올바르지 않습니다.',422,'INVALID_SCHEMA');
-    const type=schema.nodes[node.type];if(!type)invalid('지원하지 않는 문서 노드입니다.',422,'INVALID_SCHEMA');
-    const attributes=(attrs:any,spec:Record<string,unknown>|undefined)=>{if(attrs===undefined)return;if(!attrs||typeof attrs!=='object'||Array.isArray(attrs)||Object.keys(attrs).some(key=>!Object.hasOwn(spec||{},key)))invalid('지원하지 않는 문서 속성입니다.',422,'INVALID_SCHEMA');};
-    attributes(node.attrs,type.spec.attrs);
-    if(node.marks!==undefined&&!Array.isArray(node.marks))invalid('문서 서식이 올바르지 않습니다.',422,'INVALID_SCHEMA');
-    for(const mark of node.marks||[]){const type=mark&&schema.marks[mark.type];if(!type)invalid('지원하지 않는 문서 서식입니다.',422,'INVALID_SCHEMA');attributes(mark.attrs,type.spec.attrs);}
-    for(const mark of node.marks||[])if(mark.type==='link'&&typeof mark.attrs?.href==='string'&&/^(?:javascript|vbscript|data):/i.test(mark.attrs.href.trim()))invalid('지원하지 않는 링크 형식입니다.',422,'INVALID_SCHEMA');
-    if(node.type==='image'&&typeof node.attrs?.src==='string'&&!/^(?:https?:\/\/|\/)/i.test(node.attrs.src))invalid('이미지는 http(s) 또는 첨부파일 주소를 사용해 주세요.',422,'INVALID_SCHEMA');
-    if(node.type==='heading'&&![1,2,3].includes(node.attrs?.level))invalid('제목 단계는 1~3이어야 합니다.',422,'INVALID_SCHEMA');
-    if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록이 올바르지 않습니다.',422,'INVALID_SCHEMA');node.content.forEach((child:any)=>check(child,depth+1));}
-  };
-  check(value,0);
-  try{const node=schema.nodeFromJSON(value);if(node.type!==schema.topNodeType)invalid('문서 루트가 올바르지 않습니다.',422,'INVALID_SCHEMA');node.check();return{content:node.toJSON() as RichContent,plainText:node.textBetween(0,node.content.size,'\n')};}
-  catch(error){if(error instanceof CollaborationError)throw error;return invalid('지원하지 않는 문서 노드·속성·서식입니다.',422,'INVALID_SCHEMA');}
-}
+function contentOperation<T>(operation:()=>T):T{try{return operation();}catch(error){if(error instanceof DocumentContentError)invalid(error.message,error.status,error.code);throw error;}}
+function normalizeContent(value:unknown):{content:RichContent;plainText:string}{return contentOperation(()=>normalizeDocumentContent(value));}
 function inspect(doc:Y.Doc) {
   for(const name of doc.share.keys())if(name!=='default')invalid('지원하지 않는 공동 편집 루트입니다.',422,'INVALID_SCHEMA');
   const root=doc.getXmlFragment('default');
@@ -61,7 +45,7 @@ function decodeState(bytes:Buffer) {
 export class CollaborationService {
   private peers=new Set<Peer>();
   private servers=new Map<HttpServer,{wss:WebSocketServer;upgrade:(req:IncomingMessage,socket:Duplex,head:Buffer)=>void}>();
-  constructor(private readonly store:Store){
+  constructor(private readonly store:Store,private readonly documentContent:DocumentContentService=new DocumentContentService(store)){
     store.db.exec(`CREATE TABLE IF NOT EXISTS collaboration_documents(
       document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
       epoch TEXT NOT NULL,schema_version INTEGER NOT NULL,state BLOB NOT NULL,updated_at TEXT NOT NULL
@@ -70,6 +54,7 @@ export class CollaborationService {
       epoch TEXT NOT NULL,request_id TEXT NOT NULL,hash TEXT NOT NULL,
       PRIMARY KEY(document_id,epoch,request_id)
     );`);
+    this.migratePersistedStates();
   }
   private document(id:string):DocPage {return this.store.get<DocPage>('documents',id)||invalid('문서를 찾을 수 없습니다.',404,'DOCUMENT_NOT_FOUND');}
   private state(id:string):State|undefined {
@@ -77,6 +62,19 @@ export class CollaborationService {
     return row&&{documentId:row.document_id,epoch:row.epoch,schemaVersion:row.schema_version,state:Buffer.from(row.state)};
   }
   private write(state:State){this.store.db.prepare('INSERT INTO collaboration_documents(document_id,epoch,schema_version,state,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET epoch=excluded.epoch,schema_version=excluded.schema_version,state=excluded.state,updated_at=excluded.updated_at').run(state.documentId,state.epoch,state.schemaVersion,state.state,iso());}
+  private migratePersistedStates():void{
+    this.store.transaction(()=>{
+      const states=(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>this.state(row.document_id)!);
+      const candidates=new Map<string,DocPage>();
+      for(const state of states){
+        if(state.schemaVersion!==1&&state.schemaVersion!==COLLABORATION_SCHEMA)invalid('지원하지 않는 영속 공동 편집 스키마입니다.',409,'SCHEMA_MISMATCH');
+        const doc=decodeState(state.state);try{const normalized=inspect(doc);if(state.schemaVersion===1&&hasVersionTwoNodes(normalized.content))invalid('이전 공동 편집 스키마에는 새 문서 블록을 저장할 수 없습니다.',422,'SCHEMA_MISMATCH');candidates.set(state.documentId,{...this.document(state.documentId),...normalized});}finally{doc.destroy();}
+      }
+      const documents=this.store.all<DocPage>('documents').map(document=>candidates.get(document.id)||document);
+      for(const document of candidates.values())contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents}));
+      for(const state of states)if(state.schemaVersion===1){const document=candidates.get(state.documentId)!;this.write({...state,epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA});this.store.put('documents',{...document,version:document.version+1,updatedAt:iso()});this.store.db.prepare('DELETE FROM collaboration_requests WHERE document_id=?').run(document.id);}
+    });
+  }
   private fromContent(document:DocPage):{state:State;document:DocPage}{
     const normalized=normalizeContent(document.content);
     const ydoc=prosemirrorJSONToYDoc(schema,normalized.content,'default');
@@ -92,6 +90,7 @@ export class CollaborationService {
       const document=this.document(documentId);
       if(this.state(documentId))return this.session(documentId);
       if(!Number.isInteger(expectedVersion)||expectedVersion!==document.version)invalid('문서가 변경되었습니다. 최신 문서를 불러온 뒤 공동 편집을 시작해 주세요.',409,'VERSION_CONFLICT');
+      contentOperation(()=>this.documentContent.validate(documentId,document.content,document.content,{allowMissing:true}));
       const seeded=this.fromContent({...document,version:document.version+1,updatedAt:iso()});
       this.write(seeded.state);this.store.put('documents',seeded.document);
       this.store.put('activities',{id:randomUUID(),resourceType:'document',resourceId:documentId,actorId,action:'공동 편집 시작',detail:'영속 Yjs 문서 생성',createdAt:iso()});
@@ -110,8 +109,10 @@ export class CollaborationService {
     });
   }
   /** Caller owns the surrounding REST transaction; notifications occur only after commit. */
-  replaceBody(document:DocPage):DocPage {
+  replaceBody(document:DocPage,options:{allowMissing?:boolean}={}):DocPage {
     if(!this.state(document.id))return document;
+    const previous=this.deriveSnapshot(document).content;
+    contentOperation(()=>this.documentContent.validate(document.id,document.content,previous,options));
     const seeded=this.fromContent(document);this.write(seeded.state);this.store.put('documents',seeded.document);
     this.store.db.prepare('DELETE FROM collaboration_requests WHERE document_id=?').run(document.id);return seeded.document;
   }
@@ -136,16 +137,19 @@ export class CollaborationService {
   exportStates():CollaborationExport[]{return(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>{const state=this.state(row.document_id)!;return{documentId:state.documentId,epoch:state.epoch,schemaVersion:state.schemaVersion,state:state.state.toString('base64')};});}
   validateImport(value:unknown,documents:DocPage[]):State[]{
     if(!Array.isArray(value)||value.length>100000)invalid('공동 편집 상태 목록이 필요합니다.');
+    const normalizedDocuments=documents.map(document=>({...document,...normalizeContent(document.content)}));
+    const documentsById=new Map(normalizedDocuments.map(document=>[document.id,document]));
+    if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[]}));}
     const seen=new Set();return value.map(item=>{
-      if(!item||typeof item.documentId!=='string'||seen.has(item.documentId)||item.schemaVersion!==COLLABORATION_SCHEMA||typeof item.epoch!=='string'||!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(item.epoch))invalid('공동 편집 상태의 식별자·스키마가 올바르지 않습니다.');
-      seen.add(item.documentId);const document=documents.find(d=>d.id===item.documentId);if(!document)invalid('공동 편집 상태에 해당하는 문서가 없습니다.');
+      if(!item||typeof item.documentId!=='string'||seen.has(item.documentId)||![1,COLLABORATION_SCHEMA].includes(item.schemaVersion)||typeof item.epoch!=='string'||!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(item.epoch))invalid('공동 편집 상태의 식별자·스키마가 올바르지 않습니다.');
+      seen.add(item.documentId);const document=documentsById.get(item.documentId);if(!document)invalid('공동 편집 상태에 해당하는 문서가 없습니다.');
       const bytes=base64(item.state,MAX_STATE),ydoc=decodeState(bytes);
-      try{const normalized=inspect(ydoc);if(JSON.stringify(normalized.content)!==JSON.stringify(normalizeContent(document!.content).content))invalid('공동 편집 상태와 문서 JSON 내용이 일치하지 않습니다.',422,'SNAPSHOT_MISMATCH');return{documentId:item.documentId,epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA,state:bytes};}finally{ydoc.destroy();}
+      try{const normalized=inspect(ydoc);if(item.schemaVersion===1&&hasVersionTwoNodes(normalized.content))invalid('이전 공동 편집 스키마에는 새 문서 블록이 포함될 수 없습니다.',422,'SCHEMA_MISMATCH');if(JSON.stringify(normalized.content)!==JSON.stringify(document.content))invalid('공동 편집 상태와 문서 JSON 내용이 일치하지 않습니다.',422,'SNAPSHOT_MISMATCH');return{documentId:item.documentId,epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA,state:bytes};}finally{ydoc.destroy();}
     });
   }
   replaceImported(states:State[]){this.store.db.exec('DELETE FROM collaboration_requests;DELETE FROM collaboration_documents;');for(const state of states){this.write(state);this.store.put('documents',this.deriveSnapshot(this.document(state.documentId)));}}
   private handle(peer:Peer,raw:Buffer){
-    let message:any;try{message=JSON.parse(raw.toString('utf8'));}catch{return invalid('공동 편집 메시지가 올바른 JSON이 아닙니다.');}
+    let message:CollaborationClientMessage;try{message=JSON.parse(raw.toString('utf8'));}catch{return invalid('공동 편집 메시지가 올바른 JSON이 아닙니다.');}
     if(message?.type==='ping'){this.send(peer,{type:'pong'});return;}
     const state=this.state(peer.documentId);if(!state)invalid('공동 편집이 활성화되지 않았습니다.',409,'NOT_ENABLED');
     if(message?.type==='hello'){
@@ -168,6 +172,7 @@ export class CollaborationService {
       const changed=!encoded.equals(state.state);let document=this.document(peer.documentId);
       // Even an idempotent request is acknowledged only after the request receipt commits.
       this.store.transaction(()=>{
+        contentOperation(()=>this.documentContent.validate(peer.documentId,normalized.content,document.content));
         if(changed){document={...document,...normalized,version:document.version+1,updatedAt:iso()};this.write({...state,state:encoded});this.store.put('documents',document);}
         if(!prior)this.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)').run(peer.documentId,state.epoch,message.requestId,digest);
       });
