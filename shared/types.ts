@@ -14,12 +14,26 @@ export type Priority = keyof typeof PRIORITY;
 export const ISSUE_TYPES = ['큰틀', '작업', '부작업', '버그', '개선', '신규', '요구사항', '회의', '기획'] as const;
 export interface User { id: string; name: string; email: string; color: string }
 export interface Project { id: string; key: string; name: string; description: string; color: string; createdAt: string }
+export type PlanningKind = 'cycle' | 'module' | 'release';
+export type PlanningStatus = 'planned' | 'active' | 'completed' | 'archived';
+export interface PlanningItem {
+  id: string; projectId: string; kind: PlanningKind; name: string; description: string;
+  status: PlanningStatus; ownerId: string | null; startDate: string | null; endDate: string | null; targetDate: string | null;
+  version: number; createdAt: string; updatedAt: string;
+}
+export type ApiKeyAccess = 'read' | 'write';
+export interface ApiKeyRecord {
+  id: string; name: string; prefix: string; actorId: string; access: ApiKeyAccess; projectIds: string[] | null;
+  version: number; createdAt: string; expiresAt: string | null; lastUsedAt: string | null; revokedAt: string | null;
+}
+export interface ApiKeyCreated { key: ApiKeyRecord; token: string }
 export interface Issue {
   id: string; key: string; projectId: string; title: string; description: string;
   type: string; status: IssueStatus; priority: Priority; assigneeId: string | null;
   collaboratorIds: string[]; parentId: string | null; labels: string[];
   startDate: string | null; endDate: string | null; dueDate: string | null;
   estimate: number | null; cycle: string | null; module: string | null; release: string | null;
+  cycleId?: string | null; moduleId?: string | null; releaseId?: string | null;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export interface RichContent { type: string; content?: RichContent[]; text?: string; attrs?: Record<string, unknown>; marks?: {type: string; attrs?: Record<string, unknown>}[] }
@@ -45,6 +59,7 @@ export interface SavedView extends SavedViewState { id: string; projectId: strin
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
+  planningItems?: PlanningItem[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[] }

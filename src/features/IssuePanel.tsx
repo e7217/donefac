@@ -6,12 +6,13 @@ import { ISSUE_TYPES, PRIORITY, type Comment, type FeatureProps, type Issue, typ
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
+import { PlanningSelect } from './PlanningSelectors';
 import { Attachments } from './Attachments';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 
 function editableIssue(issue: Issue, labels: string) {
-  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, cycle: issue.cycle?.trim() || null, module: issue.module?.trim() || null, release: issue.release?.trim() || null };
+  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null };
 }
 
 export function IssuePanel(props: FeatureProps & { issueId: string; onClose: () => void }) {
@@ -77,6 +78,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const requiredFields = requiredFieldsFor(data,draft.projectId,draft.type,draft.status,baseDraft?.status);
   const dependencies = data.dependencies.filter(d => d.predecessorId === issueId || d.successorId === issueId);
   function update<K extends keyof Issue>(key: K, value: Issue[K]) { setDraft(previous => previous ? { ...previous, [key]: value } : previous); }
+  function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current) return; savingRef.current = true; setSaving(true); setError('');
     try {
@@ -126,9 +128,9 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
           <label className="issue-form-label">목표 마감일<input aria-label="목표 마감일" type="date" className="field" value={draft.dueDate || ''} onChange={e => update('dueDate', e.target.value || null)} /></label>
           <label className="issue-form-label">예상 소요 (포인트)<input aria-label="예상 소요 (포인트)" className="field" type="number" min="0" step="0.5" placeholder="미정" value={draft.estimate ?? ''} onChange={e => update('estimate', e.target.value === '' ? null : Number(e.target.value))} /></label>
           <label className="issue-form-label issue-grid-wide">상위 업무<select aria-label="상위 업무" className="field" value={draft.parentId || ''} onChange={e => update('parentId', e.target.value || null)}><option value="">없음</option>{data.issues.filter(i => i.projectId === draft.projectId && i.id !== issueId).map(i => <option key={i.id} value={i.id}>{i.key} · {i.title}</option>)}</select></label>
-          <label className="issue-form-label">사이클<input aria-label="사이클" className="field" placeholder="예: Sprint 03" value={draft.cycle || ''} onChange={e => update('cycle', e.target.value)} /></label>
-          <label className="issue-form-label">모듈<input aria-label="모듈" className="field" placeholder="예: 인증 시스템" value={draft.module || ''} onChange={e => update('module', e.target.value)} /></label>
-          <label className="issue-form-label">릴리스<input aria-label="릴리스" className="field" placeholder="예: v1.0" value={draft.release || ''} onChange={e => update('release', e.target.value)} /></label>
+          <label className="issue-form-label">사이클<PlanningSelect data={data} projectId={draft.projectId} kind="cycle" value={draft.cycleId ?? null} legacyLabel={draft.cycle} onChange={id => updatePlanning('cycle', id)} /></label>
+          <label className="issue-form-label">모듈<PlanningSelect data={data} projectId={draft.projectId} kind="module" value={draft.moduleId ?? null} legacyLabel={draft.module} onChange={id => updatePlanning('module', id)} /></label>
+          <label className="issue-form-label">릴리스<PlanningSelect data={data} projectId={draft.projectId} kind="release" value={draft.releaseId ?? null} legacyLabel={draft.release} onChange={id => updatePlanning('release', id)} /></label>
           <label className="issue-form-label">라벨<input aria-label="라벨" className="field" placeholder="쉼표로 구분" value={labels} onChange={e => setLabels(e.target.value)} /></label>
           <label className="issue-form-label issue-grid-wide">참여자<select multiple className="field issue-collaborator-select" aria-label="참여자 선택 (Ctrl 또는 Cmd로 여러 명 선택)" value={draft.collaboratorIds} onChange={e => update('collaboratorIds', Array.from(e.target.selectedOptions).map(o => o.value))}>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select><small className="muted">Ctrl 또는 ⌘를 누르고 여러 명을 선택하세요.</small></label>
         </div></div>
