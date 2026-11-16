@@ -102,7 +102,7 @@ test('issue deletion detaches current milestone links atomically while historica
   } finally { await f.close(); }
 });
 
-test('schema5 round-trips historical rows and calendar snapshots, bumps record CAS, and legacy1..4 starts without artifacts', async () => {
+test('current backup round-trips historical rows and calendar snapshots, bumps record CAS, and legacy1..4 starts without artifacts', async () => {
   const source = await fixture(), target = await fixture(false);
   try {
     const issue = await createIssue(source), item = await createMilestone(source, { issueIds: [issue.id] });
@@ -110,7 +110,7 @@ test('schema5 round-trips historical rows and calendar snapshots, bumps record C
     await source.request(`/issues/${issue.id}?expectedVersion=1`, 'DELETE');
     const currentItem = (await snapshot(source)).milestones!.find(value => value.id === item.id)!;
     await source.request(`/milestones/${item.id}?expectedVersion=${currentItem.version}`, 'DELETE');
-    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 5);
+    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 6);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
     let imported = await snapshot(target); assert.deepEqual(imported.baselines!.find(value => value.id === captured.id), captured);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);

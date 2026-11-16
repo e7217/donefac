@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
-import type { Project, SavedView, SavedViewState, User } from '../shared/types.js';
-import { ISSUE_TYPES } from '../shared/types.js';
+import type { Project, ProjectIssueSchema, SavedView, SavedViewState, User } from '../shared/types.js';
+import { defaultIssueSchema } from '../shared/issue-schema.js';
+import type { IssueSchemaService } from './issue-schema.js';
 import { Store } from './store.js';
 
 export class SavedViewError extends Error {
@@ -12,7 +13,7 @@ const string = (value: unknown, name: string, max: number, empty = false) => {
   if (typeof value !== 'string' || value.length > max || (!empty && !value.trim())) return fail(`${name}을(를) 확인해주세요.`);
   return empty ? value : value.trim();
 };
-function state(value: unknown): SavedViewState {
+function state(value: unknown, schema: ProjectIssueSchema): SavedViewState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('보기 설정은 객체여야 합니다.');
   const v = value as Record<string, unknown>;
   if (!['list', 'board'].includes(v.layout as string)) return fail('목록 또는 보드 보기만 저장할 수 있습니다.');
@@ -22,7 +23,7 @@ function state(value: unknown): SavedViewState {
   const status = string(filters.status, '상태 필터', 80);
   const assigneeId = string(filters.assigneeId, '담당자 필터', 100);
   const type = string(filters.type, '유형 필터', 80);
-  if (type !== 'all' && !ISSUE_TYPES.includes(type as typeof ISSUE_TYPES[number])) return fail('지원하지 않는 업무 유형 필터입니다.');
+  if (type !== 'all' && !schema.issueTypes.some(value => value.id === type)) return fail('지원하지 않는 업무 유형 필터입니다.');
   return { layout: v.layout as SavedViewState['layout'], filters: { query, status, assigneeId, type } };
 }
 const validTime = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
@@ -31,7 +32,7 @@ const nameKey = (projectId: string, name: string) => JSON.stringify([projectId, 
 
 /** Persisted shared project views. It deliberately does not introduce an account/permission engine. */
 export class SavedViewService {
-  constructor(private readonly store: Store) {
+  constructor(private readonly store: Store, private readonly issueSchemas?: IssueSchemaService) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS saved_views(
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -52,7 +53,7 @@ export class SavedViewService {
   private validateAssignee(view: SavedViewState, users = this.store.all<User>('users')) {
     if (!['all', 'none'].includes(view.filters.assigneeId) && !users.some(u => u.id === view.filters.assigneeId)) return fail('담당자 필터의 팀원을 찾을 수 없습니다.');
   }
-  validateImport(values: unknown, projects: Project[], users: User[]): SavedView[] {
+  validateImport(values: unknown, projects: Project[], users: User[], issueSchemas: ProjectIssueSchema[] = []): SavedView[] {
     if (!Array.isArray(values) || values.length > 5000) return fail('저장된 보기 목록을 확인해주세요.');
     const ids = new Set<string>();
     const names = new Set<string>();
@@ -66,7 +67,7 @@ export class SavedViewService {
       if (ids.has(id) || names.has(nameKey(projectId, name))) return fail('저장된 보기의 ID 또는 이름이 중복됩니다.');
       ids.add(id); names.add(nameKey(projectId, name));
       if (!Number.isSafeInteger(value.version) || value.version < 1 || !validTime(value.createdAt) || !validTime(value.updatedAt)) return fail('저장된 보기의 버전 또는 작성 시간이 올바르지 않습니다.');
-      const selected = state(value);
+      const selected = state(value, issueSchemas.find(schema => schema.projectId === projectId) || defaultIssueSchema(projectId));
       this.validateAssignee(selected, users);
       return { id, projectId, name, authorId, ...selected, version: value.version, createdAt: value.createdAt, updatedAt: value.updatedAt };
     });
@@ -97,7 +98,7 @@ export class SavedViewService {
     }));
     app.post('/api/views', route((req, res) => {
       const projectId = this.project(req.body.projectId);
-      const selected = state(req.body);
+      const selected = state(req.body, this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId));
       this.validateAssignee(selected);
       const now = new Date().toISOString();
       const view: SavedView = { id: randomUUID(), projectId, name: string(req.body.name, '보기 이름', 80), ...selected, authorId: hooks.actor(req), version: 1, createdAt: now, updatedAt: now };
@@ -109,7 +110,7 @@ export class SavedViewService {
       if (!Number.isSafeInteger(req.body.expectedVersion)) return fail('보기의 expectedVersion이 필요합니다.');
       if (req.body.expectedVersion !== old.version) return fail('다른 작업자가 보기를 변경했습니다. 다시 불러온 뒤 저장해주세요.', 409);
       if ('projectId' in req.body && req.body.projectId !== old.projectId) return fail('보기의 프로젝트는 변경할 수 없습니다.');
-      const selected = state({ ...old, ...req.body });
+      const selected = state({ ...old, ...req.body }, this.issueSchemas?.get(old.projectId) || defaultIssueSchema(old.projectId));
       this.validateAssignee(selected);
       const updated: SavedView = { ...old, ...selected, name: 'name' in req.body ? string(req.body.name, '보기 이름', 80) : old.name, version: old.version + 1, updatedAt: new Date().toISOString() };
       this.store.transaction(() => { this.put(updated); hooks.activity(req, 'project', old.projectId, '업무 보기 변경', updated.name); });

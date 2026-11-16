@@ -2,21 +2,24 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, ExternalLink, FileText, GitMerge, Link2, MessageSquare, Plus, Save, Trash2, X } from 'lucide-react';
-import { ISSUE_TYPES, PRIORITY, type Comment, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type Comment, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
-import { allowedNextStatuses, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
+import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
 import { PlanningSelect } from './PlanningSelectors';
+import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
+import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { Attachments } from './Attachments';
+import { afterAcceptedNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 
 function editableIssue(issue: Issue, labels: string) {
-  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null };
+  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
 export function IssuePanel(props: FeatureProps & { issueId: string; onClose: () => void }) {
-  return <IssuePanelContent key={props.issueId} {...props} />;
+  return <IssuePanelContent key={`${props.issueId}:${props.actorId}`} {...props} />;
 }
 
 function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () => void }) {
@@ -53,15 +56,15 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     dirtyRef.current = false;
     return true;
   }, [notify]);
-  const closePanel = useCallback(() => { if (confirmDiscard()) onClose(); }, [confirmDiscard, onClose]);
-  const navigateIssue = (id: string) => { if (id !== issueId && confirmDiscard()) openIssue(id); };
-  const navigateDocument = (id: string) => { if (confirmDiscard()) openDocument(id); };
+  const closePanel = useCallback(() => { onClose(); }, [onClose]);
+  const navigateIssue = (id: string) => { if (id !== issueId) openIssue(id); };
+  const navigateDocument = (id: string) => { openDocument(id); };
   useEffect(() => {
-    const navigate = (event: Event) => { if (!confirmDiscard()) event.preventDefault(); };
+    const navigate = (event: Event) => { if (event.defaultPrevented) return; if (savingRef.current) { event.preventDefault(); notify('저장이 끝난 후 이동해주세요.', 'error'); } else if (dirtyRef.current) { if (!window.confirm('저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setCommentBody(''); setError(''); setConflict(false); }); } };
     const leave = (event: BeforeUnloadEvent) => { if (!dirtyRef.current && !savingRef.current) return; event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [confirmDiscard]);
+  }, [issue, notify]);
   useEffect(() => {
     let active = true;
     api<Comment[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`).then(value => { if (active) setComments(value); }).catch(err => { if (active) setCommentError(errorMessage(err)); }).finally(() => { if (active) setLoadingComments(false); });
@@ -111,8 +114,8 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <div className="issue-panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) closePanel(); }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading">
-    <header className="issue-panel-header"><div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div><button className="issue-icon-button" onClick={closePanel} disabled={saving} aria-label="업무 상세 닫기"><X size={20} /></button></header>
-    <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} />{issue.type}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button></div></div>
+    <header className="issue-panel-header"><div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div><button className="issue-icon-button" onClick={closePanel} disabled={saving} aria-label="업무 상세 닫기"><X size={20} /></button></header>
+    <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => setTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button></div></div>
     <div className="issue-panel-content">{tab === 'details' ? <>
       {(conflict || issue.version > draft.version) && <div className="issue-conflict-banner" role="alert"><div><strong>다른 변경사항이 있습니다</strong><p>작성 중인 내용은 유지됩니다. 편집 시작 버전은 {draft.version}, 현재 버전은 {issue.version}입니다. 최신 내용을 확인한 뒤 다시 편집하세요.</p></div><button className="btn" onClick={reloadLatest} disabled={saving}>최신 버전 불러오기</button></div>}
       <form className="issue-detail-form" onSubmit={save} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -120,7 +123,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         <label className="issue-form-label">설명<textarea aria-label="설명" className="field issue-description-input" value={draft.description} onChange={e => update('description', e.target.value)} placeholder="배경, 목표, 완료 조건을 적어주세요." rows={5} /></label>
         <div className="issue-properties"><div className="issue-section-caption">속성</div><div className="issue-form-grid">
           <label className="issue-form-label">상태<select aria-label="상태" className="field" value={draft.status} onChange={e => update('status', e.target.value as Issue['status'])}>{!nextStatuses.some(status => status.id === draft.status) && <option value={draft.status} disabled>{statusMeta(data,draft.projectId,draft.status).label} (현재 허용되지 않음)</option>}{nextStatuses.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}</select></label>
-          <label className="issue-form-label">유형<select aria-label="유형" className="field" value={draft.type} onChange={e => update('type', e.target.value)}>{[...new Set([...ISSUE_TYPES, draft.type])].map(type => <option key={type}>{type}</option>)}</select></label>
+          <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={draft.projectId} value={draft.type} existingType={baseDraft?.type} onChange={value => update('type', value)} /></label>
           <label className="issue-form-label">우선순위<select aria-label="우선순위" className="field" value={draft.priority} onChange={e => update('priority', e.target.value as Issue['priority'])}>{Object.entries(PRIORITY).map(([key, name]) => <option key={key} value={key}>{name}</option>)}</select></label>
           <label className="issue-form-label">담당자<select aria-label="담당자" className="field" value={draft.assigneeId || ''} onChange={e => update('assigneeId', e.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label className="issue-form-label">시작일<input aria-label="시작일" type="date" className="field" value={draft.startDate || ''} onChange={e => update('startDate', e.target.value || null)} /></label>
@@ -134,11 +137,12 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
           <label className="issue-form-label">라벨<input aria-label="라벨" className="field" placeholder="쉼표로 구분" value={labels} onChange={e => setLabels(e.target.value)} /></label>
           <label className="issue-form-label issue-grid-wide">참여자<select multiple className="field issue-collaborator-select" aria-label="참여자 선택 (Ctrl 또는 Cmd로 여러 명 선택)" value={draft.collaboratorIds} onChange={e => update('collaboratorIds', Array.from(e.target.selectedOptions).map(o => o.value))}>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select><small className="muted">Ctrl 또는 ⌘를 누르고 여러 명을 선택하세요.</small></label>
         </div></div>
-        {requiredFields.length > 0 && <p className="issue-section-empty">이 유형·상태의 필수 속성: {requiredFields.map(field => REQUIRED_FIELD_LABELS[field]).join(', ')}</p>}
+        <CustomFields data={data} projectId={draft.projectId} issueType={draft.type} values={draft.customFields || {}} existingValues={baseDraft?.customFields || {}} onChange={value => update('customFields', value)} disabled={saving} requiredFields={requiredFields} />
+        {requiredFields.length > 0 && <p className="issue-section-empty">이 유형·상태의 필수 속성: {requiredFieldLabels(data, draft.projectId, requiredFields).join(', ')}</p>}
         {error && <div className="issue-form-error" role="alert">{error}</div>}
         <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
-      {children.length > 0 && <section className="issue-related-section"><h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>{children.map(child => <button className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}><IssueTypeIcon type={child.type} /><span className="issue-key">{child.key}</span><span>{child.title}</span><span className="issue-related-status" style={{ color: statusMeta(data,child.projectId,child.status).color }}>{statusMeta(data,child.projectId,child.status).label}</span><ChevronRight size={14} /></button>)}</section>}
+      {children.length > 0 && <section className="issue-related-section"><h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>{children.map(child => <button className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}><IssueTypeIcon type={child.type} data={data} projectId={child.projectId} /><span className="issue-key">{child.key}</span><span>{child.title}</span><span className="issue-related-status" style={{ color: statusMeta(data,child.projectId,child.status).color }}>{statusMeta(data,child.projectId,child.status).label}</span><ChevronRight size={14} /></button>)}</section>}
       <section className="issue-related-section"><h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>{linkedDocuments.map(link => { const doc = data.documents.find(d => d.id === link.documentId); return doc && <div className="issue-related-row" key={link.id}><FileText size={15} /><button onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button><button className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button></div>; })}<div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div></section>
       <section className="issue-related-section"><h3><GitMerge size={16} /> GitLab <span>{gitlabLinks.length}</span></h3>{gitlabLinks.length ? gitlabLinks.map(link => <a className="issue-related-row issue-gitlab-row" key={link.id} href={/^https?:\/\//.test(link.webUrl) ? link.webUrl : '#'} target="_blank" rel="noreferrer"><GitMerge size={15} /><div><strong>{link.kind === 'merge_request' ? `!${link.iid}` : `#${link.iid}`} {link.title}</strong><small>{link.kind} · {link.state}</small></div><ExternalLink size={14} /></a>) : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab 설정 후 업무 번호로 연결할 수 있습니다.</p>}</section>
       {dependencies.length > 0 && <section className="issue-related-section"><h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>{dependencies.map(dep => { const isPredecessor = dep.predecessorId === issueId; const related = data.issues.find(i => i.id === (isPredecessor ? dep.successorId : dep.predecessorId)); return related && <button key={dep.id} className="issue-related-row" onClick={() => navigateIssue(related.id)}><span className="muted">{isPredecessor ? '후행' : '선행'}</span><span className="issue-key">{related.key}</span><span>{related.title}</span><ChevronRight size={14} /></button>; })}</section>}

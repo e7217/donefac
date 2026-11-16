@@ -60,7 +60,7 @@ test('native backup preserves saved view definitions and rejects bad restore ato
   const f=await fixture();try{
     const created=await f.request('/views','POST',definition);assert.equal(created.status,201);
     for (const name of ['Ångström','ångström']) assert.equal((await f.request('/views','POST',{...definition,name})).status,201);
-    const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,5);assert.equal(exported.savedViews.length,3);
+    const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,6);assert.equal(exported.savedViews.length,3);
     assert.equal((await f.request('/views/'+created.data.id,'PATCH',{expectedVersion:1,name:'임시 변경'})).status,200);
     const bad=structuredClone(exported);bad.savedViews[0].authorId='missing';assert.equal((await f.request('/import','POST',{data:bad})).status,400);
     assert.equal((await f.request('/views?projectId=project-neo')).data.find((view:{id:string})=>view.id===created.data.id).name,'임시 변경');

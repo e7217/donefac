@@ -12,8 +12,10 @@ import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
+import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { createCalendarMath } from '../shared/calendar.js';
-import { STATUS, PRIORITY, ISSUE_TYPES, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type GitlabSettings, type Attachment } from '../shared/types.js';
+import { issueSearchText } from '../shared/issue-schema.js';
+import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type GitlabSettings, type Attachment } from '../shared/types.js';
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
@@ -47,7 +49,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   const files = new AttachmentFiles(dataDir);
   files.recover(store.setting('attachmentImportGeneration'));
   if (options.seed !== false) seed(store);
-  const workflows=new WorkflowService(store),savedViews=new SavedViewService(store);
+  const issueSchemas=new IssueSchemaService(store);
+  const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
   const collaboration=new CollaborationService(store);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
   const apiKeys=new ApiKeyService(store);
@@ -71,14 +74,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
   const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentRows(type,id);store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
   const cleanupAttachments=(rows:Attachment[])=>{for(const a of rows)try{files.remove(a.id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',a.id);}};
-  const snapshot = (): WorkspaceSnapshot => ({...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),milestones:scheduleArtifacts.allMilestones(),baselines:scheduleArtifacts.allBaselines()}) as unknown as WorkspaceSnapshot;
+  const snapshot = (): WorkspaceSnapshot => ({...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),milestones:scheduleArtifacts.allMilestones(),baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot()}) as unknown as WorkspaceSnapshot;
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
-  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     if(typeof i.description!=='string'||i.description.length>200000)fail('설명을 확인해 주세요.');
-    if(!ISSUE_TYPES.includes(i.type as any))fail('지원하지 않는 티켓 유형입니다.');
+    issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
     if(typeof i.status!=='string'||!Object.hasOwn(PRIORITY,i.priority))fail('상태 또는 우선순위가 올바르지 않습니다.');
     if(i.assigneeId!==null)get('users',i.assigneeId);
     if(!Array.isArray(i.collaboratorIds)||!i.collaboratorIds.every(x=>typeof x==='string'))fail('협력자를 확인해 주세요.');
@@ -142,6 +145,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
+  issueSchemas.registerRoutes(app,{actor,activity});
   planning.registerRoutes(app,{actor,activity,validateIssue});apiKeys.registerManagementRoutes(app,{actor,activity});
   calendars.registerRoutes(app,{actor,activity});
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges});
@@ -153,12 +157,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
   app.post('/api/issues',(req,res)=>{
-    const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release'];
-    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:'작업',status:workflows.get(req.body.projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]]))};
+    const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release','customFields'];
+    const activeTypes=issueSchemas.get(text(req.body.projectId,'프로젝트',200)).issueTypes.filter(type=>!type.archived);
+    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(req.body.projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]]))};
     store.transaction(()=>{Object.assign(i,planning.resolveIssueFields(req.body,i.projectId));validateIssue(i);const p=get('projects',i.projectId);const row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as any;const num=row?.next_number||1;i.key=`${p.key}-${num}`;store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);if(done(i))i.completedAt=timestamp;store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);});res.status(201).json(i);
   });
   app.patch('/api/issues/:id',(req,res)=>{
-    const updated=store.transaction(()=>{const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release','cycleId','moduleId','releaseId'];const i=validateIssue({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),...planning.resolveIssueFields(req.body,old.projectId,old),version:old.version+1,updatedAt:now()},old);i.completedAt=done(i)?(old.completedAt||now()):null;store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.filter(k=>k in req.body).join(', ')}`);return i;});res.json(updated);
+    const updated=store.transaction(()=>{const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release','cycleId','moduleId','releaseId','customFields'];const i=validateIssue({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),...planning.resolveIssueFields(req.body,old.projectId,old),version:old.version+1,updatedAt:now()},old);i.completedAt=done(i)?(old.completedAt||now()):null;store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.filter(k=>k in req.body).join(', ')}`);return i;});res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const i=get<Issue>('issues',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(i,Number(v));if(store.all<Issue>('issues').some(x=>x.parentId===i.id))fail('하위 티켓을 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('issue',i.id);cleanup.push(...deleteAttachmentRows('issue',i.id));for(const milestone of scheduleArtifacts.detachIssue(i.id))activity(req,'milestone',milestone.id,'연결 업무 삭제',`${i.key} 연결 해제`);store.remove('issues',i.id);activity(req,'issue',i.id,'티켓 삭제',i.key);});cleanupAttachments(cleanup);res.json({ok:true});});
   app.post('/api/documents',(req,res)=>{const timestamp=now(),authorId=actor(req);const d=validateDocument({id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,content:req.body.content||{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp});store.transaction(()=>{store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);});res.status(201).json(d);});
@@ -232,10 +237,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     const result=store.transaction(()=>{checkCalendarVersions(req.body.calendarVersions,changes);return commitScheduleChanges(req,changes);});res.json(result);
   });
   app.post('/api/schedule/undo',(req,res)=>{const result=store.transaction(()=>{const record=get('schedule_undos',req.body.undoId);if(record.used)fail('이미 되돌린 작업입니다.',409);for(const r of record.records)checkVersion(get('issues',r.id),r.appliedVersion);const updated=record.records.map((r:any)=>{const old=get<Issue>('issues',r.id);const i=validateIssue({...old,startDate:r.startDate,endDate:r.endDate,version:old.version+1,updatedAt:now()},old,{checkTransition:false});store.put('issues',i);activity(req,'issue',i.id,'일정 되돌리기',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);return i;});store.put('schedule_undos',{...record,used:true});activity(req,'schedule',record.id,'일정 변경 되돌리기',`${updated.length}개 티켓`);return{updated,warnings:scheduleWarnings(store.all<Issue>('issues').filter(issue=>updated.some((changed:Issue)=>changed.projectId===issue.projectId)))};});res.json(result);});
-  app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');res.json({issues:store.all<Issue>('issues').filter(i=>`${i.key} ${i.title} ${i.description} ${i.labels.join(' ')} ${i.cycle || ''} ${i.module || ''} ${i.release || ''}`.toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
+  app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
-    const payload={schemaVersion:5,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
+    const payload={schemaVersion:6,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+attachments.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=attachments.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -243,20 +248,22 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~5)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~6)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
     const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents);
-    const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues);
-    const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users);
+    const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
+    const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
+    const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas);
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     let staged:string;try{staged=files.stageImport(data.attachments,data.attachmentContents);}catch(error){fail((error as Error).message);}
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;
     try{store.transaction(()=>{
+      const previousSchemas=new Map(issueSchemas.snapshot().map(schema=>[schema.projectId,schema.version]));
       const previousWorkflows=new Map(workflows.snapshot().map(w=>[w.projectId,w.version]));
       const previousViews=new Map(savedViews.all().map(v=>[v.id,v.version]));
       const previousPlanning=new Map(planning.all().map(item=>[item.id,item.version]));
@@ -265,9 +272,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       const previousBaselines=new Map(scheduleArtifacts.allBaselines().map(baseline=>[baseline.id,baseline.version]));
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
-      for(const table of ['automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
+      for(const table of ['automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
+      issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       planning.replaceImported(importedPlanning.items,previousPlanning);
       calendars.replaceImported(importedCalendars,previousCalendars);
@@ -275,7 +283,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       for(const i of data.issues)store.put('issues',i);
       for(const d of data.documents)store.put('documents',d);
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
-      const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
+      const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
       for(const d of data.documents){validateDocument(d);if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       for(const d of data.dependencies){validateDependency(d,data.dependencies);store.put('dependencies',d);}
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
@@ -336,7 +344,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   });
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

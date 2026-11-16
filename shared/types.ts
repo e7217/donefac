@@ -33,6 +33,12 @@ export interface Milestone { id: string; projectId: string; title: string; descr
 export interface BaselineIssue { issueId: string; key: string; title: string; startDate: string | null; endDate: string | null; sourceVersion: number }
 export interface BaselineMilestone { milestoneId: string; title: string; date: string; status: 'open' | 'reached'; sourceVersion: number }
 export interface ScheduleBaseline { id: string; projectId: string; name: string; description: string; authorId: string; version: number; createdAt: string; calendar: WorkCalendar; issues: BaselineIssue[]; milestones: BaselineMilestone[] }
+export interface IssueTypeDefinition { id: string; name: string; color: string; archived: boolean }
+export type CustomFieldKind = 'text' | 'number' | 'date' | 'select' | 'multi_select' | 'checkbox' | 'user' | 'url';
+export interface CustomFieldOption { id: string; name: string; archived: boolean }
+export interface CustomFieldDefinition { id: string; name: string; description: string; kind: CustomFieldKind; required: boolean; issueTypes: string[]; options: CustomFieldOption[]; archived: boolean }
+export type CustomFieldValue = string | number | boolean | string[] | null;
+export interface ProjectIssueSchema { id: string; projectId: string; version: number; issueTypes: IssueTypeDefinition[]; fields: CustomFieldDefinition[]; updatedAt: string }
 export interface Issue {
   id: string; key: string; projectId: string; title: string; description: string;
   type: string; status: IssueStatus; priority: Priority; assigneeId: string | null;
@@ -40,6 +46,7 @@ export interface Issue {
   startDate: string | null; endDate: string | null; dueDate: string | null;
   estimate: number | null; cycle: string | null; module: string | null; release: string | null;
   cycleId?: string | null; moduleId?: string | null; releaseId?: string | null;
+  customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export interface RichContent { type: string; content?: RichContent[]; text?: string; attrs?: Record<string, unknown>; marks?: {type: string; attrs?: Record<string, unknown>}[] }
@@ -56,7 +63,7 @@ export interface Attachment { id: string; resourceType: 'issue' | 'document'; re
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; lastSyncAt: string | null; lastError: string | null }
-export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'collaboratorIds' | 'startDate' | 'endDate' | 'dueDate' | 'estimate' | 'labels' | 'parentId' | 'cycle' | 'module' | 'release';
+export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'collaboratorIds' | 'startDate' | 'endDate' | 'dueDate' | 'estimate' | 'labels' | 'parentId' | 'cycle' | 'module' | 'release' | `custom:${string}`;
 export interface WorkflowTransition { from: string; to: string; issueTypes: string[]; requiredFields: IssueRequiredField[] }
 export interface WorkflowFieldRule { issueType: string; statusId: string; requiredFields: IssueRequiredField[] }
 export interface ProjectWorkflow { id: string; projectId: string; version: number; initialStatusId: string; statuses: WorkflowStatus[]; transitions: WorkflowTransition[]; fieldRules: WorkflowFieldRule[]; updatedAt: string }
@@ -67,6 +74,7 @@ export interface WorkspaceSnapshot {
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
   planningItems?: PlanningItem[];
   calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
+  issueSchemas?: ProjectIssueSchema[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }

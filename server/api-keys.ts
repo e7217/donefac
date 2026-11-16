@@ -162,7 +162,7 @@ export class ApiKeyService {
         this.query(request, []); this.used(key);
         response.json(this.store.all<Project>('projects').filter(project => key.projectIds === null || key.projectIds.includes(project.id))); return;
       }
-      const workflow = /^\/api\/projects\/([^/]+)\/workflow$/.exec(path);
+      const workflow = /^\/api\/projects\/([^/]+)\/(workflow|issue-schema)$/.exec(path);
       if (workflow) { this.query(request, []); this.allowedProject(key, this.decode(workflow[1])); this.used(key); return next(); }
       if (['/api/issues', '/api/documents', '/api/planning-items'].includes(path)) {
         const query = this.query(request, path === '/api/planning-items' ? ['projectId', 'kind'] : ['projectId']);

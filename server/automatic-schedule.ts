@@ -9,10 +9,11 @@ import { Store } from './store.js';
 export class AutomaticScheduleError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomaticScheduleError(status,message,details);}
 export interface AutomaticScheduleMutation{id:string;expectedVersion:number;startDate:string|null;endDate:string|null}
+interface AutomaticScheduleInput{projectId:string;issueIds?:string[];anchorDate?:string|null;defaultDuration?:number|null;seedChanges?:AutomaticScheduleMutation[]}
 export interface AutomaticScheduleResult{undoId:string;updated:Issue[];warnings?:string[]}
 type Hooks={actor:(request:Request)=>string;commitChanges:(request:Request,changes:AutomaticScheduleMutation[])=>AutomaticScheduleResult};
 export const AUTO_PREVIEW_TTL_MS=30*60*1000,AUTO_RESULT_RETENTION_MS=7*24*60*60*1000;
-interface Proposal{id:string;projectId:string;actorId:string;createdAt:string;expiresAt:string;issueVersions:[string,number][];calendarVersion:number;workflowVersion:number;dependencyHash:string;preview:AutomaticSchedulePreview;used:boolean;appliedAt?:string;result?:AutomaticScheduleResult}
+interface Proposal{id:string;projectId:string;actorId:string;createdAt:string;expiresAt:string;issueVersions:[string,number][];calendarVersion:number;workflowVersion:number;issueSchemaVersion?:number;dependencyHash:string;preview:AutomaticSchedulePreview;used:boolean;appliedAt?:string;result?:AutomaticScheduleResult}
 function date(value:unknown,label:string):string|null{if(value===null)return null;if(!isCalendarDate(value))fail(`${label}은(는) YYYY-MM-DD 형식이어야 합니다.`);return value;}
 const readset=(issues:Issue[]):[string,number][]=>issues.map(issue=>[issue.id,issue.version] as [string,number]).sort((a,b)=>a[0].localeCompare(b[0]));
 function dependencyHash(dependencies:Dependency[]){return createHash('sha256').update(JSON.stringify(dependencies.map(d=>[d.id,d.predecessorId,d.successorId,d.type,d.lagDays]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))))).digest('hex');}
@@ -22,11 +23,12 @@ export class AutomaticScheduleService{
   constructor(private readonly store:Store,private readonly calendars:CalendarService){store.db.exec('CREATE TABLE IF NOT EXISTS automatic_schedule_previews(id TEXT PRIMARY KEY,json TEXT NOT NULL)');this.prune();}
   private prune(){const timestamp=new Date().toISOString(),cutoff=new Date(Date.now()-AUTO_RESULT_RETENTION_MS).toISOString();this.store.db.prepare("DELETE FROM automatic_schedule_previews WHERE (json_extract(json,'$.used')=0 AND json_extract(json,'$.expiresAt')<=?) OR (json_extract(json,'$.used')=1 AND COALESCE(json_extract(json,'$.appliedAt'),json_extract(json,'$.createdAt'))<=?)").run(timestamp,cutoff);}
   private issues(projectId:string){return this.store.all<Issue>('issues').filter(issue=>issue.projectId===projectId);}
+  private issueSchemaVersion(projectId:string){const exists=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_schemas'").get();return exists?this.store.get<{version:number}>('issue_schemas',projectId)?.version||1:1;}
   private dependencies(issues:Issue[]){const ids=new Set(issues.map(issue=>issue.id));return this.store.all<Dependency>('dependencies').filter(dependency=>ids.has(dependency.predecessorId)||ids.has(dependency.successorId));}
   preview(value:unknown,actorId:string):AutomaticSchedulePreview{return this.store.transaction(()=>this.buildPreview(value,actorId));}
   private buildPreview(value:unknown,actorId:string):AutomaticSchedulePreview{
     this.prune();
-    if(!this.store.get('users',actorId))fail('작업자를 찾을 수 없습니다.');if(!value||typeof value!=='object'||Array.isArray(value))fail('자동 일정 미리보기 설정이 필요합니다.');const input=value as Record<string,any>;
+    if(!this.store.get('users',actorId))fail('작업자를 찾을 수 없습니다.');if(!value||typeof value!=='object'||Array.isArray(value))fail('자동 일정 미리보기 설정이 필요합니다.');const input=value as AutomaticScheduleInput;
     if(typeof input.projectId!=='string'||!this.store.get('projects',input.projectId))fail('프로젝트를 찾을 수 없습니다.',404);
     const projectId=input.projectId,issues=this.issues(projectId),byId=new Map(issues.map(issue=>[issue.id,issue]));if(issues.length>10000)fail('자동 일정은 프로젝트 업무 10,000개 이하에서 계산해 주세요.');
     const calendar=this.calendars.get(projectId),math=createCalendarMath(calendar),dependencies=this.dependencies(issues);
@@ -79,7 +81,7 @@ export class AutomaticScheduleService{
     if(changes.length>1000)blocking.push('한 번에 변경할 수 있는 업무는 1000개입니다. 범위를 나누어 미리 확인해 주세요.');
     const createdAt=new Date().toISOString(),expiresAt=new Date(Date.now()+AUTO_PREVIEW_TTL_MS).toISOString(),previewId=randomUUID();
     const preview:AutomaticSchedulePreview={previewId,changes,warnings:[...new Set(warnings)],blocking:[...new Set(blocking)],calendarVersions:{[projectId]:calendar.version},expiresAt};
-    const proposal:Proposal={id:previewId,projectId,actorId,createdAt,expiresAt,issueVersions:readset(issues),calendarVersion:calendar.version,workflowVersion:workflows.find(workflow=>workflow.projectId===projectId)?.version||1,dependencyHash:dependencyHash(dependencies),preview,used:false};this.store.put('automatic_schedule_previews',proposal);return preview;
+    const proposal:Proposal={id:previewId,projectId,actorId,createdAt,expiresAt,issueVersions:readset(issues),calendarVersion:calendar.version,workflowVersion:workflows.find(workflow=>workflow.projectId===projectId)?.version||1,issueSchemaVersion:this.issueSchemaVersion(projectId),dependencyHash:dependencyHash(dependencies),preview,used:false};this.store.put('automatic_schedule_previews',proposal);return preview;
   }
   apply(request:Request,previewId:unknown,hooks:Hooks):AutomaticScheduleResult{
     const actorId=hooks.actor(request);if(typeof previewId!=='string'||!previewId)fail('미리보기 ID가 필요합니다.');
@@ -89,6 +91,7 @@ export class AutomaticScheduleService{
       const issues=this.issues(proposal.projectId);if(JSON.stringify(readset(issues))!==JSON.stringify(proposal.issueVersions))fail('업무 또는 고정 선행 일정이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(this.calendars.get(proposal.projectId).version!==proposal.calendarVersion)fail('작업 달력이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       const workflowTable=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'").get();const workflowVersion=workflowTable?this.store.get<ProjectWorkflow>('workflows',proposal.projectId)?.version||1:1;if(workflowVersion!==proposal.workflowVersion)fail('업무 상태·필수 속성 규칙이 변경되었습니다. 다시 미리 확인해 주세요.',409);
+      if(this.issueSchemaVersion(proposal.projectId)!==(proposal.issueSchemaVersion||1))fail('업무 유형·사용자 정의 필드가 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(dependencyHash(this.dependencies(issues))!==proposal.dependencyHash)fail('업무 의존성이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(!proposal.preview.changes.length)fail('적용할 일정 변경이 없습니다.');
       const mutations=proposal.preview.changes.map(change=>({id:change.id,expectedVersion:change.version,startDate:change.toStart,endDate:change.toEnd}));const result=hooks.commitChanges(request,mutations);
