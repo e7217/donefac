@@ -1,0 +1,47 @@
+.attachments-feature { min-width:0; }
+.attachments-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; }
+.attachments-heading h3 { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:600; color:#758981; margin:0; }
+.attachments-heading h3>svg { color:#94aaa0; }
+.attachments-heading h3>span { font-size:9px; font-weight:400; color:#9baca2; padding:1px 5px; border-radius:4px; background:#f0f5f2; }
+.attachments-refresh { display:inline-flex; align-items:center; justify-content:center; padding:4px; background:transparent; border:0; color:#a3b3a9; cursor:pointer; border-radius:4px; }
+.attachments-refresh:hover { background:#f0f5f1; color:var(--accent,#177c72); }
+.attachments-dropzone { display:flex; align-items:center; justify-content:center; flex-direction:column; border:1px dashed #d7e4dd; border-radius:7px; padding:18px 12px 12px; background:#fafcfb; color:#afc2b6; transition:background .15s,border-color .15s; }
+.attachments-dropzone.is-dragging { border-color:#68a894; background:#edf7f1; }
+.attachments-dropzone.is-busy { opacity:.75; }
+.attachments-dropzone p { color:#91a599; font-size:10px; margin:9px 0 3px; text-align:center; }
+.attachments-dropzone>span { font-size:9px; color:#b1beb5; }
+.attachments-dropzone>.btn { font-size:9px; padding:5px 9px; min-height:27px; margin-top:9px; }
+.attachments-input { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.attachments-input:focus-visible~button { outline:2px solid #79b2a0; outline-offset:2px; }
+.attachments-upload-list { margin-top:10px; }
+.attachments-upload { padding:8px 0; }
+.attachments-upload>div:first-child { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#91a79a; font-size:9px; }
+.attachments-upload>div:first-child>span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.attachments-upload>div:first-child>span:last-child { flex-shrink:0; }
+.attachments-upload button { display:flex; background:transparent; border:0; padding:2px; color:#bd9b91; cursor:pointer; }
+.attachments-upload p { color:#bb8e82; font-size:9px; line-height:1.8; margin:4px 0 0; }
+.attachments-progress { height:3px; border-radius:3px; background:#edf3ee; margin-top:7px; overflow:hidden; }
+.attachments-progress>span { display:block; height:100%; border-radius:inherit; background:#7aa591; transition:width .1s; }
+.attachments-error { background:#fcf6f3; color:#bd9689; border:1px solid #f0e2dc; border-radius:5px; padding:10px; margin-top:10px; font-size:10px; line-height:1.8; }
+.attachments-error p { margin:0; }
+.attachments-error button { background:transparent; border:0; text-decoration:underline; color:#a48073; padding:5px 0 0; font-size:9px; cursor:pointer; }
+.attachments-empty { display:flex; align-items:center; justify-content:center; gap:6px; color:#b0bdb4; font-size:9px; padding:17px 0 4px; margin:0; }
+.attachments-list { margin-top:8px; }
+.attachment-row { display:flex; align-items:center; gap:8px; padding:11px 0; border-bottom:1px solid #edf2ee; }
+.attachment-row:last-child { border-bottom:0; }
+.attachment-symbol { display:flex; justify-content:center; align-items:center; flex-shrink:0; height:34px; width:30px; border-radius:6px; background:#f0f4f8; color:#a0aec0; }
+.attachment-symbol.is-image { background:#edf5ef; color:#97b5a1; }
+.attachment-description { display:flex; flex:1; flex-direction:column; gap:3px; min-width:0; }
+.attachment-description>a { color:#7f9387; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; font-size:10px; text-decoration:none; }
+.attachment-description>a:hover { color:var(--accent,#177c72); text-decoration:underline; text-underline-offset:3px; }
+.attachment-description>span { color:#b1bdb5; font-size:8px; }
+.attachment-insert { display:flex; align-items:center; align-self:flex-start; gap:3px; background:transparent; border:0; padding:1px 0; color:#89a696; font-size:8px; cursor:pointer; }
+.attachment-insert:hover { color:var(--accent,#177c72); }
+.attachment-action { display:inline-flex; align-items:center; justify-content:center; padding:4px; border:0; background:transparent; color:#a8b7ad; border-radius:4px; cursor:pointer; flex-shrink:0; }
+.attachment-action:hover { background:#f0f5f1; color:var(--accent,#177c72); }
+.attachment-delete:hover { background:#fcf0ec; color:#c29080; }
+.attachments-success { display:flex; align-items:center; justify-content:center; gap:4px; font-size:9px; color:#9ab4a5; margin:8px 0 0; }
+.attachments-spin { animation:attachments-spin 1s linear infinite; }
+.attachments-feature button:disabled { opacity:.5; cursor:not-allowed; }
+.attachments-feature button:focus-visible,.attachments-feature a:focus-visible { outline:2px solid #8bb7a4; outline-offset:2px; }
+@keyframes attachments-spin { to { transform:rotate(360deg); } }
