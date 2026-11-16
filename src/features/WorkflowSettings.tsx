@@ -5,6 +5,7 @@ import { ArrowDown, ArrowRight, ArrowUp, ChevronDown, GitBranch, Plus, RefreshCw
 import { ISSUE_TYPES, type FeatureProps, type IssueRequiredField, type ProjectWorkflow, type WorkflowStatus } from '../../shared/types';
 import { projectWorkflow, REQUIRED_FIELD_LABELS, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { api, patch } from '../lib/api';
+import { afterAcceptedNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './workflow-settings.css';
 
@@ -33,9 +34,10 @@ function WorkflowEditor({ data, projectId, refresh, notify }: FeatureProps) {
     return () => { active = false; };
   }, [projectId]);
   const guard = useCallback((event: Event) => {
+    if (event.defaultPrevented) return;
     if (savingRef.current) { event.preventDefault(); notify('워크플로 저장이 끝난 뒤 이동해 주세요.', 'error'); }
-    else if (dirtyRef.current) { if (!window.confirm('저장하지 않은 워크플로 설정을 버리고 이동할까요?')) event.preventDefault(); else dirtyRef.current = false; }
-  }, [notify]);
+    else if (dirtyRef.current) { if (!window.confirm('저장하지 않은 워크플로 설정을 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(structuredClone(baseline)); setError(''); }); }
+  }, [notify, baseline]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || savingRef.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', beforeUnload);

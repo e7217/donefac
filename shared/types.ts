@@ -27,6 +27,12 @@ export interface ApiKeyRecord {
   version: number; createdAt: string; expiresAt: string | null; lastUsedAt: string | null; revokedAt: string | null;
 }
 export interface ApiKeyCreated { key: ApiKeyRecord; token: string }
+export interface CalendarException { date: string; isWorking: boolean; label: string }
+export interface WorkCalendar { id: string; projectId: string; name: string; workingWeekdays: number[]; exceptions: CalendarException[]; version: number; updatedAt: string }
+export interface Milestone { id: string; projectId: string; title: string; description: string; date: string; status: 'open' | 'reached'; ownerId: string | null; issueIds: string[]; version: number; createdAt: string; updatedAt: string }
+export interface BaselineIssue { issueId: string; key: string; title: string; startDate: string | null; endDate: string | null; sourceVersion: number }
+export interface BaselineMilestone { milestoneId: string; title: string; date: string; status: 'open' | 'reached'; sourceVersion: number }
+export interface ScheduleBaseline { id: string; projectId: string; name: string; description: string; authorId: string; version: number; createdAt: string; calendar: WorkCalendar; issues: BaselineIssue[]; milestones: BaselineMilestone[] }
 export interface Issue {
   id: string; key: string; projectId: string; title: string; description: string;
   type: string; status: IssueStatus; priority: Priority; assigneeId: string | null;
@@ -60,9 +66,11 @@ export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
   planningItems?: PlanningItem[];
+  calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
-export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[] }
+export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
+export interface AutomaticSchedulePreview extends SchedulePreview { previewId: string; blocking: string[]; expiresAt: string }
 export interface FeatureProps {
   data: WorkspaceSnapshot; projectId: string; actorId: string;
   refresh: () => Promise<void>; notify: (message: string, kind?: 'success' | 'error') => void;

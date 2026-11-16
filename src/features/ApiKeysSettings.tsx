@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy, KeyRound, Loader2, Plus, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import type { ApiKeyCreated, ApiKeyRecord, FeatureProps, Project } from '../../shared/types';
 import { api } from '../lib/api';
+import { afterAcceptedNavigation } from '../lib/navigation';
 import './api-keys.css';
 
 export interface ApiKeysSettingsProps { actorId: string; projects: Project[]; notify: FeatureProps['notify'] }
@@ -63,10 +64,11 @@ function ActorApiKeysSettings({ actorId, projects, notify }: ApiKeysSettingsProp
   }
   useEffect(() => {
     const navigate = (event: Event) => {
+      if (event.defaultPrevented) return;
       if (creatingRef.current) { event.preventDefault(); notify('API 키 발급이 끝난 후 이동해주세요.', 'error'); return; }
       if (createdRef.current) {
         if (!window.confirm('발급한 API 키를 복사했나요? 이동하면 전체 값을 다시 확인할 수 없습니다.')) event.preventDefault();
-        else { createdRef.current = null; setCreated(null); setCopied(false); }
+        else afterAcceptedNavigation(event, () => { createdRef.current = null; setCreated(null); setCopied(false); });
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (createdRef.current || creatingRef.current) { event.preventDefault(); event.returnValue = ''; } };
