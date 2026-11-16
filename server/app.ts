@@ -4,6 +4,9 @@ import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, safeFilename, sniffMime, hash } from './attachments.js';
 import { Store } from './store.js';
 import { seed, plain } from './seed.js';
+import { WorkflowService, WorkflowError } from './workflows.js';
+import { SavedViewService, SavedViewError } from './saved-views.js';
+import { CollaborationService, CollaborationError } from './collaboration.js';
 import { STATUS, PRIORITY, ISSUE_TYPES, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type GitlabSettings, type Attachment } from '../shared/types.js';
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
@@ -38,6 +41,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   const files = new AttachmentFiles(dataDir);
   files.recover(store.setting('attachmentImportGeneration'));
   if (options.seed !== false) seed(store);
+  const workflows=new WorkflowService(store),savedViews=new SavedViewService(store);
+  const collaboration=new CollaborationService(store);
   const app = express(); app.disable('x-powered-by');
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
   app.use(express.json({limit:MAX_PACKAGE_BYTES}));
@@ -53,15 +58,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
   const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentRows(type,id);store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
   const cleanupAttachments=(rows:Attachment[])=>{for(const a of rows)try{files.remove(a.id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',a.id);}};
-  const snapshot = (): WorkspaceSnapshot => Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])) as unknown as WorkspaceSnapshot;
+  const snapshot = (): WorkspaceSnapshot => ({...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),workflows:workflows.snapshot(),savedViews:savedViews.all()}) as unknown as WorkspaceSnapshot;
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
-  const validateIssue = (i: Issue) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     if(typeof i.description!=='string'||i.description.length>200000)fail('설명을 확인해 주세요.');
     if(!ISSUE_TYPES.includes(i.type as any))fail('지원하지 않는 티켓 유형입니다.');
-    if(!Object.hasOwn(STATUS,i.status)||!Object.hasOwn(PRIORITY,i.priority))fail('상태 또는 우선순위가 올바르지 않습니다.');
+    if(typeof i.status!=='string'||!Object.hasOwn(PRIORITY,i.priority))fail('상태 또는 우선순위가 올바르지 않습니다.');
     if(i.assigneeId!==null)get('users',i.assigneeId);
     if(!Array.isArray(i.collaboratorIds)||!i.collaboratorIds.every(x=>typeof x==='string'))fail('협력자를 확인해 주세요.');
     i.collaboratorIds=[...new Set(i.collaboratorIds)];i.collaboratorIds.forEach(id=>get('users',id));
@@ -71,7 +76,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     for(const f of ['cycle','module','release'] as const)i[f]=nullableText(i[f],f,100);
     let parentId=i.parentId;const visited=new Set([i.id]);
     while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
-    return i;
+    workflows.validateIssue(i,previous,options);return i;
   };
   const validateDocument = (d: DocPage) => {
     d.title=text(d.title,'문서 제목',300);if(d.projectId!==null)get('projects',d.projectId);get('users',d.authorId);
@@ -97,6 +102,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     for(const dep of store.all<any>('dependencies')){const a=map.get(dep.predecessorId),b=map.get(dep.successorId);if(a?.endDate&&b?.startDate&&b.startDate<shiftDate(a.endDate,dep.lagDays+1,false))warnings.push(`${a.key} → ${b.key}: 선행 업무 종료 후 ${dep.lagDays}일 지연 조건과 일정이 맞지 않습니다. 수동 일정은 자동 이동하지 않습니다.`);}
     return warnings;
   };
+  const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
+  workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
   app.get('/api/workspace',(_req,res)=>res.json(snapshot()));
@@ -105,18 +112,36 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
   app.post('/api/issues',(req,res)=>{
     const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release'];
-    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:'작업',status:'todo',priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]]))};
-    store.transaction(()=>{validateIssue(i);const p=get('projects',i.projectId);const row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as any;const num=row?.next_number||1;i.key=`${p.key}-${num}`;store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);if(i.status==='done')i.completedAt=timestamp;store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);});res.status(201).json(i);
+    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:'작업',status:workflows.get(req.body.projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]]))};
+    store.transaction(()=>{validateIssue(i);const p=get('projects',i.projectId);const row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as any;const num=row?.next_number||1;i.key=`${p.key}-${num}`;store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);if(done(i))i.completedAt=timestamp;store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);});res.status(201).json(i);
   });
   app.patch('/api/issues/:id',(req,res)=>{
-    const updated=store.transaction(()=>{const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release'];const i=validateIssue({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()});i.completedAt=i.status==='done'?(old.completedAt||now()):null;store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.filter(k=>k in req.body).join(', ')}`);return i;});res.json(updated);
+    const updated=store.transaction(()=>{const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','cycle','module','release'];const i=validateIssue({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);i.completedAt=done(i)?(old.completedAt||now()):null;store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.filter(k=>k in req.body).join(', ')}`);return i;});res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const i=get<Issue>('issues',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(i,Number(v));if(store.all<Issue>('issues').some(x=>x.parentId===i.id))fail('하위 티켓을 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('issue',i.id);cleanup.push(...deleteAttachmentRows('issue',i.id));store.remove('issues',i.id);activity(req,'issue',i.id,'티켓 삭제',i.key);});cleanupAttachments(cleanup);res.json({ok:true});});
   app.post('/api/documents',(req,res)=>{const timestamp=now(),authorId=actor(req);const d=validateDocument({id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,content:req.body.content||{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp});store.transaction(()=>{store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);});res.status(201).json(d);});
-  app.patch('/api/documents/:id',(req,res)=>{const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const fields=['projectId','parentId','title','content','icon','status'];const d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()});if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');store.put('documents',d);revision(d,actor(req),nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);return d;});res.json(updated);});
-  app.delete('/api/documents/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const d=get<DocPage>('documents',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(d,Number(v));if(store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('document',d.id);cleanup.push(...deleteAttachmentRows('document',d.id));store.remove('documents',d.id);activity(req,'document',d.id,'문서 삭제',d.title);});cleanupAttachments(cleanup);res.json({ok:true});});
+  app.patch('/api/documents/:id',(req,res)=>{
+    const bodyChanged=Object.hasOwn(req.body,'content');
+    const updated=store.transaction(()=>{
+      const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
+      const fields=['projectId','parentId','title','content','icon','status'];
+      let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()});
+      if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
+      store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
+      revision(d,actor(req),nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);return d;
+    });
+    if(bodyChanged)collaboration.reset(updated.id,'문서 본문이 교체되었습니다.');else collaboration.notifyMetadata(updated.id);
+    res.json(updated);
+  });
+  app.delete('/api/documents/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const d=get<DocPage>('documents',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(d,Number(v));if(store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('document',d.id);cleanup.push(...deleteAttachmentRows('document',d.id));store.remove('documents',d.id);activity(req,'document',d.id,'문서 삭제',d.title);});collaboration.reset(String(req.params.id),'문서가 삭제되었습니다.');cleanupAttachments(cleanup);res.json({ok:true});});
   app.get('/api/documents/:id/revisions',(req,res)=>{get('documents',req.params.id);res.json(store.all<any>('revisions').filter(r=>r.documentId===req.params.id).sort((a,b)=>b.version-a.version));});
-  app.post('/api/documents/:id/restore',(req,res)=>{const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');const d={...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()};store.put('documents',d);revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});res.json(updated);});
+  app.post('/api/documents/:id/restore',(req,res)=>{
+    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d={...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()};store.put('documents',d);d=collaboration.replaceBody(d);revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});
+    collaboration.reset(updated.id,'문서 이력에서 복구되었습니다.');res.json(updated);
+  });
+  app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
+  app.post('/api/documents/:id/collaboration/enable',(req,res)=>res.json(collaboration.enable(String(req.params.id),req.body.expectedVersion,actor(req))));
+  app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary)));
   app.get('/api/comments',(req,res)=>{const type=req.query.resourceType,id=req.query.resourceId;if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('댓글 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);res.json(store.all<any>('comments').filter(c=>c.resourceType===type&&c.resourceId===id));});
   app.post('/api/comments',(req,res)=>{const {resourceType,resourceId}=req.body;if(!['issue','document'].includes(resourceType))fail('댓글 대상을 확인해 주세요.');get(resourceType==='issue'?'issues':'documents',resourceId);const c={id:uid(),resourceType,resourceId,authorId:actor(req),body:text(req.body.body,'댓글',20000),createdAt:now()};store.transaction(()=>{store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));});res.status(201).json(c);});
   app.get('/api/attachments',(req,res)=>{attachmentTarget(req.query.resourceType,req.query.resourceId);res.json(attachmentRows(req.query.resourceType as string,req.query.resourceId as string));});
@@ -143,12 +168,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.post('/api/dependencies',(req,res)=>{const d={id:uid(),predecessorId:req.body.predecessorId,successorId:req.body.successorId,type:'FS',lagDays:req.body.lagDays??0};store.transaction(()=>{validateDependency(d);store.put('dependencies',d);activity(req,'issue',d.successorId,'선행 업무 연결',get<Issue>('issues',d.predecessorId).key);});res.status(201).json(d);});
   app.delete('/api/dependencies/:id',(req,res)=>{const d=get('dependencies',req.params.id);store.transaction(()=>{store.remove('dependencies',d.id);activity(req,'issue',d.successorId,'선행 업무 연결 해제');});res.json({ok:true});});
   app.post('/api/schedule/preview',(req,res)=>{const {issueIds,days,workingDays=false}=req.body;if(!Array.isArray(issueIds)||!issueIds.length||issueIds.length>1000||!issueIds.every(x=>typeof x==='string')||!Number.isInteger(days)||Math.abs(days)>3650||typeof workingDays!=='boolean')fail('대상 티켓과 이동 일수를 확인해 주세요.');const changes:ScheduleChange[]=[],warnings:string[]=[];for(const id of new Set<string>(issueIds)){const i=get<Issue>('issues',id);if(!i.startDate&&!i.endDate){warnings.push(`${i.key}: 일정이 없어 이동하지 않습니다.`);continue;}changes.push({id:i.id,key:i.key,title:i.title,version:i.version,fromStart:i.startDate,fromEnd:i.endDate,toStart:i.startDate?shiftDate(i.startDate,days,workingDays):null,toEnd:i.endDate?shiftDate(i.endDate,days,workingDays):null});}const all=store.all<Issue>('issues').map(i=>{const c=changes.find(c=>c.id===i.id);return c?{...i,startDate:c.toStart,endDate:c.toEnd}:i;});warnings.push(...scheduleWarnings(all));const preview:SchedulePreview={changes,warnings};res.json(preview);});
-  app.post('/api/schedule/apply',(req,res)=>{const changes=req.body.changes;if(!Array.isArray(changes)||!changes.length||changes.length>1000)fail('변경할 일정을 선택해 주세요.');const result=store.transaction(()=>{const seen=new Set(),records:any[]=[],updated:Issue[]=[];for(const c of changes){if(seen.has(c.id))fail('중복된 티켓입니다.');seen.add(c.id);const old=get<Issue>('issues',c.id);checkVersion(old,c.expectedVersion);if(!('startDate'in c)||!('endDate'in c))fail('시작일과 종료일 값을 지정해 주세요.');const i=validateIssue({...old,startDate:date(c.startDate,'시작일'),endDate:date(c.endDate,'종료일'),version:old.version+1,updatedAt:now()});records.push({id:i.id,appliedVersion:i.version,startDate:old.startDate,endDate:old.endDate});store.put('issues',i);activity(req,'issue',i.id,'일정 변경',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);updated.push(i);}const undoId=uid();store.put('schedule_undos',{id:undoId,records,used:false});activity(req,'schedule',undoId,'일정 일괄 변경',`${updated.length}개 티켓`);return{undoId,updated,warnings:scheduleWarnings(store.all('issues'))};});res.json(result);});
-  app.post('/api/schedule/undo',(req,res)=>{const result=store.transaction(()=>{const record=get('schedule_undos',req.body.undoId);if(record.used)fail('이미 되돌린 작업입니다.',409);for(const r of record.records)checkVersion(get('issues',r.id),r.appliedVersion);const updated=record.records.map((r:any)=>{const old=get<Issue>('issues',r.id);const i={...old,startDate:r.startDate,endDate:r.endDate,version:old.version+1,updatedAt:now()};store.put('issues',i);activity(req,'issue',i.id,'일정 되돌리기',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);return i;});store.put('schedule_undos',{...record,used:true});activity(req,'schedule',record.id,'일정 변경 되돌리기',`${updated.length}개 티켓`);return{updated};});res.json(result);});
+  app.post('/api/schedule/apply',(req,res)=>{const changes=req.body.changes;if(!Array.isArray(changes)||!changes.length||changes.length>1000)fail('변경할 일정을 선택해 주세요.');const result=store.transaction(()=>{const seen=new Set(),records:any[]=[],updated:Issue[]=[];for(const c of changes){if(seen.has(c.id))fail('중복된 티켓입니다.');seen.add(c.id);const old=get<Issue>('issues',c.id);checkVersion(old,c.expectedVersion);if(!('startDate'in c)||!('endDate'in c))fail('시작일과 종료일 값을 지정해 주세요.');const i=validateIssue({...old,startDate:date(c.startDate,'시작일'),endDate:date(c.endDate,'종료일'),version:old.version+1,updatedAt:now()},old,{checkTransition:false});records.push({id:i.id,appliedVersion:i.version,startDate:old.startDate,endDate:old.endDate});store.put('issues',i);activity(req,'issue',i.id,'일정 변경',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);updated.push(i);}const undoId=uid();store.put('schedule_undos',{id:undoId,records,used:false});activity(req,'schedule',undoId,'일정 일괄 변경',`${updated.length}개 티켓`);return{undoId,updated,warnings:scheduleWarnings(store.all('issues'))};});res.json(result);});
+  app.post('/api/schedule/undo',(req,res)=>{const result=store.transaction(()=>{const record=get('schedule_undos',req.body.undoId);if(record.used)fail('이미 되돌린 작업입니다.',409);for(const r of record.records)checkVersion(get('issues',r.id),r.appliedVersion);const updated=record.records.map((r:any)=>{const old=get<Issue>('issues',r.id);const i=validateIssue({...old,startDate:r.startDate,endDate:r.endDate,version:old.version+1,updatedAt:now()},old,{checkTransition:false});store.put('issues',i);activity(req,'issue',i.id,'일정 되돌리기',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);return i;});store.put('schedule_undos',{...record,used:true});activity(req,'schedule',record.id,'일정 변경 되돌리기',`${updated.length}개 티켓`);return{updated};});res.json(result);});
   app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');res.json({issues:store.all<Issue>('issues').filter(i=>`${i.key} ${i.title} ${i.description} ${i.labels.join(' ')}`.toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
-    const payload={schemaVersion:2,exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
+    const payload={schemaVersion:3,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+attachments.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=attachments.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -156,22 +181,28 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1 또는 2)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1, 2 또는 3)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
+    const importedCollaboration=collaboration.validateImport(data.schemaVersion===3?data.collabStates:[],data.documents);
+    const importedWorkflows=workflows.validateImport(data.schemaVersion===3?data.workflows:[],data.projects,data.issues);
+    const importedViews=savedViews.validateImport(data.schemaVersion===3?data.savedViews:[],data.projects,data.users);
     let staged:string;try{staged=files.stageImport(data.attachments,data.attachmentContents);}catch(error){fail((error as Error).message);}
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;
     try{store.transaction(()=>{
+      const previousWorkflows=new Map(workflows.snapshot().map(w=>[w.projectId,w.version]));
+      const previousViews=new Map(savedViews.all().map(v=>[v.id,v.version]));
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
-      for(const table of ['attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
+      for(const table of ['collaboration_requests','collaboration_documents','workflows','saved_views','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
+      workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       for(const i of data.issues)store.put('issues',i);
       for(const d of data.documents)store.put('documents',d);
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
-      const keys=new Set();for(const i of data.issues){validateIssue(i);if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
+      const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
       for(const d of data.documents){validateDocument(d);if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       for(const d of data.dependencies){validateDependency(d,data.dependencies);store.put('dependencies',d);}
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
@@ -182,8 +213,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       for(const a of data.attachments){attachmentTarget(a.resourceType,a.resourceId);get('users',a.authorId);if(!validTimestamp(a.createdAt))fail('첨부파일 작성 시간을 확인해 주세요.');store.put('attachments',a);}
       for(const l of data.gitlabLinks){get('issues',l.issueId);if(!['merge_request','commit','pipeline'].includes(l.kind)||!Number.isInteger(l.projectId)||typeof l.webUrl!=='string'||!/^https?:\/\//.test(l.webUrl))fail('GitLab 연결 데이터를 확인해 주세요.');store.put('gitlab_links',l);}
       for(const p of data.projects){const max=Math.max(0,...data.issues.filter((i:any)=>i.projectId===p.id).map((i:any)=>{const match=i.key.match(/-(\d+)$/);return match?Number(match[1]):0;}));store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(p.id,max+1);}
+      collaboration.replaceImported(importedCollaboration);
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
     });}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
+    collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
     files.cleanupStage(staged!);try{swapped?.commit();}catch{console.error('[teamspace attachments] previous upload directory cleanup needed');}
     res.json({ok:true,counts:{projects:data.projects.length,issues:data.issues.length,documents:data.documents.length,attachments:data.attachments.length}});
   });
@@ -230,11 +263,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   });
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,close:()=>store.db.close()};
+  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{collaboration.close();store.db.close();}};
 }

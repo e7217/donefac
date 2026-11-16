@@ -1,0 +1,120 @@
+import type { Express, Request } from 'express';
+import { ISSUE_TYPES, type Issue, type IssueRequiredField, type Project, type ProjectWorkflow, type WorkflowFieldRule, type WorkflowStatus, type WorkflowTransition } from '../shared/types.js';
+import { defaultWorkflow, REQUIRED_FIELD_LABELS, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
+import type { Store } from './store.js';
+
+export class WorkflowError extends Error {
+  constructor(public status: number, message: string, public details?: unknown) { super(message); }
+}
+function invalid(message: string, status = 400, details?: unknown): never { throw new WorkflowError(status, message, details); }
+function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('워크플로 설정 객체가 필요합니다.'); return value as Record<string, unknown>; }
+function fields(value: unknown): IssueRequiredField[] {
+  if (!Array.isArray(value) || !value.every(field => typeof field === 'string' && Object.hasOwn(REQUIRED_FIELD_LABELS, field))) invalid('지원하지 않는 필수 속성이 있습니다.');
+  return [...new Set(value)] as IssueRequiredField[];
+}
+function nonempty(value: unknown, label: string, limit: number): string { if (typeof value !== 'string' || !value.trim() || value.trim().length > limit) invalid(`${label}을(를) 확인해 주세요.`); return value.trim(); }
+function config(projectId: string, value: unknown, version: number, updatedAt: string): ProjectWorkflow {
+  const source = object(value);
+  if (!Array.isArray(source.statuses) || source.statuses.length < 1 || source.statuses.length > 40) invalid('상태는 1~40개여야 합니다.');
+  const statuses: WorkflowStatus[] = source.statuses.map(value => {
+    const status = object(value), id = nonempty(status.id, '상태 ID', 48), label = nonempty(status.label, '상태 이름', 40);
+    if (!/^[a-z][a-z0-9_-]*$/.test(id)) invalid('상태 ID는 영문 소문자로 시작하는 영문·숫자·밑줄·하이픈이어야 합니다.');
+    if (typeof status.color !== 'string' || !/^#[a-f\d]{6}$/i.test(status.color)) invalid('상태 색상은 #RRGGBB 형식이어야 합니다.');
+    if (typeof status.category !== 'string' || !Object.hasOwn(STATUS_CATEGORY_LABELS, status.category)) invalid('상태 분류를 확인해 주세요.');
+    return { id, label, color: status.color, category: status.category as WorkflowStatus['category'] };
+  });
+  const ids = new Set(statuses.map(status => status.id));
+  if (ids.size !== statuses.length) invalid('중복된 상태 ID가 있습니다.');
+  if (typeof source.initialStatusId !== 'string' || !ids.has(source.initialStatusId)) invalid('새 업무의 기본 상태를 선택해 주세요.');
+  if (!Array.isArray(source.transitions) || source.transitions.length > 1600) invalid('허용 전이 목록을 확인해 주세요.');
+  const pairs = new Set<string>();
+  const transitions: WorkflowTransition[] = source.transitions.map(value => {
+    const edge = object(value);
+    if (typeof edge.from !== 'string' || typeof edge.to !== 'string' || !ids.has(edge.from) || !ids.has(edge.to)) invalid('전이의 출발·도착 상태가 설정에 없습니다.');
+    const pair = `${edge.from}:${edge.to}`;
+    if (pairs.has(pair)) invalid('같은 상태 사이의 전이는 한 번만 설정해 주세요.'); pairs.add(pair);
+    if (!Array.isArray(edge.issueTypes) || !edge.issueTypes.every(type => typeof type === 'string' && ISSUE_TYPES.includes(type as typeof ISSUE_TYPES[number]))) invalid('전이의 업무 유형을 확인해 주세요.');
+    return { from: edge.from, to: edge.to, issueTypes: [...new Set(edge.issueTypes)] as string[], requiredFields: fields(edge.requiredFields) };
+  });
+  if (!Array.isArray(source.fieldRules) || source.fieldRules.length > 1000) invalid('유형·상태별 필수 속성 규칙을 확인해 주세요.');
+  const rules = new Set<string>();
+  const fieldRules: WorkflowFieldRule[] = source.fieldRules.map(value => {
+    const rule = object(value);
+    if (typeof rule.issueType !== 'string' || (rule.issueType !== '*' && !ISSUE_TYPES.includes(rule.issueType as typeof ISSUE_TYPES[number]))) invalid('필수 속성 규칙의 업무 유형을 확인해 주세요.');
+    if (typeof rule.statusId !== 'string' || !ids.has(rule.statusId)) invalid('필수 속성 규칙의 상태를 확인해 주세요.');
+    const key = `${rule.issueType}:${rule.statusId}`; if (rules.has(key)) invalid('같은 유형·상태의 필수 속성 규칙이 중복되었습니다.'); rules.add(key);
+    return { issueType: rule.issueType, statusId: rule.statusId, requiredFields: fields(rule.requiredFields) };
+  });
+  return { id: projectId, projectId, version, initialStatusId: source.initialStatusId, statuses, transitions, fieldRules, updatedAt };
+}
+export function validateWorkflowImport(value: unknown, projects: Project[], issues: Issue[]): ProjectWorkflow[] {
+  if (!Array.isArray(value)) invalid('백업의 workflows 목록이 필요합니다.');
+  const projectIds = new Set(projects.map(project => project.id));
+  const seen = new Set<string>();
+  const result = value.map(value => {
+    const source = object(value);
+    if (typeof source.projectId !== 'string' || source.id !== source.projectId || !projectIds.has(source.projectId)) invalid('워크플로의 프로젝트 참조가 올바르지 않습니다.');
+    if (seen.has(source.projectId)) invalid('프로젝트 워크플로가 중복되었습니다.'); seen.add(source.projectId);
+    if (!Number.isSafeInteger(source.version) || Number(source.version) < 1) invalid('워크플로 버전이 올바르지 않습니다.');
+    if (typeof source.updatedAt !== 'string' || Number.isNaN(Date.parse(source.updatedAt))) invalid('워크플로 수정 시간이 올바르지 않습니다.');
+    return config(source.projectId, source, Number(source.version), source.updatedAt);
+  });
+  for (const project of projects) if (!seen.has(project.id)) result.push(defaultWorkflow(project.id, project.createdAt));
+  for (const issue of issues) {
+    const workflow = result.find(value => value.projectId === issue.projectId);
+    if (!workflow || !workflow.statuses.some(status => status.id === issue.status)) invalid(`${issue.key || issue.id}: 백업 워크플로에 없는 상태입니다.`);
+  }
+  return result;
+}
+type Hooks = { actor?: (request: Request) => string; activity?: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => void };
+
+export class WorkflowService {
+  constructor(private readonly store: Store) { store.db.exec('CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,json TEXT NOT NULL)'); }
+  get(projectId: string): ProjectWorkflow {
+    const project = this.store.get<Project>('projects', projectId); if (!project) invalid('프로젝트를 찾을 수 없습니다.', 404);
+    return this.store.get<ProjectWorkflow>('workflows', projectId) || defaultWorkflow(projectId, project.createdAt);
+  }
+  snapshot(): ProjectWorkflow[] { return this.store.all<Project>('projects').map(project => this.get(project.id)); }
+  save(projectId: string, input: unknown, expectedVersion: unknown, afterSave?: (workflow: ProjectWorkflow) => void): ProjectWorkflow {
+    return this.store.transaction(() => {
+      const previous = this.get(projectId);
+      if (!Number.isInteger(expectedVersion)) invalid('expectedVersion이 필요합니다.');
+      if (expectedVersion !== previous.version) invalid('다른 작업자가 워크플로를 변경했습니다. 최신 설정을 불러온 뒤 다시 편집해 주세요.', 409, { currentVersion: previous.version });
+      const next = config(projectId, input, previous.version + 1, new Date().toISOString());
+      const statusIds = new Set(next.statuses.map(status => status.id));
+      const issues = this.store.all<Issue>('issues').filter(issue => issue.projectId === projectId);
+      const referenced = issues.filter(issue => !statusIds.has(issue.status));
+      if (referenced.length) invalid(`사용 중인 상태는 삭제할 수 없습니다: ${[...new Set(referenced.map(issue => previous.statuses.find(status => status.id === issue.status)?.label || issue.status))].join(', ')}`, 409, { issueIds: referenced.map(issue => issue.id) });
+      for (const issue of issues) {
+        const wasDone = previous.statuses.find(status => status.id === issue.status)?.category === 'done';
+        const isDone = next.statuses.find(status => status.id === issue.status)?.category === 'done';
+        const completedAt = isDone ? (wasDone && issue.completedAt ? issue.completedAt : next.updatedAt) : null;
+        if (wasDone !== isDone || issue.completedAt !== completedAt) this.store.put('issues', { ...issue, completedAt, version: issue.version + 1, updatedAt: next.updatedAt });
+      }
+      this.store.put('workflows', next); afterSave?.(next); return next;
+    });
+  }
+  validateIssue(next: Issue, previous?: Issue, options: { checkTransition?: boolean; checkFields?: boolean } = {}): void {
+    const workflow = this.get(next.projectId);
+    if (!workflow.statuses.some(status => status.id === next.status)) invalid('프로젝트 워크플로에 없는 상태입니다.');
+    const required = workflow.fieldRules.filter(rule => rule.statusId === next.status && (rule.issueType === '*' || rule.issueType === next.type)).flatMap(rule => rule.requiredFields);
+    if (previous && previous.status !== next.status && options.checkTransition !== false) {
+      const edge = workflow.transitions.find(edge => edge.from === previous.status && edge.to === next.status && (!edge.issueTypes.length || edge.issueTypes.includes(next.type)));
+      if (!edge) invalid(`허용되지 않은 상태 전이입니다: ${previous.status} → ${next.status}`, 422);
+      required.push(...edge.requiredFields);
+    }
+    if (options.checkFields === false) return;
+    const missing = [...new Set(required)].filter(field => { const value = next[field]; return value === null || value === undefined || (typeof value === 'string' && !value.trim()) || (Array.isArray(value) && !value.some(item => typeof item === 'string' && item.trim())); });
+    if (missing.length) invalid(`필수 속성을 입력해 주세요: ${missing.map(field => REQUIRED_FIELD_LABELS[field]).join(', ')}`, 422, { requiredFields: missing });
+  }
+  validateImport(value: unknown, projects: Project[], issues: Issue[]) { return validateWorkflowImport(value, projects, issues); }
+  replaceImported(workflows: ProjectWorkflow[]): void { this.store.db.exec('DELETE FROM workflows'); workflows.forEach(workflow => this.store.put('workflows', workflow)); }
+  registerRoutes(app: Express, hooks: Hooks = {}): void {
+    app.get('/api/projects/:projectId/workflow', (request, response) => { response.json(this.get(String(request.params.projectId))); });
+    app.patch('/api/projects/:projectId/workflow', (request, response) => {
+      hooks.actor?.(request);
+      const workflow = this.save(String(request.params.projectId), request.body, request.body?.expectedVersion, saved => hooks.activity?.(request, 'project', saved.projectId, '워크플로 변경', `버전 ${saved.version} · 상태 ${saved.statuses.length}개`));
+      response.json(workflow);
+    });
+  }
+}

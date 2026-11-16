@@ -1,12 +1,14 @@
-export const STATUS = {
-  backlog: { label: '백로그', color: '#8b93a5' },
-  todo: { label: '할 일', color: '#677386' },
-  in_progress: { label: '진행 중', color: '#5778ef' },
-  review: { label: '검토', color: '#a175d3' },
-  done: { label: '완료', color: '#31a27e' },
-  cancelled: { label: '취소', color: '#a2a8b4' },
-} as const;
-export type IssueStatus = keyof typeof STATUS;
+export type StatusCategory = 'backlog' | 'todo' | 'in_progress' | 'review' | 'done' | 'cancelled';
+export interface WorkflowStatus { id: string; label: string; color: string; category: StatusCategory }
+export const STATUS: Record<string, Omit<WorkflowStatus, 'id'>> = {
+  backlog: { label: '백로그', color: '#8b93a5', category: 'backlog' },
+  todo: { label: '할 일', color: '#677386', category: 'todo' },
+  in_progress: { label: '진행 중', color: '#5778ef', category: 'in_progress' },
+  review: { label: '검토', color: '#a175d3', category: 'review' },
+  done: { label: '완료', color: '#31a27e', category: 'done' },
+  cancelled: { label: '취소', color: '#a2a8b4', category: 'cancelled' },
+};
+export type IssueStatus = string;
 export const PRIORITY = { urgent: '긴급', high: '높음', medium: '보통', low: '낮음' } as const;
 export type Priority = keyof typeof PRIORITY;
 export const ISSUE_TYPES = ['큰틀', '작업', '부작업', '버그', '개선', '신규', '요구사항', '회의', '기획'] as const;
@@ -34,9 +36,15 @@ export interface Attachment { id: string; resourceType: 'issue' | 'document'; re
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; lastSyncAt: string | null; lastError: string | null }
+export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'collaboratorIds' | 'startDate' | 'endDate' | 'dueDate' | 'estimate' | 'labels' | 'parentId' | 'cycle' | 'module' | 'release';
+export interface WorkflowTransition { from: string; to: string; issueTypes: string[]; requiredFields: IssueRequiredField[] }
+export interface WorkflowFieldRule { issueType: string; statusId: string; requiredFields: IssueRequiredField[] }
+export interface ProjectWorkflow { id: string; projectId: string; version: number; initialStatusId: string; statuses: WorkflowStatus[]; transitions: WorkflowTransition[]; fieldRules: WorkflowFieldRule[]; updatedAt: string }
+export interface SavedViewState { layout: 'list' | 'board'; filters: { query: string; status: string; assigneeId: string; type: string } }
+export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
 export interface WorkspaceSnapshot {
-  projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[];
-  dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[];
+  projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
+  dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[] }
