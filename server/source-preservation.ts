@@ -70,6 +70,8 @@ export class SourcePreservationService {
       CREATE INDEX IF NOT EXISTS source_records_author ON source_records(import_id,product,source_instance,kind,source_id);
       CREATE TABLE IF NOT EXISTS attachment_versions(id TEXT PRIMARY KEY,attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS attachment_versions_attachment ON attachment_versions(attachment_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS attachment_versions_local_revision
+        ON attachment_versions(attachment_id,json_extract(json,'$.localRevision')) WHERE json_type(json,'$.localRevision')='integer';
       CREATE TABLE IF NOT EXISTS issue_relations(id TEXT PRIMARY KEY,source_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,target_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_bindings(product TEXT NOT NULL,source_instance TEXT NOT NULL,kind TEXT NOT NULL,source_alias TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,PRIMARY KEY(product,source_instance,kind,source_alias));`);
   }
@@ -78,6 +80,10 @@ export class SourcePreservationService {
   allVersions(): AttachmentVersion[] { return this.store.all<AttachmentVersion>('attachment_versions'); }
   allRelations(): IssueRelation[] { return this.store.all<IssueRelation>('issue_relations'); }
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
+  hasLocalAttachmentVersion(id: string): boolean {
+    return Boolean(this.store.db.prepare(`SELECT 1 FROM attachment_versions WHERE id=? AND id<>attachment_id
+      AND json_type(json,'$.localRevision')='integer' AND json_extract(json,'$.localRevision')>=2`).get(id));
+  }
   versionsForAttachments(ids: string[]): AttachmentVersion[] { const result: AttachmentVersion[] = []; for (const id of new Set(ids)) result.push(...(this.store.db.prepare('SELECT json FROM attachment_versions WHERE attachment_id=? ORDER BY rowid').all(id) as { json: string }[]).map(row => JSON.parse(row.json) as AttachmentVersion)); return result; }
   validateImport(input: { imports: unknown; records: unknown; versions: unknown; relations: unknown }, context: SourcePreservationContext): SourcePreservationData {
     const users = new Set(context.users.map(value => value.id)), imports = list(input.imports, '이관 영수증', 10000).map(value => parseImport(value, users)), byImport = unique(imports, '이관 영수증');
@@ -98,6 +104,7 @@ export class SourcePreservationService {
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
+    const localRevisions = new Map<string, number[]>();
     const versions = list(input.versions, '첨부 버전').map(raw => {
       const value = object(raw, '첨부 버전'), attachment = attachments.get(string(value.attachmentId, '첨부 ID', 200)); if (!attachment) fail(400, '첨부 버전의 현재 첨부파일이 없습니다.');
       const id = uuid(value.id), resourceType = value.resourceType, resourceId = string(value.resourceId, '첨부 소유자', 200), authorId = string(value.authorId, '첨부 작성자', 200);
@@ -109,10 +116,22 @@ export class SourcePreservationService {
       if (sourceImportId && (!byImport.has(sourceImportId) || !sourceRecordId || byRecord.get(sourceRecordId)?.sourceImportId !== sourceImportId || byRecord.get(sourceRecordId)?.record.kind !== 'attachment')) fail(400, '첨부 버전의 보관 원본이 올바르지 않습니다.');
       if (sourceRecordId) { const archive = byRecord.get(sourceRecordId)!; if (archive.targetType !== 'attachment' || archive.targetId !== id || archive.ownerType !== attachment.resourceType || archive.ownerId !== attachment.resourceId) fail(400, '첨부 파일 버전과 원본 객체의 파일·소유자 연결이 다릅니다.'); }
       const version: AttachmentVersion = { id, attachmentId: attachment.id, resourceType: attachment.resourceType, resourceId, filename, mimeType: value.mimeType, size: Number(value.size), sha256: sha(value.sha256), authorId, createdAt: timestamp(value.createdAt), versionLabel: string(value.versionLabel, '첨부 버전 이름', 100), sourceImportId, sourceRecordId };
-      if (id === attachment.id && stable(baseAttachment(version)) !== stable(baseAttachment(attachment))) fail(400, '최신 첨부 버전과 현재 파일 메타데이터가 다릅니다.');
+      if (id === attachment.id && stable(baseAttachment(version)) !== stable(baseAttachment(attachment))) fail(400, '기준 첨부 버전과 파일 메타데이터가 다릅니다.');
       if (id !== attachment.id && attachments.has(id)) fail(400, '과거 첨부 버전 ID가 다른 현재 파일과 충돌합니다.');
+      if (value.localRevision !== undefined) {
+        const localRevision = positive(value.localRevision);
+        if (localRevision < 2 || id === attachment.id || sourceImportId || version.versionLabel !== `v${localRevision}`) fail(400, '직접 추가한 첨부 버전의 순번·이름·출처를 확인해 주세요.');
+        version.localRevision = localRevision;
+        const revisions = localRevisions.get(attachment.id) ?? [];
+        revisions.push(localRevision);
+        localRevisions.set(attachment.id, revisions);
+      }
       return version;
     });
+    for (const revisions of localRevisions.values()) {
+      revisions.sort((a, b) => a - b);
+      if (revisions.some((value, index) => value !== index + 2)) fail(400, '직접 추가한 첨부 버전의 순번이 중복되거나 누락되었습니다.');
+    }
     const byVersion = unique(versions, '첨부 버전');
     this.validateTargets(records, context, byVersion);
     const issues = new Map(context.issues.map(value => [value.id, value]));
@@ -128,6 +147,7 @@ export class SourcePreservationService {
       if (requireCurrent && value.ownerType && !targets[value.ownerType].has(value.ownerId!)) fail(400, '이관 원본의 현재 소유 리소스가 없습니다.');
       if (!value.targetType) continue;
       const target = targets[value.targetType].get(value.targetId!); if (!target) { if (Object.entries(targets).some(([type, rows]) => type !== value.targetType && rows.has(value.targetId!))) fail(400, '현재 존재하는 원본 적용 대상의 종류가 다릅니다.'); if (requireCurrent) fail(400, '이관 원본의 적용 대상이 없습니다.'); continue; }
+      if (value.targetType === 'attachment' && versions.get(target.id)?.localRevision !== undefined) fail(400, '직접 추가한 첨부 버전은 이관 원본의 대상이 될 수 없습니다.');
       let owner: { type: 'issue' | 'document'; id: string } | undefined;
       if (value.targetType === 'issue' || value.targetType === 'document') owner = { type: value.targetType, id: target.id };
       else if (value.targetType === 'comment' || value.targetType === 'attachment') { const resource = target as Comment | Attachment; owner = { type: resource.resourceType, id: resource.resourceId }; }
@@ -220,8 +240,11 @@ export class SourcePreservationService {
   attachmentVersions(id: string): AttachmentVersion[] {
     const attachment = this.store.get<Attachment>('attachments', id); if (!attachment) fail(404, '첨부파일을 찾을 수 없습니다.');
     const values = this.versionsForAttachments([id]);
-    if (!values.some(value => value.id === attachment.id)) values.push({ ...attachment, attachmentId: id, versionLabel: '현재 파일', sourceImportId: null, sourceRecordId: null });
-    return values.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || (a.id === id ? -1 : b.id === id ? 1 : a.versionLabel.localeCompare(b.versionLabel)));
+    const hasLocalVersions = values.some(value => value.localRevision !== undefined);
+    if (!values.some(value => value.id === id)) values.push({ ...attachment, attachmentId: id, versionLabel: hasLocalVersions ? 'v1' : '현재 파일', sourceImportId: null, sourceRecordId: null });
+    return values.sort((a, b) => (b.localRevision ?? 0) - (a.localRevision ?? 0) ||
+      (hasLocalVersions ? Number(b.id === id) - Number(a.id === id) : 0) || b.createdAt.localeCompare(a.createdAt) ||
+      Number(b.id === id) - Number(a.id === id) || a.versionLabel.localeCompare(b.versionLabel));
   }
   registerRoutes(app: Express): void {
     const query = (request: Request, allowed: string[]) => { if (Object.keys(request.query).some(key => !allowed.includes(key))) fail(400, '지원하지 않는 원본 기록 조회 조건입니다.'); return request.query; };

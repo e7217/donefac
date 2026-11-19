@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { crc32, deflateRawSync } from 'node:zlib';
-import type { Attachment, AttachmentVersion, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Attachment, AttachmentHead, AttachmentVersion, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -77,13 +77,42 @@ test('actual ZIP attachment versions survive native9 exact downloads and migrati
     const files = (await f.call<Attachment[]>(`/attachments?resourceType=document&resourceId=${document.id}`)).data; assert.equal(files.length, 1); const versions = (await f.call<AttachmentVersion[]>(`/attachments/${files[0].id}/versions`)).data; assert.equal(versions.length, 2);
     async function exactDownloads() { for (const version of versions) { const response = await fetch(`${f.base}/attachment-versions/${version.id}/download`); assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/octet-stream'); assert.deepEqual(Buffer.from(await response.arrayBuffer()), version.versionLabel === '1' ? binary.first : binary.latest); } }
     await exactDownloads();
-    const backup = (await f.call<Record<string, unknown>>('/export')).data; assert.equal(backup.schemaVersion, 15); assert.equal((backup.attachmentVersions as unknown[]).length, 2); assert.equal((backup.attachmentContents as unknown[]).length, 3);
+    const backup = (await f.call<Record<string, unknown>>('/export')).data; assert.equal(backup.schemaVersion, 16); assert.equal((backup.attachmentVersions as unknown[]).length, 2); assert.equal((backup.attachmentContents as unknown[]).length, 3);
     const invalidNotice = structuredClone(backup); (invalidNotice.sourceImports as SourceImport[])[0].notices = [{ severity: 'error', code: 'SYNTHETIC_BLOCKER', message: '완료된 영수증에 오류를 넣을 수 없음', recordId: null, requiresAcknowledgement: false }]; assert.equal((await f.call('/import', 'POST', { data: invalidNotice })).status, 400); await exactDownloads();
     const invalid = structuredClone(backup); (invalid.resourceLinks as { documentId: string }[])[0].documentId = 'synthetic-missing-document'; const snapshot = (await f.call<WorkspaceSnapshot>('/workspace')).data;
     assert.equal((await f.call('/import', 'POST', { data: invalid })).status, 404); assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, snapshot); await exactDownloads();
     assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200); await exactDownloads();
     const after = (await f.call<SourceImport[]>('/source-imports')).data[0]; assert.equal(after.version, 2); assert.deepEqual(after.notices, plan.notices);
     const archives = (await f.call<SourceRecordPage>(`/source-imports/${plan.id}/records?kind=attachment`)).data; assert.equal(archives.total, 2); const archive = (await f.call<SourceRecordArchive>(`/source-imports/${plan.id}/records/${archives.records[0].id}`)).data; assert.equal(archive.record.kind, 'attachment');
+
+    const root = files[0].id;
+    const localBytes = Buffer.from('현지 팀에서 추가한 합성 버전');
+    const localUpload = await fetch(`${f.base}/attachments/${root}/versions?${new URLSearchParams({ expectedVersionId: root, filename: 'updated.bin' })}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-min' }, body: new Uint8Array(localBytes),
+    });
+    const local = await localUpload.json() as AttachmentHead;
+    assert.equal(localUpload.status, 201, JSON.stringify(local));
+    assert.equal(local.id, root);
+    assert.notEqual(local.currentVersionId, root);
+    assert.equal(local.versionCount, 3);
+    const historyWithLocal = (await f.call<AttachmentVersion[]>(`/attachments/${root}/versions`)).data;
+    assert.equal(historyWithLocal[0].id, local.currentVersionId);
+    assert.equal(historyWithLocal[0].localRevision, 2);
+    assert.equal(historyWithLocal[0].sourceImportId, null);
+    assert.deepEqual(historyWithLocal.slice(1), versions);
+    const preservedRoot = await fetch(`${f.base}/attachments/${root}/content`);
+    assert.equal(preservedRoot.status, 200);
+    assert.deepEqual(Buffer.from(await preservedRoot.arrayBuffer()), binary.latest);
+    await exactDownloads();
+
+    const withLocal = (await f.call<Record<string, unknown>>('/export')).data;
+    assert.equal((await f.call('/import', 'POST', { data: withLocal })).status, 200);
+    assert.deepEqual((await f.call<AttachmentVersion[]>(`/attachments/${root}/versions`)).data, historyWithLocal);
+    assert.deepEqual((await f.call<SourceRecordPage>(`/source-imports/${plan.id}/records?kind=attachment`)).data, archives);
+    const localBytesAgain = await fetch(`${f.base}/attachments/${local.currentVersionId}/content`);
+    assert.equal(localBytesAgain.status, 200);
+    assert.deepEqual(Buffer.from(await localBytesAgain.arrayBuffer()), localBytes);
+    await exactDownloads();
   } finally { await f.close(); }
 });
 

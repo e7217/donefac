@@ -291,7 +291,7 @@ test('native restore keeps pinned list metadata and refreshed document versions,
     const beforePublished = await list(f, 'user-seo', { tab: 'published' });
     const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
     assert.equal(backup.status, 200);
-    assert.equal(backup.data.schemaVersion, 15);
+    assert.equal(backup.data.schemaVersion, 16);
     assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
     const afterAssigned = await list(f, 'user-seo');
     const afterPublished = await list(f, 'user-seo', { tab: 'published' });

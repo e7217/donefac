@@ -29,14 +29,25 @@ curl --fail-with-body \
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
 | `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
 | `GET /comments?resourceType=issue&resourceId=...` | 업무 또는 문서 댓글 조회 |
+| `GET /attachments?resourceType=issue&resourceId=...` · `GET /attachments/:id/versions` | 업무·문서의 첨부 목록, 각 첨부의 버전 이력 |
+| `GET /attachments/:id/content` · `GET /attachment-versions/:id/download` | 지정된 파일 버전의 바이너리 |
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·삭제 |
 | `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·삭제 |
 | `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
+| `POST /attachments` · `POST /attachments/:id/versions` | 첨부 생성 또는 새 버전 업로드 |
 
 표의 경로 앞에는 `/api/v1`이 붙는다. 읽기 키는 조회만 허용하며 쓰기 키는 조회와 표의 변경 요청을 허용한다. 프로젝트 범위는 조회·원래 대상·이동 대상·상위 항목·계획 참조에 적용한다. 공통 문서는 전체 프로젝트 키로 접근한다.
 
 백업·가져오기·연동 설정·키 관리·팀 알림함·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
+
+## 첨부와 버전
+
+최초 업로드는 `POST /attachments?resourceType=document&resourceId=<문서 ID>&filename=<파일명>`을 사용한다. 업무의 `resourceType`은 `issue`다. 업로드 본문은 최대 20MiB의 `application/octet-stream`이며 `filename`은 URL 인코딩한다. 응답의 `id`는 첨부에 고정되고 `currentVersionId`는 최신 파일을 가리킨다. 파일명·MIME·크기·SHA-256·작성자·시각은 최신 파일 기준이다. `versionCount`는 최초 파일과 이관 이력을 함께 센다.
+
+새 버전은 `POST /attachments/<id>/versions`에 `filename`과 목록에서 확인한 `expectedVersionId=<currentVersionId>`를 전달한다. 먼저 다른 버전이 저장되면 서버는 `409`와 `details.currentVersionId`를 반환한다. 이때 첨부 목록을 다시 읽고 최신 파일을 확인한다.
+
+최신 바이너리는 `GET /attachments/<currentVersionId>/content`에서 받는다. 버전 이력의 각 `id`도 특정 파일을 가리킨다. `GET /attachment-versions/<버전 id>/download`로 이전 바이트를 내려받을 수 있다. `?inline=1`은 서버가 이미지 형식을 확인한 PNG·JPEG·GIF·WebP에 적용한다. 프로젝트 범위는 첨부의 소유 업무·문서를 기준으로 판단한다.
 
 ## 업무 생성·수정
 

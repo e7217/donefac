@@ -1,7 +1,8 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, safeFilename, sniffMime, hash } from './attachments.js';
+import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, attachmentId, safeFilename, sniffMime, hash } from './attachments.js';
+import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
 import { Store } from './store.js';
 import { seed, plain } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
@@ -87,6 +88,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation);
+  const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
@@ -106,7 +108,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string|null)[], createdAt: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt});
   app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
-  const attachmentRows=(type:string,id:string)=>store.all<Attachment>('attachments').filter(a=>a.resourceType===type&&a.resourceId===id);
+  const attachmentRows=(type:string,id:string)=>{
+    const rows=store.db.prepare('SELECT json FROM attachments WHERE resource_type=? AND resource_id=? ORDER BY rowid').all(type,id) as {json:string}[];
+    return rows.map(row=>JSON.parse(row.json) as Attachment);
+  };
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
   const attachmentFiles=(rows:Attachment[])=>[...rows,...sourcePreservation.versionsForAttachments(rows.map(row=>row.id))];
   const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentFiles(attachmentRows(type,id));store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
@@ -406,18 +411,34 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/attachments',(req,res)=>{
     attachmentTarget(req.query.resourceType,req.query.resourceId);
     const rows=attachmentRows(req.query.resourceType as string,req.query.resourceId as string);
-    const count=store.db.prepare('SELECT COUNT(*) AS count FROM attachment_versions WHERE attachment_id=?');
-    res.json(rows.map(row=>({...row,versionCount:Number(count.get(row.id)?.count||0)})));
+    res.json(rows.map(row=>attachmentVersions.head(row)));
   });
+  const uploadAttachment = (req:Request) => {
+    const bytes:unknown=req.body;
+    if(!Buffer.isBuffer(bytes)||!bytes.length)return fail('비어 있지 않은 파일이 필요합니다.');
+    if(bytes.length>MAX_FILE_BYTES)return fail('첨부파일은 20MiB 이하여야 합니다.',413);
+    let filename:string;
+    try{filename=safeFilename(req.query.filename);}catch(error){return fail((error as Error).message);}
+    return {filename,bytes,authorId:actor(req)};
+  };
+  const expectedAttachmentVersion = (value:unknown) => {
+    try{return attachmentId(value);}
+    catch{return fail('확인한 첨부파일 버전 ID가 필요합니다.');}
+  };
   app.post('/api/attachments',(req,res)=>{
     attachmentTarget(req.query.resourceType,req.query.resourceId);
-    let filename:string;try{filename=safeFilename(req.query.filename);}catch(error){fail((error as Error).message);}
-    if(!Buffer.isBuffer(req.body)||!req.body.length)fail('비어 있지 않은 파일이 필요합니다.');
-    if(req.body.length>MAX_FILE_BYTES)fail('첨부파일은 20MiB 이하여야 합니다.',413);
-    const bytes=req.body as Buffer;
-    const a:Attachment={id:uid(),resourceType:req.query.resourceType as 'issue'|'document',resourceId:req.query.resourceId as string,filename:filename!,mimeType:sniffMime(bytes),size:bytes.length,sha256:hash(bytes),authorId:actor(req),createdAt:now()};
+    const {filename,bytes,authorId}=uploadAttachment(req);
+    const a:Attachment={id:uid(),resourceType:req.query.resourceType as 'issue'|'document',resourceId:req.query.resourceId as string,filename,mimeType:sniffMime(bytes),size:bytes.length,sha256:hash(bytes),authorId,createdAt:now()};
     files.write(a.id,bytes);try{store.transaction(()=>{store.put('attachments',a);activity(req,a.resourceType,a.resourceId,'파일 첨부',a.filename);});}catch(error){files.remove(a.id);throw error;}
-    res.status(201).json(a);
+    res.status(201).json(attachmentVersions.head(a));
+  });
+  app.post('/api/attachments/:id/versions',(req,res)=>{
+    if(Object.keys(req.query).some(key=>key!=='filename'&&key!=='expectedVersionId'))return fail('첨부파일의 새 버전 조건을 확인해 주세요.');
+    const expected=expectedAttachmentVersion(req.query.expectedVersionId);
+    const head=attachmentVersions.append(req.params.id,expected,uploadAttachment(req),version=>{
+      activity(req,version.resourceType,version.resourceId,'첨부파일 버전 추가',`${version.filename} · ${version.versionLabel}`);
+    });
+    res.status(201).json(head);
   });
   const serveAttachment=(a:Attachment,req:Request,res:Response)=>{
     let bytes:Buffer;
@@ -441,7 +462,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const rows=store.db.prepare('SELECT json FROM issue_relations WHERE source_issue_id=? OR target_issue_id=? ORDER BY rowid').all(issue.id,issue.id) as {json:string}[];
     res.json(rows.map(row=>JSON.parse(row.json) as IssueRelation));
   });
-  app.delete('/api/attachments/:id',(req,res)=>{const a=get<Attachment>('attachments',req.params.id);const rows=store.transaction(()=>{const rows=attachmentFiles([a]);store.remove('attachments',a.id);activity(req,a.resourceType,a.resourceId,'첨부파일 삭제',a.filename);return rows;});cleanupAttachments(rows);res.json({ok:true});});
+  app.delete('/api/attachments/:id',(req,res)=>{
+    const expected=req.query.expectedVersionId===undefined?undefined:expectedAttachmentVersion(req.query.expectedVersionId);
+    const rows=store.transaction(()=>{
+      const base=get<Attachment>('attachments',req.params.id), head=attachmentVersions.head(base);
+      if(expected!==undefined&&expected!==head.currentVersionId)fail('다른 작업자가 새 파일 버전을 올렸습니다. 버전 목록을 다시 확인해 주세요.',409,{currentVersionId:head.currentVersionId});
+      const rows=attachmentFiles([base]);store.remove('attachments',base.id);activity(req,base.resourceType,base.resourceId,'첨부파일 삭제',head.filename);return rows;
+    });
+    cleanupAttachments(rows);res.json({ok:true});
+  });
   app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
   app.post('/api/dependencies',(req,res)=>{const d={id:uid(),predecessorId:req.body.predecessorId,successorId:req.body.successorId,type:'FS',lagDays:req.body.lagDays??0};store.transaction(()=>{validateDependency(d);store.put('dependencies',d);activity(req,'issue',d.successorId,'선행 업무 연결',get<Issue>('issues',d.predecessorId).key);});res.status(201).json(d);});
@@ -527,6 +556,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
     if(data.schemaVersion<9&&['sourceImports','sourceRecords','attachmentVersions','issueRelations'].some(key=>Array.isArray(data[key])&&data[key].length))fail('원본 이관과 첨부 버전이 있는 백업은 schemaVersion 9가 필요합니다.');
+    if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
     const importedReportSnapshots=data.schemaVersion>=10?reports.validateRestore(data.reportSnapshots,data.exportedAt,data.projects,data.users):[];
@@ -599,7 +629,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

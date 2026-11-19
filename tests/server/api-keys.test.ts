@@ -9,7 +9,7 @@ import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { ApiKeyService } from '../../server/api-keys.js';
-import type { ApiKeyCreated, ApiKeyRecord, Comment, DocPage, Issue, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, DocPage, Issue, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-api-key-test-'));
@@ -107,6 +107,58 @@ test('public mutations reuse normal validation and bind author, target/source sc
     assert.equal((await f.call('/v1/planning-items', 'POST', { projectId: 'project-neo', kind: 'cycle', name: '허용하지 않은 생성' }, headers)).status, 403);
     assert.equal((await f.call('/v1/import', 'POST', { data: {} }, headers)).status, 403);
     const wide = await f.create('write', null); assert.equal((await f.call<DocPage>('/v1/documents', 'POST', { title: '전체 범위 공통 문서' }, bearer(wide.token))).status, 201);
+  } finally { await f.close(); }
+});
+
+test('scoped keys can upload and read immutable attachment versions within the owning project', async () => {
+  const f = await fixture();
+  try {
+    const writer = await f.create('write', ['project-neo'], 'user-seo');
+    const reader = await f.create('read', ['project-neo']);
+    const outside = await f.create('write', ['project-team']);
+    const document = (await f.call<DocPage>('/documents', 'POST', { projectId:'project-neo',title:'키 범위 첨부 검사' })).data;
+    const common = (await f.call<DocPage>('/documents', 'POST', { projectId:null,title:'공통 첨부 검사' })).data;
+    const initial = Buffer.from('first immutable attachment version');
+    const changed = Buffer.from('second immutable attachment version');
+    const file = (resourceId: string) => `/attachments?resourceType=document&resourceId=${resourceId}`;
+    const upload = (path: string, token: string, body: Buffer<ArrayBuffer>) => fetch(`${f.base}/api/v1${path}`, {
+      method:'POST', body, headers:bearer(token, {'Content-Type':'application/octet-stream','X-Actor-Id':'user-jun'}),
+    });
+    for (const response of [
+      await upload(`${file(document.id)}&filename=report.txt`, reader.token, initial),
+      await upload(`${file(common.id)}&filename=report.txt`, writer.token, initial),
+    ]) assert.equal(response.status,403,await response.text());
+    const uploaded = await upload(`${file(document.id)}&filename=report.txt`,writer.token,initial);
+    assert.equal(uploaded.status,201);
+    const root = await uploaded.json() as AttachmentHead;
+    assert.equal(root.authorId,'user-seo');
+    const versionPath = `/attachments/${root.id}/versions`;
+    const appendPath = `${versionPath}?expectedVersionId=${root.currentVersionId}&filename=report.txt`;
+    assert.equal((await upload(appendPath,reader.token,changed)).status,403);
+    assert.equal((await upload(appendPath,outside.token,changed)).status,403);
+    assert.equal((await upload(`${appendPath}&expectedVersionId=${root.currentVersionId}`,writer.token,changed)).status,400);
+    const appended = await upload(appendPath,writer.token,changed);
+    assert.equal(appended.status,201);
+    const head = await appended.json() as AttachmentHead;
+    assert.equal(head.id,root.id);
+    assert.equal(head.authorId,'user-seo');
+    assert.notEqual(head.currentVersionId,root.currentVersionId);
+    const items = await f.call<AttachmentHead[]>(`/v1${file(document.id)}`,'GET',undefined,bearer(reader.token));
+    assert.deepEqual(items.data,[head]);
+    const versions = await f.call<AttachmentVersion[]>(`/v1${versionPath}`,'GET',undefined,bearer(reader.token));
+    assert.deepEqual(versions.data.map(value=>value.id),[head.currentVersionId,root.id]);
+    for (const [path, expected] of [
+      [`/attachments/${root.id}/content`,initial],
+      [`/attachments/${head.currentVersionId}/content`,changed],
+      [`/attachment-versions/${head.currentVersionId}/download`,changed],
+    ] as const) {
+      const url = `${f.base}/api/v1${path}`;
+      const response = await fetch(url,{headers:bearer(reader.token)});
+      assert.equal(response.status,200);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()),expected);
+      assert.equal((await fetch(url,{headers:bearer(outside.token)})).status,403);
+      assert.equal((await fetch(url)).status,401);
+    }
   } finally { await f.close(); }
 });
 

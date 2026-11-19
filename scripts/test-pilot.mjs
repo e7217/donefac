@@ -142,6 +142,12 @@ try {
   const attachment = await (await call(pilot.url,target,{
     method:'POST',status:201,headers:{'Content-Type':'application/octet-stream','X-File-Type':'application/octet-stream'},body:file,
   })).json();
+  const revisedFile = Buffer.from('Teamspace pilot attachment v2\n최신 첨부 바이트\n');
+  const updatedAttachment = await (await call(pilot.url,`/attachments/${attachment.id}/versions?expectedVersionId=${attachment.currentVersionId}&filename=pilot.bin`,{
+    method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:revisedFile,
+  })).json();
+  assert.equal(updatedAttachment.id,attachment.id);
+  assert.equal(updatedAttachment.versionCount,2);
   const original = Buffer.from('Issue key,Summary,Description\r\nOLD-1,파일럿 원본 업무,보관할 원본 내용\r\n');
   const archive = await (await call(pilot.url,'/legacy-import/packages?filename=pilot.csv&instanceKey=pilot-synthetic&product=jira',{
     method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:original,
@@ -189,6 +195,14 @@ try {
   assert.deepEqual(restoredInbox.items.find(item=>item.id===reviewNotification.id),readNotification);
   const restoredFile = await call(copy.url,`/attachments/${attachment.id}/content`);
   assert.deepEqual(Buffer.from(await restoredFile.arrayBuffer()),file);
+  const restoredVersions = await (await call(copy.url,`/v1/attachments/${attachment.id}/versions`,{
+    headers:{Authorization:`Bearer ${key.token}`},
+  })).json();
+  assert.deepEqual(restoredVersions.map(version=>version.id),[updatedAttachment.currentVersionId,attachment.id]);
+  const restoredRevision = await call(copy.url,`/v1/attachment-versions/${updatedAttachment.currentVersionId}/download`,{
+    headers:{Authorization:`Bearer ${key.token}`},
+  });
+  assert.deepEqual(Buffer.from(await restoredRevision.arrayBuffer()),revisedFile);
   const restoredPackage = await (await call(copy.url,`/legacy-import/packages/${archive.id}`)).json();
   assert.equal(restoredPackage.summary.sha256,archive.sha256);
   assert.deepEqual(readFileSync(join(restored,'legacy-imports',`${archive.id}.bundle`)),original);

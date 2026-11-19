@@ -32,7 +32,7 @@ export class MigrationService {
 
   constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService, private readonly sources: SourcePreservationService) {
     this.append = new AttachmentAppend(dataDir);
-    this.append.recover(id => this.sources.hasImport(id));
+    this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id));
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
     )`);

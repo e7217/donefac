@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { contentReferences } from '../shared/document-nodes.js';
@@ -153,7 +153,7 @@ export class ApiKeyService {
         const key = this.valid(this.get(context.id));
         if (key.version !== context.version || key.actorId !== context.actorId) return unauthorized();
         request.headers['x-actor-id'] = key.actorId;
-        if (request.body && typeof request.body === 'object') request.body.actorId = key.actorId;
+        if (request.body && typeof request.body === 'object' && !Buffer.isBuffer(request.body)) request.body.actorId = key.actorId;
         this.authorize(key, context.path, request, response, next);
       } catch (error) { next(error); }
     });
@@ -163,7 +163,41 @@ export class ApiKeyService {
     const result = this.store.db.prepare("UPDATE api_keys SET json=json_set(json,'$.lastUsedAt',?) WHERE id=? AND json_extract(json,'$.version')=? AND json_extract(json,'$.revokedAt') IS NULL").run(new Date().toISOString(), key.id, key.version);
     if (Number(result.changes) !== 1) unauthorized();
   }
+  private authorizeAttachment(key: ApiKeyRecord, path: string, request: Request): boolean {
+    const versions = /^\/api\/attachments\/([^/]+)\/versions$/.exec(path);
+    const content = /^\/api\/attachments\/([^/]+)\/content$/.exec(path);
+    const download = /^\/api\/attachment-versions\/([^/]+)\/download$/.exec(path);
+    if (path !== '/api/attachments' && !versions && !content && !download) return false;
+    const upload = request.method === 'POST' && (path === '/api/attachments' || versions);
+    if (request.method !== 'GET' && !upload) fail(403, '공개 API에서 지원하지 않는 첨부 작업입니다.');
+    if (upload && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
+    const owner = (type: unknown, id: unknown) => {
+      if (type !== 'issue' && type !== 'document') fail(400, '첨부파일 대상을 확인해 주세요.');
+      this.resource(key, type === 'issue' ? 'issues' : 'documents', id);
+    };
+    if (path === '/api/attachments') {
+      const query = this.query(request, upload ? ['resourceType','resourceId','filename'] : ['resourceType','resourceId']);
+      owner(query.resourceType, query.resourceId);
+    } else if (versions) {
+      this.query(request, upload ? ['filename','expectedVersionId'] : []);
+      const attachment = this.store.get<Attachment>('attachments', this.decode(versions[1]));
+      if (!attachment) return fail(404, '첨부파일을 찾을 수 없습니다.');
+      owner(attachment.resourceType, attachment.resourceId);
+    } else {
+      const query = this.query(request, ['inline']);
+      if (query.inline !== undefined && query.inline !== '1') fail(400, '첨부파일 표시 방식을 확인해 주세요.');
+      const id = this.decode((content ?? download)![1]);
+      const attachment = this.store.get<Attachment>('attachments', id) ?? this.store.get<AttachmentVersion>('attachment_versions', id);
+      if (!attachment) return fail(404, '첨부파일을 찾을 수 없습니다.');
+      owner(attachment.resourceType, attachment.resourceId);
+    }
+    return true;
+  }
   private authorize(key: ApiKeyRecord, path: string, request: Request, response: Response, next: NextFunction) {
+    if (this.authorizeAttachment(key, path, request)) {
+      this.used(key);
+      return next();
+    }
     const fieldBreakdown = /^\/api\/projects\/([^/]+)\/field-breakdown(?:\/issues)?$/.exec(path);
     if (request.method === 'POST' && fieldBreakdown) {
       this.query(request, []);
