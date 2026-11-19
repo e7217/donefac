@@ -30,7 +30,7 @@ test('Jira CSV를 분석해 원본 객체·페이지·진단·SHA를 확인하�
   const raw = '<img src="x" onerror="window.__legacyUnsafe=true"/>\r\n  원본 공백과 본문  ';
   const content = csv([['Issue key', 'Issue id', 'Summary', 'Description', 'Status'], ...Array.from({ length: 51 }, (_, index) => [`OLD-${index + 1}`, String(1000 + index), `합성 가져오기 ${index + 1}`, index === 0 ? raw : `본문 ${index + 1}`, '진행'])]);
   const settings = await openSettings(page, f);
-  await expect(settings).toContainText('현재는 분석·미리보기만 가능합니다.');
+  await expect(settings).toContainText('원본을 분석하고 누락 항목을 확인하세요.');
   await settings.getByLabel('원본 인스턴스 식별값', { exact: true }).fill(f.instanceKey);
   await settings.getByLabel('Jira·Confluence 원본 파일', { exact: true }).setInputFiles({ name: f.filename, mimeType: 'text/csv', buffer: content });
   const creation = page.waitForResponse(response => response.url().includes('/api/legacy-import/packages?') && response.request().method() === 'POST');

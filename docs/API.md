@@ -174,7 +174,7 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 ## 기존 도구 원본 분석
 
-설정의 **기존 도구 원본 분석**에서 Jira·Confluence 내보내기 XML/CSV/JSON/ZIP을 선택하고 원본 서버를 구분할 이름을 입력한다. 같은 원본 서버의 자료에는 같은 이름을 사용한다. 외부 서비스에는 연결하지 않는다. 현재는 분석·미리보기 단계이며 실제 업무·문서 적용은 제공하지 않는다.
+설정의 **기존 도구 원본 분석**에서 Jira·Confluence 내보내기 XML/CSV/JSON/ZIP을 선택하고 원본 서버를 구분할 이름을 입력한다. 같은 원본 서버의 자료에는 같은 이름을 사용한다. 외부 서비스에는 연결하지 않는다. 분석 결과로 적용할 자료를 확인한 뒤 같은 설정 화면의 **실제 데이터 이관**에서 적용을 준비한다.
 
 | 요청 | 동작 |
 | --- | --- |
@@ -189,3 +189,23 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 목록 페이지 크기는1~100이다. `product`는 `auto`·`jira`·`confluence` 중 하나다. 입력/개별 ZIP 파일64MiB·총 해제256MiB·5000파일·정규화 객체100000개 한도이며, 한 번에 한 패키지를 최대25초 분석한다. 분석 원본 보관은20개·512MiB까지다. ZIP 경로·심볼릭 링크·중복 경로·CRC와 XML 선언/엔티티/구조를 검증한다. 누락 첨부나 링크는 자동 다운로드하지 않는다.
 
 관리 경로는 `/api/v1` 키로 사용할 수 없다. 분석 패키지는 현재 신뢰하는 관리 브라우저 범위에서 접근하며, 기존 도구의 권한을 재현하는 기능은 아니다. 제한된 콘텐츠는 진단으로 표시하고 실제 적용 단계에서 검토해야 한다. 자체 JSON 백업에는 분석 패키지·원본이 포함되지 않고 백업 가져오기 후에도 유지되므로, 분석 자료까지 백업하려면 서버 DB와 `data/legacy-imports/`를 함께 보관한다.
+
+## 검토한 원본 이관 적용
+
+| 요청 | 동작 |
+| --- | --- |
+| `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑 후보와 기본값 |
+| `POST /api/migrations/preview` | `configuration`으로 새 프로젝트 생성 계획, 변환 예시, 보존·누락 진단 검토 |
+| `GET /api/migrations/previews/:id` | 선택한 작업자의 검사 결과 다시 읽기 |
+| `POST /api/migrations/previews/:id/apply` | `expectedVersion`·`acknowledgements`로 검토한 계획 적용 |
+| `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
+| `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
+| `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
+| `GET /api/issues/:id/relations` | 원본의 업무 간 관계 |
+| `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
+
+미리보기는 30분간 보관한다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
+
+원본의 시간대가 없는 시각에는 설정한 IANA 시간대를 사용한다. Jira CSV의 영문 월 형식도 처리하며, 두 자리 연도는 2000년대로 해석한다는 확인을 요청한다. [Atlassian Jira 날짜 형식 안내](https://confluence.atlassian.com/jirakb/date-format-changes-after-exporting-to-excel-119799961.html) 해석 불가 시 기본값은 적용 차단이다. 이관 시각을 사용하는 정책을 선택하면 그 사실을 검토 결과와 영수증에 남긴다. 원본 작성자는 원래 신원으로 보존한다. 현재 팀원으로 매핑하지 않은 작성자는 현재 문서·댓글·첨부에 이관 실행자를 기록한다. 제외한 원본은 적용 대상 없이 관리용 영수증에 보관한다. 원본 권한 정책은 별도로 검토해야 한다.
+
+자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.

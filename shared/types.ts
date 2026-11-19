@@ -36,6 +36,43 @@ export interface LegacyPackageDetail { summary:LegacyPackageSummary; files:Legac
 export type LegacyRecordSummary=Omit<LegacyRecord,'text'|'metadata'|'references'>&{textPreview:string;textBytes:number;referenceCount:number};
 export interface LegacyRecordPage { records:LegacyRecordSummary[]; total:number; offset:number; limit:number }
 export interface LegacyDiagnosticPage { diagnostics:LegacyDiagnostic[]; total:number; offset:number; limit:number }
+export interface MigrationContainerOption { id:string;packageId:string;sourceProjectId:string;name:string;proposedKey:string;issueCount:number;documentCount:number }
+export interface MigrationValueOption { id:string;packageId:string;sourceValue:string;label:string }
+export interface MigrationIdentityOption extends MigrationValueOption { email:string|null }
+export interface MigrationFieldOption extends MigrationValueOption { suggestedKind:CustomFieldKind|'archive' }
+export interface MigrationOptions {
+  packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
+  statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
+  defaultConfiguration:MigrationConfiguration;
+}
+export interface MigrationConfiguration {
+  packageIds:string[];projects:{containerId:string;key:string;name:string}[];
+  users:Record<string,string|null>;statuses:Record<string,StatusCategory>;issueTypes:Record<string,string|null>;
+  fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
+  timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
+}
+export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
+export interface MigrationPreview {
+  id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
+  projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
+  counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
+  samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent}[];
+}
+export interface SourceImport {
+  id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
+  packages:{stagingId:string;filename:string;sha256:string;source:LegacySource}[];counts:Record<string,number>;
+  notices?:MigrationNotice[];
+}
+export interface SourceRecordArchive {
+  id:string;sourceImportId:string;packageSha256:string;source:LegacySource;record:LegacyRecord;
+  targetType:'project'|'issue'|'document'|'comment'|'revision'|'attachment'|null;targetId:string|null;targetProjectId:string|null;
+  ownerType:'issue'|'document'|null;ownerId:string|null;
+}
+export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null }
+export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string }
+export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
+export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};
+export interface SourceRecordPage { records:SourceRecordSummary[];total:number;offset:number;limit:number }
 export interface Project { id: string; key: string; name: string; description: string; color: string; createdAt: string }
 export type PlanningKind = 'cycle' | 'module' | 'release';
 export type PlanningStatus = 'planned' | 'active' | 'completed' | 'archived';
@@ -83,7 +120,7 @@ export interface DocRevision { id: string; documentId: string; version: number; 
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: 'FS'; lagDays: number }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string }
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
-export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string }
+export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }

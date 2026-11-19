@@ -19,10 +19,12 @@ import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhook
 import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
+import { MigrationService } from './migration.js';
+import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
-import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User } from '../shared/types.js';
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
@@ -57,6 +59,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
   const legacyImport=new LegacyImportService(store,dataDir);
+  const sourcePreservation=new SourcePreservationService(store);
+  const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation);
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
@@ -76,8 +80,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
   const attachmentRows=(type:string,id:string)=>store.all<Attachment>('attachments').filter(a=>a.resourceType===type&&a.resourceId===id);
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
-  const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentRows(type,id);store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
-  const cleanupAttachments=(rows:Attachment[])=>{for(const a of rows)try{files.remove(a.id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',a.id);}};
+  const attachmentFiles=(rows:Attachment[])=>[...rows,...sourcePreservation.versionsForAttachments(rows.map(row=>row.id))];
+  const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentFiles(attachmentRows(type,id));store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
+  const cleanupAttachments=(rows:Attachment[])=>{for(const id of new Set(rows.map(row=>row.id)))try{files.remove(id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',id);}};
   const snapshot = (): WorkspaceSnapshot => ({...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),milestones:scheduleArtifacts.allMilestones(),baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot()}) as unknown as WorkspaceSnapshot;
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
@@ -156,6 +161,36 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{processEvent:event=>automation.processEvent(event),onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next)});
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
+  sourcePreservation.registerRoutes(app);
+  migrations.registerRoutes(app, {
+    actor,
+    persistCanonical(value, req) {
+      const schemas = issueSchemas.validateImport(value.issueSchemas, value.projects, value.issues, {users:store.all<User>('users')});
+      const importedWorkflows = workflows.validateImport(value.workflows, value.projects, value.issues, schemas);
+      for (const project of value.projects) store.put('projects', validateProject(project));
+      for (const schema of schemas) store.put('issue_schemas', schema);
+      for (const workflow of importedWorkflows) store.put('workflows', workflow);
+      // Insert both sets first so forward references can be validated against the complete plan.
+      for (const issue of value.issues) store.put('issues', issue);
+      for (const document of value.documents) store.put('documents', document);
+      const firstDocument = value.documents[0];
+      if (firstDocument) documentContent.validate(firstDocument.id, firstDocument.content);
+      for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {checkFields:false,allowArchivedSchema:true}));
+      for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
+      for (const comment of value.comments) store.put('comments', comment);
+      for (const revision of value.revisions) store.put('revisions', revision);
+      for (const attachment of value.attachments) store.put('attachments', attachment);
+      for (const link of value.resourceLinks) store.put('resource_links', link);
+      const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
+      for (const issue of value.issues) {
+        const number = Number(issue.key.split('-').at(-1));
+        nextNumbers.set(issue.projectId, Math.max(nextNumbers.get(issue.projectId)!, number + 1));
+      }
+      const insertSequence = store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)');
+      for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
+      activity(req, 'source-import', value.sourceImport.id, '원본 이관 적용', `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
+    },
+  });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
   issueSchemas.registerRoutes(app,{actor,activity});
@@ -204,7 +239,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary)));
   app.get('/api/comments',(req,res)=>{const type=req.query.resourceType,id=req.query.resourceId;if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('댓글 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);res.json(store.all<any>('comments').filter(c=>c.resourceType===type&&c.resourceId===id));});
   app.post('/api/comments',(req,res)=>{const {resourceType,resourceId}=req.body;if(!['issue','document'].includes(resourceType))fail('댓글 대상을 확인해 주세요.');get(resourceType==='issue'?'issues':'documents',resourceId);const c={id:uid(),resourceType,resourceId,authorId:actor(req),body:text(req.body.body,'댓글',20000),createdAt:now()};store.transaction(()=>{store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));});res.status(201).json(c);});
-  app.get('/api/attachments',(req,res)=>{attachmentTarget(req.query.resourceType,req.query.resourceId);res.json(attachmentRows(req.query.resourceType as string,req.query.resourceId as string));});
+  app.get('/api/attachments',(req,res)=>{
+    attachmentTarget(req.query.resourceType,req.query.resourceId);
+    const rows=attachmentRows(req.query.resourceType as string,req.query.resourceId as string);
+    const count=store.db.prepare('SELECT COUNT(*) AS count FROM attachment_versions WHERE attachment_id=?');
+    res.json(rows.map(row=>({...row,versionCount:Number(count.get(row.id)?.count||0)})));
+  });
   app.post('/api/attachments',(req,res)=>{
     attachmentTarget(req.query.resourceType,req.query.resourceId);
     let filename:string;try{filename=safeFilename(req.query.filename);}catch(error){fail((error as Error).message);}
@@ -215,14 +255,29 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     files.write(a.id,bytes);try{store.transaction(()=>{store.put('attachments',a);activity(req,a.resourceType,a.resourceId,'파일 첨부',a.filename);});}catch(error){files.remove(a.id);throw error;}
     res.status(201).json(a);
   });
-  app.get('/api/attachments/:id/content',(req,res)=>{
-    const a=get<Attachment>('attachments',req.params.id);let bytes:Buffer;
+  const serveAttachment=(a:Attachment,req:Request,res:Response)=>{
+    let bytes:Buffer;
     try{bytes=files.read(a);}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못했습니다.',503);}
     const inline=req.query.inline==='1';if(inline&&!['image/png','image/jpeg','image/gif','image/webp'].includes(sniffMime(bytes!)))fail('이 파일 형식은 인라인으로 표시할 수 없습니다.',415);
     const encoded=encodeURIComponent(a.filename).replace(/['()*]/g,c=>`%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-    res.set({'Content-Type':inline?a.mimeType:'application/octet-stream','Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encoded}`,'Content-Length':String(bytes!.length),'X-Content-Type-Options':'nosniff','Cache-Control':'private, no-cache','ETag':`"${a.sha256}"`});res.end(bytes!);
+    res.set({'Content-Type':inline?sniffMime(bytes!):'application/octet-stream','Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encoded}`,'Content-Length':String(bytes!.length),'X-Content-Type-Options':'nosniff','Cache-Control':'private, no-cache','ETag':`"${a.sha256}"`});res.end(bytes!);
+  };
+  app.get('/api/attachments/:id/content',(req,res)=>{
+    const id=String(req.params.id);
+    const attachment=store.get<Attachment>('attachments',id) || get<AttachmentVersion>('attachment_versions',id);
+    serveAttachment(attachment,req,res);
   });
-  app.delete('/api/attachments/:id',(req,res)=>{const a=get<Attachment>('attachments',req.params.id);store.transaction(()=>{store.remove('attachments',a.id);activity(req,a.resourceType,a.resourceId,'첨부파일 삭제',a.filename);});cleanupAttachments([a]);res.json({ok:true});});
+  app.get('/api/attachment-versions/:id/download',(req,res)=>{
+    const id=String(req.params.id);
+    const attachment=store.get<AttachmentVersion>('attachment_versions',id) || get<Attachment>('attachments',id);
+    serveAttachment(attachment,req,res);
+  });
+  app.get('/api/issues/:id/relations',(req,res)=>{
+    const issue=get<Issue>('issues',req.params.id);
+    const rows=store.db.prepare('SELECT json FROM issue_relations WHERE source_issue_id=? OR target_issue_id=? ORDER BY rowid').all(issue.id,issue.id) as {json:string}[];
+    res.json(rows.map(row=>JSON.parse(row.json) as IssueRelation));
+  });
+  app.delete('/api/attachments/:id',(req,res)=>{const a=get<Attachment>('attachments',req.params.id);const rows=store.transaction(()=>{const rows=attachmentFiles([a]);store.remove('attachments',a.id);activity(req,a.resourceType,a.resourceId,'첨부파일 삭제',a.filename);return rows;});cleanupAttachments(rows);res.json({ok:true});});
   app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
   app.post('/api/dependencies',(req,res)=>{const d={id:uid(),predecessorId:req.body.predecessorId,successorId:req.body.successorId,type:'FS',lagDays:req.body.lagDays??0};store.transaction(()=>{validateDependency(d);store.put('dependencies',d);activity(req,'issue',d.successorId,'선행 업무 연결',get<Issue>('issues',d.predecessorId).key);});res.status(201).json(d);});
@@ -253,15 +308,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
-    const payload={schemaVersion:8,automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
-    const estimated=Buffer.byteLength(JSON.stringify(payload))+attachments.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
+    const attachmentVersions=sourcePreservation.allVersions();
+    const binaries=[...new Map([...attachments,...attachmentVersions].map(file=>[file.id,file])).values()];
+    const payload={schemaVersion:9,automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
-    try{payload.attachmentContents=attachments.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
+    try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
     const serialized=JSON.stringify(payload);if(Buffer.byteLength(serialized)>MAX_EXPORT_BYTES)fail('내보내기 파일은 64MiB 미만이어야 합니다.',413);
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~8)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8,9].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~9)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
@@ -277,7 +334,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
-    let staged:string;try{staged=files.stageImport(data.attachments,data.attachmentContents);}catch(error){fail((error as Error).message);}
+    if(data.schemaVersion<9&&['sourceImports','sourceRecords','attachmentVersions','issueRelations'].some(key=>Array.isArray(data[key])&&data[key].length))fail('원본 이관과 첨부 버전이 있는 백업은 schemaVersion 9가 필요합니다.');
+    const importedSources=sourcePreservation.validateImport({
+      imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
+      versions:data.schemaVersion>=9?data.attachmentVersions:[], relations:data.schemaVersion>=9?data.issueRelations:[],
+    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:data.comments,revisions:data.revisions,attachments:data.attachments});
+    const binaries=[...new Map<string,Attachment>([...(data.attachments as Attachment[]),...importedSources.versions].map(file=>[file.id,file])).values()];
+    let staged:string;try{staged=files.stageImport(binaries,data.attachmentContents);}catch(error){fail((error as Error).message);}
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;
     try{store.withMutationContext({actorId:null,origin:'import'},()=>store.transaction(()=>{
       const previousAutomation=new Map(automation.all().map(rule=>[rule.id,rule.version]));
@@ -290,7 +353,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousBaselines=new Map(scheduleArtifacts.allBaselines().map(baseline=>[baseline.id,baseline.version]));
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
-      outbound.resetForImport();gitlab.resetForImport();
+      const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
+      outbound.resetForImport();gitlab.resetForImport();migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
@@ -315,6 +379,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const l of data.gitlabLinks){get('issues',l.issueId);if(!['merge_request','commit','pipeline'].includes(l.kind)||!Number.isInteger(l.projectId)||typeof l.webUrl!=='string'||!/^https?:\/\//.test(l.webUrl))fail('GitLab 연결 데이터를 확인해 주세요.');store.put('gitlab_links',l);}
       for(const p of data.projects){const max=Math.max(0,...data.issues.filter((i:any)=>i.projectId===p.id).map((i:any)=>{const match=i.key.match(/-(\d+)$/);return match?Number(match[1]):0;}));store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(p.id,max+1);}
       collaboration.replaceImported(importedCollaboration);
+      sourcePreservation.replaceImported(importedSources,previousImports);
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
     }));}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
     collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
@@ -324,11 +389,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{legacyImport.close();outbound.close();collaboration.close();store.db.close();}};
+  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();store.db.close();}};
 }

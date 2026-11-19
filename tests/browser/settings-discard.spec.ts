@@ -11,6 +11,7 @@ async function decisions(page: Page, choices: boolean[], action: () => Promise<u
 }
 
 test('워크플로와 달력을 함께 편집하면 뒤의 탐색 취소가 앞에서 동의한 초안도 보존한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 1440, height: 680 });
   const data = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot, project = data.projects[0];
   const workflow = await (await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
   const originalCalendar = data.calendars!.find(value => value.projectId === project.id)!;
