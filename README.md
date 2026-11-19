@@ -22,7 +22,7 @@ npm run dev
 
 ## 팀 파일럿 실행
 
-Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `TEAMSPACE_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. `npm run test:pilot`으로 브라우저 흐름과 전체 데이터 복원 리허설을 실행할 수 있습니다. [파일럿 실행과 복원](docs/PILOT.md)
+Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `TEAMSPACE_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. `npm run test:pilot`으로 브라우저 흐름과 전체 데이터 복원을, `npm run test:pilot:team`으로 합성 팀원 20명의 동시 사용과 복구를 검증할 수 있습니다. [파일럿 실행과 복원](docs/PILOT.md)
 
 ## 현재 구현한 흐름
 

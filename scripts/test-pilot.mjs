@@ -8,12 +8,36 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const mode = process.argv[2];
+assert.ok(process.argv.length === 2 || (process.argv.length === 3 && mode === '--team'), 'Usage: node scripts/test-pilot.mjs [--team]');
+const teamSeconds = mode === '--team' ? Number(process.env.TEAMSPACE_PILOT_TEAM_SECONDS ?? 75) : null;
+if (teamSeconds !== null) {
+  assert.ok(Number.isSafeInteger(teamSeconds) && teamSeconds >= 30 && teamSeconds <= 1800,
+    'TEAMSPACE_PILOT_TEAM_SECONDS must be an integer from 30 to 1800.');
+}
+
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'teamspace-pilot-'));
 const source = join(scratch, 'source');
 const backup = join(scratch, 'backup');
 const restored = join(scratch, 'restored');
 const pilots = new Set();
+const interruption = new AbortController();
+let browserChild;
+let browserShutdownTimer;
+
+function interrupt(signal, exitCode) {
+  if (interruption.signal.aborted) return;
+  process.exitCode = exitCode;
+  interruption.abort(new Error(`Pilot rehearsal interrupted (${signal}).`));
+  const child = browserChild;
+  if (child) {
+    child.kill('SIGINT');
+    browserShutdownTimer = setTimeout(() => child.kill('SIGKILL'), 10_000).unref();
+  }
+}
+const onInterrupt = () => interrupt('SIGINT', 130);
+const onTerminate = () => interrupt('SIGTERM', 143);
 
 async function deadline(completion, milliseconds, message) {
   let timer;
@@ -25,6 +49,7 @@ async function deadline(completion, milliseconds, message) {
 }
 
 async function start(dataDir, demo = false) {
+  interruption.signal.throwIfAborted();
   const child = spawn('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
     cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...process.env, TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: demo ? '1' : '0', TEAMSPACE_PILOT_OUTBOUND: '0',
@@ -44,6 +69,7 @@ async function start(dataDir, demo = false) {
   const url = await deadline(Promise.race([ready, exit.then(([code, signal]) => {
     throw new Error(`Pilot exited during startup (${code ?? signal}).\n${logs}`);
   })]), 25_000, 'Pilot startup timed out.');
+  interruption.signal.throwIfAborted();
   return {child,exit,url};
 }
 
@@ -65,13 +91,14 @@ async function call(url, path, { method = 'GET', body, headers = {}, status = 20
   const response = await fetch(new URL(`/api${path}`, url), {
     method, headers: { 'Content-Type': 'application/json', ...headers },
     body: body === undefined || Buffer.isBuffer(body) ? body : JSON.stringify(body),
-    signal: AbortSignal.timeout(25_000),
+    signal: AbortSignal.any([interruption.signal, AbortSignal.timeout(25_000)]),
   });
   assert.equal(response.status, status, `${method} ${path} returned ${response.status}`);
   return response;
 }
 
 function cli(action, from, to) {
+  interruption.signal.throwIfAborted();
   const result = spawnSync(process.execPath, ['scripts/pilot-backup.mjs', action, from, to], {
     cwd: repo, encoding: 'utf8', timeout: 30_000,
   });
@@ -81,13 +108,24 @@ function cli(action, from, to) {
 
 function fileHash(path) { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
 
-async function browser(url) {
+async function browser(url, teamFixture) {
+  interruption.signal.throwIfAborted();
   const playwright = fileURLToPath(new URL('../node_modules/@playwright/test/cli.js', import.meta.url));
+  const env = { ...process.env, TEAMSPACE_PILOT_TEST_URL: url };
+  delete env.TEAMSPACE_PILOT_TEAM_FIXTURE;
+  if (teamFixture) env.TEAMSPACE_PILOT_TEAM_FIXTURE = JSON.stringify(teamFixture);
   const child = spawn(process.execPath, [playwright, 'test', '--config=playwright.pilot.config.ts', `--output=${join(scratch,'browser')}`, '--reporter=line'], {
-    cwd: repo, stdio: 'inherit', env: { ...process.env, TEAMSPACE_PILOT_TEST_URL: url },
+    cwd: repo, stdio: 'inherit', env, detached: process.platform !== 'win32',
   });
-  const [code, signal] = await once(child, 'exit');
-  assert.equal(code, 0, `Pilot browser checks failed (${code ?? signal}).`);
+  browserChild = child;
+  try {
+    const [code, signal] = await once(child, 'exit');
+    interruption.signal.throwIfAborted();
+    assert.equal(code, 0, `Pilot browser checks failed (${code ?? signal}).`);
+  } finally {
+    browserChild = undefined;
+    clearTimeout(browserShutdownTimer);
+  }
 }
 
 const syntheticToken = randomUUID();
@@ -102,7 +140,125 @@ const gitlab = createServer((request, response) => {
   response.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
 });
 
-try {
+async function teamSnapshot(url, fixture, evidence) {
+  const documentPath = `/documents/${fixture.documentId}`;
+  const session = await (await call(url, `${documentPath}/collaboration`)).json();
+  const workspace = await (await call(url, '/export')).json();
+  const current = workspace.documents.find(document => document.id === fixture.documentId);
+  const recovery = workspace.documents.find(document => document.id === evidence.recoveryDocumentId);
+  const state = workspace.collabStates.find(value => value.documentId === fixture.documentId);
+  assert.ok(current && recovery && state, 'The original document, the recovery copy and persisted collaboration state must exist.');
+  assert.equal(session.enabled, true);
+  assert.equal(session.epoch, evidence.finalEpoch);
+  assert.equal(state.epoch, session.epoch);
+  assert.equal(state.schemaVersion, session.schemaVersion);
+  assert.ok(typeof state.state === 'string' && state.state.length > 0, 'The saved Yjs payload must be present.');
+  assert.equal(current.version, evidence.documentVersion);
+  assert.ok(current.plainText === evidence.plainText, 'The browser and canonical document must agree on the saved text.');
+  assert.ok(JSON.stringify(current) === JSON.stringify(session.document), 'The collaboration session must expose the canonical document.');
+  assert.ok(!current.plainText.includes(evidence.staleMarker), 'The original document must exclude the stale offline edit.');
+  assert.ok(recovery.plainText === evidence.recoveryText, 'The stored recovery copy must match the copy observed by the browser.');
+  assert.equal(recovery.plainText.split(evidence.staleMarker).length, 2, 'The recovery copy must contain the stale offline edit once.');
+  assert.equal(recovery.projectId, fixture.projectId);
+  assert.equal(recovery.authorId, fixture.actorIds.at(-1));
+  assert.deepEqual(new Set(workspace.users.map(user => user.id)), new Set(fixture.actorIds));
+
+  const traffic = evidence.workspaceTraffic;
+  const issue = workspace.issues.find(value => value.id === fixture.issueId);
+  const issueList = workspace.documents.find(document => document.id === traffic.issueListDocumentId);
+  assert.ok(issue && issueList && issueList.id !== current.id && issueList.id !== recovery.id, 'The concurrent issue and issue list must exist.');
+  assert.equal(traffic.issueId, issue.id);
+  assert.equal(issue.version, traffic.issueVersion);
+  assert.equal(issue.plannedEffortMinutes, traffic.plannedEffortMinutes);
+  assert.equal(issue.startDate, traffic.workingDate);
+  const listNode = issueList.content.content?.find(node => node.type === 'issueList' && node.attrs?.projectId === fixture.projectId);
+  const view = workspace.savedViews?.find(value => value.id === listNode?.attrs.savedViewId && value.projectId === fixture.projectId);
+  assert.ok(listNode && view, 'The issue list must retain its project and same-project saved view.');
+
+  return {
+    documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
+    // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
+    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, issueList, view })).digest('hex'),
+  };
+}
+
+async function runTeamPilot(seconds) {
+  const pilot = await start(source);
+  const actorIds = [];
+  for (let index = 1; index <= 20; index++) {
+    const actorNumber = String(index).padStart(2, '0');
+    const user = await (await call(pilot.url, '/users', {
+      method: 'POST', status: 201, body: { name: `합성 팀원 ${actorNumber}`, email: `pilot-${actorNumber}@example.invalid` },
+    })).json();
+    actorIds.push(user.id);
+  }
+  assert.equal(new Set(actorIds).size, 20);
+  const headers = { 'X-Actor-Id': actorIds[0] };
+  const project = await (await call(pilot.url, '/projects', {
+    method: 'POST', status: 201, headers, body: { key: 'TEAM', name: '합성 팀 파일럿' },
+  })).json();
+  const planned = new Date();
+  do { planned.setUTCDate(planned.getUTCDate() + 1); } while ([0, 6].includes(planned.getUTCDay()));
+  const workingDate = planned.toISOString().slice(0, 10);
+  const issue = await (await call(pilot.url, '/issues', {
+    method: 'POST', status: 201, headers, body: {
+      projectId: project.id, title: '동시 편집 중 검증할 업무', assigneeId: actorIds[0],
+      startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
+    },
+  })).json();
+  const title = '20명 공동 편집 리허설';
+  const initialText = '이 문장은 팀 파일럿의 합성 원문입니다.';
+  const document = await (await call(pilot.url, '/documents', {
+    method: 'POST', status: 201, headers, body: {
+      projectId: project.id, title,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: initialText }] }] },
+    },
+  })).json();
+  const session = await (await call(pilot.url, `/documents/${document.id}/collaboration/enable`, {
+    method: 'POST', headers, body: { expectedVersion: document.version },
+  })).json();
+  assert.ok(session.enabled && session.epoch);
+  const evidencePath = join(scratch, 'team-evidence.json');
+  const fixture = {
+    actorIds, projectId: project.id, documentId: document.id, issueId: issue.id, title, initialText,
+    initialEpoch: session.epoch, seconds, evidencePath,
+  };
+  console.log(`Team pilot started: ${actorIds.length} actors, at least ${seconds}s of shared editing.`);
+  await browser(pilot.url, fixture);
+
+  const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'));
+  assert.equal(evidence.documentId, document.id);
+  assert.equal(evidence.originalEpoch, session.epoch);
+  assert.ok(typeof evidence.finalEpoch === 'string' && evidence.finalEpoch !== session.epoch);
+  assert.ok(Number.isSafeInteger(evidence.documentVersion) && evidence.documentVersion > session.document.version);
+  assert.ok(typeof evidence.plainText === 'string' && evidence.plainText.includes(initialText));
+  assert.ok(typeof evidence.staleMarker === 'string' && evidence.staleMarker.length > 0);
+  assert.ok(typeof evidence.recoveryText === 'string' && evidence.recoveryText.includes(evidence.staleMarker));
+  assert.ok(typeof evidence.recoveryDocumentId === 'string' && evidence.recoveryDocumentId !== document.id);
+  assert.equal(evidence.peerCount, actorIds.length);
+  assert.ok(Number.isSafeInteger(evidence.rounds) && evidence.rounds >= 2);
+  assert.ok(Number.isSafeInteger(evidence.editCount) && evidence.editCount >= actorIds.length);
+  assert.ok(Number.isFinite(evidence.elapsedMs) && evidence.elapsedMs >= seconds * 1_000);
+  assert.ok(evidence.workspaceTraffic, 'The browser must verify issue and issue-list changes during editing.');
+  const baseline = await teamSnapshot(pilot.url, fixture, evidence);
+  await stop(pilot);
+
+  const reopened = await start(source);
+  assert.deepEqual(await teamSnapshot(reopened.url, fixture, evidence), baseline, 'The source changed across a restart.');
+  await stop(reopened);
+
+  const saved = cli('backup', source, backup);
+  assert.equal(saved.status, 0, saved.stderr);
+  const recovery = cli('restore', backup, restored);
+  assert.equal(recovery.status, 0, recovery.stderr);
+  const copy = await start(restored);
+  assert.deepEqual(await teamSnapshot(copy.url, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
+  await stop(copy);
+  console.log(`Team pilot passed: ${evidence.peerCount} browser actors, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Original document, recovery copy, issue and issue list matched after restart and separate restore.`);
+}
+
+async function runStandardPilot() {
   const empty = await start(join(scratch, 'empty'));
   const emptyWorkspace = await (await call(empty.url, '/workspace')).json();
   assert.deepEqual(emptyWorkspace.users, []);
@@ -251,8 +407,20 @@ try {
   assert.equal(authenticatedReads,2);
   await stop(copy);
   console.log('Pilot rehearsal passed: browser workflows, single-writer lock, cold copy, integrity rejection and restored data.');
+}
+
+process.on('SIGINT', onInterrupt);
+process.on('SIGTERM', onTerminate);
+try {
+  if (teamSeconds === null) await runStandardPilot();
+  else await runTeamPilot(teamSeconds);
+} catch (error) {
+  if (!interruption.signal.aborted) throw error;
+  console.error(interruption.signal.reason.message);
 } finally {
   for (const pilot of pilots) await stop(pilot).catch(() => {});
   if (gitlab.listening) await new Promise(resolve => gitlab.close(resolve));
   rmSync(scratch,{recursive:true,force:true});
+  process.off('SIGINT', onInterrupt);
+  process.off('SIGTERM', onTerminate);
 }
