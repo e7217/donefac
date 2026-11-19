@@ -413,7 +413,7 @@ export interface TeamNotificationPage {
   nextCursor: string | null;
   unreadCount: number;
 }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
 export interface GitlabSyncPreviewCounts {
   mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;

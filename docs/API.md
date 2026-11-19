@@ -28,6 +28,7 @@ curl --fail-with-body \
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
+| `GET /issues/:id/gitlab-links` | 프로젝트 범위 안 업무의 브랜치·커밋·MR·파이프라인 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
 | `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
@@ -203,6 +204,14 @@ curl --fail-with-body \
 트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`다. MR의 update/approval 이벤트와 push는 상태 자동화를 실행하지 않는다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 다른 규칙으로 넘어가거나 연쇄 실행하지 않는다. 이미 도착 상태이면 업무 버전은 바꾸지 않는다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
 
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
+
+### MR 생성 전 브랜치·커밋
+
+GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키를 찾는다. 새 커밋이 없는 브랜치도 연결하며 커밋의 제목이나 본문에 키가 있으면 그 키를 사용한다. 커밋 자체에 키가 없으면 브랜치 키를 사용한다. GitLab은 큰 푸시에서 최근 20개 커밋만 웹훅에 싣는다. 수동 동기화의 조회 대상은 MR과 파이프라인이다. [GitLab Push 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#push-events)
+
+브랜치가 이어지는 변경은 이전 SHA와 다음 SHA로 확인한다. 중간 이벤트가 빠지면 마지막으로 이어진 브랜치 상태를 유지하고, 이미 받은 커밋은 이력에 남긴다. 삭제된 브랜치는 마지막 확인 SHA와 `deleted` 상태를 보존한다. 자체 백업 형식 24는 활성 티켓과 휴지통의 브랜치 관측을 보존한다.
+
+`GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
 
 ## 외부 발신 웹훅
 

@@ -49,6 +49,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS documents_parent ON documents(parent_id);
       CREATE INDEX IF NOT EXISTS comments_resource ON comments(resource_type,resource_id);
       CREATE INDEX IF NOT EXISTS attachments_resource ON attachments(resource_type,resource_id);
+      CREATE INDEX IF NOT EXISTS gitlab_links_issue ON gitlab_links(issue_id);
     `);
   }
   all<T = any>(table: string): T[] { return (this.db.prepare(`SELECT json FROM ${table}`).all() as {json: string}[]).map(r => JSON.parse(r.json)); }

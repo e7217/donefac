@@ -8,6 +8,7 @@ import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { CollaborationExport } from './collaboration.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import type { Store } from './store.js';
 
 type ArchiveRows = {
@@ -291,8 +292,7 @@ export class TrashService {
       const issueRelations = collect<IssueRelation>(entry.issueRelations, reserved.issueRelations, '업무 관계', row =>
         resourceType === 'issue' && idInPair(row.sourceIssueId, row.targetIssueId) && validString(row.type) && validVersion(row.version) && validDate(row.createdAt));
       const gitlabLinks = collect<GitlabLink>(entry.gitlabLinks, reserved.gitlabLinks, 'GitLab 연결', row =>
-        resourceType === 'issue' && row.issueId === entry.resourceId && ['merge_request','commit','pipeline'].includes(String(row.kind)) &&
-        Number.isInteger(row.projectId) && typeof row.webUrl === 'string' && /^https?:\/\//.test(row.webUrl));
+        resourceType === 'issue' && row.issueId === entry.resourceId && isRestorableGitlabLink(row));
       const seenMilestones = new Set<string>();
       const milestoneIds = array(entry.milestoneIds, '이정표').map(value => {
         if (resourceType !== 'issue' || !validString(value)) malformed('이정표 ID');

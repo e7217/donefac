@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, ExternalLink, FileText, GitMerge, Link2, MessageSquare, Plus, Save, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, Clock3, FileText, GitMerge, Link2, MessageSquare, Plus, Save, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -14,6 +14,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { IssueWorklogs } from './IssueWorklogs';
+import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import './issues.css';
@@ -195,7 +196,10 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       {children.length > 0 && <section className="issue-related-section"><h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>{children.map(child => <button className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}><IssueTypeIcon type={child.type} data={data} projectId={child.projectId} /><span className="issue-key">{child.key}</span><span>{child.title}</span><span className="issue-related-status" style={{ color: statusMeta(data,child.projectId,child.status).color }}>{statusMeta(data,child.projectId,child.status).label}</span><ChevronRight size={14} /></button>)}</section>}
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} />
       <section className="issue-related-section"><h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>{linkedDocuments.map(link => { const doc = data.documents.find(d => d.id === link.documentId); return doc && <div className="issue-related-row" key={link.id}><FileText size={15} /><button onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button><button className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button></div>; })}<div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div></section>
-      <section className="issue-related-section"><h3><GitMerge size={16} /> GitLab <span>{gitlabLinks.length}</span></h3>{gitlabLinks.length ? gitlabLinks.map(link => <a className="issue-related-row issue-gitlab-row" key={link.id} href={/^https?:\/\//.test(link.webUrl) ? link.webUrl : '#'} target="_blank" rel="noreferrer"><GitMerge size={15} /><div><strong>{link.kind === 'merge_request' ? `!${link.iid}` : `#${link.iid}`} {link.title}</strong><small>{link.kind} · {link.state}</small></div><ExternalLink size={14} /></a>) : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab 설정 후 업무 번호로 연결할 수 있습니다.</p>}</section>
+      <section className="issue-related-section" aria-label="GitLab">
+        <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{gitlabLinks.length}</span></h3><GitlabActivityRefresh refresh={refresh} notify={notify} /></div>
+        {gitlabLinks.length ? <GitlabActivityList links={gitlabLinks} /> : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab을 연결한 뒤 브랜치 이름이나 커밋 메시지에 {issue.key}를 넣어 푸시하세요.</p>}
+      </section>
       {dependencies.length > 0 && <section className="issue-related-section">
         <h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>
         {dependencies.map(dependency => {

@@ -122,3 +122,93 @@ test('저장 전 GitLab 연결에서 저장소별 결과와 티켓 후보를 확
     }
   }
 });
+
+test('360px 티켓에서 MR 전에 GitLab 브랜치와 커밋을 확인하고 브랜치 삭제 뒤에도 커밋 링크를 유지한다', async ({ page, request }) => {
+  const workspace = async () => (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
+  const settings = async () => (await (await request.get('/api/integrations/gitlab')).json()) as GitlabSettings;
+  const project = (await workspace()).projects[0];
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const created = await request.post('/api/issues', { data: { projectId: project.id, title: `푸시 연결 검증 ${randomUUID()}` } });
+  expect(created.status()).toBe(201);
+  const issue = await created.json() as Issue;
+  const secret = `synthetic-push-${randomUUID()}`;
+  const baseUrl = 'https://git.example.test/forge';
+  const projectUrl = `${baseUrl}/team/engine`;
+  const branch = `feature/${issue.key}-integration`;
+  const zero = '0'.repeat(40);
+  const initialHead = 'a'.repeat(40);
+  const pushedHead = 'b'.repeat(40);
+  const commitTitle = 'Improve first-run status panel';
+  const branchUrl = `${projectUrl}/-/tree/${encodeURIComponent(branch)}`;
+  const commitUrl = `${projectUrl}/-/commit/${pushedHead}`;
+  const externalRequests: string[] = [];
+  page.on('request', item => { if (new URL(item.url()).hostname === 'git.example.test') externalRequests.push(item.url()); });
+  const push = async (before: string, after: string, commits: Record<string, string>[] = []) => {
+    const response = await request.post('/api/integrations/gitlab/webhook', {
+      headers: { 'X-Gitlab-Token': secret, 'X-Gitlab-Event': 'Push Hook', 'webhook-id': randomUUID() },
+      data: { object_kind: 'push', project_id: 42, ref: `refs/heads/${branch}`, before, after,
+        checkout_sha: after === zero ? null : after, commits, total_commits_count: commits.length,
+        project: { id: 42, web_url: projectUrl, path_with_namespace: 'team/engine' } },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+  };
+  try {
+    const configured = await request.patch('/api/integrations/gitlab', { data: { expectedVersion: original.version, baseUrl, projectIds: [42], webhookSecret: secret } });
+    expect(configured.ok(), await configured.text()).toBeTruthy();
+    await push(zero, initialHead);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const dialog = page.getByRole('dialog');
+    const gitlab = dialog.getByRole('region', { name: 'GitLab', exact: true });
+    const branches = gitlab.getByRole('region', { name: '브랜치', exact: true });
+    const commits = gitlab.getByRole('region', { name: '커밋', exact: true });
+    const refresh = gitlab.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true });
+    await expect(branches).toBeVisible({ timeout: 24_000 });
+    await expect(branches.locator('[data-gitlab-kind="branch"]')).toHaveAttribute('data-gitlab-state', 'active');
+    await expect(branches.getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', branchUrl);
+    await expect(branches.locator('code')).toHaveText(initialHead.slice(0, 8));
+    await expect(commits).toHaveCount(0);
+    await expect(gitlab.getByRole('region', { name: 'MR', exact: true })).toHaveCount(0);
+    const bounds = await gitlab.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(361);
+
+    const draft = dialog.getByRole('textbox', { name: '제목', exact: true });
+    const unsavedTitle = `${issue.title} 작성 중`;
+    await draft.fill(unsavedTitle);
+    await push(initialHead, pushedHead, [{ id: pushedHead, title: commitTitle, message: commitTitle, url: commitUrl }]);
+    await refresh.click();
+    await expect(branches.locator('code')).toHaveText(pushedHead.slice(0, 8));
+    await expect(commits.getByRole('link', { name: new RegExp(commitTitle) })).toHaveAttribute('href', commitUrl);
+    await expect(commits.locator('code')).toHaveText(pushedHead.slice(0, 8));
+    await expect(commits).toContainText(branch);
+    await expect(commits).not.toContainText('#0');
+    await expect(draft).toHaveValue(unsavedTitle);
+    await draft.fill(issue.title);
+
+    await push(pushedHead, zero);
+    await refresh.click();
+    await expect(branches.locator('[data-gitlab-kind="branch"]')).toHaveAttribute('data-gitlab-state', 'deleted');
+    await expect(branches).toContainText('삭제됨');
+    await expect(branches.getByRole('link')).toHaveCount(0);
+    await expect(commits.getByRole('link', { name: new RegExp(commitTitle) })).toHaveAttribute('href', commitUrl);
+    await expect(gitlab.getByRole('region', { name: 'MR', exact: true })).toHaveCount(0);
+    const saved = await workspace();
+    expect(saved.issues.find(value => value.id === issue.id)).toMatchObject({ title: issue.title, version: issue.version, status: issue.status });
+    expect(externalRequests).toEqual([]);
+
+    await page.goto(`/#/${project.id}/development`);
+    const activity = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
+    await expect(activity.getByRole('region', { name: '브랜치', exact: true })).toContainText('삭제됨');
+    await expect(activity.getByRole('region', { name: '커밋', exact: true }).getByRole('link', { name: new RegExp(commitTitle) })).toHaveAttribute('href', commitUrl);
+  } finally {
+    await request.delete(`/api/issues/${issue.id}`);
+    const current = await settings();
+    if (current.baseUrl === baseUrl) {
+      const cleared = await request.patch('/api/integrations/gitlab', { data: { expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '' } });
+      expect(cleared.ok(), await cleared.text()).toBeTruthy();
+    }
+  }
+});

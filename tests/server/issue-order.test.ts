@@ -167,7 +167,7 @@ test('schema 23 validates the complete project order and restore invalidates ear
     const first = await f.api.move(initial, b, a, 'before');
     assert.equal(first.status, 200, JSON.stringify(first.data));
     const exported = await f.api.read<Backup>('/export');
-    assert.equal(exported.schemaVersion, 23);
+    assert.equal(exported.schemaVersion, 24);
     assert.deepEqual(exported.issueOrders.find(order => order.projectId === projectId)?.issueIds, first.data.order.issueIds);
     const second = await f.api.move(first.data.order, a, b, 'before');
     assert.equal(second.status, 200, JSON.stringify(second.data));

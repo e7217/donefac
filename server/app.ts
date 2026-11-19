@@ -44,6 +44,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../sh
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
@@ -450,6 +451,22 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.json(result);
   });
+  app.get('/api/issues/:id/gitlab-links', (req, res) => {
+    if (Object.keys(req.query).some(key => key !== 'kind' && key !== 'offset')) return fail('GitLab 활동 조회 조건을 확인해 주세요.');
+    const kind = req.query.kind ?? '';
+    if (typeof kind !== 'string' || (kind && !['branch', 'commit', 'merge_request', 'pipeline'].includes(kind))) return fail('GitLab 활동 종류를 확인해 주세요.');
+    const rawOffset = req.query.offset ?? '0';
+    if (typeof rawOffset !== 'string' || !/^\d+$/.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset))) return fail('GitLab 활동 조회 위치를 확인해 주세요.');
+    const issue = get<Issue>('issues', req.params.id);
+    const offset = Number(rawOffset), limit = 50;
+    const where = `WHERE issue_id=?${kind ? " AND json_extract(json, '$.kind')=?" : ''}`;
+    const args = kind ? [issue.id, kind] : [issue.id];
+    const { total } = store.db.prepare(`SELECT COUNT(*) AS total FROM gitlab_links ${where}`).get(...args) as { total: number };
+    const rows = store.db.prepare(`SELECT json FROM gitlab_links ${where}
+      ORDER BY julianday(json_extract(json, '$.updatedAt')) DESC, id LIMIT ? OFFSET ?`)
+      .all(...args, limit, offset) as { json: string }[];
+    res.set('Cache-Control', 'no-store').json({ links: rows.map(row => JSON.parse(row.json)), total, offset, limit });
+  });
   app.post('/api/issues/query',(req,res)=>{
     const {projectId}=req.body;
     if(typeof projectId!=='string'||!projectId||projectId.length>200)fail('필터를 적용할 프로젝트가 필요합니다.');
@@ -567,6 +584,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         issue.completedAt=done(issue)?issue.completedAt||updatedAt:null;
         store.put('issues',issue);
         trash.restoreChildren(entry);
+        gitlab.refreshRestoredBranchLinks(issue.id);
       }else{
         const original=entry.resource;
         const doc=validateDocument({...original,version:original.version+1,updatedAt},original,{allowMissing:true});
@@ -802,7 +820,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
     const attachmentVersions=sourcePreservation.allVersions();
-    const trashEntries=trash.all();
+    const trashEntries=trash.all().map(entry=>entry.gitlabLinks.some(link=>link.kind==='branch')
+      ? {...entry,gitlabLinks:entry.gitlabLinks.map(link=>gitlab.latestObservedBranchLink(link))}
+      : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
     const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
@@ -851,6 +871,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
     if(data.schemaVersion<17&&((Array.isArray(data.trashEntries)&&data.trashEntries.length)||importedReportLedger.events.some(event=>event.kind==='restored')))fail('휴지통과 복원 이력이 있는 백업은 schemaVersion 17이 필요합니다.');
     const importedTrash=trash.validateImport(data.schemaVersion>=17?data.trashEntries:[],data);
+    if (data.schemaVersion < 24 && (data.gitlabLinks.some((link: { kind: string }) => link.kind === 'branch') ||
+        importedTrash.some(entry => entry.gitlabLinks.some(link => link.kind === 'branch')))) {
+      fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
+    }
+    if (!data.gitlabLinks.every(isRestorableGitlabLink)) fail('GitLab 연결 데이터를 확인해 주세요.');
     const importedDependencies=data.dependencies as Dependency[];
     const archivedDependencies=importedTrash.flatMap(entry=>entry.dependencies);
     if(data.schemaVersion<21&&(importedDependencies.some(value=>value.type!=='FS')||archivedDependencies.some(value=>value.type!=='FS'))){
@@ -927,7 +952,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       }
       const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
       const previousWorklogs=worklogs.clearForRestore();
-      outbound.resetForImport();gitlab.resetForImport();migrations.resetForNativeImport();
+      outbound.resetForImport();
+      gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
+      migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
@@ -960,7 +987,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentPublication.replaceRestored(importedPublications);
       for(const a of data.activities){get('users',a.actorId);store.put('activities',a);}
       for(const a of data.attachments){attachmentTarget(a.resourceType,a.resourceId);get('users',a.authorId);if(!validTimestamp(a.createdAt))fail('첨부파일 작성 시간을 확인해 주세요.');store.put('attachments',a);}
-      for(const l of data.gitlabLinks){get('issues',l.issueId);if(!['merge_request','commit','pipeline'].includes(l.kind)||!Number.isInteger(l.projectId)||typeof l.webUrl!=='string'||!/^https?:\/\//.test(l.webUrl))fail('GitLab 연결 데이터를 확인해 주세요.');store.put('gitlab_links',l);}
+      for(const l of data.gitlabLinks){get('issues',l.issueId);store.put('gitlab_links',l);}
       const nextNumbers=new Map(previousSequences);
       const reserve=(projectId:string,key:string)=>{
         const number=Number(key.match(/-(\d+)$/)?.[1]??0);

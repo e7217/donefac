@@ -57,6 +57,136 @@ test('pipeline branch ordering prevents late older results and MR inheritance re
   }finally{f.close();}
 });
 
+const pushBase = 'https://git.example.test/forge';
+const pushRepo = `${pushBase}/team/engine`;
+const commitSha = (digit: string, width = 40) => digit.repeat(width);
+function pushPayload(branch: string, before: string, after: string, commits: Record<string, unknown>[] = []) {
+  return {
+    object_kind: 'push', project_id: 42, ref: `refs/heads/${branch}`, before, after,
+    checkout_sha: /^0+$/.test(after) ? null : after,
+    project: { id: 42, web_url: pushRepo, path_with_namespace: 'team/engine' },
+    commits, total_commits_count: commits.length,
+  };
+}
+
+test('an authenticated push links a keyed branch without commits and associates commits before an MR exists', () => {
+  const f = fixture();
+  try {
+    const key = Buffer.alloc(32, 7);
+    f.configure({ baseUrl: pushBase, signingToken: `whsec_${key.toString('base64')}` });
+    const issues = f.store.all('issues');
+    const branch = 'feature/NEO-1';
+    const initialHead = commitSha('a');
+    const nextHead = commitSha('b');
+    const explicitSha = commitSha('c');
+    const firstPush = pushPayload(branch, commitSha('0'), initialHead);
+    const raw = Buffer.from(JSON.stringify(firstPush, null, 2));
+    const id = randomUUID();
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = createHmac('sha256', key).update(Buffer.from(`${id}.${timestamp}.`)).update(raw).digest('base64');
+    const headers = { 'X-Gitlab-Event': 'Push Hook', 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` };
+    rejects(() => f.service.webhook(request(firstPush, { ...headers, 'webhook-signature': 'v1,incorrect' }, raw)), 401);
+    assert.deepEqual(links(f), []);
+
+    const created = f.service.webhook(request(firstPush, headers, raw));
+    assert.equal(created.linked, 1);
+    assert.deepEqual(created.runs, []);
+    const [firstLink] = links(f);
+    assert.ok(firstLink);
+    assert.equal(firstLink.kind, 'branch');
+    assert.equal(firstLink.iid, 0);
+    assert.equal(firstLink.issueId, 'issue-1');
+    assert.equal(firstLink.sourceBranch, branch);
+    assert.equal(firstLink.sourceSha, initialHead);
+    assert.equal(firstLink.state, 'active');
+    assert.equal(firstLink.webUrl, `${pushRepo}/-/tree/feature%2FNEO-1`);
+    assert.equal(f.service.webhook(request(firstPush, headers, raw)).duplicate, true);
+
+    const nextPush = pushPayload(branch, initialHead, nextHead, [
+      { id: nextHead, title: 'Improve development flow', message: 'Improve development flow', url: `${pushRepo}/-/commit/${nextHead}` },
+      { id: explicitSha, title: 'Add report column', message: 'Add report column\n\nFollow-up NEO-2', url: `${pushRepo}/-/commit/${explicitSha}` },
+    ]);
+    const pushed = f.service.webhook(request(nextPush, { 'X-Gitlab-Event': 'Push Hook' }));
+    assert.deepEqual(pushed.runs, []);
+    const nextLinks = links(f);
+    assert.equal(nextLinks.length, 3);
+    const updated = nextLinks.find(link => link.id === firstLink.id);
+    assert.equal(updated?.sourceSha, nextHead);
+    const commits = nextLinks.filter(link => link.kind === 'commit');
+    assert.deepEqual(new Map(commits.map(link => [link.sourceSha, link.issueId])), new Map([
+      [nextHead, 'issue-1'], [explicitSha, 'issue-2'],
+    ]));
+    assert.ok(commits.every(link => link.sourceBranch === branch && link.iid === 0));
+    assert.ok(commits.every(link => link.webUrl === `${pushRepo}/-/commit/${link.sourceSha}`));
+    assert.equal(f.service.webhook(request(nextPush)).linked, 0);
+    assert.deepEqual(links(f), nextLinks);
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.store.all('issues'), issues);
+  } finally { f.close(); }
+});
+
+test('push head continuity preserves branch history against disconnected updates and late deletions', () => {
+  const f = fixture();
+  try {
+    f.configure({ baseUrl: pushBase });
+    const branch = 'fix/NEO-1';
+    const [zero, a, b, c, d, e] = ['0', 'a', 'b', 'c', 'd', 'e'].map(digit => commitSha(digit, 64));
+    const push = (before: string, after: string, commits?: Record<string, unknown>[]) =>
+      f.service.webhook(request(pushPayload(branch, before, after, commits), { 'X-Gitlab-Event': 'Push Hook' }));
+    push(zero, a);
+    const first = links(f).find(link => link.kind === 'branch')!;
+    assert.equal(first.sourceSha, a);
+    push(a, b, [{ id: b, title: 'Stable change', url: `${pushRepo}/-/commit/${b}` }]);
+    push(d, c);
+    assert.equal(links(f).find(link => link.id === first.id)?.sourceSha, b);
+    push(a, zero);
+    assert.equal(links(f).find(link => link.id === first.id)?.state, 'active');
+
+    push(b, zero);
+    const deleted = links(f).find(link => link.id === first.id);
+    assert.equal(deleted?.state, 'deleted');
+    assert.equal(deleted?.sourceSha, b);
+    push(a, d);
+    assert.deepEqual(links(f).find(link => link.id === first.id), deleted);
+    push(zero, e);
+    const recreated = links(f).find(link => link.id === first.id);
+    assert.equal(recreated?.state, 'active');
+    assert.equal(recreated?.sourceSha, e);
+    push(b, zero);
+    assert.deepEqual(links(f).find(link => link.id === first.id), recreated);
+    assert.equal(links(f).filter(link => link.kind === 'branch').length, 1);
+    assert.equal(links(f).find(link => link.kind === 'commit')?.sourceSha, b);
+    assert.deepEqual(f.events, []);
+  } finally { f.close(); }
+});
+
+test('tag events retain explicit commit matching without associating a branch or inheriting a ref key', () => {
+  const f = fixture();
+  try {
+    f.configure({ baseUrl: pushBase });
+    const sha = commitSha('a');
+    const payload = {
+      ...pushPayload('NEO-1', commitSha('0'), sha, [
+        { id: sha, title: 'Release', message: 'Release NEO-2', url: `${pushRepo}/-/commit/${sha}` },
+      ]),
+      object_kind: 'tag_push', ref: 'refs/tags/NEO-1',
+    };
+    const applied = f.service.webhook(request(payload, { 'X-Gitlab-Event': 'Tag Push Hook' }));
+    assert.equal(applied.linked, 1);
+    const [commit] = links(f);
+    assert.equal(links(f).length, 1);
+    assert.equal(commit.kind, 'commit');
+    assert.equal(commit.issueId, 'issue-2');
+    assert.equal(commit.sourceBranch, undefined);
+    const publicSha = commitSha('b');
+    const publicUrl = `https://gitlab-public.example.test/team/engine/-/commit/${publicSha}`;
+    const historical = { ...payload, project: { id: 42 }, commits: [{ id: publicSha, message: 'Legacy release NEO-2', url: publicUrl }] };
+    assert.equal(f.service.webhook(request(historical)).linked, 1);
+    assert.equal(links(f).find(link => link.sourceSha === publicSha)?.webUrl, publicUrl);
+    assert.deepEqual(f.events, []);
+  } finally { f.close(); }
+});
+
 test('sync remains read-only and a changed connection cannot receive in-flight success or failure results',async()=>{
   const f=fixture();let held:ServerResponse|undefined,announce=()=>{};const nextRequest=()=>new Promise<void>(resolve=>{announce=resolve;});const seen=nextRequest();const mock=await mockServer((path,res)=>{res.setHeader('Content-Type','application/json');if(path.includes('merge_requests')){held=res;announce();}else res.end('[]');});
   try{f.configure({baseUrl:mock.url});const pending=f.service.sync();await seen;const before=f.service.settings();f.service.configure({expectedVersion:before.version,baseUrl:'https://changed.example.test'});held!.end(JSON.stringify([{id:101,iid:7,title:'NEO-1 이전 결과',state:'merged',source_branch:'feature/NEO-1',web_url:'https://git.example.test/mr/7'}]));await assert.rejects(pending,(error:unknown)=>error instanceof GitlabIntegrationError&&error.status===409);assert.equal(links(f).length,0);assert.equal(f.service.settings().baseUrl,'https://changed.example.test');assert.equal(f.service.settings().lastError,null);assert.equal(f.events.length,0);f.configure({baseUrl:mock.url});const failedRequest=nextRequest(),failed=f.service.sync();await failedRequest;f.service.configure({expectedVersion:f.service.settings().version,baseUrl:'https://changed-again.example.test'});held!.statusCode=503;held!.end('unavailable');await assert.rejects(failed,(error:unknown)=>error instanceof GitlabIntegrationError&&error.status===409);assert.equal(f.service.settings().baseUrl,'https://changed-again.example.test');assert.equal(f.service.settings().lastError,null);assert.equal(links(f).length,0);

@@ -1,11 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUpRight, GitBranch, RefreshCw, Search } from 'lucide-react';
+import { GitBranch, RefreshCw, Search } from 'lucide-react';
 import type { FeatureProps, GitlabSettings, GitlabSyncPreview } from '../../shared/types';
 import { api, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
+import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
 import { WebhookSettings } from './WebhookSettings';
 import './development.css';
 
@@ -76,7 +77,8 @@ export function Development(props:FeatureProps){
       if (previewRequest.current === controller) previewRequest.current = null;
     }
   }
-  const issueIds=new Set(props.data.issues.filter(issue=>issue.projectId===props.projectId).map(issue=>issue.id)),links=props.data.gitlabLinks.filter(link=>issueIds.has(link.issueId));
+  const issueKeys = new Map(props.data.issues.filter(issue => issue.projectId === props.projectId).map(issue => [issue.id, issue.key]));
+  const links = props.data.gitlabLinks.filter(link => issueKeys.has(link.issueId));
   return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div><button className="btn btn-primary" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={sync}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button></div>
     {error&&<div className="inline-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}
     <div className="integration-grid"><form className="card integration-form" onSubmit={save}><div className="card-heading"><h2><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
@@ -89,9 +91,12 @@ export function Development(props:FeatureProps){
       <div className="data-actions"><button className="btn btn-primary" disabled={!dirty}>연결 설정 저장</button><button type="button" className="btn" disabled={!draft.baseUrl.trim() || !draft.ids.trim() || preview?.state === 'loading'} onClick={() => void requestPreview()}><Search size={15} aria-hidden="true"/>연결 미리보기</button>{(settings?.tokenConfigured||settings?.webhookSecretConfigured||settings?.signingTokenConfigured)&&<button className="btn btn-ghost" type="button" onClick={disconnect}>연결 해제</button>}</div>
     </fieldset>{settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{settings?.lastError&&<p className="error-text">{settings.lastError}</p>}</form>
     {preview && <GitlabPreview preview={preview} openIssue={props.openIssue}/>}
-    <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 MR 제목에 티켓 번호를 넣으면 관련 업무를 찾아 연결합니다.</p><code>{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12 로그인 오류 수정</code><ul><li>MR과 파이프라인 활동을 티켓에서 확인합니다.</li><li>상태 변경은 활성화한 자동화 규칙에 따라 처리합니다.</li><li>수동 동기화는 개발 활동 연결을 갱신합니다.</li></ul><p className="help-text">웹훅 경로: <code>/api/integrations/gitlab/webhook</code><br/>GitLab에서 접근 가능한 배포 주소가 있을 때 설정하세요.</p></section></div>
+    <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>수동 동기화는 MR과 파이프라인 연결을 갱신합니다.</li></ul><p className="help-text">GitLab에서 접근 가능한 배포 주소에 웹훅 경로 <code>/api/integrations/gitlab/webhook</code>를 설정하세요.</p></section></div>
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
-    <section className="card linked-development"><div className="card-heading"><h2>연결된 개발 활동</h2><span className="count-pill">{links.length}</span></div>{links.length?links.map(link=><div className="development-row" key={link.id}><GitBranch size={19}/><div><a href={link.webUrl} target="_blank" rel="noreferrer">{link.title} <ArrowUpRight size={13}/></a><button className="text-link" onClick={()=>props.openIssue(link.issueId)}>{props.data.issues.find(issue=>issue.id===link.issueId)?.key}</button></div><span className="badge">{link.state}</span></div>):<div className="empty-state"><GitBranch/><h3>아직 연결된 개발 활동이 없습니다</h3><p>GitLab을 설정하고 티켓 번호가 포함된 MR을 동기화해보세요.</p></div>}</section>
+    <section className="card linked-development" aria-label="연결된 개발 활동">
+      <div className="card-heading gitlab-activity-header"><h2>연결된 개발 활동 <span className="count-pill">{links.length}</span></h2><GitlabActivityRefresh refresh={props.refresh} notify={notify} /></div>
+      {links.length ? <GitlabActivityList links={links} heading="h3" issueContext={{ keys: issueKeys, openIssue: props.openIssue }} /> : <div className="empty-state"><GitBranch aria-hidden="true"/><h3>아직 연결된 개발 활동이 없습니다</h3><p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 MR을 동기화하세요.</p></div>}
+    </section>
   </div>;
 }
 

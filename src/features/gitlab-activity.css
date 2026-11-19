@@ -1,0 +1,153 @@
+.gitlab-activity-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.issue-related-section .gitlab-activity-header h3 {
+  margin: 0;
+}
+
+.gitlab-activity-refresh {
+  min-height: 34px;
+  padding: 6px 9px;
+  color: #3c6554;
+}
+
+.gitlab-activity-list {
+  display: grid;
+  gap: 13px;
+  min-width: 0;
+}
+
+.gitlab-activity-group {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dce8e1;
+  border-radius: 7px;
+}
+
+.gitlab-activity-group .gitlab-activity-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 8px 11px;
+  color: #365b4c;
+  background: #f3f8f5;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.gitlab-activity-group .gitlab-activity-group-heading > span {
+  margin-left: auto;
+  color: #547364;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gitlab-activity-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gitlab-activity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 11px;
+  padding: 7px 11px;
+  border-top: 1px solid #e5eee8;
+}
+
+.gitlab-activity-body {
+  display: grid;
+  justify-items: start;
+  min-width: 0;
+}
+
+.gitlab-activity-target {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  max-width: 100%;
+  padding: 6px 0;
+  color: #2a5846;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+a.gitlab-activity-target:hover {
+  text-decoration: underline;
+}
+
+.gitlab-activity-target svg {
+  align-self: center;
+  flex: none;
+}
+
+.gitlab-activity-number,
+.gitlab-activity-target > code,
+.gitlab-activity-detail code {
+  color: #245846;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gitlab-activity-detail,
+.gitlab-activity-issue {
+  max-width: 100%;
+  color: #4d685b;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-activity-issue {
+  margin-top: 4px;
+}
+
+.gitlab-activity-state {
+  max-width: 7rem;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #edf4ef;
+  color: #3c5f4e;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-activity-row[data-gitlab-state='deleted'] .gitlab-activity-state {
+  background: #f1efee;
+  color: #605550;
+}
+
+.gitlab-activity-pages {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding: 5px;
+  border-top: 1px solid #e5eee8;
+  color: #3c6554;
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .gitlab-activity-target[href],
+  .gitlab-activity-refresh,
+  .gitlab-activity-pages button {
+    min-height: 44px;
+  }
+
+  .gitlab-activity-state {
+    max-width: 5rem;
+  }
+}

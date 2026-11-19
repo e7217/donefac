@@ -2,6 +2,8 @@ import { createHash,createHmac,timingSafeEqual } from 'node:crypto';
 import type { Express,Request,Response,NextFunction } from 'express';
 import type { AutomationEvent,AutomationRun,GitlabLink,GitlabSettings,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
+import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
+import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GitlabReadError,readGitlabSyncProject } from './gitlab-read-sync.js';
 import type { Store } from './store.js';
 
@@ -11,12 +13,14 @@ type Obj=Record<string,unknown>;
 type RawSettings={baseUrl:string;projectIds:number[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string};
 type BranchCursor={id:string;pipelineId:number};
+type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string};
 type Hooks={processEvent:(event:AutomationEvent)=>AutomationRun[];onConnectionChanged:(previous:GitlabSettings,next:GitlabSettings)=>number};
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
 type SyncConnection={baseUrl:string;projectIds:number[];token:string|null;version:number};
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
 type IssueMatch=Pick<Issue,'id'|'key'|'title'>;
 const PREVIEW_CANDIDATE_LIMIT=100;
+const GITLAB_PUSH_COMMIT_LIMIT=20;
 const now=()=>new Date().toISOString();
 const record=(value:unknown):Obj=>value&&typeof value==='object'&&!Array.isArray(value)?value as Obj:{};
 const string=(value:unknown):string=>typeof value==='string'?value:'';
@@ -64,6 +68,19 @@ function branchHead(branch:unknown,sha:unknown):string|null{
   const ref=bound(branch,512),head=bound(sha,128);
   return ref&&head?JSON.stringify([ref,head]):null;
 }
+function pushCursorId(instance: string, projectId: number, branch: string): string {
+  const refId = createHash('sha256').update(branch).digest('hex');
+  return `gitlab:${instance}:${projectId}:branch:${refId}`;
+}
+function pushObservationFromLink(link: GitlabLink): PushObservation | null {
+  const { sourceBranch, state, webUrl, updatedAt } = link;
+  if (link.kind !== 'branch' || !isGitlabBranchName(sourceBranch) || (state !== 'active' && state !== 'deleted')) return null;
+  const instance = /^gitlab:([a-f\d]{12}):/.exec(link.id)?.[1];
+  const sourceSha = gitlabObjectSha(link.sourceSha);
+  if (!instance || !sourceSha || /^0+$/.test(sourceSha) || !Number.isFinite(Date.parse(updatedAt))) return null;
+  const id = pushCursorId(instance, link.projectId, sourceBranch);
+  return link.id === `${id}:${link.issueId}` ? { id, state, sourceSha, webUrl, updatedAt } : null;
+}
 function safePreviewValue(value:string,token:string|null):string{
   return token?value.replaceAll(token,'[숨김]'):value;
 }
@@ -88,7 +105,7 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,signal
 
 /** All external writes are local links; remote calls are explicit read-only syncs. */
 export class GitlabIntegrationService{
-  constructor(private readonly store:Store,private readonly hooks:Hooks){store.db.exec('CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);');}
+  constructor(private readonly store:Store,private readonly hooks:Hooks){store.db.exec('CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);');}
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
   private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError};}
   settings():GitlabSettings{return this.public(this.raw());}
@@ -101,7 +118,19 @@ export class GitlabIntegrationService{
     for(const field of ['token','webhookSecret','signingToken'] as const)if(field in input){const value=credential(input[field]);if(value&&field==='signingToken')signingKey(value);next[field]=value?this.store.seal(value):null;}
     next.version=old.version+1;this.store.setSetting('gitlab',next);this.hooks.onConnectionChanged(this.public(old),this.public(next));afterSave?.(this.public(next));return this.public(next);
   });}
-  resetForImport():void{this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;');const raw=this.raw();this.store.setSetting('gitlab',{...raw,version:raw.version+1});}
+  resetForImport(branchLinks: Iterable<GitlabLink> = []): void {
+    this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;DELETE FROM gitlab_push_cursors;');
+    const observations = new Map<string, PushObservation>();
+    for (const link of branchLinks) {
+      const observed = pushObservationFromLink(link);
+      if (!observed) continue;
+      const previous = observations.get(observed.id);
+      if (!previous || Date.parse(previous.updatedAt) < Date.parse(observed.updatedAt)) observations.set(observed.id, observed);
+    }
+    for (const observed of observations.values()) this.store.put('gitlab_push_cursors', observed);
+    const raw = this.raw();
+    this.store.setSetting('gitlab', { ...raw, version: raw.version + 1 });
+  }
   private authenticate(req:Request,raw:RawSettings):void{
     if(req.headers['webhook-signature']!==undefined){
       if(!raw.signingToken)fail('Webhook 서명 인증에 실패했습니다.',401);
@@ -125,14 +154,110 @@ export class GitlabIntegrationService{
     for(const issueId of issueIds){const link=linkForIssue(instance,projectId,kind,issueId,draft);if(preserveExisting&&this.store.get('gitlab_links',link.id))continue;this.store.put('gitlab_links',link);linked++;}
     return{linked,issueIds};
   }
+  private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, issueIds: string[]): number {
+    const id = pushCursorId(instance, projectId, head.branch);
+    let previous = this.store.get<PushObservation>('gitlab_push_cursors', id);
+    if (!previous) {
+      // Native backups contain branch links without transient webhook cursors.
+      const persisted = issueIds.flatMap(issueId => {
+        const prior = this.store.get<GitlabLink>('gitlab_links', `${id}:${issueId}`);
+        return prior?.kind === 'branch' && prior.sourceBranch === head.branch ? [prior] : [];
+      });
+      const latest = persisted.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+      previous = latest ? pushObservationFromLink(latest) ?? undefined : undefined;
+    }
+    if (!previous && !issueIds.length) return 0;
+    const lastHead = previous?.state === 'deleted' ? '0'.repeat(previous.sourceSha.length) : previous?.sourceSha;
+    const sameHead = lastHead === head.after;
+    if (lastHead !== undefined && !sameHead && lastHead !== head.before) return 0;
+
+    const treeUrl = repository && gitlabPushLinkUrl(repository, 'tree', head.branch);
+    const webUrl = treeUrl || gitlabScopedPushUrl(baseUrl, previous?.webUrl);
+    if (!webUrl) return 0;
+    const observation: PushObservation = sameHead && previous ? { ...previous, webUrl } : {
+      id, state: head.deleted ? 'deleted' : 'active', sourceSha: head.deleted ? head.before : head.after, webUrl, updatedAt: now(),
+    };
+    this.store.put('gitlab_push_cursors', observation);
+    let linked = 0;
+    for (const issueId of issueIds) {
+      const link: GitlabLink = { ...observation, id: `${id}:${issueId}`, issueId, projectId, iid: 0, kind: 'branch', title: head.branch, sourceBranch: head.branch };
+      const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
+      if (existing?.state === link.state && existing.sourceSha === link.sourceSha && existing.webUrl === link.webUrl) continue;
+      this.store.put('gitlab_links', link);
+      linked++;
+    }
+    return linked;
+  }
+  latestObservedBranchLink(link: GitlabLink): GitlabLink {
+    const observation = pushObservationFromLink(link);
+    if (!observation) return link;
+    const current = this.store.get<PushObservation>('gitlab_push_cursors', observation.id);
+    return current ? { ...link, ...current, id: link.id } : link;
+  }
+  refreshRestoredBranchLinks(issueId: string): void {
+    const links = this.store.db.prepare(`SELECT json FROM gitlab_links WHERE issue_id=? AND json_extract(json,'$.kind')='branch'`).all(issueId);
+    for (const row of links) {
+      const link = JSON.parse(String(row.json)) as GitlabLink;
+      const latest = this.latestObservedBranchLink(link);
+      if (latest !== link) this.store.put('gitlab_links', latest);
+    }
+  }
+  private recordPush(raw: RawSettings, instance: string, projectId: number, kind: string, body: Obj, project: Obj): number {
+    const head = kind === 'push' ? readGitlabHeadPush(body) : null;
+    const branchKeys = head ? keys(head.branch) : [];
+    const commits = Array.isArray(body.commits) ? body.commits : [];
+    if (!branchKeys.length && !commits.length) return 0;
+
+    const repository = gitlabRepositoryUrl(raw.baseUrl, project);
+    const issues = this.syncIssues();
+    const targets = (matched: string[]) => matched.flatMap(key => {
+      const issue = issues.get(key);
+      return issue ? [issue.id] : [];
+    });
+    const branchIssueIds = targets(branchKeys);
+    let linked = head ? this.observeBranch(raw.baseUrl, instance, projectId, head, repository, branchIssueIds) : 0;
+    if (head?.deleted) return linked;
+
+    for (const item of (head ? commits.slice(-GITLAB_PUSH_COMMIT_LIMIT) : commits)) {
+      const commit = record(item);
+      const sha = gitlabObjectSha(commit.id);
+      if (sha && /^0+$/.test(sha)) continue;
+      if (head && (!sha || sha.length !== head.after.length)) continue;
+      const explicitKeys = keys(commit.title, commit.message, commit.description);
+      const issueIds = explicitKeys.length ? targets(explicitKeys) : branchIssueIds;
+      if (!issueIds.length) continue;
+
+      const suppliedUrl = commit.web_url || commit.url;
+      const canonicalUrl = repository && sha && gitlabPushLinkUrl(repository, 'commit', sha);
+      const webUrl = canonicalUrl || gitlabScopedPushUrl(raw.baseUrl, suppliedUrl) || (!head && validWebUrl(suppliedUrl));
+      if (!webUrl) continue;
+      const draft = readLink('commit', {
+        id: sha || commit.id, title: commit.title, message: commit.message, web_url: webUrl,
+        state: 'committed', updated_at: commit.timestamp, source_branch: head?.branch, sha,
+      }, []);
+      if (!draft.id) continue;
+      for (const issueId of issueIds) {
+        const link = linkForIssue(instance, projectId, 'commit', issueId, draft);
+        const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
+        if (existing) {
+          const shaToAdd = existing.sourceSha ? undefined : link.sourceSha;
+          const branchToAdd = existing.sourceBranch ? undefined : link.sourceBranch;
+          if (!shaToAdd && !branchToAdd) continue;
+          this.store.put('gitlab_links', { ...existing, ...(shaToAdd ? { sourceSha: shaToAdd } : {}), ...(branchToAdd ? { sourceBranch: branchToAdd } : {}) });
+        } else this.store.put('gitlab_links', link);
+        linked++;
+      }
+    }
+    return linked;
+  }
   webhook(req:Request):{ok:true;duplicate:boolean;linked:number;runs:AutomationRun[]}{
     const raw=this.raw();this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
-    const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push'} as Record<string,string>)[header]||'';
+    const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push'} as Record<string,string>)[header]||'';
     const attributes=record(body.object_attributes),instance=this.instance(raw),externalId=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update((req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody||Buffer.from(JSON.stringify(body))).digest('hex');if(externalId.length>500)fail('Webhook 식별자가 너무 깁니다.');const eventId=`gitlab:${instance}:${projectId}:${kind}:${createHash('sha256').update(externalId).digest('hex')}`;
     return this.store.transaction(()=>{
       if(this.store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
-      if(kind==='push'||kind==='tag_push'){let linked=0;for(const item of Array.isArray(body.commits)?body.commits:[])linked+=this.upsert(raw,projectId,'commit',{...record(item),state:'committed'}).linked;return{ok:true,duplicate:false,linked,runs:[]};}
+      if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:this.recordPush(raw,instance,projectId,kind,body,project),runs:[]};
       if(kind!=='merge_request'&&kind!=='pipeline')return{ok:true,duplicate:false,linked:0,runs:[]};
       const id=objectId(attributes),state=string(attributes.state)||string(attributes.status)||'unknown',branch=bound(kind==='merge_request'?attributes.source_branch:attributes.ref,512),sha=bound(attributes.sha||record(attributes.last_commit).id||record(body.commit).id,128);
       const time=occurredAt(kind==='merge_request'?(attributes.actioned_at||attributes.updated_at):(attributes.finished_at||attributes.updated_at||attributes.created_at));
