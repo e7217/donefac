@@ -179,7 +179,13 @@ export class ApiKeyService {
       return next();
     }
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
+    const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot)?$/.exec(path);
     if (request.method === 'GET') {
+      if (publication) {
+        this.query(request, publication[2] ? ['kind', 'revisionId'] : []);
+        this.resource(key, 'documents', this.decode(publication[1]));
+        this.used(key); return next();
+      }
       if (worklogs && !worklogs[2]) {
         this.query(request, ['offset']);
         this.resource(key, 'issues', this.decode(worklogs[1]));
@@ -247,6 +253,9 @@ export class ApiKeyService {
     } else if (worklogs && (!worklogs[2] && request.method === 'POST' || worklogs[2] && ['PATCH','DELETE'].includes(request.method))) {
       this.query(request, []);
       this.resource(key, 'issues', this.decode(worklogs[1]));
+    } else if (publication && !publication[2] && request.method === 'POST') {
+      this.query(request, []);
+      this.resource(key, 'documents', this.decode(publication[1]));
     } else if (request.method === 'POST' && path === '/api/comments') {
       this.query(request, []);
       if (!['issue', 'document'].includes(request.body.resourceType)) fail(400, '댓글 대상을 확인해 주세요.');

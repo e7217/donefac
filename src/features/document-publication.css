@@ -1,0 +1,328 @@
+.document-publication-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 280;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgb(18 38 31 / 42%);
+}
+
+.document-publication-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  max-height: min(900px, calc(100dvh - 56px));
+  overflow: hidden;
+  border: 1px solid #dce5df;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 20px 80px rgb(20 45 34 / 18%);
+  color: #263e35;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.document-publication-header,
+.document-publication-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 20px 26px;
+}
+
+.document-publication-header {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  border-bottom: 1px solid #e2e9e4;
+}
+
+.document-publication-header > div {
+  min-width: 0;
+}
+
+.document-publication-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.document-publication-header p {
+  margin: 5px 0 0;
+  color: #526b60;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-content {
+  display: grid;
+  gap: 20px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 26px 28px;
+  overscroll-behavior: contain;
+}
+
+.document-publication-toolbar,
+.document-publication-withdraw {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+  color: #526b60;
+}
+
+.document-publication-state-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.document-publication-state,
+.document-publication-review-actions,
+.document-publication-request,
+.document-publication-snapshot {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #dfe7e1;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.document-publication-state {
+  background: #f8faf8;
+}
+
+.document-publication-state.is-published {
+  border-color: #cfe3d8;
+  background: #f3f9f5;
+}
+
+.document-publication-dialog h3 {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.document-publication-state h3 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.document-publication-state > strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-state p,
+.document-publication-review-actions > p,
+.document-publication-request > p {
+  margin: 8px 0;
+  color: #526b60;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-state dl {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0;
+  font-size: 13px;
+}
+
+.document-publication-state dl > div {
+  display: grid;
+  grid-template-columns: 65px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.document-publication-state dt {
+  color: #526b60;
+}
+
+.document-publication-state dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-state .document-publication-note,
+.document-publication-changes p {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #edf2ee;
+  color: #2e4e3f;
+  white-space: pre-wrap;
+}
+
+.document-publication-changes {
+  margin: 14px 0;
+  padding-top: 12px;
+  border-top: 1px solid #dfe7e1;
+  font-size: 14px;
+}
+
+.document-publication-changes time {
+  display: block;
+  margin-top: 4px;
+  color: #526b60;
+  font-size: 12px;
+}
+
+.document-publication-dialog fieldset {
+  display: grid;
+  gap: 15px;
+  min-width: 0;
+  margin: 17px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.document-publication-dialog label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.document-publication-dialog label > span {
+  display: inline;
+  font-weight: 400;
+  color: #526b60;
+}
+
+.document-publication-dialog .field {
+  width: 100%;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.document-publication-dialog textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.document-publication-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.document-publication-dialog .btn {
+  min-height: 38px;
+  font-size: 14px;
+}
+
+.document-publication-error,
+.document-publication-warning {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-error {
+  background: #fff0ed;
+  color: #98372b;
+}
+
+.document-publication-warning {
+  background: #fff6df;
+  color: #72531f;
+}
+
+.document-publication-dialog .document-publication-help {
+  margin: 12px 0 0;
+  color: #526b60;
+  font-size: 13px;
+}
+
+.document-publication-snapshot > header > span,
+.document-publication-snapshot time {
+  display: block;
+  color: #526b60;
+  font-size: 12px;
+}
+
+.document-publication-snapshot h3 {
+  margin: 7px 0;
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-snapshot > .document-publication-help {
+  margin-bottom: 20px;
+}
+
+.document-publication-snapshot .doc-readonly-content {
+  overflow-wrap: anywhere;
+}
+
+.document-publication-snapshot .doc-reference-card {
+  opacity: 1;
+}
+
+.document-publication-footer {
+  border-top: 1px solid #e2e9e4;
+  background: #f8faf8;
+}
+
+.document-publication-footer > span {
+  color: #526b60;
+  font-size: 13px;
+}
+
+@media (max-width: 600px) {
+  .document-publication-backdrop {
+    padding: 10px;
+  }
+
+  .document-publication-dialog {
+    max-height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+
+  .document-publication-header,
+  .document-publication-footer {
+    padding: 17px;
+  }
+
+  .document-publication-header h2 {
+    font-size: 19px;
+  }
+
+  .document-publication-content {
+    padding: 17px;
+  }
+
+  .document-publication-state-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .document-publication-state,
+  .document-publication-review-actions,
+  .document-publication-request,
+  .document-publication-snapshot {
+    padding: 15px;
+  }
+
+  .document-publication-actions > .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .document-publication-footer > .btn {
+    margin-left: auto;
+  }
+}

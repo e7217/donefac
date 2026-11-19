@@ -5,7 +5,7 @@ import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
 import {
   ArrowDownToLine, Bold, Check, CheckCheck, ChevronDown, ChevronRight,
-  Code2, FilePlus2, FileText, History, ImageIcon, Italic, Link2, List,
+  Code2, FileCheck2, FilePlus2, FileText, History, ImageIcon, Italic, Link2, List,
   ListChecks, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, Trash2, Unlink, X,
@@ -15,6 +15,7 @@ import { contentReferences, documentPlainText } from '../../shared/document-node
 import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { SourceOrigins } from './SourceOrigins';
 import { DocumentHistory } from './DocumentHistory';
+import { DocumentPublication } from './DocumentPublication';
 import type { Comment, DocPage, DocRevision, FeatureProps, RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, downloadDocument, templateContent } from './document-utils';
@@ -54,6 +55,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const savingRef = useRef(false);
   const [conflict, setConflict] = useState(false);
   const [showLatest, setShowLatest] = useState(false);
+  const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
+  const publicationOpener = useRef<HTMLButtonElement>(null);
+  const closePublication = useCallback(() => {
+    setPublicationDocumentId(null);
+    requestAnimationFrame(() => publicationOpener.current?.focus());
+  }, []);
   const [storageProblem, setStorageProblem] = useState(false);
   const [search, setSearch] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -98,6 +105,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const archivedLiveRecoveryRef = useRef(false);
 
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
+  const publicationOpen = Boolean(selectedPage && selectedPage.id === publicationDocumentId);
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
@@ -345,12 +353,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void saveDraft(); }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        if (!publicationOpen) void saveDraft();
+      }
       if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setExportOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft]);
+  }, [saveDraft, publicationOpen]);
 
   const documentId = draft?.id;
   useEffect(() => {
@@ -371,7 +382,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [documentId, actorId, rememberComment]);
 
   useEffect(() => {
-    if (!documentId || sideTab !== 'history') return;
+    if (!documentId || sideTab !== 'history' || publicationOpen) return;
     let active = true;
     setHistoryLoading(true); setHistoryError('');
     api<DocRevision[]>(`/documents/${documentId}/revisions`)
@@ -379,7 +390,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       .catch(error => { if (active) setHistoryError(error instanceof Error ? error.message : '이력을 불러오지 못했습니다.'); })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
-  }, [documentId, draft?.expectedVersion, sideTab]);
+  }, [documentId, draft?.expectedVersion, sideTab, publicationOpen]);
 
   function selectDocument(id: string) {
     if (id === selectedDocumentId) return;
@@ -627,11 +638,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     });
 
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
+  const canRequestPublication = Boolean(draft && !draft.dirty && !saving && !bodyReadOnly &&
+    (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
   const button = (label: string, icon: React.ReactNode, onClick: () => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         <div className="docs-tree-content">
@@ -650,6 +663,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           <div className="docs-document-topbar">
             <div className="docs-breadcrumb"><FileText size={14} /><span>{selectedPage.projectId ? data.projects.find(project => project.id === selectedPage.projectId)?.name || '프로젝트' : '팀 공통'}</span><ChevronRight size={12} /><span>{draft.title || '제목 없는 문서'}</span></div>
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
+              <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
               <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: 2, document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
@@ -665,7 +679,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
           <div className="docs-paper-scroll">
             <div className="docs-paper">
-              <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '게시됨' : '초안'}</span><span>마지막 수정 {relativeTime(selectedPage.updatedAt)}</span></div>
+              <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime(selectedPage.updatedAt)}</span></div>
               <input className="docs-title-input" disabled={restoring} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
               <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || '#78849a' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
 
@@ -711,7 +725,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보"><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'comments' && <><div className="docs-panel-heading"><h3>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>{commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}{commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}{!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}{comments.map(comment => { const user = data.users.find(item => item.id === comment.authorId); return <article className="docs-comment" key={comment.id}><div className="docs-comment-head"><span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span><strong>{user?.name || '팀원'}</strong><time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time></div><p>{comment.body}</p></article>; })}<form className="docs-comment-form" onSubmit={submitComment}><textarea className="field" value={commentBody} onChange={event => updateCommentBody(event.target.value)} placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} /><button type="submit" className="btn btn-primary" disabled={!commentBody.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button></form></>}
-            {sideTab === 'links' && <><div className="docs-panel-heading"><h3>연결된 업무</h3><p>문서의 맥락을 실제 업무와 연결하세요.</p></div>{!linkedIssues.length && <div className="docs-panel-empty"><Link2 size={25} /><strong>연결된 업무가 없어요</strong><span>관련 업무를 검색해 연결할 수 있어요.</span></div>}{linkedIssues.map(issue => <button key={issue.id} className="docs-linked-issue" onClick={() => openIssue(issue.id)}><span>{issue.key}<ChevronRight size={12} /></span><strong>{issue.title}</strong></button>)}<label className="docs-issue-search"><Search size={14} /><input value={issueSearch} onChange={event => setIssueSearch(event.target.value)} placeholder="업무 번호 또는 제목 검색" aria-label="연결할 업무 검색" /></label>{issueSearch && <div className="docs-issue-results">{candidateIssues.length ? candidateIssues.map(issue => <button key={issue.id} onClick={() => void linkIssue(issue.id)} disabled={linkBusy}><span>{issue.key}</span><strong>{issue.title}</strong><Plus size={14} /></button>) : <p className="docs-panel-muted">연결할 수 있는 업무가 없습니다.</p>}</div>}<div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={`${reference.id}:${reference.kind}`} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && ' · 찾을 수 없음'}</small><strong>{page?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div><div className="docs-reference-list"><h3>본문의 업무 참조</h3>{!inlineIssues.length && <p>본문에 삽입한 업무 참조가 없습니다.</p>}{inlineIssues.map(reference => { const issue = data.issues.find(value => value.id === reference.id); return <button key={reference.id} disabled={!issue} onClick={() => issue && openIssue(issue.id)}><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">게시됨</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div></>}
+            {sideTab === 'links' && <><div className="docs-panel-heading"><h3>연결된 업무</h3><p>문서의 맥락을 실제 업무와 연결하세요.</p></div>{!linkedIssues.length && <div className="docs-panel-empty"><Link2 size={25} /><strong>연결된 업무가 없어요</strong><span>관련 업무를 검색해 연결할 수 있어요.</span></div>}{linkedIssues.map(issue => <button key={issue.id} className="docs-linked-issue" onClick={() => openIssue(issue.id)}><span>{issue.key}<ChevronRight size={12} /></span><strong>{issue.title}</strong></button>)}<label className="docs-issue-search"><Search size={14} /><input value={issueSearch} onChange={event => setIssueSearch(event.target.value)} placeholder="업무 번호 또는 제목 검색" aria-label="연결할 업무 검색" /></label>{issueSearch && <div className="docs-issue-results">{candidateIssues.length ? candidateIssues.map(issue => <button key={issue.id} onClick={() => void linkIssue(issue.id)} disabled={linkBusy}><span>{issue.key}</span><strong>{issue.title}</strong><Plus size={14} /></button>) : <p className="docs-panel-muted">연결할 수 있는 업무가 없습니다.</p>}</div>}<div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={`${reference.id}:${reference.kind}`} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && ' · 찾을 수 없음'}</small><strong>{page?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div><div className="docs-reference-list"><h3>본문의 업무 참조</h3>{!inlineIssues.length && <p>본문에 삽입한 업무 참조가 없습니다.</p>}{inlineIssues.map(reference => { const issue = data.issues.find(value => value.id === reference.id); return <button key={reference.id} disabled={!issue} onClick={() => issue && openIssue(issue.id)}><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div></>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>파일을 첨부하고 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
           </div>
@@ -719,6 +733,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </> : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
+    {publicationOpen && selectedPage && draft && <DocumentPublication key={`${selectedPage.id}:${actorId}`} data={data}
+      document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
+      onClose={closePublication} notify={notify} refreshDocument={refresh} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !creating) setNewOpen(false); }}><form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}><div className="docs-modal-header"><div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div><button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={() => setNewOpen(false)}><X size={19} /></button></div><label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?" value={newTitle} onChange={event => setNewTitle(event.target.value)} required maxLength={240} /></label><div className="docs-template-grid">{DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id} onClick={() => { setNewTemplate(template.id); if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle)) setNewTitle(template.id === 'blank' ? '' : template.name); }}><span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}</button>)}</div><div className="docs-location-fields"><label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent)} value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}><option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="docs-modal-label">상위 문서<select className="field" value={newParent} onChange={event => setNewParent(event.target.value)}><option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label></div><div className="docs-modal-footer"><button className="btn btn-ghost" type="button" disabled={creating} onClick={() => setNewOpen(false)}>취소</button><button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating}>{creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />} 문서 만들기</button></div></form></div>}
   </section></DocumentBlocksProvider>;

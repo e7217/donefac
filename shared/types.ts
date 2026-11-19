@@ -242,6 +242,35 @@ export interface DocPage {
   version: number; authorId: string; createdAt: string; updatedAt: string;
 }
 export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string }
+export interface DocumentReview {
+  revisionId: string;
+  requestedById: string;
+  reviewerId: string;
+  requestedAt: string;
+  note: string;
+  changesRequested: { byId: string; at: string; note: string } | null;
+}
+export interface DocumentPublishedVersion {
+  revisionId: string;
+  publishedById: string;
+  publishedAt: string;
+  note: string;
+  requestedById: string;
+  reviewerId: string;
+  requestedAt: string;
+}
+export interface DocumentPublicationState {
+  documentId: string;
+  version: number;
+  review: DocumentReview | null;
+  published: DocumentPublishedVersion | null;
+}
+export interface DocumentPublicationView extends DocumentPublicationState {
+  workspaceGeneration: string | null;
+  documentVersion: number;
+  reviewRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
+  publishedRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
+}
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: 'FS'; lagDays: number }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string }
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }

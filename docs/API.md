@@ -27,9 +27,11 @@ curl --fail-with-body \
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
+| `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
 | `GET /comments?resourceType=issue&resourceId=...` | 업무 또는 문서 댓글 조회 |
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·삭제 |
 | `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·삭제 |
+| `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
 
 표의 경로 앞에는 `/api/v1`이 붙는다. 읽기 키는 조회만 허용하며 쓰기 키는 조회와 표의 변경 요청을 허용한다. 프로젝트 범위는 조회·원래 대상·이동 대상·상위 항목·계획 참조에 적용한다. 공통 문서는 전체 프로젝트 키로 접근한다.
@@ -299,3 +301,20 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 응답에는 조회 시각 `generatedAt`, 비교 기준 `revision`, 조건에 맞는 전체 업무 수와 적용·입력·미입력·유형 미적용 업무 수, 값별 `groups`가 포함된다. 숫자 0과 확인 여부 `false`는 각각 입력된 값이다. 다중 선택은 선택지마다 그 선택지를 가진 업무를 한 번 세므로 한 업무가 여러 그룹에 나타날 수 있다. 그룹 ID는 필드 ID와 저장 값에 기반한다. 숫자 필드의 `numeric`에는 값이 있을 때 `min`, `max`, `average`, `sum`이 포함된다. 합계가 유한한 JSON 숫자 범위를 넘으면 `sum`은 `null`이다. 한 번에 선택된 업무 10,000개까지 집계하며 초과 시 `413`을 반환한다.
 
 `POST /api/v1/projects/:id/field-breakdown/issues`에 같은 `fieldId`, `savedViewId`와 응답의 `revision`, 그룹 `id`를 `bucketId`로 보낸다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 자료가 바뀌어 `revision`이 달라지면 `409`를 반환한다. 그때는 집계를 다시 조회해 새 `revision`을 사용한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 그룹의 응답은 `404`다.
+
+## 문서 검토·발행
+
+`GET /api/v1/documents/:id/publication`은 현재 검토 요청, 마지막 발행 정보, 각 문서 저장본의 ID·제목·버전, 현재 초안의 `documentVersion`, 검토 상태의 `version`, `workspaceGeneration`을 반환한다. 검토 이력이 없는 문서의 상태 `version`은 0이다. 복원 전 워크스페이스의 `workspaceGeneration`은 `null`일 수 있다.
+
+`GET /api/v1/documents/:id/publication/snapshot?kind=review&revisionId=…`에는 상태 응답의 `reviewRevision.id`를 넣는다. 마지막 발행본은 `kind=published`와 `publishedRevision.id`를 사용한다. 응답은 요청 당시 저장된 `DocRevision`이다. 저장본이 없으면 `404`, 상태가 바뀌어 다른 저장본을 가리키면 `409`를 반환한다.
+
+`POST /api/v1/documents/:id/publication`에는 최신 조회 결과의 `version`을 `expectedVersion`으로, `workspaceGeneration`을 반환된 값 그대로 보낸다. 쓰기 키의 소유자를 작업자로 사용하고 브라우저 경로에서는 현재 선택한 작업자를 사용한다.
+
+| `action` | 필요한 값과 동작 |
+| --- | --- |
+| `request` | 열어 본 문서의 버전을 `expectedDocumentVersion`으로 보내고, 다른 팀원의 `reviewerId`를 지정한다. 선택 항목 `note`와 함께 현재 서버 저장본을 검토 대상으로 고정한다. |
+| `publish` | 지정 검토자가 현재 검토본을 발행한다. 선택 항목 `note`를 발행본에 기록하고 검토 요청을 닫는다. |
+| `request_changes` | 지정 검토자가 필수 `note`와 함께 수정을 요청한다. 저장본의 참조와 의견을 남긴다. 새 검토 요청을 시작할 수 있다. |
+| `withdraw` | 요청자가 검토를 철회한다. 기존 발행본은 유지된다. |
+
+메모는 최대 2,000자다. 버전·복원 세대 또는 요청 직전 문서 버전이 다르면 `409`로 응답한다. 다른 작업자에게만 허용된 동작은 `403`을 반환한다. 모든 경로는 해당 문서의 프로젝트 범위를 확인한다. 브라우저에서 사용하는 동일한 경로의 접두사는 `/api`다.
