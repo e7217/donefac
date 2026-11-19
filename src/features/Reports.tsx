@@ -17,6 +17,7 @@ import { isCalendarDate } from '../../shared/calendar';
 import { api } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { WorklogReport } from './WorklogReport';
+import { FieldBreakdownReport } from './FieldBreakdownReport';
 import './reports.css';
 
 type Props = FeatureProps & { snapshotId?: string | null };
@@ -109,7 +110,7 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [view, setView] = useState<'live' | 'saved' | 'worklogs'>(props.snapshotId ? 'saved' : 'live'),
+  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields'>(props.snapshotId ? 'saved' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
   const [creating, setCreating] = useState(false),
@@ -328,7 +329,7 @@ function ProjectReports(props: Props) {
     );
   function showView(next: typeof view) {
     if (next === view) return;
-    if ((view === 'worklogs' || next === 'worklogs') &&
+    if ([view, next].some(item => item === 'worklogs' || item === 'fields') &&
         !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setView(next);
   }
@@ -373,6 +374,16 @@ function ProjectReports(props: Props) {
           onClick={() => showView('worklogs')}
         >
           작업 시간
+        </button>
+        <button
+          role="tab"
+          id="report-fields-tab"
+          aria-controls="report-fields-panel"
+          aria-selected={view === 'fields'}
+          disabled={creating}
+          onClick={() => showView('fields')}
+        >
+          필드 집계
         </button>
       </div>
       {view === 'live' ? (
@@ -528,6 +539,10 @@ function ProjectReports(props: Props) {
       ) : view === 'worklogs' ? (
         <section role="tabpanel" id="report-worklogs-panel" aria-labelledby="report-worklogs-tab">
           <WorklogReport {...props} />
+        </section>
+      ) : view === 'fields' ? (
+        <section role="tabpanel" id="report-fields-panel" aria-labelledby="report-fields-tab">
+          <FieldBreakdownReport {...props} />
         </section>
       ) : (
         <section role="tabpanel" id="report-saved-panel" aria-labelledby="report-saved-tab">

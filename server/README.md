@@ -191,3 +191,7 @@ Jira worklogs are promoted during reviewed migration when the owning issue, mapp
 ## Custom field filters
 
 Lists, boards and typed API queries share a predicate. The saved view's optional `filters.fieldFilter` contains an all/any group of up to eight typed rules. Schema changes retain referenced definitions and options by stable identifier. Archived definitions remain filterable. The authenticated `POST /api/v1/issues/query` accepts read keys within one explicit project and returns matched tickets. See the [field filter contract](../docs/API.md#사용자-정의-필드-조건).
+
+## Custom field breakdown
+
+The read routes aggregate current project issues by a single field. With a saved view, they use the same matcher as the issue list and board. The summary and paginated group routes compute a revision from the selected view, schema, and matching data inside a read transaction. Group requests carry that revision to detect changes before returning issue titles. See the [field breakdown API](../docs/API.md#사용자-정의-필드-집계).

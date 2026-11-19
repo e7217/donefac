@@ -1,0 +1,436 @@
+.field-breakdown-feature {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+  color: #243c38;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.field-breakdown-feature .card {
+  border: 1px solid #dfe7e4;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.field-breakdown-query,
+.field-breakdown-numeric,
+.field-breakdown-groups,
+.field-breakdown-issues {
+  padding: 24px;
+}
+
+.field-breakdown-feature h2,
+.field-breakdown-feature h3,
+.field-breakdown-feature p {
+  margin: 0;
+}
+
+.field-breakdown-feature h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.field-breakdown-feature h3 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.field-breakdown-query header > p,
+.field-breakdown-groups > p {
+  margin-top: 8px;
+  color: #516962;
+  font-size: 14px;
+}
+
+.field-breakdown-query fieldset {
+  min-width: 0;
+  margin: 22px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.field-breakdown-query-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.field-breakdown-query-grid label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.field-breakdown-query-grid select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  font-size: 14px;
+}
+
+.field-breakdown-query-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.field-breakdown-feature .btn {
+  min-height: 38px;
+  font-size: 14px;
+}
+
+.field-breakdown-info,
+.field-breakdown-error,
+.field-breakdown-stale {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.field-breakdown-query > .field-breakdown-info,
+.field-breakdown-query > .field-breakdown-error {
+  margin-top: 16px;
+}
+
+.field-breakdown-info {
+  background: #f1f7f5;
+  color: #375c52;
+}
+
+.field-breakdown-error {
+  background: #fff2f0;
+  color: #9b342a;
+}
+
+.field-breakdown-stale {
+  border: 1px solid #e9d39a;
+  background: #fff9e9;
+  color: #75521b;
+}
+
+.field-breakdown-result {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.field-breakdown-asof,
+.field-breakdown-groups > header,
+.field-breakdown-issues > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.field-breakdown-asof h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-asof h3 > span {
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: #ecf0ee;
+  color: #52655f;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.field-breakdown-asof p,
+.field-breakdown-asof time,
+.field-breakdown-groups > header > span,
+.field-breakdown-issues > header > span {
+  color: #516962;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.field-breakdown-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+}
+
+.field-breakdown-metric > span {
+  font-size: 13px;
+  color: #516962;
+}
+
+.field-breakdown-metric > strong {
+  font-size: 28px;
+  line-height: 1.2;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-breakdown-numeric dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  margin: 18px 0 0;
+}
+
+.field-breakdown-numeric dt {
+  font-size: 13px;
+  color: #516962;
+}
+
+.field-breakdown-numeric dd {
+  margin: 5px 0 0;
+  font-size: 19px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-table-scroll {
+  margin-top: 18px;
+  overflow-x: auto;
+}
+
+.field-breakdown-groups table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 14px;
+}
+
+.field-breakdown-groups th,
+.field-breakdown-groups td {
+  padding: 12px;
+  border-bottom: 1px solid #e6ece9;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.field-breakdown-groups thead th {
+  background: #f6f8f7;
+  color: #516962;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field-breakdown-groups th:first-child {
+  width: 45%;
+}
+
+.field-breakdown-groups th:nth-child(2) {
+  width: 18%;
+}
+
+.field-breakdown-groups tr.is-selected {
+  background: #f0f8f5;
+}
+
+.field-breakdown-bucket {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #176f64;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-bucket strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.field-breakdown-bucket small {
+  color: #5b6f68;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.field-breakdown-bucket:disabled {
+  color: #425c54;
+  cursor: default;
+}
+
+.field-breakdown-bucket:focus-visible,
+.field-breakdown-issue:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 5px;
+  border-radius: 4px;
+}
+
+.field-breakdown-bar {
+  display: inline-flex;
+  width: calc(100% - 57px);
+  min-width: 32px;
+  height: 9px;
+  margin-right: 9px;
+  border-radius: 4px;
+  background: #e6eeeb;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.field-breakdown-bar > span {
+  height: 100%;
+  border-radius: inherit;
+  background: #177c72;
+}
+
+.field-breakdown-percent {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.field-breakdown-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.field-breakdown-pagination > span {
+  margin-right: auto;
+  color: #516962;
+  font-size: 13px;
+}
+
+.field-breakdown-issues ul {
+  display: grid;
+  gap: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.field-breakdown-issues li + li {
+  border-top: 1px solid #e6ece9;
+}
+
+.field-breakdown-issue {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+  padding: 13px 0;
+  border: 0;
+  background: transparent;
+  color: #243c38;
+  text-align: left;
+  cursor: pointer;
+}
+
+.field-breakdown-issue strong {
+  color: #177c72;
+  font-size: 13px;
+}
+
+.field-breakdown-issue > span {
+  flex: 1 1 200px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-issue > small {
+  font-size: 12px;
+}
+
+.field-breakdown-issue:disabled {
+  cursor: default;
+}
+
+.field-breakdown-revision {
+  color: #516962;
+  font-size: 12px;
+}
+
+.field-breakdown-revision summary {
+  cursor: pointer;
+}
+
+.field-breakdown-revision code {
+  display: block;
+  margin-top: 10px;
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 46px 20px;
+  color: #516962;
+  text-align: center;
+}
+
+.field-breakdown-empty > svg {
+  color: #177c72;
+}
+
+.field-breakdown-empty p {
+  font-size: 14px;
+}
+
+@media (max-width: 900px) {
+  .field-breakdown-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .field-breakdown-query,
+  .field-breakdown-numeric,
+  .field-breakdown-groups,
+  .field-breakdown-issues {
+    padding: 17px;
+  }
+
+  .field-breakdown-query-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .field-breakdown-summary,
+  .field-breakdown-numeric dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .field-breakdown-metric {
+    padding: 15px;
+  }
+
+  .field-breakdown-query-actions > .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .field-breakdown-asof {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

@@ -298,6 +298,33 @@ export interface SavedViewState {
   layout: 'list' | 'board';
   filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter };
 }
+export interface IssueFieldBreakdownBucket {
+  id: string;
+  label: string;
+  kind: 'value' | 'missing' | 'not_applicable';
+  count: number;
+}
+export interface IssueFieldBreakdownIssue { id: string; key: string; title: string }
+export interface IssueFieldBreakdown {
+  projectId: string;
+  field: Pick<CustomFieldDefinition, 'id' | 'name' | 'kind' | 'archived'>;
+  savedView: { id: string; name: string; version: number } | null;
+  revision: string;
+  generatedAt: string;
+  totalIssues: number;
+  applicableIssues: number;
+  populatedIssues: number;
+  missingIssues: number;
+  notApplicableIssues: number;
+  groups: IssueFieldBreakdownBucket[];
+  numeric: { min: number; max: number; average: number; sum: number | null } | null;
+}
+export interface IssueFieldBreakdownPage {
+  bucket: IssueFieldBreakdownBucket;
+  total: number;
+  offset: number;
+  issues: IssueFieldBreakdownIssue[];
+}
 export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];

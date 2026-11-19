@@ -27,6 +27,8 @@ import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
+import { FieldBreakdownError } from './field-breakdown.js';
+import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
@@ -206,6 +208,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     },
   });
   worklogs.registerRoutes(app,{actor,activity});
+  registerFieldBreakdownRoutes(app,store,issueSchemas);
   reports.registerRoutes(app,{
     actor,
     createDocument(req,snapshot,content,issueIds) {
@@ -466,7 +469,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

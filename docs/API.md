@@ -20,6 +20,7 @@ curl --fail-with-body \
 | `GET /projects` | 키 범위의 프로젝트 목록 |
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
+| `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
@@ -290,3 +291,11 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 ```
 
 사용 중인 필드·선택지는 이름 변경과 보관 후에도 같은 ID로 조회할 수 있다. 필드나 선택지를 삭제하려면 이를 사용하는 공유 보기를 먼저 수정한다. 보기 저장·수정의 필터 객체에서 필드 그룹을 생략하거나 `null`로 보내면 해당 조건을 제거한다. 필드 그룹이 저장된 보기는 schema13 백업에서 복원한다. 조건 없이 저장한 기존 보기와 이전 백업도 계속 사용할 수 있다.
+
+## 사용자 정의 필드 집계
+
+`POST /api/v1/projects/:id/field-breakdown`에 `fieldId`와 선택 항목인 `savedViewId`를 보낸다. 보기를 생략하거나 `null`을 보내면 전체 프로젝트를 집계한다. 보기를 지정하면 현재 저장된 검색어·상태·담당자·유형·필드 조건을 모두 적용한다. 두 조회 경로는 같은 프로젝트 범위의 읽기 키와 브라우저의 `/api` 경로에서 사용할 수 있다.
+
+응답에는 조회 시각 `generatedAt`, 비교 기준 `revision`, 조건에 맞는 전체 업무 수와 적용·입력·미입력·유형 미적용 업무 수, 값별 `groups`가 포함된다. 숫자 0과 확인 여부 `false`는 각각 입력된 값이다. 다중 선택은 선택지마다 그 선택지를 가진 업무를 한 번 세므로 한 업무가 여러 그룹에 나타날 수 있다. 그룹 ID는 필드 ID와 저장 값에 기반한다. 숫자 필드의 `numeric`에는 값이 있을 때 `min`, `max`, `average`, `sum`이 포함된다. 합계가 유한한 JSON 숫자 범위를 넘으면 `sum`은 `null`이다. 한 번에 선택된 업무 10,000개까지 집계하며 초과 시 `413`을 반환한다.
+
+`POST /api/v1/projects/:id/field-breakdown/issues`에 같은 `fieldId`, `savedViewId`와 응답의 `revision`, 그룹 `id`를 `bucketId`로 보낸다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 자료가 바뀌어 `revision`이 달라지면 `409`를 반환한다. 그때는 집계를 다시 조회해 새 `revision`을 사용한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 그룹의 응답은 `404`다.

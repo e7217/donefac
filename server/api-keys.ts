@@ -164,6 +164,13 @@ export class ApiKeyService {
     if (Number(result.changes) !== 1) unauthorized();
   }
   private authorize(key: ApiKeyRecord, path: string, request: Request, response: Response, next: NextFunction) {
+    const fieldBreakdown = /^\/api\/projects\/([^/]+)\/field-breakdown(?:\/issues)?$/.exec(path);
+    if (request.method === 'POST' && fieldBreakdown) {
+      this.query(request, []);
+      this.allowedProject(key, this.decode(fieldBreakdown[1]));
+      this.used(key);
+      return next();
+    }
     if (request.method === 'POST' && path === '/api/issues/query') {
       this.query(request, []);
       if (typeof request.body.projectId !== 'string' || !request.body.projectId) fail(400, '필터를 적용할 프로젝트가 필요합니다.');

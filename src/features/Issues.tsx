@@ -6,12 +6,12 @@ import { PRIORITY, type CustomFieldValue, type FeatureProps, type Issue, type Is
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dateLabel, patch, post } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
-import { issueSearchText, issueTypeMeta, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
+import { issueTypeMeta, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { CustomFields, CustomFieldSummary, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect } from './PlanningSelectors';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
-import { createIssueFieldMatcher } from '../../shared/issue-field-filter';
+import { createIssueViewMatcher } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 
@@ -34,7 +34,12 @@ export function Issues(props: FeatureProps) {
   const [fieldEditorEpoch, setFieldEditorEpoch] = useState(0);
   const fieldFilter = projectFieldFilters.get(projectId);
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
-  const matchesFields = useMemo(() => createIssueFieldMatcher(fieldFilter, schema), [fieldFilter, schema]);
+  const filters = useMemo(() => ({
+    query,status,assigneeId:assignee,type,...(fieldFilter ? {fieldFilter} : {}),
+  }), [query,status,assignee,type,fieldFilter]);
+  const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
+    issueSchemas:data.issueSchemas,users:data.users,
+  }, schema), [filters,data.issueSchemas,data.users,schema]);
   const [creating, setCreating] = useState(false);
   const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');
   const [busy, setBusy] = useState<string | null>(null);
@@ -42,7 +47,7 @@ export function Issues(props: FeatureProps) {
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => data.issues.filter(i => isAll(projectId) || i.projectId === projectId), [data.issues, projectId]);
-  const issues = projectIssues.filter(i => (!query || issueSearchText(data, i).toLowerCase().includes(query.toLowerCase())) && (status === 'all' || i.status === status) && (assignee === 'all' || (assignee === 'none' ? !i.assigneeId : i.assigneeId === assignee)) && (type === 'all' || i.type === type) && matchesFields(i));
+  const issues = projectIssues.filter(matchesIssue);
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
   const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter);
@@ -91,7 +96,7 @@ export function Issues(props: FeatureProps) {
       onApply={updateFieldFilter} notify={notify}
     />}
     <SavedViews projectId={projectId} actorId={props.actorId}
-      current={{layout:view,filters:{query,status,assigneeId:assignee,type,...(fieldFilter ? {fieldFilter} : {})}}}
+      current={{layout:view,filters}}
       onApply={applySavedView} notify={notify} />
     <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? '카드를 끌어 상태 변경 · 카드에서 업무 상세 확인' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>
     {view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr><th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map(issue => {
