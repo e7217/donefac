@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { zip } from '../tests/fixtures/legacy-export-zip.mjs';
 
 const mode = process.argv[2];
 assert.ok(process.argv.length === 2 || (process.argv.length === 3 && mode === '--team'), 'Usage: node scripts/test-pilot.mjs [--team]');
@@ -107,6 +108,84 @@ function cli(action, from, to) {
 }
 
 function fileHash(path) { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
+
+async function applyPilotSourceMigration(url, actorId) {
+  const jira = Buffer.from([
+    'Issue id,Issue key,Project key,Summary,Description,Created,Updated,Status,Issue Type',
+    '100,OLD-1,OLD,파일럿 원본 업무,보관할 원본 내용,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task',
+    '101,OLD-2,OLD,파일럿 두 번째 업무,진행 상태의 원본,2020-01-02T00:00:00Z,2020-01-03T00:00:00Z,In Progress,Task',
+    '',
+  ].join('\r\n'));
+  const versions = [Buffer.from('보존할 첨부 첫 버전\r\n'), Buffer.from('보존할 첨부 두 번째 버전\x00\n')];
+  const confluence = zip([
+    {path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+      <object class="Space"><id name="id">42</id><property name="key">SYN</property><property name="name">파일럿 원본 공간</property></object>
+      <object class="Page"><id name="id">100</id><property name="title">파일럿 원본 설계 문서</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property></object>
+      <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>이관 뒤 검토할 설계 내용</p><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+      <object class="Attachment"><id name="id">700</id><property name="title">pilot-origin.bin</property><property name="version">2</property><property name="containerContent" class="Page"><id name="id">100</id></property><collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection><property name="creationDate">2020-01-02T00:00:00Z</property></object>
+      <object class="Attachment"><id name="id">701</id><property name="title">pilot-origin.bin</property><property name="version">1</property><property name="containerContent" class="Page"><id name="id">100</id></property><property name="originalVersion" class="Attachment"><id name="id">700</id></property><property name="creationDate">2020-01-01T00:00:00Z</property></object>
+    </hibernate-generic>`)},
+    ...versions.map((bytes, index) => ({path: `attachments/100/700/${index + 1}`, bytes})),
+  ]);
+  const headers = { 'X-Actor-Id': actorId };
+  async function stage(filename, product, body) {
+    const query = new URLSearchParams({filename, product, instanceKey: `pilot-${product}`});
+    return (await call(url, `/legacy-import/packages?${query}`, {
+      method: 'POST', status: 201, headers: {...headers, 'Content-Type': 'application/octet-stream'}, body,
+    })).json();
+  }
+  const jiraPackage = await stage('pilot.csv', 'jira', jira);
+  const wikiPackage = await stage('pilot.zip', 'confluence', confluence);
+  const query = new URLSearchParams();
+  for (const info of [jiraPackage, wikiPackage]) query.append('packageId', info.id);
+  const options = await (await call(url, `/migrations/options?${query}`, {headers})).json();
+  const migration = options.defaultConfiguration;
+  migration.projects = migration.projects.map(project => ({...project, key: 'PILOTIMP', name: '파일럿 합성 이관'}));
+  const preview = await (await call(url, '/migrations/preview', {
+    method: 'POST', status: 201, headers, body: {configuration: migration},
+  })).json();
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  const {import: receipt} = await (await call(url, `/migrations/previews/${preview.id}/apply`, {
+    method: 'POST', status: 201, headers,
+    body: {expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements},
+  })).json();
+  return {receipt, versions, packages: [{summary: jiraPackage, bytes: jira}, {summary: wikiPackage, bytes: confluence}]};
+}
+
+async function verifyPilotSourceMigration(url, migration) {
+  const {receipt, versions} = migration;
+  assert.equal(receipt.projectIds.length, 1);
+  const [projectId] = receipt.projectIds;
+  const base = `/source-imports/${receipt.id}/reconciliation`;
+  const workspace = await (await call(url, '/workspace')).json();
+  const issue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 원본 업무');
+  const document = workspace.documents.find(item => item.projectId === projectId);
+  const workflow = workspace.workflows.find(item => item.projectId === projectId);
+  const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
+  assert.ok(issue && nextStatus && nextStatus !== issue.status);
+  assert.equal(document?.title, '파일럿 원본 설계 문서');
+  assert.ok(document.plainText.includes('이관 뒤 검토할 설계 내용'));
+  assert.ok(document.content.content.some(node => node.type === 'issueReference' && node.attrs.issueId === issue.id));
+  assert.ok(workspace.resourceLinks.some(link => link.issueId === issue.id && link.documentId === document.id));
+  const reconciliation = await (await call(url, `${base}?kind=issue`)).json();
+  assert.equal(reconciliation.rows.find(row => row.sourceKey === 'OLD-1')?.target?.id, issue.id);
+  const audit = await (await call(url, `${base}/audit?expectedVersion=${receipt.version}`)).json();
+  assert.equal(audit.receiptVersion, receipt.version);
+  assert.deepEqual(audit.recordCounts, reconciliation.counts);
+  assert.equal(audit.recordCounts.missing, 0);
+  assert.deepEqual(audit.attachmentCounts, {verified: 2, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0});
+  assert.equal(audit.attachments.length, versions.length);
+  for (const [index, bytes] of versions.entries()) {
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    const checked = audit.attachments.find(file => file.sha256 === sha);
+    assert.equal(checked?.status, 'verified');
+    assert.equal(checked.sourceId, index === 0 ? '701' : '700');
+    assert.equal(checked.packageSha256, migration.packages[1].summary.sha256);
+    const download = await call(url, `/attachment-versions/${checked.fileId}/download`);
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+  }
+  return {issue, document, nextStatus, recordCounts: audit.recordCounts, attachments: audit.attachments};
+}
 
 async function browser(url, teamFixture) {
   interruption.signal.throwIfAborted();
@@ -320,10 +399,8 @@ async function runStandardPilot() {
   })).json();
   assert.equal(updatedAttachment.id,attachment.id);
   assert.equal(updatedAttachment.versionCount,2);
-  const original = Buffer.from('Issue key,Summary,Description\r\nOLD-1,파일럿 원본 업무,보관할 원본 내용\r\n');
-  const archive = await (await call(pilot.url,'/legacy-import/packages?filename=pilot.csv&instanceKey=pilot-synthetic&product=jira',{
-    method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:original,
-  })).json();
+  const migration = await applyPilotSourceMigration(pilot.url, assigneeId);
+  const sourceAudit = await verifyPilotSourceMigration(pilot.url, migration);
   const key = await (await call(pilot.url,'/api-keys',{
     method:'POST',status:201,body:{name:'파일럿 복원 키',access:'read',projectIds:[projectId],expiresAt:null},
   })).json();
@@ -400,13 +477,22 @@ async function runStandardPilot() {
     headers:{Authorization:`Bearer ${key.token}`},
   });
   assert.deepEqual(Buffer.from(await restoredRevision.arrayBuffer()),revisedFile);
-  const restoredPackage = await (await call(copy.url,`/legacy-import/packages/${archive.id}`)).json();
-  assert.equal(restoredPackage.summary.sha256,archive.sha256);
-  assert.deepEqual(readFileSync(join(restored,'legacy-imports',`${archive.id}.bundle`)),original);
+  for (const {summary, bytes} of migration.packages) {
+    const restoredPackage = await (await call(copy.url, `/legacy-import/packages/${summary.id}`)).json();
+    assert.equal(restoredPackage.summary.sha256, summary.sha256);
+    assert.deepEqual(readFileSync(join(restored, 'legacy-imports', `${summary.id}.bundle`)), bytes);
+  }
+  const restoredAudit = await verifyPilotSourceMigration(copy.url, migration);
+  assert.deepEqual(restoredAudit, sourceAudit, 'The migrated ticket, document, linkage and file audit must agree across physical restore.');
+  const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {
+    method: 'PATCH', body: {expectedVersion: restoredAudit.issue.version, status: restoredAudit.nextStatus},
+  })).json();
+  assert.equal(updatedMigratedIssue.status, restoredAudit.nextStatus);
+  assert.equal(updatedMigratedIssue.version, restoredAudit.issue.version + 1);
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, single-writer lock, cold copy, integrity rejection and restored data.');
+  console.log('Pilot rehearsal passed: browser workflows, mixed Jira/Confluence migration audit, single-writer lock, cold copy, integrity rejection and restored data.');
 }
 
 process.on('SIGINT', onInterrupt);

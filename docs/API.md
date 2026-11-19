@@ -288,6 +288,10 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 `GET /api/source-imports/:id/records/:recordId/check-file`은 지정한 원본 첨부 버전의 저장 바이트를 기록된 파일 크기와 SHA-256으로 검사한다. `verified`, `missing`, `corrupt`, `unbound` 상태와 연결된 파일의 식별 정보를 반환한다. 휴지통에 보관한 파일 버전도 검사할 수 있다.
 
+`GET /api/source-imports/:id/reconciliation/audit?expectedVersion=…`는 해당 영수증의 전체 대상 상태를 집계하고 활성·휴지통의 원본 첨부 버전을 검사한다. `recordCounts`와 `attachmentCounts`는 전체 건수다. `attachments`에는 원본 제품·인스턴스·패키지 해시·원본 ID·현재 대상 상태와 대상 파일 ID·기준 크기·기준 SHA-256이 들어 있다. 검증 상태는 `verified`, `missing`, `corrupt`, `unbound`, `excluded`, `unreadable`이다.
+
+서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
+
 
 ## 프로젝트 보고서와 주간 문서
 

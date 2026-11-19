@@ -1,10 +1,13 @@
+import { createHash } from 'node:crypto';
+import { constants, statSync } from 'node:fs';
+import fileSystem from 'node:fs/promises';
 import type { Express } from 'express';
-import { statSync } from 'node:fs';
 import type {
-  Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationFileCheck, SourceReconciliationOwner,
+  Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment,
+  SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationOwner,
   SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget,
 } from '../shared/types.js';
-import type { AttachmentFiles } from './attachments.js';
+import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import type { TrashArchive, TrashService } from './trash.js';
@@ -19,6 +22,14 @@ type MatchRow = SourceIdentity & {
   ownerLabel: string | null; ownerProjectId: string | null;
   trashId: string | null; trashTitle: string | null; trashIssueKey: string | null; trashProjectId: string | null;
 };
+type AuditMatchRow = MatchRow & {
+  originalSize: string | number | null; originalSha: string | null; size: number | null; sha: string | null;
+  originalOwnerId: string | null; originalOwnerType: SourceReconciliationOwner['type'] | null;
+  ownerVersion: number | null; targetVersion: number | null; targetUpdatedAt: string | null;
+  fileOwnerId: string | null; fileOwnerType: SourceReconciliationOwner['type'] | null;
+};
+type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
+type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
 type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string };
 type Dependencies = { store: Store; files: AttachmentFiles; preservation: SourcePreservationService; trash: TrashService };
 const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
@@ -50,8 +61,20 @@ function parseQuery(input: Record<string, unknown>): ReceiptQuery {
 }
 
 // The projection keeps archived bodies, metadata values and file bytes outside the response and JS scan.
-const rowsSql = `
+const auditProjection = `
+    CASE WHEN r.kind='attachment' THEN coalesce(json_extract(r.json,'$.record.metadata.actualSize'),json_extract(r.json,'$.record.metadata.size')) END AS originalSize,
+    CASE WHEN r.kind='attachment' THEN json_extract(r.json,'$.record.metadata.sha256') END AS originalSha,
+    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.size') ELSE json_extract(a.json,'$.size') END AS size,
+    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.sha256') ELSE json_extract(a.json,'$.sha256') END AS sha,
+    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.resourceId') ELSE json_extract(a.json,'$.resourceId') END AS fileOwnerId,
+    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.resourceType') ELSE json_extract(a.json,'$.resourceType') END AS fileOwnerType,
+    r.owner_id AS originalOwnerId, r.owner_type AS originalOwnerType,
+    coalesce(json_extract(i.json,'$.version'),json_extract(d.json,'$.version')) AS ownerVersion,
+    coalesce(json_extract(v.json,'$.version'),json_extract(w.json,'$.version')) AS targetVersion,
+    coalesce(json_extract(c.json,'$.updatedAt'),json_extract(p.json,'$.updatedAt')) AS targetUpdatedAt,`;
+const rowsSql = (audit: boolean) => `
   SELECT r.id AS sourceRecordId, r.kind, r.source_id AS sourceId, r.product, r.source_instance AS sourceInstance,
+    ${audit ? auditProjection : ''}
     json_extract(r.json,'$.record.id') AS originalRecordId, json_extract(r.json,'$.packageSha256') AS packageSha256,
     coalesce(json_extract(r.json,'$.record.title'),'') AS title,
     CASE WHEN r.product='jira' THEN coalesce(
@@ -100,47 +123,56 @@ function packageIdentity(product: string, instance: string, sha256: string) {
   return JSON.stringify([product, instance, sha256]);
 }
 
-function archiveLabels(archive: TrashArchive) {
+function archiveProjection(archive: TrashArchive, audit: boolean) {
   const labels: Record<string, Map<string, string>> = {
     comment: new Map(archive.comments.map(value => [value.id, '댓글'])),
     revision: new Map(archive.revisions.map(value => [value.id, `버전 ${value.version}`])),
     attachment: new Map(archive.attachments.map(value => [value.id, value.filename])),
   };
   for (const version of archive.attachmentVersions) labels.attachment.set(version.id, `${version.filename} · ${version.versionLabel}`);
-  return labels;
+  const files = new Map<string, FileMetadata>();
+  if (audit) for (const { id, size, sha256, resourceId, resourceType } of [...archive.attachments, ...archive.attachmentVersions]) {
+    files.set(id, { size, sha256, resourceId, resourceType });
+  }
+  return { labels, files };
 }
 
-function reconciliation({store, trash}: Dependencies, importId: string, query: ReceiptQuery): SourceReconciliationPage {
-  const receipt = store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+function scanReceipt(
+  { store, trash }: Dependencies, receipt: SourceImport, audit: boolean,
+  visit: (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null, archivedFile?: FileMetadata) => void,
+): SourceReconciliationPage['counts'] {
   const packages = new Map(receipt.packages.map(value => [packageIdentity(value.source.product, value.source.instanceKey, value.sha256), value.stagingId]));
   const excluded = new Set(receipt.configuration.excludedRecords);
   const counts: SourceReconciliationPage['counts'] = { linked: 0, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
-  const rows: SourceReconciliationRow[] = [];
-  const trashedChildren = new Map<string, ReturnType<typeof archiveLabels>>();
-  let total = 0;
+  const trashedChildren = new Map<string, ReturnType<typeof archiveProjection>>();
 
-  function archivedLabel(row: MatchRow, type: TargetType, targetId: string) {
-    if (!row.trashId) return null;
-    if (type === 'issue' || type === 'document') {
-      return [row.trashIssueKey, row.trashTitle].filter(Boolean).join(' · ') || targetId;
-    }
-    if (!['comment', 'revision', 'attachment'].includes(type)) return null;
-    let labels = trashedChildren.get(row.trashId);
-    if (!labels) {
-      labels = archiveLabels(trash.get(row.trashId));
+  function archivedChildren(trashId: string) {
+    let children = trashedChildren.get(trashId);
+    if (!children) {
+      children = archiveProjection(trash.get(trashId), audit);
       if (trashedChildren.size >= 32) trashedChildren.delete(trashedChildren.keys().next().value!);
-      trashedChildren.set(row.trashId, labels);
+      trashedChildren.set(trashId, children);
     }
-    return labels[type]?.get(targetId) ?? null;
+    return children;
   }
 
-  for (const raw of store.db.prepare(rowsSql).iterate(importId)) {
+  for (const raw of store.db.prepare(rowsSql(audit)).iterate(receipt.id)) {
     const row = raw as unknown as MatchRow;
     const stagingId = packages.get(packageIdentity(row.product, row.sourceInstance, row.packageSha256));
     let status: SourceReconciliationStatus = stagingId && excluded.has(`${stagingId}/${row.originalRecordId}`) ? 'excluded' : 'archive-only';
     let target: SourceReconciliationTarget | null = null;
+    let archivedFile: FileMetadata | undefined;
     if (status !== 'excluded' && row.targetType && row.targetId) {
-      const archived = row.linked ? null : archivedLabel(row, row.targetType, row.targetId);
+      let archived: string | null = null;
+      if (!row.linked && row.trashId) {
+        if (row.targetType === 'issue' || row.targetType === 'document') {
+          archived = [row.trashIssueKey, row.trashTitle].filter(Boolean).join(' · ') || row.targetId;
+        } else if (['comment', 'revision', 'attachment'].includes(row.targetType)) {
+          const children = archivedChildren(row.trashId);
+          archived = children.labels[row.targetType]?.get(row.targetId) ?? null;
+          if (row.targetType === 'attachment') archivedFile = children.files.get(row.targetId);
+        }
+      }
       status = row.linked ? 'linked' : archived !== null ? 'trashed' : 'missing';
       const owner = row.ownerType && row.ownerId ? {
         type: row.ownerType, id: row.ownerId, label: row.ownerLabel ?? row.ownerId, projectId: row.ownerProjectId,
@@ -151,13 +183,23 @@ function reconciliation({store, trash}: Dependencies, importId: string, query: R
       };
     }
     counts[status]++;
-    if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) continue;
+    visit(row, status, target, archivedFile);
+  }
+  return counts;
+}
+
+function reconciliation(dependencies: Dependencies, importId: string, query: ReceiptQuery): SourceReconciliationPage {
+  const receipt = dependencies.store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+  const rows: SourceReconciliationRow[] = [];
+  let total = 0;
+  const counts = scanReceipt(dependencies, receipt, false, (row, status, target) => {
+    if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) return;
     if (query.q && ![row.sourceId, row.sourceKey, row.title, row.sourceInstance, target?.label, target?.owner?.label]
-      .some(value => value && casefold(value).includes(query.q))) continue;
-    if (total++ < query.offset || rows.length >= query.limit) continue;
+      .some(value => value && casefold(value).includes(query.q))) return;
+    if (total++ < query.offset || rows.length >= query.limit) return;
     const { sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance } = row;
     rows.push({ sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance, status, target });
-  }
+  });
   return { importId, receiptVersion: receipt.version, counts, rows, total, offset: query.offset, limit: query.limit };
 }
 
@@ -187,12 +229,144 @@ function checkFile({store, files, preservation, trash}: Dependencies, importId: 
   }
 }
 
+function declaredSize(value: AuditMatchRow['originalSize']): number | null {
+  const size = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : null;
+  return size !== null && Number.isSafeInteger(size) && size >= 0 ? size : null;
+}
+
+function auditEntry(row: AuditMatchRow, recordStatus: SourceReconciliationStatus, archivedFile?: FileMetadata): AuditEntry {
+  const { sourceRecordId, sourceId, title, product, sourceInstance, packageSha256 } = row;
+  const identity = { sourceRecordId, sourceId, title, product, sourceInstance, packageSha256, recordStatus };
+  if (recordStatus === 'excluded' || row.targetType !== 'attachment' || !row.targetId) {
+    return { ...identity, status: recordStatus === 'excluded' ? 'excluded' : 'unbound', fileId: null, size: null, sha256: null };
+  }
+  if (recordStatus === 'missing') return { ...identity, status: 'missing', fileId: row.targetId, size: null, sha256: null };
+  const size = archivedFile ? archivedFile.size : row.size;
+  const sha256 = archivedFile ? archivedFile.sha256 : row.sha;
+  const resourceId = archivedFile ? archivedFile.resourceId : row.fileOwnerId;
+  const resourceType = archivedFile ? archivedFile.resourceType : row.fileOwnerType;
+  const sourceSize = declaredSize(row.originalSize);
+  const sourceSha = typeof row.originalSha === 'string' && /^[a-f\d]{64}$/i.test(row.originalSha) ? row.originalSha.toLowerCase() : null;
+  const compatible = typeof size === 'number' && Number.isSafeInteger(size) && size > 0 && size <= MAX_FILE_BYTES &&
+    typeof sha256 === 'string' && /^[a-f\d]{64}$/.test(sha256) &&
+    (!row.originalOwnerId || resourceId === row.originalOwnerId && resourceType === row.originalOwnerType) &&
+    (sourceSize === null || size === sourceSize) && (sourceSha === null || sha256 === sourceSha);
+  return {
+    ...identity, status: compatible ? null : 'corrupt', fileId: row.targetId,
+    size: typeof size === 'number' ? size : null, sha256: typeof sha256 === 'string' ? sha256 : null,
+  };
+}
+
+function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collect: boolean) {
+  const fingerprint = createHash('sha256');
+  const entries: AuditEntry[] = [];
+  const recordCounts = scanReceipt(dependencies, receipt, true, (row, status, target, archivedFile) => {
+    fingerprint.update(JSON.stringify([row, status, target, archivedFile ?? null])).update('\n');
+    if (collect && row.kind === 'attachment') entries.push(auditEntry(row as AuditMatchRow, status, archivedFile));
+  });
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts };
+}
+
+function errorCode(error: unknown): unknown {
+  return error && typeof error === 'object' && 'code' in error ? error.code : null;
+}
+
+async function auditFile(
+  files: AttachmentFiles, fileId: string, size: number, sha256: string, buffer: Buffer, signal: AbortSignal,
+): Promise<SourceReconciliationAuditStatus> {
+  let path: string;
+  try { path = files.path(fileId); }
+  catch { return 'corrupt'; }
+  try {
+    // Open the identified file once. A replacement during the read must remain unverified.
+    const file = await fileSystem.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      signal.throwIfAborted();
+      const before = await file.stat({ bigint: true });
+      if (!before.isFile() || before.size !== BigInt(size)) return 'corrupt';
+      const digest = createHash('sha256');
+      let offset = 0;
+      while (offset < size) {
+        signal.throwIfAborted();
+        const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, size - offset), offset);
+        if (!bytesRead) return 'corrupt';
+        offset += bytesRead;
+        digest.update(buffer.subarray(0, bytesRead));
+      }
+      signal.throwIfAborted();
+      const current = await fileSystem.lstat(path, { bigint: true });
+      if (!current.isFile() || current.dev !== before.dev || current.ino !== before.ino ||
+        current.size !== before.size || current.mtimeNs !== before.mtimeNs || current.ctimeNs !== before.ctimeNs) return 'unreadable';
+      return digest.digest('hex') === sha256 ? 'verified' : 'corrupt';
+    } finally { await file.close(); }
+  } catch (error) {
+    signal.throwIfAborted();
+    if (errorCode(error) === 'ENOENT') return 'missing';
+    if (errorCode(error) === 'ELOOP') return 'corrupt';
+    return 'unreadable';
+  }
+}
+
+function auditVersion(query: Record<string, unknown>): number {
+  const { expectedVersion } = query;
+  if (Object.keys(query).length !== 1 || typeof expectedVersion !== 'string' || !/^\d{1,16}$/.test(expectedVersion) ||
+    !Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 1) {
+    return failure(400, '이관 전체 검증에 사용할 영수증 버전을 확인해 주세요.');
+  }
+  return Number(expectedVersion);
+}
+
+async function auditReceipt(dependencies: Dependencies, importId: string, expectedVersion: number, signal: AbortSignal): Promise<SourceReconciliationAudit> {
+  const { store, files } = dependencies;
+  const receipt = store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+  const conflict = () => failure(409, '검증 중 이관 영수증이나 현재 대상이 변경되었습니다. 결과를 새로고침하고 다시 검증해 주세요.');
+  if (receipt.version !== expectedVersion) conflict();
+  const startedAt = new Date().toISOString();
+  const generation = store.setting('attachmentImportGeneration');
+  const before = auditSnapshot(dependencies, receipt, true);
+  const attachmentCounts: SourceReconciliationAudit['attachmentCounts'] = { verified: 0, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 };
+  const attachments: SourceReconciliationAuditAttachment[] = [];
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  for (const entry of before.entries) {
+    signal.throwIfAborted();
+    const status = entry.status ?? await auditFile(files, entry.fileId!, entry.size!, entry.sha256!, buffer, signal);
+    attachmentCounts[status]++;
+    attachments.push({ ...entry, status });
+  }
+  signal.throwIfAborted();
+  if (store.setting('attachmentImportGeneration') !== generation) conflict();
+  const current = store.get<SourceImport>('source_imports', importId);
+  if (!current || current.version !== expectedVersion || auditSnapshot(dependencies, current, false).fingerprint !== before.fingerprint) conflict();
+  return {
+    importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
+    recordCounts: before.recordCounts, attachmentCounts, attachments,
+  };
+}
+
 export function registerSourceReconciliationRoutes(app: Express, dependencies: Dependencies) {
+  let auditing = false;
   app.get('/api/source-imports/:id/reconciliation', (request, response) => {
     response.set('Cache-Control', 'no-store').json(reconciliation(dependencies, String(request.params.id), parseQuery(request.query)));
   });
   app.get('/api/source-imports/:id/records/:recordId/check-file', (request, response) => {
     if (Object.keys(request.query).length) failure(400, '지원하지 않는 파일 확인 조건입니다.');
     response.set('Cache-Control', 'no-store').json(checkFile(dependencies, String(request.params.id), String(request.params.recordId)));
+  });
+  app.get('/api/source-imports/:id/reconciliation/audit', async (request, response) => {
+    const expectedVersion = auditVersion(request.query);
+    if (auditing) failure(429, '다른 이관 전체 검증이 진행 중입니다. 완료 후 다시 시도해 주세요.');
+    const controller = new AbortController();
+    const disconnected = () => controller.abort();
+    response.once('close', disconnected);
+    auditing = true;
+    try {
+      const report = await auditReceipt(dependencies, String(request.params.id), expectedVersion, controller.signal);
+      if (!controller.signal.aborted) response.set('Cache-Control', 'no-store').json(report);
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      auditing = false;
+      response.off('close', disconnected);
+    }
   });
 }

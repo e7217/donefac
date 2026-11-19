@@ -1,0 +1,21 @@
+.migration-audit-entry { margin-bottom: .85rem; }
+.migration-audit { margin-top: .65rem; padding: .85rem; border: 1px solid #cbded8; border-radius: .55rem; background: #fcfefd; text-align: left; }
+.migration-audit-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: .45rem .65rem; }
+.migration-audit-heading > div { min-width: 0; }
+.migration-audit-heading h4 { margin: 0; }
+.migration-audit-heading .btn { max-width: 100%; white-space: normal; text-align: left; }
+.migration-audit h5 { margin: .65rem 0 .3rem; font-size: .875rem; }
+.migration-audit-completed { font-size: .875rem; color: #176355; margin: .5rem 0; }
+.migration-audit-filter { display: block; max-width: 19rem; margin: 0 0 .65rem; }
+.migration-audit-status { font-size: .8125rem; font-weight: 650; color: #465853; background: #eaf0ee; border-radius: .3rem; padding: .1rem .45rem; }
+.migration-audit-status.is-verified { color: #176355; background: #dff0e8; }
+.migration-audit-status.is-unbound { color: #734b1e; background: #fcf0d8; }
+.migration-audit-status:is(.is-missing, .is-corrupt, .is-unreadable) { color: #882e33; background: #f9e6e6; }
+.migration-audit .migration-reconciliation-row code { overflow-wrap: anywhere; }
+.migration-audit .migration-reconciliation-row .btn svg { flex-shrink: 0; }
+
+@media (max-width: 640px) {
+  .migration-audit { padding: .6rem; }
+  .migration-audit .migration-reconciliation-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .migration-audit .migration-reconciliation-counts div { min-width: 0; overflow-wrap: anywhere; }
+}

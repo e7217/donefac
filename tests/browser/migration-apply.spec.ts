@@ -1,21 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { crc32 } from 'node:zlib';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
-function zip(entries: [string, Buffer][]) {
-  const locals: Buffer[] = [], central: Buffer[] = []; let offset = 0;
-  for (const [path, content] of entries) {
-    const name = Buffer.from(path), local = Buffer.alloc(30), directory = Buffer.alloc(46), checksum = crc32(content);
-    local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt32LE(checksum, 14); local.writeUInt32LE(content.length, 18); local.writeUInt32LE(content.length, 22); local.writeUInt16LE(name.length, 26);
-    directory.writeUInt32LE(0x02014b50); directory.writeUInt16LE(3 << 8 | 20, 4); directory.writeUInt16LE(20, 6); directory.writeUInt16LE(0x800, 8); directory.writeUInt32LE(checksum, 16); directory.writeUInt32LE(content.length, 20); directory.writeUInt32LE(content.length, 24); directory.writeUInt16LE(name.length, 28); directory.writeUInt32LE((0o100600 << 16) >>> 0, 38); directory.writeUInt32LE(offset, 42);
-    locals.push(local, name, content); central.push(directory, name); offset += local.length + name.length + content.length;
-  }
-  const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...locals, directory, end]);
-}
 async function upload(request: APIRequestContext, filename: string, content: Buffer, instanceKey: string) { const response = await request.post(`/api/legacy-import/packages?${new URLSearchParams({ filename, instanceKey })}`, { headers: { 'Content-Type': 'application/octet-stream' }, data: content }); expect(response.status(), await response.text()).toBe(201); return await response.json() as LegacyPackageSummary; }
 async function open(page: Page, request: APIRequestContext) { const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot; await page.goto(`/#/${workspace.projects[0].id}/settings`); const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true }); await expect(settings).toBeVisible(); return { settings, workspace }; }
 async function selectPackage(settings: Locator, filename: string) { await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check(); await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click(); await expect(settings.getByLabel('이관 원본 시간대', { exact: true })).toBeVisible(); }
@@ -98,7 +88,7 @@ test('Confluence 문서·이력을 적용하고 원본 작성자와 긴 storage 
   const creator = ref('creator', 'ConfluenceUserImpl', 'old-user'), dates = prop('creationDate', '2019-01-02 03:04:05.000') + prop('lastModificationDate', '2020-01-02 03:04:05.000');
   const attachmentName = 'migration-notes.txt', bytes1 = Buffer.from('원본 첨부 첫 버전'), bytes2 = Buffer.from('원본 첨부 두 번째 버전');
   const xml = `<hibernate-generic>${obj('Space', '42', prop('key', `CF${unique}`) + prop('name', name))}${obj('ConfluenceUserImpl', 'old-user', prop('name', 'confluence-author'))}${obj('Page', '100', prop('title', title) + prop('version', '2') + ref('space', 'Space', '42') + creator + dates + '<collection name="historicalVersions"><element class="Page"><id name="id">101</id></element></collection>')}${obj('Page', '101', prop('title', '과거 제목') + prop('version', '1') + prop('contentStatus', 'historical') + ref('space', 'Space', '42') + ref('originalVersion', 'Page', '100') + creator + dates)}${obj('BodyContent', '200', prop('body', raw) + ref('content', 'Page', '100') + prop('bodyType', '2'))}${obj('BodyContent', '201', prop('body', old) + ref('content', 'Page', '101') + prop('bodyType', '2'))}${obj('Attachment', '700', prop('title', attachmentName) + prop('version', '2') + ref('containerContent', 'Page', '100') + creator + dates + '<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection>')}${obj('Attachment', '701', prop('title', attachmentName) + prop('version', '1') + ref('containerContent', 'Page', '100') + ref('originalVersion', 'Attachment', '700') + creator + dates)}</hibernate-generic>`;
-  const filename = `confluence-${unique}.zip`, pkg = await upload(request, filename, zip([['entities.xml', Buffer.from(xml)], ['attachments/100/700/1', bytes1], ['attachments/100/700/2', bytes2]]), `migration-confluence-${unique}`);
+  const filename = `confluence-${unique}.zip`, pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }, { path: 'attachments/100/700/1', bytes: bytes1 }, { path: 'attachments/100/700/2', bytes: bytes2 }]), `migration-confluence-${unique}`);
   try {
     const { settings } = await open(page, request); await selectPackage(settings, filename); await settings.getByLabel(`새 프로젝트 키 ${name}`, { exact: true }).fill(`CF${unique}`);
     const ready = await preview(page, settings); expect(ready.canApply, JSON.stringify(ready.notices)).toBe(true); await acknowledge(settings, ready);
@@ -146,6 +136,98 @@ test('Confluence 문서·이력을 적용하고 원본 작성자와 긴 storage 
     for (const [label, bytes] of [['1', bytes1], ['2', bytes2]] as const) { const event = page.waitForEvent('download'); await versions.getByRole('link', { name: `${attachmentName} 버전 ${label} 다운로드`, exact: true }).click(); const file = await event, path = await file.path(); expect(await readFile(path!)).toEqual(bytes); }
     await attachmentPanel.getByRole('button', { name: `${attachmentName} 버전`, exact: true }).click(); await attachmentPanel.getByRole('button', { name: `${attachmentName} 버전`, exact: true }).click(); await expect(versions).toBeVisible(); expect(versionRequests).toBe(1);
     await attachmentPanel.getByLabel('첨부할 파일 선택', { exact: true }).setInputFiles({ name: 'standalone.txt', mimeType: 'text/plain', buffer: Buffer.from('이관 이후 일반 첨부') }); await expect(attachmentPanel.getByRole('link', { name: 'standalone.txt', exact: true })).toBeVisible(); await expect(attachmentPanel.getByRole('button', { name: 'standalone.txt 버전', exact: true })).toHaveCount(0);
+  } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
+});
+
+test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버전을 검사하고 누락 결과를 내려받는다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const unique = suffix(), space = `검증 공간 ${unique}`;
+  const date = '<property name="creationDate">2020-01-02T00:00:00Z</property>';
+  const owner = '<property name="containerContent" class="Page"><id name="id">100</id></property>';
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">BA${unique}</property><property name="name">${space}</property></object>
+    <object class="Page"><id name="id">100</id><property name="title">이관 검증 문서</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property>${date}</object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>검증 보고서에 복사하지 않을 원문</p>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+    <object class="Attachment"><id name="id">700</id><property name="title">versioned.txt</property><property name="version">2</property>${owner}${date}<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection></object>
+    <object class="Attachment"><id name="id">701</id><property name="title">versioned.txt</property><property name="version">1</property>${owner}${date}<property name="originalVersion" class="Attachment"><id name="id">700</id></property></object>
+    <object class="Attachment"><id name="id">702</id><property name="title">removed-after-import.txt</property><property name="version">1</property>${owner}${date}</object>
+  </hibernate-generic>`;
+  const first = Buffer.from('첫 바이너리'), latest = Buffer.from('최신 버전 파일'), removed = Buffer.from('이관 후 삭제할 파일');
+  const filename = `receipt-${unique}.zip`;
+  const pkg = await upload(request, filename, zip([
+    { path: 'entities.xml', bytes: Buffer.from(xml) },
+    { path: 'attachments/100/700/1', bytes: first },
+    { path: 'attachments/100/700/2', bytes: latest },
+    { path: 'attachments/100/702/1', bytes: removed },
+  ]), `receipt-${unique}`);
+  try {
+    const { settings } = await open(page, request);
+    await selectPackage(settings, filename);
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts.attachmentVersions).toBe(3);
+    await acknowledge(settings, plan);
+    const applied = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await settings.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const application = await applied;
+    expect(application.ok(), await application.text()).toBe(true);
+    const { import: receipt } = await application.json() as MigrationApplyResult;
+
+    const reconciliation = await openReconciliation(settings);
+    const kinds = reconciliation.getByLabel('대조 원본 종류', { exact: true });
+    await kinds.selectOption('page');
+    await expect(reconciliation.getByRole('list', { name: '이관 결과 대조 목록' }).getByRole('listitem')).toHaveCount(1);
+    const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
+    const audit = reconciliation.getByRole('region', { name: '전체 이관 검증', exact: true });
+    const output = audit.getByRole('button', { name: '검증 결과 JSON 내보내기', exact: true });
+    const filter = audit.getByLabel('첨부 검증 상태', { exact: true });
+    const rows = audit.getByRole('list', { name: '첨부 검증 목록', exact: true }).getByRole('listitem');
+    async function checkAll() {
+      const ready = page.waitForResponse(value => new URL(value.url()).pathname === `/api/source-imports/${receipt.id}/reconciliation/audit`);
+      await run.click();
+      const response = await ready;
+      expect(response.ok(), await response.text()).toBe(true);
+      expect(new URL(response.url()).searchParams.get('expectedVersion')).toBe(String(receipt.version));
+      await expect(output).toBeVisible();
+      return await response.json() as SourceReconciliationAudit;
+    }
+
+    const good = await checkAll();
+    expect(good.attachmentCounts).toEqual({ verified: 3, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 });
+    expect(new Set(good.attachments.map(row => row.sha256))).toEqual(new Set([first, latest, removed].map(bytes => createHash('sha256').update(bytes).digest('hex'))));
+    await expect(filter).toHaveValue('all');
+    await expect(rows).toHaveCount(3);
+    const box = await audit.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(361);
+    expect(await audit.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(Math.ceil(box!.width));
+
+    const target = good.attachments.find(row => row.sourceId === '702')!.fileId;
+    expect(target).toBeTruthy();
+    const deletion = await request.delete(`/api/attachments/${target}`);
+    expect(deletion.ok(), await deletion.text()).toBe(true);
+    const mixed = await checkAll();
+    expect(mixed.attachmentCounts).toEqual({ ...good.attachmentCounts, verified: 2, missing: 1 });
+    await expect(filter).toHaveValue('findings');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText('removed-after-import.txt');
+    await expect(rows.first()).toContainText('파일 누락');
+    await expect(rows.first()).toContainText(pkg.sha256);
+    await expect(kinds).toHaveValue('page');
+
+    const downloadEvent = page.waitForEvent('download');
+    await output.click();
+    const download = await downloadEvent;
+    const path = await download.path();
+    expect(path).not.toBeNull();
+    const json = await readFile(path!, 'utf8');
+    expect(JSON.parse(json)).toEqual(mixed);
+    expect(json).not.toContain('검증 보고서에 복사하지 않을 원문');
+    await filter.selectOption('all');
+    await expect(rows).toHaveCount(3);
   } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
 });
 

@@ -7,6 +7,7 @@ import type {
   SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceRecordArchive,
 } from '../../shared/types';
 import { api } from '../lib/api';
+import { MigrationReceiptAudit } from './MigrationReceiptAudit';
 import { SourceArchiveDetail, sourceRecordKindLabels } from './SourceOrigins';
 
 const PAGE_SIZE = 30;
@@ -25,7 +26,8 @@ type Filters = { status: SourceReconciliationStatus | ''; kind: LegacyRecordKind
 type PageLoad = { filters: Filters; data: SourceReconciliationPage } | { filters: Filters; error: string };
 type Destination = NonNullable<SourceReconciliationTarget['owner']>;
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'openDocument' | 'refresh' | 'notify'> & { sourceImportId: string };
-type RecordLoad = { sourceRecordId: string } & ({ pending: true } | { archive: SourceRecordArchive } | { error: string });
+type RecordArea = 'list' | 'audit';
+type RecordLoad = { sourceRecordId: string; area: RecordArea } & ({ pending: true } | { archive: SourceRecordArchive } | { error: string });
 
 export function MigrationReconciliation(props: Props) {
   const [open, setOpen] = useState(false);
@@ -43,6 +45,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
   const [filters, setFilters] = useState<Filters>({ status: '', kind: '', q: '', offset: 0 });
   const [searchDraft, setSearchDraft] = useState('');
   const [load, setLoad] = useState<PageLoad | null>(null);
+  const [receiptVersion, setReceiptVersion] = useState<number | null>(null);
   const [record, setRecord] = useState<RecordLoad | null>(null);
   const recordRequest = useRef<AbortController | null>(null);
   const recordButton = useRef<HTMLButtonElement | null>(null);
@@ -51,6 +54,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
   const result = load?.filters === filters && 'data' in load ? load.data : null;
   const error = load?.filters === filters && 'error' in load ? load.error : null;
   const loading = load?.filters !== filters;
+  const auditRecord = record?.area === 'audit' ? record : null;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -61,6 +65,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     void api<SourceReconciliationPage>(`${base}/reconciliation?${params}`, { signal: abort.signal, cache: 'no-store' })
       .then(data => {
         if (abort.signal.aborted) return;
+        setReceiptVersion(data.receiptVersion);
         if (data.offset > 0 && data.offset >= data.total) {
           const lastPage = Math.floor(Math.max(0, data.total - 1) / PAGE_SIZE) * PAGE_SIZE;
           setFilters(current => current === filters ? { ...current, offset: lastPage } : current);
@@ -77,29 +82,30 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
 
   function closeRecord(restoreFocus = false) {
     recordRequest.current?.abort();
+    recordRequest.current = null;
     setRecord(null);
     if (restoreFocus) recordButton.current?.focus();
     recordButton.current = null;
   }
   function updateFilters(changes: Partial<Filters> = {}) {
-    closeRecord();
+    if (record?.area === 'list') closeRecord();
     setFilters(current => ({ ...current, ...changes }));
   }
   function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     updateFilters({ q: searchDraft.trim(), offset: 0 });
   }
-  async function openRecord(sourceRecordId: string, trigger: HTMLButtonElement) {
+  async function openRecord(sourceRecordId: string, area: RecordArea, trigger: HTMLButtonElement) {
     recordRequest.current?.abort();
     const abort = new AbortController();
     recordRequest.current = abort;
     recordButton.current = trigger;
-    setRecord({ sourceRecordId, pending: true });
+    setRecord({ sourceRecordId, area, pending: true });
     try {
       const archive = await api<SourceRecordArchive>(`${base}/records/${encodeURIComponent(sourceRecordId)}`, { signal: abort.signal, cache: 'no-store' });
-      if (!abort.signal.aborted) setRecord({ sourceRecordId, archive });
+      if (!abort.signal.aborted) setRecord({ sourceRecordId, area, archive });
     } catch (cause) {
-      if (!abort.signal.aborted) setRecord({ sourceRecordId, error: cause instanceof Error ? cause.message : '보존 원본을 불러오지 못했습니다.' });
+      if (!abort.signal.aborted) setRecord({ sourceRecordId, area, error: cause instanceof Error ? cause.message : '보존 원본을 불러오지 못했습니다.' });
     }
   }
 
@@ -113,6 +119,17 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
         <RefreshCw size={16} aria-hidden="true" />새로고침
       </button>
     </header>
+
+    <MigrationReceiptAudit key={`${base}:${receiptVersion ?? ''}`} base={base} receiptVersion={receiptVersion}
+      canStart={Boolean(result)} recordLabels={statusLabels} onStale={() => updateFilters()} detail={{
+        openId: auditRecord?.sourceRecordId ?? null,
+        onToggle: (sourceRecordId, trigger) => {
+          if (auditRecord?.sourceRecordId === sourceRecordId) closeRecord();
+          else void openRecord(sourceRecordId, 'audit', trigger);
+        },
+        onClose: () => { if (auditRecord) closeRecord(); },
+        content: auditRecord && <ReconciliationRecordDetail state={auditRecord} onClose={() => closeRecord(true)} />,
+      }} />
 
     {result && <dl className="migration-reconciliation-counts" aria-label="전체 원본 대조 건수">
       {Object.entries(statusLabels).map(([status, label]) => <div key={status}>
@@ -144,14 +161,14 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     {result && (result.rows.length ? <>
       <ul className="migration-reconciliation-list" aria-label="이관 결과 대조 목록">
         {result.rows.map(row => {
-          const selectedRecord = record?.sourceRecordId === row.sourceRecordId ? record : null;
+          const selectedRecord = record?.area === 'list' && record.sourceRecordId === row.sourceRecordId ? record : null;
           return <li className="migration-reconciliation-row" key={row.sourceRecordId}>
             <div className="migration-reconciliation-source">
               <small>{sourceRecordKindLabels[row.kind]} · {row.product === 'jira' ? 'Jira' : 'Confluence'} / {row.sourceInstance}</small>
               <strong>{row.title || '(제목 없음)'}</strong>
               <small>원본 {row.sourceKey && row.sourceKey !== row.sourceId ? `${row.sourceKey} · ` : ''}{row.sourceId}</small>
               <button type="button" className="btn btn-ghost" aria-expanded={Boolean(selectedRecord)} onClick={event => {
-                if (selectedRecord) closeRecord(); else void openRecord(row.sourceRecordId, event.currentTarget);
+                if (selectedRecord) closeRecord(); else void openRecord(row.sourceRecordId, 'list', event.currentTarget);
               }}>보존 원본 열기</button>
             </div>
             <div className="migration-reconciliation-target">
@@ -160,9 +177,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
               {row.kind === 'attachment' && row.target?.type === 'attachment' && <FileCheck base={base} row={row} />}
             </div>
             {selectedRecord && <div className="migration-reconciliation-record">
-              {'pending' in selectedRecord && <p role="status">보존 원본을 불러오는 중…</p>}
-              {'error' in selectedRecord && <p role="alert" className="migration-error">{selectedRecord.error}</p>}
-              {'archive' in selectedRecord && <SourceArchiveDetail archive={selectedRecord.archive} originalAuthorName={null} onClose={() => closeRecord(true)} />}
+              <ReconciliationRecordDetail state={selectedRecord} onClose={() => closeRecord(true)} />
             </div>}
           </li>;
         })}
@@ -174,6 +189,12 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
       </div>
     </> : <p role="status">조건에 맞는 원본이 없습니다.</p>)}
   </section>;
+}
+
+function ReconciliationRecordDetail({ state, onClose }: { state: RecordLoad; onClose: () => void }) {
+  if ('pending' in state) return <p role="status">보존 원본을 불러오는 중…</p>;
+  if ('error' in state) return <p role="alert" className="migration-error">{state.error}</p>;
+  return <SourceArchiveDetail archive={state.archive} originalAuthorName={null} onClose={onClose} />;
 }
 
 function Target({ row, data, ...navigation }: Pick<Props, 'data' | 'openIssue' | 'openDocument' | 'refresh' | 'notify'> & { row: SourceReconciliationRow }) {

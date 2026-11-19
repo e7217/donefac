@@ -191,6 +191,25 @@ export interface SourceReconciliationFileCheck {
   sourceRecordId: string; status: 'verified' | 'missing' | 'corrupt' | 'unbound';
   fileId: string | null; size: number | null; sha256: string | null;
 }
+export type SourceReconciliationAuditStatus = SourceReconciliationFileCheck['status'] | 'excluded' | 'unreadable';
+export interface SourceReconciliationAuditAttachment extends Omit<SourceReconciliationFileCheck, 'status'> {
+  sourceId: string;
+  title: string;
+  product: LegacySource['product'];
+  sourceInstance: string;
+  packageSha256: string;
+  recordStatus: SourceReconciliationStatus;
+  status: SourceReconciliationAuditStatus;
+}
+export interface SourceReconciliationAudit {
+  importId: string;
+  receiptVersion: number;
+  startedAt: string;
+  completedAt: string;
+  recordCounts: SourceReconciliationPage['counts'];
+  attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
+  attachments: SourceReconciliationAuditAttachment[];
+}
 export interface Project { id: string; key: string; name: string; description: string; color: string; createdAt: string }
 export type PlanningKind = 'cycle' | 'module' | 'release';
 export type PlanningStatus = 'planned' | 'active' | 'completed' | 'archived';
