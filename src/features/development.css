@@ -1,0 +1,9 @@
+.development-page .integration-form,.development-page .integration-guide{font-size:16px;line-height:1.6}
+.development-page .integration-form fieldset{display:grid;gap:16px}
+.development-page .integration-form .form-label{font-size:14px;margin:0;color:#486554}
+.development-page .integration-form .field{font-size:16px}
+.development-page>.page-heading .btn,.development-page .integration-form .btn{font-size:14px}
+.development-page .integration-guide p,.development-page .integration-guide li,.development-page .integration-guide>code{font-size:16px;color:#486554}
+.development-page .integration-guide .help-text,.development-page .integration-guide .help-text code{font-size:12px}
+.development-page .help-text{font-size:12px}
+.development-page .development-row{font-size:14px}

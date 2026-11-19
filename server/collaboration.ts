@@ -193,7 +193,7 @@ export class CollaborationService {
         const timer=setTimeout(()=>{if(!peer.ready)ws.close(4408,'hello_timeout');},10000);timer.unref();
         ws.on('error',()=>{});
         ws.on('message',(data,isBinary)=>{
-          try{if(isBinary)invalid('JSON 텍스트 메시지를 사용해 주세요.');this.handle(peer,Buffer.isBuffer(data)?data:Buffer.from(data as ArrayBuffer));}
+          try{if(isBinary)invalid('JSON 텍스트 메시지를 사용해 주세요.');this.store.withMutationContext({actorId:peer.actorId,origin:'user'},()=>this.handle(peer,Buffer.isBuffer(data)?data:Buffer.from(data as ArrayBuffer)));}
           catch(error){const e=error instanceof CollaborationError?error:new CollaborationError(500,'공동 편집을 저장하지 못했습니다. 다시 연결해 주세요.','SERVER_ERROR');this.send(peer,{type:'error',code:e.code,message:e.message});if(e.code==='SCHEMA_MISMATCH'||e.code==='SERVER_ERROR')ws.close(e.code==='SCHEMA_MISMATCH'?4400:4500,e.code);}
         });
         ws.on('close',()=>{clearTimeout(timer);this.peers.delete(peer);this.broadcastPresence(documentId);});

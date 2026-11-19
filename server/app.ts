@@ -1,5 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
-import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, safeFilename, sniffMime, hash } from './attachments.js';
 import { Store } from './store.js';
@@ -14,9 +14,12 @@ import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-sc
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, hasVersionTwoNodes } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
+import { AutomationService, AutomationError } from './automation.js';
+import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
+import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
-import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type GitlabSettings, type Attachment } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment } from '../shared/types.js';
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
@@ -36,7 +39,7 @@ function shiftDate(value: string, days: number, working: boolean): string {
   return d.toISOString().slice(0,10);
 }
 
-export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
+export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean} = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
   const files = new AttachmentFiles(dataDir);
@@ -53,6 +56,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
+  app.use('/api/integrations/gitlab/webhook',express.json({limit:2*1024*1024,verify:(req,_res,buffer)=>{(req as Request & {gitlabRawBody:Buffer}).gitlabRawBody=Buffer.from(buffer);}}));
   app.use(express.json({limit:MAX_PACKAGE_BYTES}));
   app.use((req,res,next)=>{req.body??={};if(req.method!=='GET'&&(typeof req.body!=='object'||Array.isArray(req.body)))return res.status(400).json({error:'JSON 객체가 필요합니다.'});next();});
   apiKeys.installAuthorization(app);
@@ -64,6 +68,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     return store.all<any>('users')[0]?.id || fail('먼저 팀원을 등록해 주세요.');
   };
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
+  app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
   const attachmentRows=(type:string,id:string)=>store.all<Attachment>('attachments').filter(a=>a.resourceType===type&&a.resourceId===id);
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
   const deleteAttachmentRows=(type:string,id:string)=>{const rows=attachmentRows(type,id);store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);return rows;};
@@ -138,6 +143,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     for(const c of changes){if(!c||typeof c!=='object'||typeof c.id!=='string')fail('일정 변경 형식을 확인해 주세요.');const issue=get<Issue>('issues',c.id);if(!Object.hasOwn(versions,issue.projectId))fail('변경할 업무의 달력 버전이 필요합니다.');}
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
+  const automation=new AutomationService(store,{
+    getGitlabSettings:()=>gitlab.settings(),
+    prepareChange:(before,status)=>{const next=validateIssue({...before,status,version:before.version+1,updatedAt:now()},before);next.completedAt=done(next)?(before.completedAt||now()):null;return next;},
+    commitChange:(rule,before,next,event)=>{store.put('issues',next);store.put('activities',{id:uid(),resourceType:'issue',resourceId:next.id,actorId:rule.actorId,action:'GitLab 자동화 상태 변경',detail:`${before.status} → ${next.status} · ${rule.name} · ${event.id}`,createdAt:now()});},
+  });
+  const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{processEvent:event=>automation.processEvent(event),onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next)});
+  const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
+  automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
   issueSchemas.registerRoutes(app,{actor,activity});
   planning.registerRoutes(app,{actor,activity,validateIssue});apiKeys.registerManagementRoutes(app,{actor,activity});
@@ -234,7 +247,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
   app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
-    const payload={schemaVersion:7,collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
+    const payload={schemaVersion:8,automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt:now(),...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[]};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+attachments.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=attachments.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -242,7 +255,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5,6,7].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~7)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~8)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
@@ -257,9 +270,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas);
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
+    const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
     let staged:string;try{staged=files.stageImport(data.attachments,data.attachmentContents);}catch(error){fail((error as Error).message);}
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;
-    try{store.transaction(()=>{
+    try{store.withMutationContext({actorId:null,origin:'import'},()=>store.transaction(()=>{
+      const previousAutomation=new Map(automation.all().map(rule=>[rule.id,rule.version]));
       const previousSchemas=new Map(issueSchemas.snapshot().map(schema=>[schema.projectId,schema.version]));
       const previousWorkflows=new Map(workflows.snapshot().map(w=>[w.projectId,w.version]));
       const previousViews=new Map(savedViews.all().map(v=>[v.id,v.version]));
@@ -269,11 +284,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       const previousBaselines=new Map(scheduleArtifacts.allBaselines().map(baseline=>[baseline.id,baseline.version]));
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
-      for(const table of ['automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
+      outbound.resetForImport();gitlab.resetForImport();
+      for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
+      automation.replaceImported(importedAutomation,previousAutomation);
       planning.replaceImported(importedPlanning.items,previousPlanning);
       calendars.replaceImported(importedCalendars,previousCalendars);
       scheduleArtifacts.replaceImported(importedArtifacts,previousMilestones,previousBaselines);
@@ -293,59 +310,19 @@ export function createApp(options: {dataDir?: string; seed?: boolean} = {}) {
       for(const p of data.projects){const max=Math.max(0,...data.issues.filter((i:any)=>i.projectId===p.id).map((i:any)=>{const match=i.key.match(/-(\d+)$/);return match?Number(match[1]):0;}));store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(p.id,max+1);}
       collaboration.replaceImported(importedCollaboration);
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
-    });}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
+    }));}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
     collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
     files.cleanupStage(staged!);try{swapped?.commit();}catch{console.error('[teamspace attachments] previous upload directory cleanup needed');}
     res.json({ok:true,counts:{projects:data.projects.length,issues:data.issues.length,documents:data.documents.length,attachments:data.attachments.length,planningItems:importedPlanning.items.length,milestones:importedArtifacts.milestones.length,baselines:importedArtifacts.baselines.length}});
   });
 
-  const settings = (): GitlabSettings => {
-    const raw=store.setting('gitlab')||{};return{baseUrl:raw.baseUrl||'',projectIds:raw.projectIds||[],tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,lastSyncAt:raw.lastSyncAt||null,lastError:raw.lastError||null};
-  };
-  app.get('/api/integrations/gitlab',(_req,res)=>res.json(settings()));
-  app.patch('/api/integrations/gitlab',(req,res)=>{const old=store.setting('gitlab')||{};const raw={...old};if('baseUrl'in req.body){const value=String(req.body.baseUrl).trim().replace(/\/$/,'');if(value){let url:URL;try{url=new URL(value);}catch{fail('GitLab 주소가 올바르지 않습니다.');}if(!['https:','http:'].includes(url!.protocol)||url!.username||url!.password||url!.search||url!.hash)fail('GitLab http(s) 기본 주소가 필요합니다.');}raw.baseUrl=value;}
-    if('projectIds'in req.body){const v=req.body.projectIds;if(!Array.isArray(v)||!v.every((x:any)=>Number.isInteger(x)&&x>0)||v.length>100)fail('저장소 ID는 양의 정수 목록이어야 합니다.');raw.projectIds=[...new Set(v)];}
-    for(const field of ['token','webhookSecret'])if(field in req.body){if(typeof req.body[field]!=='string'||req.body[field].length>2000||/[\r\n]/.test(req.body[field]))fail('인증 값이 올바르지 않습니다.');raw[field]=req.body[field]?store.seal(req.body[field]):null;}
-    store.transaction(()=>{store.setSetting('gitlab',raw);activity(req,'integration','gitlab','GitLab 설정 변경');});res.json(settings());
-  });
-  const upsertGitlab = (projectId:number,kind:'merge_request'|'pipeline'|'commit',obj:any,explicitKeys?:string[]) => {
-    const title=String(obj.title||obj.name||obj.ref||obj.message||`${kind} #${obj.iid||obj.id}`);
-    const source=`${title} ${obj.description||''} ${obj.source_branch||''} ${(explicitKeys||[]).join(' ')}`;
-    const keys=new Set(source.match(/\b[A-Z][A-Z0-9]{1,11}-\d+\b/g)||[]);
-    const instance=createHash('sha256').update(store.setting('gitlab')?.baseUrl||'').digest('hex').slice(0,12);
-    let count=0;for(const i of store.all<Issue>('issues'))if(keys.has(i.key)){const objectId=obj.id??obj.iid;if(objectId===undefined)continue;const webUrl=String(obj.web_url||obj.url||'');if(!/^https?:\/\//.test(webUrl))continue;store.put('gitlab_links',{id:`gitlab:${instance}:${projectId}:${kind}:${objectId}:${i.id}`,issueId:i.id,projectId,iid:kind==='commit'?0:Number(obj.iid||obj.id),kind,title:title.slice(0,500),webUrl,state:String(obj.state||obj.status||'unknown'),updatedAt:obj.updated_at||now()});count++;}return count;
-  };
-  app.post('/api/integrations/gitlab/sync',async(req,res,next)=>{
-    const raw=store.setting('gitlab')||{};if(!raw.baseUrl||!raw.projectIds?.length) return next(new ApiError(400,'GitLab 주소와 저장소 ID를 먼저 설정해 주세요.'));
-    try{
-      const headers:Record<string,string>={Accept:'application/json'};if(raw.token)headers['PRIVATE-TOKEN']=store.unseal(raw.token);
-      const objects:{projectId:number;kind:'merge_request'|'pipeline';obj:any;keys?:string[]}[]=[];
-      for(const projectId of raw.projectIds){
-        const api=async(path:string)=>{const response=await fetch(`${raw.baseUrl}/api/v4/projects/${projectId}/${path}`,{headers,signal:AbortSignal.timeout(10000),redirect:'error'});if(!response.ok)throw new Error(`GitLab HTTP ${response.status}`);return response.json() as Promise<any>;};
-        for(let page=1;page<=10;page++){const mrs=await api(`merge_requests?scope=all&per_page=100&page=${page}`);if(!Array.isArray(mrs))throw new Error('GitLab MR 응답 형식 오류');for(const mr of mrs)objects.push({projectId,kind:'merge_request',obj:mr});if(mrs.length<100)break;}
-        const pipelines=await api('pipelines?per_page=50');if(!Array.isArray(pipelines))throw new Error('GitLab 파이프라인 응답 형식 오류');for(const pipeline of pipelines){const keys=objects.filter(x=>x.projectId===projectId&&x.kind==='merge_request'&&x.obj.source_branch===pipeline.ref).flatMap(x=>(`${x.obj.title} ${x.obj.description||''}`).match(/\b[A-Z][A-Z0-9]{1,11}-\d+\b/g)||[]);objects.push({projectId,kind:'pipeline',obj:pipeline,keys});}
-      }
-      let linked=0;store.transaction(()=>{for(const x of objects)linked+=upsertGitlab(x.projectId,x.kind,x.obj,x.keys);store.setSetting('gitlab',{...raw,lastSyncAt:now(),lastError:null});activity(req,'integration','gitlab','GitLab 재동기화',`${objects.length}개 항목 확인, ${linked}개 업무 연결`);});res.json({ok:true,scanned:objects.length,linked,settings:settings(),notice:'MR은 저장소당 최근 최대 1000개, 파이프라인은 최근 50개를 조회합니다. 업무 상태는 자동 변경하지 않습니다.'});
-    }catch(error){const message=error instanceof Error?error.message:'GitLab 연결 실패';store.setSetting('gitlab',{...raw,lastError:message});next(new ApiError(502,'GitLab 동기화에 실패했습니다.',{reason:message}));}
-  });
-  app.post('/api/integrations/gitlab/webhook',(req,res)=>{
-    const raw=store.setting('gitlab')||{};if(!raw.webhookSecret)fail('웹훅 비밀 값이 설정되지 않았습니다.',503);const expected=store.unseal(raw.webhookSecret),received=req.header('X-Gitlab-Token')||'';const a=Buffer.from(expected),b=Buffer.from(received);if(a.length!==b.length||!timingSafeEqual(a,b))fail('웹훅 인증에 실패했습니다.',401);
-    const projectId=Number(req.body.project?.id||req.body.project_id);if(!raw.projectIds?.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
-    const event=req.header('X-Gitlab-Event')||req.body.object_kind||'';
-    const dedup=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update(JSON.stringify(req.body)).digest('hex');const id=`${projectId}:${event}:${dedup}`;
-    const result=store.transaction(()=>{if(store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(id))return{ok:true,duplicate:true,linked:0};store.db.prepare('INSERT INTO webhook_inbox VALUES(?,?)').run(id,now());let linked=0;const attributes=req.body.object_attributes||{};
-      if(event==='Merge Request Hook'||req.body.object_kind==='merge_request')linked=upsertGitlab(projectId,'merge_request',attributes);
-      else if(event==='Pipeline Hook'||req.body.object_kind==='pipeline'){const project=req.body.project||{};linked=upsertGitlab(projectId,'pipeline',{...attributes,web_url:attributes.url||`${project.web_url}/-/pipelines/${attributes.id}`});}
-      else if(event==='Push Hook'||req.body.object_kind==='push')for(const c of req.body.commits||[])linked+=upsertGitlab(projectId,'commit',{...c,state:'committed'});
-      return{ok:true,duplicate:false,linked};});res.json(result);
-  });
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
-    if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
+    if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{collaboration.close();store.db.close();}};
+  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{outbound.close();collaboration.close();store.db.close();}};
 }

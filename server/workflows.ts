@@ -88,6 +88,10 @@ export class WorkflowService {
       const issues = this.store.all<Issue>('issues').filter(issue => issue.projectId === projectId);
       const referenced = issues.filter(issue => !statusIds.has(issue.status));
       if (referenced.length) invalid(`사용 중인 상태는 삭제할 수 없습니다: ${[...new Set(referenced.map(issue => previous.statuses.find(status => status.id === issue.status)?.label || issue.status))].join(', ')}`, 409, { issueIds: referenced.map(issue => issue.id) });
+      if(this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='automation_rules'").get()){
+        const rules=this.store.all<import('../shared/types.js').AutomationRule>('automation_rules').filter(rule=>rule.projectId===projectId);
+        if(rules.some(rule=>[...rule.fromStatuses,rule.toStatusId].some(id=>!statusIds.has(id))))invalid('자동화 규칙에서 참조하는 상태입니다. 규칙을 변경하거나 삭제한 뒤 상태를 삭제해 주세요.',409);
+      }
       for (const issue of issues) {
         const wasDone = previous.statuses.find(status => status.id === issue.status)?.category === 'done';
         const isDone = next.statuses.find(status => status.id === issue.status)?.category === 'done';

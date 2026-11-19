@@ -2,10 +2,25 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { MutationOrigin } from '../shared/types.js';
+
+export interface MutationContext { actorId: string | null; origin: MutationOrigin; sourceEventId?: string | null }
+export interface StoreChange { table: string; before: unknown; after: unknown; context: MutationContext }
 
 export class Store {
   db: DatabaseSync;
   key: Buffer;
+  private transactionActive = false;
+  private changeListeners = new Map<(change: StoreChange) => void, Set<string> | null>();
+  private mutationContexts = new AsyncLocalStorage<MutationContext>();
+  withMutationContext<T>(context: MutationContext, action: () => T): T { return this.mutationContexts.run(context, action); }
+  onChange(listener: (change: StoreChange) => void, tables?: string[]): () => void { this.changeListeners.set(listener,tables ? new Set(tables) : null); return () => { this.changeListeners.delete(listener); }; }
+  private observed(table: string) { return [...this.changeListeners.values()].some(tables=>!tables||tables.has(table)); }
+  private changed(table: string, before: unknown, after: unknown) {
+    const change: StoreChange={table,before,after,context:this.mutationContexts.getStore()||{actorId:null,origin:'system',sourceEventId:null}};
+    for(const [listener,tables] of this.changeListeners)if(!tables||tables.has(table))listener(change);
+  }
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     const keyPath = join(dataDir, '.credential-key');
@@ -41,7 +56,10 @@ export class Store {
     const row = this.db.prepare(`SELECT json FROM ${table} WHERE id=?`).get(id) as {json: string} | undefined;
     return row && JSON.parse(row.json);
   }
-  put(table: string, value: any) {
+  put(table: string, value: any): void {
+    const observed=this.observed(table);
+    if(observed&&!this.transactionActive)return this.transaction(()=>this.put(table,value));
+    const before=observed?this.get(table,value.id):undefined;
     const cols: Record<string, Record<string, any>> = {
       users: { email: value.email }, projects: { key: value.key },
       issues: { project_id: value.projectId, parent_id: value.parentId, assignee_id: value.assigneeId },
@@ -55,13 +73,23 @@ export class Store {
     };
     const extra = cols[table] || {};
     const keys = ['id', ...Object.keys(extra), 'json'];
-    this.db.prepare(`INSERT INTO ${table}(${keys.join(',')}) VALUES(${keys.map(() => '?').join(',')}) ON CONFLICT(id) DO UPDATE SET ${keys.slice(1).map(k => `${k}=excluded.${k}`).join(',')}`).run(value.id, ...Object.values(extra), JSON.stringify(value));
+    const serialized=JSON.stringify(value);
+    this.db.prepare(`INSERT INTO ${table}(${keys.join(',')}) VALUES(${keys.map(() => '?').join(',')}) ON CONFLICT(id) DO UPDATE SET ${keys.slice(1).map(k => `${k}=excluded.${k}`).join(',')}`).run(value.id, ...Object.values(extra), serialized);
+    if(observed)this.changed(table,before,JSON.parse(serialized));
   }
-  remove(table: string, id: string) { this.db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); }
+  remove(table: string, id: string): void {
+    const observed=this.observed(table);
+    if(observed&&!this.transactionActive)return this.transaction(()=>this.remove(table,id));
+    const before=observed?this.get(table,id):undefined;
+    this.db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id);
+    if(observed&&before)this.changed(table,before,undefined);
+  }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
+    this.transactionActive=true;
     try { const result = fn(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    finally { this.transactionActive=false; }
   }
   setting(key: string): any {
     const r = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as { value: string } | undefined;

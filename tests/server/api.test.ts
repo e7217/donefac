@@ -103,7 +103,7 @@ test('attachments persist bytes and hashes, reject unsafe names and oversized up
 test('native export/import includes exact attachment bytes and accepts legacy schema2 while rolling back invalid packages',async()=>{
  const f=await fixture();try{
   const a=await upload(f,Buffer.from('보존할 첨부파일'),'설계.txt');const b=await upload(f,onePixelPng,'image.png','document','doc-retry','image/png');
-  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,7);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
+  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,8);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
   const extra=await upload(f,Buffer.from('나중 파일'),'later.txt','issue','issue-2');
   const corrupt=structuredClone(exported);corrupt.attachmentContents[0].data=Buffer.from('손상됨').toString('base64');assert.equal((await f.request('/import','POST',{data:corrupt})).status,400);
   assert.equal(existsSync(join(f.dir,'uploads',extra.data.id)),true);assert.deepEqual(readFileSync(join(f.dir,'uploads',b.data.id)),onePixelPng);
@@ -165,7 +165,7 @@ test('GitLab configured-only sync, encrypted write-only credentials, authenticat
  const mock=createServer((req,res)=>{requested.push(req.url!);assert.equal(req.headers['private-token'],'mock-private-token');res.setHeader('Content-Type','application/json');if(req.url?.includes('merge_requests'))res.end(JSON.stringify([{id:101,iid:7,title:'NEO-1 연결 검증',source_branch:'feature/NEO-1',state:'merged',web_url:'http://gitlab.test/neo/-/merge_requests/7'}]));else res.end(JSON.stringify([{id:99,ref:'feature/NEO-1',status:'success',web_url:'http://gitlab.test/neo/-/pipelines/99'}]));});mock.listen(0,'127.0.0.1');await once(mock,'listening');
  try{
   assert.equal((await f.request('/integrations/gitlab/sync','POST',{})).status,400);assert.equal(requested.length,0);
-  const setup=await f.request('/integrations/gitlab','PATCH',{baseUrl:`http://127.0.0.1:${(mock.address() as any).port}`,projectIds:[42],token:'mock-private-token',webhookSecret:'mock-webhook-secret'});assert.equal(setup.data.tokenConfigured,true);assert.ok(!JSON.stringify(setup.data).includes('mock-private-token'));
+  const setup=await f.request('/integrations/gitlab','PATCH',{expectedVersion:1,baseUrl:`http://127.0.0.1:${(mock.address() as any).port}`,projectIds:[42],token:'mock-private-token',webhookSecret:'mock-webhook-secret'});assert.equal(setup.data.tokenConfigured,true);assert.ok(!JSON.stringify(setup.data).includes('mock-private-token'));
   const sync=await f.request('/integrations/gitlab/sync','POST',{});assert.equal(sync.status,200);assert.equal(sync.data.linked,2);assert.equal(requested.length,2);
   let s=(await f.request('/workspace')).data;assert.equal(s.gitlabLinks.length,2);assert.equal(s.issues.find((i:any)=>i.id==='issue-1').status,'in_progress');
   const payload={object_kind:'merge_request',project:{id:42},object_attributes:{id:102,iid:8,title:'NEO-2 웹훅',state:'opened',url:'http://gitlab.test/mr/8'}};

@@ -26,7 +26,23 @@
 
 일정은 프로젝트 달력의 근무일로 계산하며 변경은 미리 검토한다. 자동 제안은 업무·달력·의존성·워크플로의 버전을 고정하고, 같은 트랜잭션 안에서 날짜·이력·되돌리기·적용 기록을 저장한다. 기준 계획은 당시 날짜와 달력을 변경하지 않고 보존하며 현재 계획과 비교한다. 마일스톤의 현재 업무 연결과 과거 캡처 기록을 구분한다.
 
-현재 구현 다음에는 사용자 정의 필드의 고급 집계·필터, 문서의 고급 매크로·발행 절차, 시간 단위·작업량 기반 계획, 외부 발신 웹훅을 확장한다. 실제 구현과 검사 결과는 [개발 상태](STATUS.md)에 기록한다.
+GitLab 상태 자동화는 명시적으로 활성화한 규칙과 현재 워크플로의 검증을 함께 적용한다. 수신 이벤트·상태 변경·이력·외부 웹훅 대기는 같은 트랜잭션에서 저장한다. 외부 전송은 서명과 영속 재시도를 사용하며 수신 측은 이벤트 ID로 중복을 처리한다. 자체 백업으로 복원한 규칙은 비활성 상태로 시작한다.
+
+현재 구현 다음에는 사용자 정의 필드의 고급 집계·필터, 문서의 고급 매크로·발행 절차, 시간 단위·작업량 기반 계획, 알림·보고와 기존 도구 이관을 확장한다. 실제 구현과 검사 결과는 [개발 상태](STATUS.md)에 기록한다.
+
+## 기존 도구 원본 이관
+
+기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 아직 구현 완료한 기능은 아니다.
+
+주 입력은 Jira 관리자 XML 백업과 별도 첨부파일 묶음, Confluence Server 전체 공간 XML ZIP이다. Jira CSV의 반복 Comment/Attachment 헤더, 검색 XML과 REST/Importers JSON은 별도 형식으로 판별한다. CSV만으로 작성자·전체 이력·첨부 바이트가 보존된다고 판단하지 않는다. Jira 관리자 백업에도 첨부 바이트는 별도이며, JSON Importers 명세를 UI의 완전한 JSON 내보내기 명세로 취급하지 않는다.
+
+원본 인스턴스·객체 종류·원본 ID를 기준으로 Teamspace ID를 매핑하고 원래 키·URL·시각·작성자·원문 해시를 보관한다. 이름만으로 팀원을 합치지 않는다. 현재 모델에 없는 원본 신원·변경 이력·첨부 버전의 보존 구조를 먼저 추가한다. Confluence Page/historicalVersions/BodyContent 관계를 따라 버전을 복원하고, 양쪽 ID를 확보한 뒤 문서/티켓/include 링크를 재작성한다. 모르는 매크로는 원문과 대체 표시·손실 항목으로 남기며 누락 첨부를 자동 다운로드하지 않는다. 제한된 문서/댓글을 팀 전체에 조용히 공개하지 않고 적용 차단 또는 명시적 제외로 보고한다.
+
+서버가 보관한 미리보기 계획에 패키지 해시·매핑 버전·대상 버전을 고정한다. 같은 패키지 재적용은 중복 생성하지 않고, 대상 변경은 충돌로 중단한다. 적용은 DB와 새 첨부 바이트를 복구 가능하게 묶으며 기존 업로드를 전체 교체하지 않는다. `origin:import`를 사용해 상태 자동화와 외부 발신 이벤트를 만들지 않는다. 완료 근거는 개수·원본 ID·작성자·이력·첨부 해시·양방향 링크 대조와 실패/재시작 복구다.
+
+순서는 공통 분석/보존 모델과 손실 보고, Jira XML·Confluence XML 적용, CSV/JSON 어댑터 보완과 실제 오프라인 패키지 리허설이다. 6.9.1 세부 자료 포함 범위는 실제 오프라인 샘플로 검증해야 한다. 지금은 공식 문서 조사와 설계까지만 완료했다.
+
+근거: [Jira 검색 내보내기](https://confluence.atlassian.com/jirasoftware/working-with-search-results-1528533257.html), [관리자 XML 백업과 첨부 범위](https://confluence.atlassian.com/adminjiraserver/backing-up-data-938847673.html), [Jira Importers JSON](https://confluence.atlassian.com/adminjiraserver100/importing-data-from-json-1442845835.html), [Confluence XML 객체/이력 구조](https://confluence.atlassian.com/confkb/use-space-site-xml-export-entities-xml-to-find-confluence-objects-1283686755.html), [Confluence 저장 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html).
 
 ## 완료 판단
 

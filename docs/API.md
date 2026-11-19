@@ -118,3 +118,56 @@ curl --fail-with-body \
 현재 브라우저용 `/api`와 작업자 선택은 신뢰하는 로컬 팀 개발 환경을 위한 기능이며 로그인 인증을 제공하지 않는다. API 키의 권한 검사는 `/api/v1`에 적용된다. 키 발급이 애플리케이션 전체의 로그인이나 외부 접근 제한을 대신하지 않는다. 운영 배포에서는 브라우저 접근 경계와 자동화 API 공개 경로를 함께 정해야 한다.
 
 자체 백업에는 API 키가 포함되지 않는다. 백업 가져오기는 팀원·프로젝트를 교체하므로 기존 키를 모두 회수한다. 복원 후 필요한 키를 다시 발급한다. 실패한 가져오기는 키와 기존 데이터를 유지한다.
+
+## GitLab 연결과 상태 자동화
+
+**개발 · GitLab**에서 연결과 자동화 규칙을 관리한다. 아래 관리 경로는 브라우저용 `/api` 경로이며 `/api/v1` 키로는 사용할 수 없다.
+
+| 요청 | 동작 |
+| --- | --- |
+| `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전 |
+| `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명 변경 |
+| `POST /api/integrations/gitlab/sync` | MR·파이프라인 읽기 동기화, 상태 자동화 실행 없음 |
+| `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
+| `GET /api/automation-rules?projectId=...` | 규칙 목록 |
+| `POST /api/automation-rules` | 규칙 생성 |
+| `PATCH /api/automation-rules/:id` · `DELETE /api/automation-rules/:id` | `expectedVersion`으로 변경·삭제 |
+| `POST /api/automation/preview` | `{rule,issueIds,sample:{trigger,gitlabProjectId,branch}}` 모의 검토 |
+| `GET /api/automation-runs?projectId=...&limit=100` | 최근 실행·차단·무시 이유, 최대500건 |
+
+자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 생략하면 유지하고 빈 문자열이면 지운다. GET은 설정 여부만 반환한다. 초기 설정 버전은1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 변경 중인 동기화 결과는 폐기한다.
+
+규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `branchPattern`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. 브랜치는 `*`·`?`만 와일드카드로 사용하는 최대128자 패턴이다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. 미리보기는 티켓이나 실행 기록을 쓰지 않고 외부 요청도 하지 않는다.
+
+트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`다. MR의 update/approval 이벤트와 push는 상태 자동화를 실행하지 않는다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 다른 규칙으로 넘어가거나 연쇄 실행하지 않는다. 이미 도착 상태이면 업무 버전은 바꾸지 않는다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
+
+GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
+
+## 외부 발신 웹훅
+
+**개발 · GitLab → 외부 웹훅**에서 수신처를 만든다. 처음에는 비활성이며 서명 키는 생성·교체 직후 한 번만 표시한다. 수신 시스템에 저장한 뒤 활성화한다. 최대20개 수신처를 등록할 수 있다.
+
+| 요청 | 동작 |
+| --- | --- |
+| `GET /api/webhook-endpoints` · `POST /api/webhook-endpoints` | 목록·비활성 수신처 생성 |
+| `PATCH /api/webhook-endpoints/:id` · `DELETE /api/webhook-endpoints/:id` | `expectedVersion`으로 설정·활성화·삭제 |
+| `POST /api/webhook-endpoints/:id/rotate-secret` | `expectedVersion`으로 서명 키 교체, `{endpoint,secret}` 한 번 표시 |
+| `GET /api/webhook-deliveries?endpointId=...&limit=100` | 전송 이력, 최대100건 |
+| `GET /api/webhook-deliveries/:id` | `{delivery,envelope}` 메타데이터 |
+| `POST /api/webhook-deliveries/:id/retry` | 실패·취소 기록을 `expectedVersion`으로 재시도 |
+
+수신처 설정은 `{name,url,projectIds,eventTypes,enabled}`다. `projectIds:null`은 공통 문서를 포함한 전체, 비어 있지 않은 ID 목록은 해당 프로젝트만 받는다. 이벤트는 `issue.created/updated/deleted`, `document.created/updated/deleted`, `comment.created`다. http(s) URL만 지원하고 리다이렉트는 따라가지 않는다.
+
+본문에는 고정 이벤트 `id`, `type`, `occurredAt`, `actorId`, `origin`, `projectId`, `sourceEventId`, `changedFields`, 현재 `resource` 요약과 이전 `previous` 요약을 보낸다. 본문·댓글 원문, 사용자 정의 필드 값과 연결 자격 증명은 보내지 않는다. 필요한 상세는 범위가 제한된 API 키로 조회한다. 이벤트와 전송 대기는 원본 변경과 같은 트랜잭션에서 저장한다. 비활성 시기의 이벤트, 기술적인 동일 값 저장과 가져오기는 전송을 만들지 않는다.
+
+수신 측은 원문 요청 바이트로 다음 서명을 확인한다. `whsec_`를 제거하고 Base64 디코딩한 키를 사용하며 시각의 허용 오차도 검사한다.
+
+```text
+webhook-id: 이벤트 ID (재시도에도 동일)
+webhook-timestamp: 현재 시도의 Unix 초
+webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawBody))>
+```
+
+전송은 최대4건씩, 요청당 최대10초, 자동 최대5회다. 실패 후 기본5·10·20·40초 간격으로 재시도한다. 최소 한 번 전달 방식이므로 수신 측은 이벤트 ID를 중복 처리해야 한다. 응답 본문은 읽거나 기록하지 않는다. 설정·활성화·키 변경은 이전 대기 전송을 취소한다. 명시적 재시도는 현재 활성 수신처의 프로젝트·이벤트 범위로 검사하고 현재 키를 사용한다. 종료된 전송은30일 보관하고 전체 전송 기록 상한50000건에 도달하면 원본 변경도 함께 거절한다.
+
+자체 백업 schema8에는 규칙 정의만 포함한다. 복원한 규칙은 비활성으로 시작한다. 외부 수신처·서명 키·전송 이력·GitLab 수신 기록은 제외하고, 가져오기가 성공하면 초기화한다. 실패한 가져오기는 기존 설정·대기 전송·세대 값을 보존한다.

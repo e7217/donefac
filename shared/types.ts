@@ -62,8 +62,46 @@ export interface ResourceLink { id: string; issueId: string; documentId: string;
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string }
-export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; lastSyncAt: string | null; lastError: string | null }
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
+export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
+export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
+export interface AutomationRule {
+  id: string; projectId: string; name: string; enabled: boolean; trigger: GitlabAutomationTrigger;
+  gitlabProjectIds: number[]; branchPattern: string; issueTypes: string[]; fromStatuses: string[]; toStatusId: string;
+  actorId: string; priority: number; gitlabBaseUrl: string; enabledAt: string | null;
+  version: number; createdAt: string; updatedAt: string;
+}
+export interface AutomationEvent {
+  id: string; trigger: GitlabAutomationTrigger; gitlabProjectId: number; objectKind: 'merge_request' | 'pipeline'; objectId: string;
+  branch: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
+  disposition: 'fresh' | 'stale' | 'ambiguous' | 'unverified'; reason: string;
+}
+export interface AutomationOutcome {
+  issueId: string; key: string; title: string; fromStatus: string; toStatus: string;
+  outcome: 'changed' | 'no_op' | 'blocked' | 'ignored'; reason: string;
+}
+export interface AutomationRun extends AutomationOutcome {
+  id: string; eventId: string; ruleId: string; projectId: string; actorId: string; createdAt: string; occurredAt: string | null;
+}
+export interface AutomationPreview { outcomes: AutomationOutcome[]; warnings: string[] }
+export type OutboundEventType = 'issue.created' | 'issue.updated' | 'issue.deleted' | 'document.created' | 'document.updated' | 'document.deleted' | 'comment.created';
+export type MutationOrigin = 'user' | 'gitlab' | 'automation' | 'system' | 'import';
+export interface WebhookEndpoint {
+  id: string; name: string; url: string; projectIds: string[] | null; eventTypes: OutboundEventType[];
+  enabled: boolean; secretConfigured: boolean; version: number; createdAt: string; updatedAt: string;
+}
+export interface WebhookEndpointCreated { endpoint: WebhookEndpoint; secret: string }
+export interface WebhookEnvelope {
+  id: string; type: OutboundEventType; occurredAt: string; actorId: string | null; origin: MutationOrigin;
+  projectId: string | null; sourceEventId: string | null; changedFields: string[];
+  resource: { id: string; type: 'issue' | 'document' | 'comment'; key?: string; title?: string; status?: string; version?: number; parentType?: 'issue' | 'document'; parentId?: string };
+  previous: { title?: string; status?: string; version?: number } | null;
+}
+export interface WebhookDelivery {
+  id: string; endpointId: string; eventId: string; eventType: OutboundEventType; projectId: string | null; resourceId: string;
+  status: 'pending' | 'delivering' | 'succeeded' | 'failed' | 'cancelled'; attempts: number; nextAttemptAt: string | null;
+  lastAttemptAt: string | null; httpStatus: number | null; lastError: string | null; version: number; createdAt: string; updatedAt: string;
+}
 export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'collaboratorIds' | 'startDate' | 'endDate' | 'dueDate' | 'estimate' | 'labels' | 'parentId' | 'cycle' | 'module' | 'release' | `custom:${string}`;
 export interface WorkflowTransition { from: string; to: string; issueTypes: string[]; requiredFields: IssueRequiredField[] }
 export interface WorkflowFieldRule { issueType: string; statusId: string; requiredFields: IssueRequiredField[] }
