@@ -1,6 +1,13 @@
 import * as Y from 'yjs';
 import { yDocToProsemirrorJSON } from 'y-prosemirror';
-import { COLLABORATION_SCHEMA, type CollaborationPeer, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration';
+import {
+  COLLABORATION_CURSOR_PROTOCOL,
+  COLLABORATION_SCHEMA,
+  type CollaborationCursorSelection,
+  type CollaborationPeer,
+  type CollaborationServerMessage,
+  type CollaborationSession,
+} from '../../shared/collaboration';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
 
@@ -9,11 +16,19 @@ export interface CollaborationView {
   phase: CollaborationPhase; ready: boolean; pending: boolean; peers: CollaborationPeer[];
   epoch: string; document: DocPage; error: string; storageError: boolean;
 }
+export interface RemoteCollaborationCursor {
+  peer: CollaborationPeer;
+  selection: CollaborationCursorSelection;
+}
 interface PendingCache { epoch: string; schemaVersion: number; update: string; pending: true; updatedAt: string }
 const REMOTE = Symbol('server-update');
 const CACHE = Symbol('pending-cache');
 const MAX_CACHE_STATE = 16 * 1024 * 1024;
 const MAX_CACHE_DOCUMENT = 8 * 1024 * 1024;
+const CURSOR_INTERVAL = 80;
+const CURSOR_HEARTBEAT = 10_000;
+const sameSelection = (a: CollaborationCursorSelection | null, b: CollaborationCursorSelection | null) =>
+  a === b || (a !== null && b !== null && a.anchor === b.anchor && a.head === b.head);
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 
 /** A known old cache is rendered only after validation in a disposable document.
@@ -91,6 +106,15 @@ export class CollaborationClient {
   private socket: WebSocket | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  private cursorPeerId: string | null = null;
+  private localCursor: CollaborationCursorSelection | null = null;
+  private sentCursor: CollaborationCursorSelection | null = null;
+  private lastCursorSentAt = -Infinity;
+  private remoteCursors = new Map<string, CollaborationCursorSelection>();
+  private remoteCursorSnapshot: readonly RemoteCollaborationCursor[] = [];
+  private cursorListeners = new Set<() => void>();
+  private cursorNotificationQueued = false;
   private disposed = false;
   private welcomed = false;
   private retryCount = 0;
@@ -122,6 +146,16 @@ export class CollaborationClient {
     this.publish(this.state);
   }
   get view() { return this.state; }
+  getRemoteCursors(): readonly RemoteCollaborationCursor[] { return this.remoteCursorSnapshot; }
+  subscribeCursors(listener: () => void): () => void {
+    this.cursorListeners.add(listener);
+    return () => { this.cursorListeners.delete(listener); };
+  }
+  setCursor(selection: CollaborationCursorSelection | null) {
+    if (this.disposed || this.state.phase === 'recovery' || this.state.phase === 'error' || sameSelection(selection, this.localCursor)) return;
+    this.localCursor = selection;
+    this.flushCursor();
+  }
   start() {
     this.publish(this.state);
     window.addEventListener('online', this.onOnline);
@@ -199,10 +233,79 @@ export class CollaborationClient {
     this.socket.send(JSON.stringify({ type: 'update', epoch: this.state.epoch, requestId, update: encodeBytes(update) }));
   }
 
+  private clearCursorTimer() {
+    if (this.cursorTimer !== null) clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+  }
+
+  private flushCursor = () => {
+    this.clearCursorTimer();
+    const socket = this.socket;
+    if (!this.cursorPeerId || this.state.phase !== 'connected' || socket?.readyState !== WebSocket.OPEN) return;
+    const selection = this.localCursor;
+    if (selection) {
+      // Peers can resolve only positions anchored to acknowledged document edits.
+      if (this.localSequence > this.acknowledgedSequence) return;
+      const interval = sameSelection(selection, this.sentCursor) ? CURSOR_HEARTBEAT : CURSOR_INTERVAL;
+      const wait = this.lastCursorSentAt + interval - performance.now();
+      if (wait > 0) {
+        this.cursorTimer = setTimeout(this.flushCursor, Math.ceil(wait));
+        return;
+      }
+    } else if (this.sentCursor === null) return;
+
+    try { socket.send(JSON.stringify({ type: 'cursor', epoch: this.state.epoch, selection })); }
+    catch { return; /* Cursor delivery never changes document synchronization. */ }
+    this.sentCursor = selection;
+    if (selection) {
+      this.lastCursorSentAt = performance.now();
+      this.cursorTimer = setTimeout(this.flushCursor, CURSOR_HEARTBEAT);
+    }
+  };
+
+  private publishRemoteCursors() {
+    const snapshot = this.state.peers.flatMap(peer => {
+      const selection = this.remoteCursors.get(peer.id);
+      return selection ? [{ peer, selection }] : [];
+    });
+    if (snapshot.length === this.remoteCursorSnapshot.length && snapshot.every(({ peer, selection }, index) => {
+      const prior = this.remoteCursorSnapshot[index];
+      return peer.id === prior.peer.id && peer.actorId === prior.peer.actorId && peer.name === prior.peer.name && peer.color === prior.peer.color && sameSelection(selection, prior.selection);
+    })) return;
+    this.remoteCursorSnapshot = snapshot;
+    if (this.cursorNotificationQueued) return;
+    // Keep ProseMirror decoration updates out of document transaction callbacks.
+    this.cursorNotificationQueued = true;
+    queueMicrotask(() => {
+      this.cursorNotificationQueued = false;
+      for (const listener of this.cursorListeners) listener();
+    });
+  }
+
+  private rememberRemoteCursor(peerId: string, selection: CollaborationCursorSelection | null) {
+    if (!this.cursorPeerId || peerId === this.cursorPeerId || !this.state.peers.some(peer => peer.id === peerId)) return;
+    if (selection === null) this.remoteCursors.delete(peerId);
+    else if (selection && typeof selection.anchor === 'string' && typeof selection.head === 'string') {
+      this.remoteCursors.set(peerId, { anchor: selection.anchor, head: selection.head });
+    }
+  }
+
+  private clearCursorChannel(keepLocal = false) {
+    this.clearCursorTimer();
+    this.cursorPeerId = null;
+    if (!keepLocal) this.localCursor = null;
+    this.sentCursor = null;
+    this.lastCursorSentAt = -Infinity;
+    this.remoteCursors.clear();
+    this.publishRemoteCursors();
+  }
+
   private connect() {
     if (this.disposed || this.state.phase === 'recovery' || this.state.phase === 'error') return;
+    if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
     if (!navigator.onLine) { this.setState({ phase: 'offline', peers: [] }); return; }
     this.welcomed = false;
+    this.clearCursorChannel(true);
     this.setState({ phase: 'connecting', peers: [], error: '' });
     const endpoint = new URL('/api/collaboration', window.location.href);
     endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -211,7 +314,7 @@ export class CollaborationClient {
     this.socket = socket;
     socket.onopen = () => {
       if (this.disposed || this.socket !== socket) return;
-      socket.send(JSON.stringify({ type: 'hello', epoch: this.state.epoch, schemaVersion: COLLABORATION_SCHEMA, stateVector: encodeBytes(Y.encodeStateVector(this.doc)) }));
+      socket.send(JSON.stringify({ type: 'hello', epoch: this.state.epoch, schemaVersion: COLLABORATION_SCHEMA, stateVector: encodeBytes(Y.encodeStateVector(this.doc)), cursorProtocol: COLLABORATION_CURSOR_PROTOCOL }));
     };
     socket.onmessage = event => {
       if (this.disposed || this.socket !== socket) return;
@@ -225,6 +328,7 @@ export class CollaborationClient {
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = null;
       if (this.state.phase === 'recovery' || this.state.phase === 'error') return;
+      this.clearCursorChannel(event.code !== 4409);
       if (event.code === 4409) { this.setState({ phase: 'recovery', error: '문서 버전이 교체되었습니다. 이전 편집을 보관하거나 최신 문서를 열어주세요.', peers: [] }); return; }
       this.setState({ phase: 'offline', peers: [] });
       void this.reconcileDisconnect();
@@ -234,13 +338,21 @@ export class CollaborationClient {
   private receive(message: CollaborationServerMessage) {
     if (message.type === 'welcome') {
       if (message.schemaVersion !== COLLABORATION_SCHEMA) { this.fail('문서 형식이 달라 편집을 중단했습니다. 새로고침 후 다시 확인해주세요.'); return; }
-      if (message.epoch !== this.state.epoch) { this.setState({ phase: 'recovery', error: '문서 버전이 교체되어 이전 편집을 자동으로 합치지 않았습니다.' }); this.socket?.close(); return; }
+      if (message.epoch !== this.state.epoch) { this.clearCursorChannel(); this.setState({ phase: 'recovery', error: '문서 버전이 교체되어 이전 편집을 자동으로 합치지 않았습니다.' }); this.socket?.close(); return; }
       Y.applyUpdate(this.doc, decodeBytes(message.update), REMOTE);
       this.serverVector = decodeBytes(message.stateVector);
       this.welcomed = true; this.retryCount = 0; this.inFlight.clear();
       this.acceptDocument(message.document);
       this.setState({ phase: 'connected', ready: true, peers: message.peers, error: '' });
+      this.cursorPeerId = message.cursorProtocol === COLLABORATION_CURSOR_PROTOCOL &&
+        message.peers.some(peer => peer.id === message.peerId && peer.actorId === this.actorId) ? message.peerId ?? null : null;
+      this.remoteCursors.clear();
+      if (this.cursorPeerId && Array.isArray(message.cursors)) {
+        for (const cursor of message.cursors) if (cursor) this.rememberRemoteCursor(cursor.peerId, cursor.selection);
+      }
+      this.publishRemoteCursors();
       this.sendPending();
+      this.flushCursor();
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = setInterval(() => { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'ping' })); }, 20_000);
     } else if (message.type === 'update' && message.epoch === this.state.epoch) {
@@ -254,9 +366,19 @@ export class CollaborationClient {
       this.acceptDocument(message.document);
       this.persistPending();
       this.setState({});
-    } else if (message.type === 'presence') this.setState({ peers: message.peers });
+      this.flushCursor();
+    } else if (message.type === 'cursor' && message.epoch === this.state.epoch) {
+      this.rememberRemoteCursor(message.peerId, message.selection);
+      this.publishRemoteCursors();
+    } else if (message.type === 'presence') {
+      this.setState({ peers: message.peers });
+      const peerIds = new Set(message.peers.map(peer => peer.id));
+      for (const id of this.remoteCursors.keys()) if (!peerIds.has(id)) this.remoteCursors.delete(id);
+      this.publishRemoteCursors();
+    }
     else if (message.type === 'reset') {
       this.persistPending();
+      this.clearCursorChannel();
       this.setState({ phase: 'recovery', peers: [], error: message.reason || '이전 버전 복구로 문서가 교체되었습니다.' });
       this.socket?.close();
     } else if (message.type === 'error') this.fail(message.message);
@@ -269,6 +391,7 @@ export class CollaborationClient {
   }
   fail(message: string) {
     this.persistPending();
+    this.clearCursorChannel();
     this.setState({ phase: 'error', error: message, peers: [] });
     this.socket?.close();
   }
@@ -284,6 +407,7 @@ export class CollaborationClient {
       if (response.ok) {
         const session = await response.json() as CollaborationSession;
         if (!session.enabled || session.epoch !== this.state.epoch) {
+          this.clearCursorChannel();
           this.setState({ phase: 'recovery', ready: this.state.ready || this.doc.getXmlFragment('default').length > 0, error: '문서가 교체되거나 공동 편집이 해제되어 이전 편집을 자동으로 합치지 않았습니다.' });
           return;
         }
@@ -292,7 +416,7 @@ export class CollaborationClient {
     if (!this.disposed && !this.socket) this.scheduleReconnect();
   }
   private onOnline = () => { if (this.retry) clearTimeout(this.retry); this.retry = null; this.connect(); };
-  private onOffline = () => { if (this.state.phase === 'recovery' || this.state.phase === 'error') return; this.socket?.close(); this.setState({ phase: 'offline', peers: [] }); };
+  private onOffline = () => { if (this.state.phase === 'recovery' || this.state.phase === 'error') return; this.clearCursorChannel(true); this.socket?.close(); this.setState({ phase: 'offline', peers: [] }); };
 
   discardOwnPending(allEpochs = false) {
     const ownPrefix = prefix(this.actorId, this.documentId);
@@ -310,6 +434,8 @@ export class CollaborationClient {
   }
   destroy() {
     this.persistPending(); this.disposed = true;
+    this.cursorListeners.clear();
+    this.clearCursorChannel();
     window.removeEventListener('online', this.onOnline); window.removeEventListener('offline', this.onOffline);
     if (this.retry) clearTimeout(this.retry);
     if (this.heartbeat) clearInterval(this.heartbeat);

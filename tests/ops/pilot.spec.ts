@@ -186,6 +186,13 @@ test('built pilot upgrades real WebSockets and persists edits from two browser a
       await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
       await expect(page.locator('.docs-collaboration-presence')).toContainText('2명 접속');
     }
+    await a.bringToFront();
+    await a.locator('.docs-live-prose').focus();
+    await a.keyboard.press('Control+End');
+    const caret = b.locator(`.docs-remote-caret[data-actor-id="${f.actors[0]}"]`);
+    await expect(caret).toHaveCount(1);
+    await a.getByRole('textbox', { name:'문서 제목', exact:true }).focus();
+    await expect(caret).toHaveCount(0);
     async function append(page: Page, value: string) {
       await page.locator('.docs-live-prose').click();
       await page.locator('.docs-live-prose').press('Control+End');

@@ -12,6 +12,7 @@ import { decorateDocumentExtensions } from './DocumentBlocks';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { api } from '../lib/api';
 import { CollaborationClient, hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
+import { collaborativeCursors, publishEditorCursor } from './CollaborationCursors';
 import { downloadDocument } from './document-utils';
 
 export interface CollaborativeEditorProps {
@@ -95,16 +96,17 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     </div>
     {view?.storageError && <div className="docs-notice" role="alert">브라우저에 편집을 임시 보관하지 못했습니다. 서버 동기화가 끝나기 전에 이 화면을 닫지 말고 복구 데이터를 내려받아주세요.<button className="docs-collab-text-button" onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button></div>}
     {recovery && <div className="docs-notice docs-collaboration-recovery" role="alert"><strong>{view?.error || '문서가 교체되어 이전 편집을 자동으로 합치지 않았습니다.'}</strong><p>아래 내용은 이전 편집입니다. 사본으로 보관하거나 최신 문서를 열어주세요.</p><div><button onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button><button onClick={() => void saveRecoveryCopy()} disabled={busy || !view?.ready}>사본으로 보관</button><button onClick={openLatest} disabled={busy}><RotateCcw size={12} /> 최신 문서 열기</button></div></div>}
-    {client && view?.ready ? <LiveBinding {...props} client={client} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
+    {client && view?.ready ? <LiveBinding {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
   </div>;
 }
 
-function LiveBinding({ client, readOnly, onEditor, onContent }: CollaborativeEditorProps & { client: CollaborationClient; readOnly: boolean }) {
+function LiveBinding({ client, connected, readOnly, onEditor, onContent }: CollaborativeEditorProps & { client: CollaborationClient; connected: boolean; readOnly: boolean }) {
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
       ...decorateDocumentExtensions(createEditorExtensions({ collaboration: true })),
       Collaboration.configure({ document: client.doc, field: 'default' }),
+      collaborativeCursors(client),
       Placeholder.configure({ placeholder: '함께 내용을 작성하세요.' }),
     ],
     // No JSON `content`: only the server welcome/update may seed this Y.Doc.
@@ -120,5 +122,11 @@ function LiveBinding({ client, readOnly, onEditor, onContent }: CollaborativeEdi
   });
   useEffect(() => { onEditor(editor); return () => onEditor(null); }, [editor, onEditor]);
   useEffect(() => { editor?.setEditable(!readOnly, false); }, [editor, readOnly]);
-  return <EditorContent editor={editor} />;
+  useEffect(() => {
+    if (editor && !editor.isDestroyed) publishEditorCursor(editor.view, client);
+  }, [editor, client, connected, readOnly]);
+  return <div className="docs-live-editor">
+    <EditorContent editor={editor} />
+    <div className="docs-remote-carets" aria-hidden="true" />
+  </div>;
 }

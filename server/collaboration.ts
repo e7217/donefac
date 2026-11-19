@@ -5,20 +5,32 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror';
 import { createEditorSchema } from '../shared/editor-schema.js';
-import { COLLABORATION_SCHEMA, type CollaborationPeer, type CollaborationSession, type CollaborationServerMessage,type CollaborationClientMessage } from '../shared/collaboration.js';
+import {
+  COLLABORATION_CURSOR_PROTOCOL, COLLABORATION_SCHEMA, MAX_COLLABORATION_CURSOR_BYTES, type CollaborationClientMessage,
+  type CollaborationCursor, type CollaborationCursorSelection, type CollaborationPeer,
+  type CollaborationServerMessage, type CollaborationSession,
+} from '../shared/collaboration.js';
 import type { DocPage, DocRevision, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { DocumentContentService,DocumentContentError,normalizeDocumentContent,hasVersionTwoNodes } from './document-content.js';
 
 export const MAX_COLLABORATION_UPDATE=1024*1024;
 const MAX_STATE=16*1024*1024;
+const CURSOR_UPDATE_INTERVAL_MS=50;
+const CURSOR_IDLE_MS=30_000;
 const schema=createEditorSchema();
 const iso=()=>new Date().toISOString();
 export class CollaborationError extends Error { constructor(public status:number,message:string,public code='INVALID_COLLABORATION'){super(message);} }
 function invalid(message:string,status=400,code?:string):never{throw new CollaborationError(status,message,code);}
 export interface CollaborationExport { documentId:string;epoch:string;schemaVersion:number;state:string }
 interface State {documentId:string;epoch:string;schemaVersion:number;state:Buffer}
-interface Peer {socket:WebSocket;id:string;actorId:string;documentId:string;epoch:string|null;ready:boolean}
+interface PeerCursor {
+  selection: CollaborationCursorSelection | null;
+  receivedAt: number;
+  expiresAt: number;
+  expiry?: ReturnType<typeof setTimeout>;
+}
+interface Peer {socket:WebSocket;id:string;actorId:string;documentId:string;epoch:string|null;ready:boolean;cursor:PeerCursor|null}
 
 function base64(value:unknown,max:number) {
   if(typeof value!=='string'||!value.length||value.length>Math.ceil(max/3)*4)invalid('공동 편집 데이터의 크기 또는 형식이 올바르지 않습니다.',413,'UPDATE_TOO_LARGE');
@@ -26,6 +38,14 @@ function base64(value:unknown,max:number) {
   if(bytes.length>max)invalid('공동 편집 데이터의 크기 한도를 초과했습니다.',413,'UPDATE_TOO_LARGE');
   if(bytes.toString('base64')!==value)invalid('공동 편집 데이터의 base64 형식이 올바르지 않습니다.');
   return bytes;
+}
+function cursorPosition(value: unknown): value is string {
+  try {
+    const bytes = base64(value, MAX_COLLABORATION_CURSOR_BYTES);
+    const position = Y.decodeRelativePosition(bytes);
+    // Use the canonical encoding to reject alternate encodings and trailing bytes.
+    return (position.tname === null || position.tname === 'default') && bytes.equals(Y.encodeRelativePosition(position));
+  } catch { return false; }
 }
 function contentOperation<T>(operation:()=>T):T{try{return operation();}catch(error){if(error instanceof DocumentContentError)invalid(error.message,error.status,error.code);throw error;}}
 function normalizeContent(value:unknown):{content:RichContent;plainText:string}{return contentOperation(()=>normalizeDocumentContent(value));}
@@ -124,10 +144,61 @@ export class CollaborationService {
   private ready(documentId:string){return[...this.peers].filter(peer=>peer.ready&&peer.documentId===documentId&&peer.socket.readyState===WebSocket.OPEN);}
   private presence(documentId:string):CollaborationPeer[]{return this.ready(documentId).flatMap(peer=>{const user=this.store.get<User>('users',peer.actorId);return user?[{id:peer.id,actorId:peer.actorId,name:user.name,color:user.color}]:[];});}
   private broadcastPresence(documentId:string){const peers=this.presence(documentId);for(const peer of this.ready(documentId))this.send(peer,{type:'presence',peers});}
+  private cursorSnapshot(peer: Peer): CollaborationCursor[] {
+    const now = performance.now();
+    return this.ready(peer.documentId).flatMap(other => {
+      const cursor = other.cursor;
+      return other !== peer && other.epoch === peer.epoch && cursor?.selection && cursor.expiresAt > now
+        ? [{ peerId: other.id, selection: cursor.selection }] : [];
+    });
+  }
+  private broadcastCursor(peer: Peer, selection: CollaborationCursorSelection | null) {
+    const epoch = peer.epoch;
+    if (!epoch) return;
+    for (const receiver of this.ready(peer.documentId)) {
+      if (receiver !== peer && receiver.cursor && receiver.epoch === epoch) {
+        this.send(receiver, { type: 'cursor', epoch, peerId: peer.id, selection });
+      }
+    }
+  }
+  private clearCursor(peer: Peer, broadcast: boolean) {
+    const cursor = peer.cursor;
+    if (!cursor?.selection) return;
+    clearTimeout(cursor.expiry);
+    cursor.expiry = undefined;
+    cursor.selection = null;
+    cursor.expiresAt = 0;
+    if (broadcast) this.broadcastCursor(peer, null);
+  }
+  private handleCursor(peer: Peer, message: Extract<CollaborationClientMessage, { type: 'cursor' }>) {
+    const cursor = peer.cursor;
+    if (!cursor || !peer.ready || !peer.epoch || message.epoch !== peer.epoch) return;
+    if (message.selection === null) {
+      this.clearCursor(peer, true);
+      return;
+    }
+    const now = performance.now();
+    if (now - cursor.receivedAt < CURSOR_UPDATE_INTERVAL_MS) return;
+    cursor.receivedAt = now;
+    const { selection } = message;
+    if (!selection || !cursorPosition(selection.anchor) || !cursorPosition(selection.head)) return;
+    const state = this.store.db.prepare('SELECT epoch FROM collaboration_documents WHERE document_id=?')
+      .get(peer.documentId) as { epoch: string } | undefined;
+    if (state?.epoch !== peer.epoch) return;
+
+    const changed = cursor.selection?.anchor !== selection.anchor || cursor.selection?.head !== selection.head;
+    cursor.selection = { anchor: selection.anchor, head: selection.head };
+    cursor.expiresAt = now + CURSOR_IDLE_MS;
+    clearTimeout(cursor.expiry);
+    cursor.expiry = setTimeout(() => this.clearCursor(peer, true), CURSOR_IDLE_MS);
+    cursor.expiry.unref();
+    if (changed) this.broadcastCursor(peer, cursor.selection);
+  }
   notifyMetadata(documentId:string){const state=this.state(documentId);if(!state)return;const document=this.document(documentId);for(const peer of this.ready(documentId))this.send(peer,{type:'update',epoch:state.epoch,update:Buffer.from([0,0]).toString('base64'),document});}
   reset(documentId:string,reason:string){
     const state=this.state(documentId),document=this.store.get<DocPage>('documents',documentId);
     for(const peer of [...this.peers].filter(peer=>peer.documentId===documentId)){
+      this.clearCursor(peer,false);
       if(state&&document)this.send(peer,{type:'reset',epoch:state.epoch,document,reason});
       else this.send(peer,{type:'error',code:'DOCUMENT_NOT_FOUND',message:'문서가 삭제되거나 공동 편집 데이터가 교체되었습니다.'});
       peer.ready=false;peer.socket.close(state?4409:4404,'document_reset');
@@ -159,12 +230,29 @@ export class CollaborationService {
   private handle(peer:Peer,raw:Buffer){
     let message:CollaborationClientMessage;try{message=JSON.parse(raw.toString('utf8'));}catch{return invalid('공동 편집 메시지가 올바른 JSON이 아닙니다.');}
     if(message?.type==='ping'){this.send(peer,{type:'pong'});return;}
+    if(message?.type==='cursor'){this.handleCursor(peer,message);return;}
     const state=this.state(peer.documentId);if(!state)invalid('공동 편집이 활성화되지 않았습니다.',409,'NOT_ENABLED');
     if(message?.type==='hello'){
       if(message.schemaVersion!==COLLABORATION_SCHEMA||state.schemaVersion!==COLLABORATION_SCHEMA)invalid('공동 편집 스키마 버전이 다릅니다.',409,'SCHEMA_MISMATCH');
       if(message.epoch!==null&&message.epoch!==state.epoch){this.send(peer,{type:'reset',epoch:state.epoch,document:this.document(peer.documentId),reason:'문서가 복구되거나 교체되었습니다. 이전 편집을 새 문서에 보관해 주세요.'});peer.socket.close(4409,'epoch_changed');return;}
       const doc=decodeState(state.state);
-      try{let vector:Uint8Array|undefined;if(message.stateVector!==undefined){vector=base64(message.stateVector,MAX_COLLABORATION_UPDATE);try{Y.decodeStateVector(vector);}catch{invalid('Yjs 상태 벡터가 올바르지 않습니다.',422,'INVALID_STATE_VECTOR');}}const update=Y.encodeStateAsUpdate(doc,vector);peer.epoch=state.epoch;peer.ready=true;this.send(peer,{type:'welcome',epoch:state.epoch,schemaVersion:COLLABORATION_SCHEMA,update:Buffer.from(update).toString('base64'),stateVector:Buffer.from(Y.encodeStateVector(doc)).toString('base64'),document:this.document(peer.documentId),peers:this.presence(peer.documentId)});this.broadcastPresence(peer.documentId);}finally{doc.destroy();}return;
+      try {
+        let vector:Uint8Array|undefined;
+        if(message.stateVector!==undefined){vector=base64(message.stateVector,MAX_COLLABORATION_UPDATE);try{Y.decodeStateVector(vector);}catch{invalid('Yjs 상태 벡터가 올바르지 않습니다.',422,'INVALID_STATE_VECTOR');}}
+        if (!peer.ready && message.cursorProtocol === COLLABORATION_CURSOR_PROTOCOL) {
+          peer.cursor = { selection: null, receivedAt: -Infinity, expiresAt: 0 };
+        }
+        peer.epoch=state.epoch;
+        peer.ready=true;
+        this.send(peer, {
+          type:'welcome',epoch:state.epoch,schemaVersion:COLLABORATION_SCHEMA,
+          update:Buffer.from(Y.encodeStateAsUpdate(doc,vector)).toString('base64'),stateVector:Buffer.from(Y.encodeStateVector(doc)).toString('base64'),
+          document:this.document(peer.documentId),peers:this.presence(peer.documentId),
+          ...(peer.cursor ? { cursorProtocol: COLLABORATION_CURSOR_PROTOCOL, peerId: peer.id, cursors: this.cursorSnapshot(peer) } : {}),
+        });
+        this.broadcastPresence(peer.documentId);
+      } finally { doc.destroy(); }
+      return;
     }
     if(message?.type!=='update')invalid('지원하지 않는 공동 편집 메시지입니다.');
     if(!peer.ready)invalid('먼저 공동 편집 세션을 시작해 주세요.',409,'NOT_READY');
@@ -197,17 +285,17 @@ export class CollaborationService {
       const documentId=url.searchParams.get('documentId')||'',actorId=url.searchParams.get('actorId')||'';
       if(!this.store.get('users',actorId)||!this.store.get('documents',documentId)||!this.state(documentId)){socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');return;}
       wss.handleUpgrade(req,socket,head,ws=>{
-        const peer:Peer={socket:ws,id:randomUUID(),actorId,documentId,epoch:null,ready:false};this.peers.add(peer);
+        const peer:Peer={socket:ws,id:randomUUID(),actorId,documentId,epoch:null,ready:false,cursor:null};this.peers.add(peer);
         const timer=setTimeout(()=>{if(!peer.ready)ws.close(4408,'hello_timeout');},10000);timer.unref();
         ws.on('error',()=>{});
         ws.on('message',(data,isBinary)=>{
           try{if(isBinary)invalid('JSON 텍스트 메시지를 사용해 주세요.');this.store.withMutationContext({actorId:peer.actorId,origin:'user'},()=>this.handle(peer,Buffer.isBuffer(data)?data:Buffer.from(data as ArrayBuffer)));}
           catch(error){const e=error instanceof CollaborationError?error:new CollaborationError(500,'공동 편집을 저장하지 못했습니다. 다시 연결해 주세요.','SERVER_ERROR');this.send(peer,{type:'error',code:e.code,message:e.message});if(e.code==='SCHEMA_MISMATCH'||e.code==='SERVER_ERROR')ws.close(e.code==='SCHEMA_MISMATCH'?4400:4500,e.code);}
         });
-        ws.on('close',()=>{clearTimeout(timer);this.peers.delete(peer);this.broadcastPresence(documentId);});
+        ws.on('close',()=>{clearTimeout(timer);this.peers.delete(peer);this.clearCursor(peer,true);this.broadcastPresence(documentId);});
       });
     };
     server.on('upgrade',upgrade);this.servers.set(server,{wss,upgrade});
   }
-  close(){for(const peer of this.peers)peer.socket.terminate();this.peers.clear();for(const [server,{wss,upgrade}]of this.servers){server.removeListener('upgrade',upgrade);wss.close();}this.servers.clear();}
+  close(){for(const peer of this.peers){this.clearCursor(peer,false);peer.socket.terminate();}this.peers.clear();for(const [server,{wss,upgrade}]of this.servers){server.removeListener('upgrade',upgrade);wss.close();}this.servers.clear();}
 }

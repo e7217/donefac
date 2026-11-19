@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { test as base, expect, type APIRequestContext, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
+import type { Editor } from '@tiptap/core';
 import type { DocPage, WorkspaceSnapshot } from '../../shared/types';
 
 interface CollaborativeFixture { document: DocPage; requests: APIRequestContext; actorIds: string[]; initialText: string }
@@ -82,6 +83,67 @@ test('두 브라우저의 실제 공동 편집이 중복 초기화 없이 합쳐
     await synced(a);
     await expect(a.locator('.docs-live-prose')).toHaveText(text);
     await expect(a.locator('.docs-live-prose p')).toHaveCount(1);
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
+test('공동 편집에서 다른 사람의 커서와 선택 영역이 같은 글을 따라가고 본문에는 저장되지 않는다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const [firstActor, secondActor] = fixture.actorIds;
+  const contexts = await Promise.all([firstActor, secondActor].map(() => browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [a, b] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(a, fixture.document), open(b, fixture.document)]);
+    await Promise.all([synced(a), synced(b)]);
+    await expect(b.locator('.docs-collaboration-presence')).toContainText('2명 접속');
+    const before = await canonical(fixture);
+    const aEditor = a.locator('.docs-live-prose'), bEditor = b.locator('.docs-live-prose');
+    const caret = b.locator(`.docs-remote-caret[data-actor-id="${firstActor}"]`);
+    const selection = bEditor.locator(`.docs-remote-selection[data-actor-id="${firstActor}"]`);
+
+    await a.bringToFront();
+    await aEditor.focus();
+    await a.keyboard.press('Control+Home');
+    for (let index = 0; index < 4; index++) await a.keyboard.press('ArrowRight');
+    await a.keyboard.press('Shift+ArrowRight');
+    await a.keyboard.press('Shift+ArrowRight');
+    await expect.poll(() => a.evaluate(() => window.getSelection()?.toString())).toBe('원본');
+    await expect(selection).toHaveText('원본');
+    await expect(caret).toBeVisible();
+    await expect(caret).toHaveAttribute('aria-hidden', 'true');
+    await expect(a.locator(`.docs-remote-caret[data-actor-id="${firstActor}"]`)).toHaveCount(0);
+    expect(await bEditor.innerText()).toBe(fixture.initialText);
+    expect(await canonical(fixture)).toEqual(before);
+
+    // Make a concurrent edit through the second editor without taking focus from the sender.
+    await bEditor.evaluate(node => {
+      const editor = (node as HTMLElement & {editor?: Editor}).editor;
+      if (!editor) throw new Error('The live editor is unavailable.');
+      editor.view.dispatch(editor.state.tr.insertText('앞에 덧붙임 ', 1));
+    });
+    const changed = `앞에 덧붙임 ${fixture.initialText}`;
+    await expect(aEditor).toHaveText(changed);
+    await expect(bEditor).toHaveText(changed);
+    await expect(selection).toHaveText('원본');
+    await synced(b);
+    expect((await canonical(fixture)).version).toBe(before.version + 1);
+
+    await a.keyboard.press('ArrowRight');
+    await expect(selection).toHaveCount(0);
+    await expect(caret).toHaveCount(1);
+    await a.getByRole('textbox', { name: '문서 제목', exact: true }).focus();
+    await expect(caret).toHaveCount(0);
+    await aEditor.focus();
+    await a.keyboard.press('Control+End');
+    await expect(caret).toBeVisible();
+    expect(await bEditor.innerText()).toBe(changed);
+    await contexts[0].close();
+    await expect(caret).toHaveCount(0);
+    await expect(b.locator('.docs-collaboration-presence')).toContainText('1명 접속');
+    const stored = await canonical(fixture);
+    expect(stored.version).toBe(before.version + 1);
+    expect(stored.plainText).toBe(changed);
+    expect(JSON.stringify(stored.content)).not.toContain('remote-caret');
   } finally { await Promise.all(contexts.map(context => context.close())); }
 });
 
