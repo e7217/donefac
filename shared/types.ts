@@ -186,29 +186,38 @@ export interface ApiKeyRecord {
 export interface ApiKeyCreated { key: ApiKeyRecord; token: string }
 export interface CalendarException { date: string; isWorking: boolean; label: string }
 export interface WorkCalendar { id: string; projectId: string; name: string; workingWeekdays: number[]; exceptions: CalendarException[]; version: number; updatedAt: string }
-export interface ProjectWorkloadCapacity {
-  id: string;
-  projectId: string;
-  version: number;
-  updatedAt: string;
+export interface WorkloadCapacityValues {
   defaultDailyMinutes: number;
   members: { userId: string; dailyMinutes: number }[];
   exceptions: { userId: string; date: string; availableMinutes: number }[];
 }
+export interface ProjectWorkloadCapacity extends WorkloadCapacityValues {
+  id: string;
+  projectId: string;
+  version: number;
+  updatedAt: string;
+}
+export interface TeamWorkloadCapacity extends WorkloadCapacityValues {
+  version: number;
+  updatedAt: string;
+  workingWeekdays: number[];
+  calendarExceptions: CalendarException[];
+}
 export type WorkloadIncompleteReason = 'unassigned' | 'missing-dates' | 'missing-effort' | 'no-working-days';
 export interface ProjectWorkloadDay { date: string; working: boolean }
-export interface ProjectWorkloadCell {
+export interface WorkloadAllocation { issueId: string; minutes: number }
+export interface ProjectWorkloadCell<Allocation extends WorkloadAllocation = WorkloadAllocation> {
   date: string;
   scheduledMinutes: number;
   availableMinutes: number;
-  allocations: { issueId: string; minutes: number }[];
+  allocations: Allocation[];
 }
-export interface ProjectWorkloadRow {
+export interface ProjectWorkloadRow<Allocation extends WorkloadAllocation = WorkloadAllocation> {
   userId: string;
   scheduledMinutes: number;
   availableMinutes: number;
   overloadedDays: number;
-  days: ProjectWorkloadCell[];
+  days: ProjectWorkloadCell<Allocation>[];
 }
 export interface ProjectWorkloadResult {
   startDate: string;
@@ -219,6 +228,13 @@ export interface ProjectWorkloadResult {
   totalScheduledMinutes: number;
   totalAvailableMinutes: number;
   overloadedCells: number;
+}
+export interface TeamWorkloadAllocation extends WorkloadAllocation { projectId: string }
+export interface TeamWorkloadResult extends Omit<ProjectWorkloadResult, 'rows' | 'incomplete'> {
+  projectIds: string[];
+  capacityVersion: number;
+  rows: ProjectWorkloadRow<TeamWorkloadAllocation>[];
+  incomplete: { issueId: string; projectId: string; reasons: WorkloadIncompleteReason[] }[];
 }
 export interface Milestone { id: string; projectId: string; title: string; description: string; date: string; status: 'open' | 'reached'; ownerId: string | null; issueIds: string[]; version: number; createdAt: string; updatedAt: string }
 export interface BaselineIssue { issueId: string; key: string; title: string; startDate: string | null; endDate: string | null; sourceVersion: number }
@@ -460,6 +476,7 @@ export interface WorkspaceSnapshot {
   planningItems?: PlanningItem[];
   calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
   workloadCapacities?: ProjectWorkloadCapacity[];
+  teamWorkloadCapacity?: TeamWorkloadCapacity;
   issueSchemas?: ProjectIssueSchema[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }

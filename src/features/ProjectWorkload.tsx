@@ -1,20 +1,19 @@
 'use client';
 
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, BarChart3, Plus, RefreshCw, Save, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { useId, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, BarChart3, SlidersHorizontal, X } from 'lucide-react';
 import type { FeatureProps, Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, SchedulePreview, User, WorkloadIncompleteReason } from '../../shared/types';
 import { calendarDate, calendarDay, defaultWorkCalendar, isCalendarDate } from '../../shared/calendar';
-import { calculateProjectWorkload, defaultWorkloadCapacity, MAX_DAILY_WORKLOAD_MINUTES } from '../../shared/project-workload';
+import { calculateProjectWorkload, defaultWorkloadCapacity } from '../../shared/project-workload';
 import { projectWorkflow } from '../../shared/workflow-helpers';
-import { api, ApiError, patch } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import { errorMessage } from './schedule-utils';
+import { WorkloadCapacityEditor } from './WorkloadCapacityEditor';
 import './project-workload.css';
 
 const PAGE_DAYS = 14;
 const INPUT_PAGE = 12;
-const CAPACITY_DRAFT = 'workload-capacity';
-const REASONS: Record<WorkloadIncompleteReason, string> = {
+export const WORKLOAD_INCOMPLETE_REASONS: Record<WorkloadIncompleteReason, string> = {
   unassigned: '담당자 미지정',
   'missing-dates': '일정 미정',
   'missing-effort': '계획 작업 시간 미정',
@@ -23,6 +22,7 @@ const REASONS: Record<WorkloadIncompleteReason, string> = {
 
 type WorkloadRange = { startDate: string; endDate: string };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
+export type WorkloadSelection = { userId: string; date: string };
 type WorkloadProps = FeatureProps & WorkloadRange & { onDraftChange?: TrackDraft };
 type SummaryProps = Pick<FeatureProps, 'data' | 'projectId'> & WorkloadRange & { preview: SchedulePreview };
 
@@ -38,7 +38,8 @@ function useWorkloadInput(data: FeatureProps['data'], projectId: string, startDa
 }
 
 const shortDate = (value: string) => `${Number(value.slice(5, 7))}.${Number(value.slice(8))}`;
-const weekday = (value: string) => ['일', '월', '화', '수', '목', '금', '토'][new Date(`${value}T00:00:00Z`).getUTCDay()];
+const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+const weekday = (value: string) => weekdays[new Date(`${value}T00:00:00Z`).getUTCDay()];
 const displayMinutes = formatWorklogMinutes;
 
 export function ProjectWorkload(props: WorkloadProps) {
@@ -50,9 +51,8 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
   const [localCapacity, setLocalCapacity] = useState<ProjectWorkloadCapacity | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [pageStart, setPageStart] = useState<string | null>(null);
-  const [selected, setSelected] = useState<{ userId: string; date: string } | null>(null);
+  const [selected, setSelected] = useState<WorkloadSelection | null>(null);
   const [missingPage, setMissingPage] = useState(0);
-  const cellDescription = useId();
   const settingsButton = useRef<HTMLButtonElement>(null);
   const capacity = localCapacity && localCapacity.version > input.capacity.version ? localCapacity : input.capacity;
   const result = useMemo(() => {
@@ -86,7 +86,7 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
         <SlidersHorizontal size={15} />가용 시간 설정
       </button>
     </header>
-    {editorOpen && <CapacityEditor projectId={projectId} users={data.users} current={capacity} defaultDate={days[0]?.date ?? startDate}
+    {editorOpen && <WorkloadCapacityEditor route={`/projects/${encodeURIComponent(projectId)}/workload-capacity`} users={data.users} current={capacity} defaultDate={days[0]?.date ?? startDate}
       onSnapshot={setLocalCapacity} onClose={closeEditor} onDraftChange={onDraftChange} refresh={refresh} notify={notify} />}
     {result.error && <p className="workload-error" role="alert">{result.error}</p>}
     {workload && <>
@@ -108,33 +108,7 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
             <button className="btn btn-ghost" aria-label="다음 업무량 기간" disabled={first + PAGE_DAYS >= workload.days.length} type="button" onClick={() => movePage(PAGE_DAYS)}><ArrowRight size={15} /></button>
           </div>
         </div>
-        <div className="workload-scroll" role="region" aria-label="업무량 표 가로 스크롤" tabIndex={0}>
-          <table className="workload-table" aria-label="일별 계획 작업 시간과 가용 시간">
-            <thead><tr><th scope="col">담당자</th>{days.map(day => <th scope="col" key={day.date} className={day.working ? '' : 'is-nonworking'}>
-              <time dateTime={day.date} title={day.date}>{shortDate(day.date)} <span>{weekday(day.date)}</span></time>
-            </th>)}</tr></thead>
-            <tbody>{workload.rows.map((row, rowIndex) => {
-              const user = usersById.get(row.userId);
-              if (!user) return null;
-              return <tr key={row.userId}><th scope="row"><strong title={user.name}>{user.name}</strong><small>{row.overloadedDays > 0 ? `초과 ${row.overloadedDays}일` : '초과 없음'}</small></th>
-                {row.days.slice(first, first + PAGE_DAYS).map((day, index) => {
-                  const overload = day.scheduledMinutes > day.availableMinutes;
-                  const isSelected = selected?.userId === row.userId && selected?.date === day.date;
-                  const label = `${day.date} ${user.name} 업무량`;
-                  const descriptionId = `${cellDescription}-${rowIndex}-${index}`;
-                  return <td key={day.date} className={days[index].working ? '' : 'is-nonworking'}>
-                    <button type="button" className={`workload-cell${overload ? ' is-overloaded' : ''}`} aria-pressed={isSelected} aria-label={label}
-                      aria-describedby={`${descriptionId}-planned ${descriptionId}-available`}
-                      data-scheduled-minutes={day.scheduledMinutes} data-available-minutes={day.availableMinutes}
-                      onClick={() => setSelected(isSelected ? null : { userId: row.userId, date: day.date })}>
-                      <strong id={`${descriptionId}-planned`}>{displayMinutes(day.scheduledMinutes)}</strong><small id={`${descriptionId}-available`}>{overload ? '초과 · ' : ''}가용 {displayMinutes(day.availableMinutes)}</small>
-                    </button>
-                  </td>;
-                })}</tr>;
-            })}</tbody>
-          </table>
-          {workload.rows.length === 0 && <p className="workload-empty">등록된 팀원이 없습니다.</p>}
-        </div>
+        <WorkloadTable days={days} rows={workload.rows} first={first} users={usersById} selected={selected} onSelect={setSelected} />
       </>}
       {selected && focusedDay && <section className="workload-detail" aria-label="날짜별 업무 배분">
         <div className="workload-section-heading">
@@ -145,7 +119,7 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
         <ul className="workload-items">
           {focusedDay.allocations.map(allocation => {
             const issue = issuesById.get(allocation.issueId);
-            return issue && <li key={issue.id}><IssueLink issue={issue} openIssue={openIssue} /><span>{displayMinutes(allocation.minutes)}</span></li>;
+            return issue && <li key={issue.id}><WorkloadIssueLink issue={issue} openIssue={openIssue} /><span>{displayMinutes(allocation.minutes)}</span></li>;
           })}
         </ul>
       </section>}
@@ -154,7 +128,7 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
         <ul className="workload-items">
           {incomplete.slice(missingOffset, missingOffset + INPUT_PAGE).map(value => {
             const issue = issuesById.get(value.issueId);
-            return issue && <li key={issue.id}><IssueLink issue={issue} openIssue={openIssue} /><span>{value.reasons.map(reason => REASONS[reason]).join(' · ')}</span></li>;
+            return issue && <li key={issue.id}><WorkloadIssueLink issue={issue} openIssue={openIssue} /><span>{value.reasons.map(reason => WORKLOAD_INCOMPLETE_REASONS[reason]).join(' · ')}</span></li>;
           })}
         </ul>
         {incomplete.length > INPUT_PAGE && <div className="workload-page-actions">
@@ -167,160 +141,46 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
   </section>;
 }
 
-function IssueLink({ issue, openIssue }: { issue: Issue; openIssue: FeatureProps['openIssue'] }) {
+export function WorkloadTable({ days, rows, first = 0, users, selected, onSelect }: {
+  days: ProjectWorkloadResult['days'];
+  rows: ProjectWorkloadResult['rows'];
+  first?: number;
+  users: ReadonlyMap<string, User>;
+  selected: WorkloadSelection | null;
+  onSelect: (selection: WorkloadSelection | null) => void;
+}) {
+  const cellDescription = useId();
+  return <div className="workload-scroll" role="region" aria-label="업무량 표 가로 스크롤" tabIndex={0}>
+    <table className="workload-table" aria-label="일별 계획 작업 시간과 가용 시간">
+      <thead><tr><th scope="col">담당자</th>{days.map(day => <th scope="col" key={day.date} className={day.working ? '' : 'is-nonworking'}>
+        <time dateTime={day.date} title={day.date}>{shortDate(day.date)} <span>{weekday(day.date)}</span></time>
+      </th>)}</tr></thead>
+      <tbody>{rows.map((row, rowIndex) => {
+        const user = users.get(row.userId);
+        if (!user) return null;
+        return <tr key={row.userId}><th scope="row"><strong title={user.name}>{user.name}</strong><small>{row.overloadedDays > 0 ? `초과 ${row.overloadedDays}일` : '초과 없음'}</small></th>
+          {row.days.slice(first, first + days.length).map((day, index) => {
+            const overload = day.scheduledMinutes > day.availableMinutes;
+            const isSelected = selected?.userId === row.userId && selected?.date === day.date;
+            const label = `${day.date} ${user.name} 업무량`;
+            const descriptionId = `${cellDescription}-${rowIndex}-${index}`;
+            return <td key={day.date} className={days[index].working ? '' : 'is-nonworking'}>
+              <button type="button" className={`workload-cell${overload ? ' is-overloaded' : ''}`} aria-pressed={isSelected} aria-label={label}
+                aria-describedby={`${descriptionId}-planned ${descriptionId}-available`}
+                data-scheduled-minutes={day.scheduledMinutes} data-available-minutes={day.availableMinutes}
+                onClick={() => onSelect(isSelected ? null : { userId: row.userId, date: day.date })}>
+                <strong id={`${descriptionId}-planned`}>{displayMinutes(day.scheduledMinutes)}</strong><small id={`${descriptionId}-available`}>{overload ? '초과 · ' : ''}가용 {displayMinutes(day.availableMinutes)}</small>
+              </button>
+            </td>;
+          })}</tr>;
+      })}</tbody>
+    </table>
+    {rows.length === 0 && <p className="workload-empty">등록된 팀원이 없습니다.</p>}
+  </div>;
+}
+
+export function WorkloadIssueLink({ issue, openIssue }: { issue: Pick<Issue, 'id' | 'key' | 'title'>; openIssue: FeatureProps['openIssue'] }) {
   return <button className="workload-issue" type="button" onClick={() => openIssue(issue.id)}><span>{issue.key}</span><strong>{issue.title}</strong></button>;
-}
-
-type CapacityDraft = {
-  defaultDailyMinutes: string;
-  members: { key: string; userId: string; dailyMinutes: string }[];
-  exceptions: { key: string; userId: string; date: string; availableMinutes: string }[];
-};
-
-function toDraft(capacity: ProjectWorkloadCapacity): CapacityDraft {
-  return {
-    defaultDailyMinutes: String(capacity.defaultDailyMinutes),
-    members: capacity.members.map(value => ({ ...value, key: `member-${value.userId}`, dailyMinutes: String(value.dailyMinutes) })),
-    exceptions: capacity.exceptions.map(value => ({ ...value, key: `exception-${value.userId}-${value.date}`, availableMinutes: String(value.availableMinutes) })),
-  };
-}
-
-type CapacityEditorProps = Pick<FeatureProps, 'refresh' | 'notify' | 'projectId'> & {
-  current: ProjectWorkloadCapacity;
-  users: User[];
-  defaultDate: string;
-  onSnapshot: (value: ProjectWorkloadCapacity) => void;
-  onClose: () => void;
-  onDraftChange?: TrackDraft;
-};
-
-function CapacityEditor({ current, projectId, users, defaultDate, onSnapshot, onClose, onDraftChange, refresh, notify }: CapacityEditorProps) {
-  const [base, setBase] = useState(current);
-  const [draft, setDraft] = useState(() => toDraft(current));
-  const [pending, setPending] = useState<'saving' | 'loading' | null>(null);
-  const [error, setError] = useState('');
-  const [conflict, setConflict] = useState(false);
-  const pendingRef = useRef(false);
-  const nextKey = useRef(0);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(toDraft(base));
-  const newest = users.find(user => !draft.members.some(member => member.userId === user.id));
-  const route = `/projects/${encodeURIComponent(projectId)}/workload-capacity`;
-
-  useEffect(() => { onDraftChange?.(CAPACITY_DRAFT, dirty, Boolean(pending)); }, [dirty, onDraftChange, pending]);
-  useEffect(() => () => onDraftChange?.(CAPACITY_DRAFT, false, false), [onDraftChange]);
-
-  function canDiscard() {
-    return !pendingRef.current && (!dirty || window.confirm('작성 중인 가용 시간 설정을 버릴까요?'));
-  }
-  function begin(action: typeof pending) {
-    pendingRef.current = Boolean(action);
-    setPending(action);
-    onDraftChange?.(CAPACITY_DRAFT, dirty, Boolean(action));
-  }
-  async function reload() {
-    if (!canDiscard()) return;
-    begin('loading');
-    try {
-      const value = await api<ProjectWorkloadCapacity>(route);
-      setBase(value);
-      setDraft(toDraft(value));
-      setConflict(false);
-      setError('');
-      onSnapshot(value);
-      try { await refresh(); }
-      catch (cause) { notify(`최신 가용 시간을 불러왔습니다. 워크스페이스를 새로 고쳐 주세요. ${errorMessage(cause)}`, 'error'); }
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { begin(null); }
-  }
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (pendingRef.current || !dirty) return;
-    if (new Set(draft.members.map(value => value.userId)).size !== draft.members.length ||
-        new Set(draft.exceptions.map(value => `${value.userId}\0${value.date}`)).size !== draft.exceptions.length) {
-      setError('같은 담당자 또는 같은 담당자의 날짜 예외를 한 번만 입력해 주세요.');
-      return;
-    }
-    setError('');
-    begin('saving');
-    let saved = false;
-    try {
-      const value = await patch<ProjectWorkloadCapacity>(route, {
-        expectedVersion: base.version,
-        defaultDailyMinutes: Number(draft.defaultDailyMinutes),
-        members: draft.members.map(({ userId, dailyMinutes }) => ({ userId, dailyMinutes: Number(dailyMinutes) })),
-        exceptions: draft.exceptions.map(({ userId, date, availableMinutes }) => ({ userId, date, availableMinutes: Number(availableMinutes) })),
-      });
-      saved = true;
-      onSnapshot(value);
-      try { await refresh(); notify('가용 시간 설정을 저장했습니다.'); }
-      catch (cause) { notify(`가용 시간은 저장했습니다. 워크스페이스를 새로 고쳐 주세요. ${errorMessage(cause)}`, 'error'); }
-    } catch (cause) {
-      setConflict(cause instanceof ApiError && cause.status === 409);
-      setError(errorMessage(cause));
-    } finally { begin(null); }
-    if (saved) onClose();
-  }
-
-  function changeMember(key: string, changes: Partial<CapacityDraft['members'][number]>) {
-    setDraft(previous => ({ ...previous, members: previous.members.map(value => value.key === key ? { ...value, ...changes } : value) }));
-  }
-  function changeException(key: string, changes: Partial<CapacityDraft['exceptions'][number]>) {
-    setDraft(previous => ({ ...previous, exceptions: previous.exceptions.map(value => value.key === key ? { ...value, ...changes } : value) }));
-  }
-
-  return <form className="workload-capacity" aria-label="가용 시간 편집" onSubmit={save}>
-    <div className="workload-section-heading"><div><h3>가용 시간 설정</h3><p>프로젝트 근무일에 적용합니다. 특정 날짜가 담당자의 일일 설정보다 우선합니다.</p></div>
-      <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={() => void reload()}><RefreshCw size={14} />최신 설정 불러오기</button>
-    </div>
-    <fieldset disabled={Boolean(pending)}>
-      <MinutesField label="기본 일일 가용 시간 (분)" value={draft.defaultDailyMinutes} onChange={value => setDraft(previous => ({ ...previous, defaultDailyMinutes: value }))} />
-      <div className="workload-section-heading"><h4>담당자별 기본 시간</h4>
-        <button className="btn" type="button" disabled={!newest} onClick={() => {
-          if (!newest) return;
-          const key = `new-${++nextKey.current}`;
-          setDraft(previous => ({ ...previous, members: [...previous.members, { key, userId: newest.id, dailyMinutes: previous.defaultDailyMinutes }] }));
-        }}><Plus size={14} />담당자별 가용 시간 추가</button>
-      </div>
-      {draft.members.map((member, index) => <div key={member.key} className="workload-rule-row">
-        <UserField label={`담당자 ${index + 1}`} users={users} value={member.userId} onChange={userId => changeMember(member.key, { userId })} />
-        <MinutesField label={`담당자 ${index + 1} 일일 가용 시간 (분)`} value={member.dailyMinutes} onChange={dailyMinutes => changeMember(member.key, { dailyMinutes })} />
-        <button className="issue-icon-button" type="button" aria-label={`담당자 ${index + 1} 설정 삭제`} onClick={() => setDraft(previous => ({ ...previous, members: previous.members.filter(value => value.key !== member.key) }))}><Trash2 size={15} /></button>
-      </div>)}
-      <div className="workload-section-heading"><div><h4>날짜 예외</h4><p>예를 들어 개인 휴무일은 0분으로 설정합니다.</p></div>
-        <button className="btn" type="button" disabled={!users.length} onClick={() => {
-          const key = `new-${++nextKey.current}`;
-          const userId = users.find(user => !draft.exceptions.some(value => value.userId === user.id && value.date === defaultDate))?.id ?? '';
-          setDraft(previous => ({ ...previous, exceptions: [...previous.exceptions, { key, userId, date: defaultDate, availableMinutes: '0' }] }));
-        }}><Plus size={14} />날짜 예외 추가</button>
-      </div>
-      {draft.exceptions.map((exception, index) => <div key={exception.key} className="workload-rule-row has-date">
-        <UserField label={`날짜 예외 ${index + 1} 담당자`} users={users} value={exception.userId} onChange={userId => changeException(exception.key, { userId })} />
-        <label className="workload-label">{`날짜 예외 ${index + 1} 날짜`}<input className="field" type="date" required value={exception.date}
-          onChange={event => changeException(exception.key, { date: event.target.value })} /></label>
-        <MinutesField label={`날짜 예외 ${index + 1} 가용 시간 (분)`} value={exception.availableMinutes} onChange={availableMinutes => changeException(exception.key, { availableMinutes })} />
-        <button className="issue-icon-button" type="button" aria-label={`날짜 예외 ${index + 1} 삭제`} onClick={() => setDraft(previous => ({ ...previous, exceptions: previous.exceptions.filter(value => value.key !== exception.key) }))}><Trash2 size={15} /></button>
-      </div>)}
-    </fieldset>
-    {error && <p className="workload-error" role="alert">{error} 작성 중인 내용이 유지됩니다.</p>}
-    {!error && current.version > base.version && <p className="workload-error" role="alert">최신 설정은 버전 {current.version}입니다. 작성 중인 내용은 버전 {base.version}에 남아 있습니다.</p>}
-    <div className="workload-capacity-actions"><small>편집 기준 버전 {base.version}</small>
-      <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={() => { if (canDiscard()) onClose(); }}>설정 닫기</button>
-      <button className="btn btn-primary" type="submit" disabled={Boolean(pending) || !dirty || conflict || current.version > base.version}>
-        <Save size={15} />{pending === 'saving' ? '저장 중…' : '가용 시간 저장'}
-      </button>
-    </div>
-  </form>;
-}
-
-function MinutesField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return <label className="workload-label">{label}<input className="field" type="number" min={0} max={MAX_DAILY_WORKLOAD_MINUTES} step={1} required
-    value={value} onChange={event => onChange(event.target.value)} /></label>;
-}
-
-function UserField({ label, value, users, onChange }: { label: string; value: string; users: User[]; onChange: (value: string) => void }) {
-  return <label className="workload-label">{label}<select className="field" aria-label={label} value={value} required onChange={event => onChange(event.target.value)}>
-    <option value="">담당자 선택</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
-  </select></label>;
 }
 
 type Day = ProjectWorkloadResult['rows'][number]['days'][number];

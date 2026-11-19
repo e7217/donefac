@@ -136,6 +136,30 @@
 .workload-capacity-actions small { margin-right: auto; }
 .workload-error { margin: 9px 0 0; padding: 8px; border-radius: 5px; background: var(--workload-alert-tint); color: var(--workload-alert); font-size: 12px; overflow-wrap: anywhere; }
 
+.team-workload-filters { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px; margin: 14px 0 8px; }
+.team-workload-filters > .workload-label { min-width: 124px; }
+.team-workload-projects { min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); }
+.team-workload-projects[open] { flex-basis: 100%; }
+.team-workload-projects summary { display: flex; gap: 7px; align-items: center; padding: 8px 10px; font-size: 12px; list-style: none; cursor: pointer; }
+.team-workload-projects summary::-webkit-details-marker { display: none; }
+.team-workload-projects summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.team-workload-projects[open] summary svg { transform: rotate(180deg); }
+.team-workload-count { color: var(--workload-muted); font-size: 11px; }
+.team-workload-project-actions { display: flex; gap: 5px; margin: 0 7px; }
+.team-workload-projects .workload-choices { padding: 7px 10px 10px; max-height: 180px; overflow-y: auto; }
+.workload-choices { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.workload-choices .gantt-checkbox-label { min-width: 0; overflow-wrap: anywhere; cursor: pointer; }
+.team-workload-period { margin: 0 0 0 auto; align-self: center; }
+.team-workload-period > small { white-space: nowrap; }
+.team-workload-error { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.team-workload-error .workload-error { margin: 0; }
+.team-workload .workload-scroll { max-height: min(48vh, 420px); }
+.team-workload .workload-table thead th { position: sticky; top: 0; z-index: 2; }
+.team-workload .workload-table thead th:first-child { z-index: 3; }
+.team-workload-breakdown { padding-top: 8px; }
+.team-workload-breakdown h4 { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; margin: 0; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+.team-workload-breakdown h4 small { color: var(--workload-muted); font-size: 11px; font-weight: 400; }
+
 .workload-preview { margin: 9px 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--canvas); color: var(--ink); font-size: 12px; }
 .workload-preview p { margin: 3px 0; }
 .workload-preview ul { list-style: none; margin: 5px 0; padding: 0; }
@@ -147,4 +171,5 @@
   .workload-rule-row.has-date { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
   .workload-rule-row.has-date > :first-child { grid-column: 1 / -1; }
   .workload-table tr > :first-child { min-width: 75px; max-width: 108px; }
+  .team-workload-period { margin-left: 0; }
 }

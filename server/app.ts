@@ -36,6 +36,8 @@ import { countDocumentAssignedReviews, listDocumentPublications } from './docume
 import { NotificationsService, TeamNotificationError } from './notifications.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { ProjectWorkloadService } from './project-workload.js';
+import { registerTeamWorkloadRoutes } from './team-workload.js';
+import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
@@ -87,6 +89,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const workload=new ProjectWorkloadService(store);
+  const teamCapacity=new TeamWorkloadCapacityService(store);
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
   const schedulePaste=new SchedulePasteService(store);
   const planScheduleShift=new PlanScheduleShiftService(store);
@@ -125,7 +128,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);
   };
   const cleanupAttachments=(rows:Attachment[])=>{for(const id of new Set(rows.map(row=>row.id)))try{files.remove(id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',id);}};
-  const snapshot = (): WorkspaceSnapshot => ({...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),workloadCapacities:workload.snapshot(),milestones:scheduleArtifacts.allMilestones(),baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot()}) as unknown as WorkspaceSnapshot;
+  const snapshot = (): WorkspaceSnapshot => ({
+    ...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),
+    workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
+    workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
+    baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
+  }) as unknown as WorkspaceSnapshot;
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
@@ -289,6 +297,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.set('Cache-Control','no-store').json(result);
   });
+  registerTeamWorkloadRoutes(app,{store,capacity:teamCapacity,calendars,workflows,actor,activity});
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges});
   schedulePaste.registerRoutes(app,{
     actor,
@@ -699,6 +708,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     }
     for(const issue of effortIssues)validatePlannedEffortMinutes(issue.plannedEffortMinutes);
     const importedCapacity=workload.validateImport(data.schemaVersion>=18?data.workloadCapacities:[],data.projects,data.users,{legacy:data.schemaVersion<18});
+    const importedTeamCapacity=teamCapacity.validateImport(data.teamWorkloadCapacity,data.users,{legacy:data.schemaVersion<19});
     const archiveAttachments=importedTrash.flatMap(entry=>entry.attachments);
     const archiveVersions=importedTrash.flatMap(entry=>entry.attachmentVersions);
     if(data.schemaVersion>=9&&!Array.isArray(data.attachmentVersions))fail('첨부 버전 목록을 확인해 주세요.');
@@ -737,6 +747,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousPlanning=new Map(planning.all().map(item=>[item.id,item.version]));
       const previousCalendars=new Map(calendars.snapshot().map(calendar=>[calendar.projectId,calendar.version]));
       const previousCapacities=new Map(workload.snapshot().map(capacity=>[capacity.projectId,capacity.version]));
+      const previousTeamCapacityVersion=teamCapacity.get().version;
       const previousMilestones=new Map(scheduleArtifacts.allMilestones().map(milestone=>[milestone.id,milestone.version]));
       const previousBaselines=new Map(scheduleArtifacts.allBaselines().map(baseline=>[baseline.id,baseline.version]));
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
@@ -763,6 +774,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       planning.replaceImported(importedPlanning.items,previousPlanning);
       calendars.replaceImported(importedCalendars,previousCalendars);
       workload.replaceImported(importedCapacity,previousCapacities);
+      teamCapacity.replaceImported(importedTeamCapacity,previousTeamCapacityVersion);
       scheduleArtifacts.replaceImported(importedArtifacts,previousMilestones,previousBaselines);
       for(const i of data.issues)store.put('issues',i);
       for(const d of data.documents)store.put('documents',d);

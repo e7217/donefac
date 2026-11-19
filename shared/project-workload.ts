@@ -1,9 +1,14 @@
-import { calendarDate, calendarDay, createCalendarMath, isCalendarDate } from './calendar.js';
+import { calendarDate, calendarDay, createCalendarMath, defaultWorkCalendar, isCalendarDate } from './calendar.js';
 import type {
   Issue,
   ProjectWorkloadCapacity,
+  ProjectWorkloadDay,
   ProjectWorkloadResult,
   ProjectWorkloadRow,
+  TeamWorkloadAllocation,
+  TeamWorkloadCapacity,
+  TeamWorkloadResult,
+  WorkloadAllocation,
   WorkCalendar,
   WorkloadIncompleteReason,
 } from './types.js';
@@ -12,6 +17,10 @@ export const DEFAULT_DAILY_WORKLOAD_MINUTES = 480;
 export const MAX_DAILY_WORKLOAD_MINUTES = 1440;
 export const MAX_PLANNED_EFFORT_MINUTES = 1_000_000;
 export const MAX_WORKLOAD_DAYS = 180;
+export const MAX_TEAM_WORKLOAD_PROJECTS = 100;
+export const MAX_TEAM_WORKLOAD_ISSUES = 10_000;
+const MAX_TEAM_WORKLOAD_CELLS = 36_000;
+const MAX_TEAM_WORKLOAD_ALLOCATIONS = 100_000;
 
 export class WorkloadError extends Error {
   constructor(public status: number, message: string, public details?: unknown) {
@@ -43,19 +52,17 @@ export function defaultWorkloadCapacity(projectId: string, updatedAt?: string): 
   };
 }
 
-type WorkloadInput = {
-  startDate: unknown;
-  endDate: unknown;
+export type WorkloadIssue = Pick<Issue, 'id' | 'projectId' | 'status' | 'assigneeId' | 'startDate' | 'endDate' | 'plannedEffortMinutes'>;
+
+type WorkloadScope = {
   calendar: WorkCalendar;
-  capacity: ProjectWorkloadCapacity;
-  userIds: readonly string[];
-  issues: readonly Issue[];
+  issues: readonly WorkloadIssue[];
   terminalStatusIds: ReadonlySet<string> | readonly string[];
 };
 
-export function calculateProjectWorkload({
-  startDate, endDate, calendar, capacity, userIds, issues, terminalStatusIds,
-}: WorkloadInput): ProjectWorkloadResult {
+type WorkloadQuery = { startDate: unknown; endDate: unknown; userIds: readonly string[] };
+
+export function validateWorkloadRange(startDate: unknown, endDate: unknown) {
   if (!isCalendarDate(startDate) || !isCalendarDate(endDate) || startDate > endDate) {
     throw new WorkloadError(400, '업무량 조회의 시작일과 종료일을 확인해 주세요.');
   }
@@ -64,16 +71,20 @@ export function calculateProjectWorkload({
   if (span > MAX_WORKLOAD_DAYS) {
     throw new WorkloadError(400, `업무량은 한 번에 최대 ${MAX_WORKLOAD_DAYS}일까지 조회할 수 있습니다.`);
   }
-  if (capacity.projectId !== calendar.projectId) {
-    throw new WorkloadError(400, '작업 달력과 가용 시간의 프로젝트가 일치하지 않습니다.');
-  }
+  return { startDate, endDate, startDay, span };
+}
 
-  const math = createCalendarMath(calendar);
-  const days = Array.from({ length: span }, (_, index) => {
-    const date = calendarDate(startDay + index);
-    return { date, working: math.isWorking(date) };
-  });
-  const workingDays = days.flatMap((day, index) => day.working ? [{ date: day.date, index }] : []);
+function workloadRange(start: unknown, end: unknown) {
+  const { startDate, endDate, startDay, span } = validateWorkloadRange(start, end);
+  return { startDate, endDate, dates: Array.from({ length: span }, (_, index) => calendarDate(startDay + index)) };
+}
+
+function workloadRows<Allocation extends WorkloadAllocation>(
+  days: readonly ProjectWorkloadDay[],
+  capacity: Pick<ProjectWorkloadCapacity, 'members' | 'exceptions' | 'defaultDailyMinutes'>,
+  userIds: readonly string[],
+  useOverridesOnNonWorkingDays: boolean,
+): Map<string, ProjectWorkloadRow<Allocation>> {
   const dailyMinutes = new Map(capacity.members.map(member => [member.userId, member.dailyMinutes]));
   const dateOverrides = new Map<string, Map<string, number>>();
   for (const { userId, date, availableMinutes } of capacity.exceptions) {
@@ -81,10 +92,10 @@ export function calculateProjectWorkload({
     overrides.set(date, availableMinutes);
     dateOverrides.set(userId, overrides);
   }
-  const rows: ProjectWorkloadRow[] = [...new Set(userIds)].map(userId => {
+  return new Map([...new Set(userIds)].map(userId => {
     const available = dailyMinutes.get(userId) ?? capacity.defaultDailyMinutes;
     const overrides = dateOverrides.get(userId);
-    return {
+    return [userId, {
       userId,
       scheduledMinutes: 0,
       availableMinutes: 0,
@@ -92,14 +103,24 @@ export function calculateProjectWorkload({
       days: days.map(({ date, working }) => ({
         date,
         scheduledMinutes: 0,
-        availableMinutes: working ? overrides?.get(date) ?? available : 0,
+        availableMinutes: (working || useOverridesOnNonWorkingDays ? overrides?.get(date) : undefined) ?? (working ? available : 0),
         allocations: [],
       })),
-    };
-  });
-  const memberRows = new Map(rows.map(row => [row.userId, row]));
+    }];
+  }));
+}
+
+function allocateIssues<Allocation extends WorkloadAllocation>(
+  { calendar, issues, terminalStatusIds }: WorkloadScope,
+  { startDate, endDate }: ReturnType<typeof workloadRange>,
+  days: readonly ProjectWorkloadDay[],
+  math: ReturnType<typeof createCalendarMath>,
+  memberRows: ReadonlyMap<string, ProjectWorkloadRow<Allocation>>,
+  reportIncomplete: (issue: WorkloadIssue, reasons: WorkloadIncompleteReason[]) => void,
+  allocation: (issue: WorkloadIssue, minutes: number) => Allocation,
+) {
+  const workingDays = days.flatMap((day, index) => day.working ? [{ date: day.date, index }] : []);
   const terminal = new Set(terminalStatusIds);
-  const incomplete: ProjectWorkloadResult['incomplete'] = [];
 
   for (const issue of issues) {
     if (issue.projectId !== calendar.projectId || terminal.has(issue.status)) continue;
@@ -116,7 +137,7 @@ export function calculateProjectWorkload({
     if (!hasDates) reasons.push('missing-dates');
     if (!isEffortMinutes(effort)) reasons.push('missing-effort');
     if (hasDates && workdays === 0) reasons.push('no-working-days');
-    if (reasons.length > 0) incomplete.push({ issueId: issue.id, reasons });
+    if (reasons.length > 0) reportIncomplete(issue, reasons);
 
     if (!row || !hasDates || !workdays || !isEffortMinutes(effort) || effort === 0) continue;
     const first = workingDays.findIndex(day => day.date >= from);
@@ -132,10 +153,12 @@ export function calculateProjectWorkload({
       if (minutes === 0) break;
       const cell = row.days[workingDays[index].index];
       cell.scheduledMinutes += minutes;
-      cell.allocations.push({ issueId: issue.id, minutes });
+      cell.allocations.push(allocation(issue, minutes));
     }
   }
+}
 
+function sumWorkload(rows: readonly ProjectWorkloadRow[]) {
   let totalScheduledMinutes = 0;
   let totalAvailableMinutes = 0;
   let overloadedCells = 0;
@@ -149,5 +172,59 @@ export function calculateProjectWorkload({
     totalAvailableMinutes += row.availableMinutes;
     overloadedCells += row.overloadedDays;
   }
-  return { startDate, endDate, days, rows, incomplete, totalScheduledMinutes, totalAvailableMinutes, overloadedCells };
+  return { totalScheduledMinutes, totalAvailableMinutes, overloadedCells };
+}
+
+export function calculateProjectWorkload(input: WorkloadQuery & WorkloadScope & { capacity: ProjectWorkloadCapacity }): ProjectWorkloadResult {
+  const { calendar, capacity, userIds } = input;
+  const range = workloadRange(input.startDate, input.endDate);
+  if (capacity.projectId !== calendar.projectId) {
+    throw new WorkloadError(400, '작업 달력과 가용 시간의 프로젝트가 일치하지 않습니다.');
+  }
+  const math = createCalendarMath(calendar);
+  const days = range.dates.map(date => ({ date, working: math.isWorking(date) }));
+  const memberRows = workloadRows<WorkloadAllocation>(days, capacity, userIds, false);
+  const incomplete: ProjectWorkloadResult['incomplete'] = [];
+  allocateIssues(input, range, days, math, memberRows, (issue, reasons) => incomplete.push({ issueId: issue.id, reasons }),
+    (issue, minutes) => ({ issueId: issue.id, minutes }));
+  const rows = [...memberRows.values()];
+  return { startDate: range.startDate, endDate: range.endDate, days, rows, incomplete, ...sumWorkload(rows) };
+}
+
+export function calculateTeamWorkload({
+  startDate, endDate, userIds, capacity, projects,
+}: WorkloadQuery & { capacity: TeamWorkloadCapacity; projects: readonly WorkloadScope[] }): TeamWorkloadResult {
+  const range = workloadRange(startDate, endDate);
+  const projectIds = projects.map(project => project.calendar.projectId);
+  if (projects.length > MAX_TEAM_WORKLOAD_PROJECTS || new Set(projectIds).size !== projectIds.length) {
+    throw new WorkloadError(400, `작업량 조회 프로젝트는 중복 없이 최대 ${MAX_TEAM_WORKLOAD_PROJECTS}개를 선택해 주세요.`);
+  }
+  if (new Set(userIds).size * range.dates.length > MAX_TEAM_WORKLOAD_CELLS) {
+    throw new WorkloadError(422, '팀원별 날짜 칸이 너무 많습니다. 조회 기간을 줄여 주세요.');
+  }
+  if (projects.reduce((total, project) => total + project.issues.length, 0) > MAX_TEAM_WORKLOAD_ISSUES) {
+    throw new WorkloadError(422, `작업량 조회는 최대 ${MAX_TEAM_WORKLOAD_ISSUES.toLocaleString('ko-KR')}개 업무를 처리합니다. 프로젝트를 줄여 주세요.`);
+  }
+  const teamCalendar = createCalendarMath({ ...defaultWorkCalendar('team'),
+    workingWeekdays: capacity.workingWeekdays, exceptions: capacity.calendarExceptions });
+  const days = range.dates.map(date => ({ date, working: teamCalendar.isWorking(date) }));
+  const memberRows = workloadRows<TeamWorkloadAllocation>(days, capacity, userIds, true);
+  const incomplete: TeamWorkloadResult['incomplete'] = [];
+  let allocationCount = 0;
+  for (const project of projects) {
+    const math = createCalendarMath(project.calendar);
+    const projectDays = range.dates.map(date => ({ date, working: math.isWorking(date) }));
+    allocateIssues(project, range, projectDays, math, memberRows,
+      (issue, reasons) => incomplete.push({ issueId: issue.id, projectId: issue.projectId, reasons }), (issue, minutes) => {
+        if (++allocationCount > MAX_TEAM_WORKLOAD_ALLOCATIONS) {
+          throw new WorkloadError(422, '날짜별 업무 배정이 너무 많습니다. 조회 기간이나 프로젝트를 줄여 주세요.');
+        }
+        return { issueId: issue.id, projectId: issue.projectId, minutes };
+      });
+  }
+  const rows = [...memberRows.values()];
+  return {
+    startDate: range.startDate, endDate: range.endDate, days, rows, incomplete, projectIds, capacityVersion: capacity.version,
+    ...sumWorkload(rows),
+  };
 }

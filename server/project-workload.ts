@@ -1,6 +1,6 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { defaultWorkloadCapacity, MAX_DAILY_WORKLOAD_MINUTES, WorkloadError } from '../shared/project-workload.js';
-import type { Project, ProjectWorkloadCapacity, User } from '../shared/types.js';
+import type { Project, ProjectWorkloadCapacity, User, WorkloadCapacityValues } from '../shared/types.js';
 import type { Store } from './store.js';
 
 export { WorkloadError } from '../shared/project-workload.js';
@@ -28,14 +28,12 @@ function readUserId(value: unknown, userIds: ReadonlySet<string>): string {
   return value;
 }
 
-function nextVersion(version: number): number {
+export function nextWorkloadCapacityVersion(version: number): number {
   if (!Number.isSafeInteger(version + 1)) invalid('가용 시간 설정 버전이 한도에 도달했습니다.', 409);
   return version + 1;
 }
 
-function parseCapacity(
-  input: Record<string, unknown>, projectId: string, version: number, updatedAt: string, userIds: ReadonlySet<string>,
-): ProjectWorkloadCapacity {
+export function parseWorkloadCapacityValues(input: Record<string, unknown>, userIds: ReadonlySet<string>): WorkloadCapacityValues {
   const defaultDailyMinutes = minutes(input.defaultDailyMinutes);
   if (!Array.isArray(input.members) || input.members.length > userIds.size) invalid('팀원별 가용 시간 목록을 확인해 주세요.');
   const seenMembers = new Set<string>();
@@ -65,7 +63,7 @@ function parseCapacity(
 
   members.sort((a, b) => a.userId.localeCompare(b.userId));
   exceptions.sort((a, b) => a.date.localeCompare(b.date) || a.userId.localeCompare(b.userId));
-  return { id: projectId, projectId, version, updatedAt, defaultDailyMinutes, members, exceptions };
+  return { defaultDailyMinutes, members, exceptions };
 }
 
 export class ProjectWorkloadService {
@@ -105,7 +103,10 @@ export class ProjectWorkloadService {
         exceptions: Object.hasOwn(input, 'exceptions') ? input.exceptions : prior.exceptions,
       };
       const userIds = new Set(this.store.all<User>('users').map(user => user.id));
-      const result = parseCapacity(values, projectId, nextVersion(prior.version), new Date().toISOString(), userIds);
+      const result = {
+        id: projectId, projectId, version: nextWorkloadCapacityVersion(prior.version), updatedAt: new Date().toISOString(),
+        ...parseWorkloadCapacityValues(values, userIds),
+      };
       this.store.put('project_workload_capacities', result);
       onSaved?.(result);
       return result;
@@ -129,14 +130,14 @@ export class ProjectWorkloadService {
         invalid('가용 시간 설정의 버전과 수정 시간을 확인해 주세요.');
       }
       seen.add(projectId);
-      return parseCapacity(input, projectId, version, updatedAt, userIds);
+      return { id: projectId, projectId, version, updatedAt, ...parseWorkloadCapacityValues(input, userIds) };
     });
   }
 
   replaceImported(values: ProjectWorkloadCapacity[], previousVersions: ReadonlyMap<string, number>): void {
     const restored = values.map(value => {
       const previous = previousVersions.get(value.projectId);
-      return previous === undefined ? value : { ...value, version: nextVersion(Math.max(value.version, previous)) };
+      return previous === undefined ? value : { ...value, version: nextWorkloadCapacityVersion(Math.max(value.version, previous)) };
     });
     this.store.db.exec('DELETE FROM project_workload_capacities');
     for (const value of restored) this.store.put('project_workload_capacities', value);

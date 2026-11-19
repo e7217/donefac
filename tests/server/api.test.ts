@@ -103,7 +103,7 @@ test('attachments persist bytes and hashes, reject unsafe names and oversized up
 test('native export/import includes exact attachment bytes and accepts legacy schema2 while rolling back invalid packages',async()=>{
  const f=await fixture();try{
   const a=await upload(f,Buffer.from('보존할 첨부파일'),'설계.txt');const b=await upload(f,onePixelPng,'image.png','document','doc-retry','image/png');
-  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,18);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
+  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,19);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
   const extra=await upload(f,Buffer.from('나중 파일'),'later.txt','issue','issue-2');
   const corrupt=structuredClone(exported);corrupt.attachmentContents[0].data=Buffer.from('손상됨').toString('base64');assert.equal((await f.request('/import','POST',{data:corrupt})).status,400);
   assert.equal(existsSync(join(f.dir,'uploads',extra.data.id)),true);assert.deepEqual(readFileSync(join(f.dir,'uploads',b.data.id)),onePixelPng);

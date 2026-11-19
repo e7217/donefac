@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import { calendarDate, calendarDay, createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
-import type { Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, TeamWorkloadCapacity, WorkspaceSnapshot } from '../../shared/types';
 
 const capacityDraft = ({ defaultDailyMinutes, members, exceptions }: ProjectWorkloadCapacity) => ({ defaultDailyMinutes, members, exceptions });
 
@@ -108,6 +108,104 @@ test('간트에서 계획 시간을 편집하고 가용 시간을 저장한 뒤 
       const current = await capacity();
       if (JSON.stringify(capacityDraft(current)) !== JSON.stringify(capacityDraft(originalCapacity))) {
         const restored = await requests.patch(path, {data:{...capacityDraft(originalCapacity),expectedVersion:current.version}});
+        expect(restored.ok(), await restored.text()).toBeTruthy();
+      }
+    }
+  }
+});
+
+test('프로젝트 간 작업량에서 겹친 업무를 확인하고 다른 프로젝트의 업무 상세를 연다', async ({ page, request: requests }) => {
+  const initial = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const [first, second] = initial.projects;
+  const [assignee] = initial.users;
+  const endpoint = '/api/workload-capacity';
+  const readCapacity = async () => {
+    const response = await requests.get(endpoint);
+    expect(response.ok(), await response.text()).toBeTruthy();
+    return response.json() as Promise<TeamWorkloadCapacity>;
+  };
+  const original = await readCapacity();
+  const calendars = [first, second].map(project => createCalendarMath(initial.calendars?.find(calendar => calendar.projectId === project.id) ?? defaultWorkCalendar(project.id)));
+  const future = calendarDay(new Date().toISOString().slice(0, 10)) + 84;
+  const date = Array.from({length:28}, (_, index) => calendarDate(future + index))
+    .find(value => calendars.every(calendar => calendar.isWorking(value)) && new Date(`${value}T00:00:00Z`).getUTCDay() === 1);
+  expect(date).toBeDefined();
+  const issues: Issue[] = [];
+  try {
+    for (const [project, plannedEffortMinutes] of [[first,70],[second,65]] as const) {
+      const response = await requests.post('/api/issues', {data:{
+        projectId:project.id, title:`합성 병행 업무 ${randomUUID()}`, assigneeId:assignee.id,
+        startDate:date, endDate:date, plannedEffortMinutes,
+      }});
+      expect(response.status(), await response.text()).toBe(201);
+      issues.push(await response.json() as Issue);
+    }
+    await page.setViewportSize({width:360,height:820});
+    await page.goto(`/#/${first.id}/gantt`);
+    const toggle = page.getByRole('button', {name:'프로젝트 간 작업량',exact:true});
+    await toggle.click();
+    const team = page.getByRole('region', {name:'프로젝트 간 작업량',exact:true});
+    await expect(team).toBeVisible();
+    await team.getByLabel('프로젝트 간 작업량 시작일', {exact:true}).fill(date!);
+    const cell = team.getByRole('button', {name:`${date} ${assignee.name} 업무량`,exact:true});
+    await expect(cell).toHaveAttribute('data-scheduled-minutes','135');
+    const scroller = team.getByRole('region', {name:'업무량 표 가로 스크롤',exact:true});
+    expect(await scroller.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+
+    const settings = team.getByRole('button', {name:'팀 가용 시간 설정',exact:true});
+    await settings.click();
+    const form = team.getByRole('form', {name:'팀 가용 시간 편집',exact:true});
+    const minutes = form.getByLabel('기본 일일 가용 시간 (분)', {exact:true});
+    await minutes.fill('100');
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === endpoint && response.request().method() === 'PATCH');
+    await form.getByRole('button', {name:'가용 시간 저장',exact:true}).click();
+    const update = await saved;
+    expect(update.ok(), await update.text()).toBeTruthy();
+    await expect(cell).toHaveAttribute('data-available-minutes','100');
+    await expect(cell).toHaveClass(/is-overloaded/);
+
+    await team.getByText('프로젝트 선택', {exact:true}).click();
+    const projectChoice = team.getByRole('checkbox', {name:first.name,exact:true});
+    await projectChoice.uncheck();
+    await expect(cell).toHaveAttribute('data-scheduled-minutes','65');
+    await expect(cell).toHaveAttribute('data-available-minutes','100');
+    await projectChoice.check();
+    await expect(cell).toHaveAttribute('data-scheduled-minutes','135');
+    await cell.click();
+    const detail = team.getByRole('region', {name:'프로젝트별 업무 배분',exact:true});
+    const [localIssue, foreignIssue] = issues;
+    await expect(detail).toContainText(first.name);
+    await expect(detail).toContainText(second.name);
+    await expect(detail.getByRole('button', {name:new RegExp(localIssue.title)})).toBeVisible();
+    const foreign = detail.getByRole('button', {name:new RegExp(foreignIssue.title)});
+
+    if (!(await form.isVisible())) await settings.click();
+    await expect(minutes).toHaveValue('100');
+    await minutes.fill('112');
+    page.once('dialog', dialog => dialog.dismiss());
+    await foreign.click();
+    await expect(minutes).toHaveValue('112');
+    await expect(page).toHaveURL(/\/gantt$/);
+    page.once('dialog', dialog => dialog.accept());
+    await foreign.click();
+    await expect(page.getByRole('dialog', {name:foreignIssue.title,exact:true})).toBeVisible();
+    expect(new URL(page.url()).hash).toContain(`/${second.id}/gantt`);
+    expect((await readCapacity()).defaultDailyMinutes).toBe(100);
+  } finally {
+    try {
+      for (const issue of issues) {
+        const response = await requests.delete(`/api/issues/${issue.id}`);
+        expect(response.ok(), await response.text()).toBeTruthy();
+        const { trashEntryId } = await response.json() as {trashEntryId:string};
+        expect((await requests.delete(`/api/trash/${trashEntryId}`)).ok()).toBeTruthy();
+      }
+    } finally {
+      const latest = await readCapacity();
+      if (latest.version !== original.version) {
+        const { defaultDailyMinutes, members, exceptions, workingWeekdays, calendarExceptions } = original;
+        const restored = await requests.patch(endpoint, {data:{
+          defaultDailyMinutes,members,exceptions,workingWeekdays,calendarExceptions,expectedVersion:latest.version,
+        }});
         expect(restored.ok(), await restored.text()).toBeTruthy();
       }
     }

@@ -117,10 +117,20 @@ try {
   const workloadDate = '2026-11-23';
   const workloadPath = `/projects/${projectId}/workload?startDate=${workloadDate}&endDate=${workloadDate}`;
   const capacityPath = `/projects/${projectId}/workload-capacity`;
+  const teamCapacityPath = '/workload-capacity';
+  const teamWorkloadPath = `/workload?startDate=${workloadDate}&endDate=${workloadDate}`;
   const initialCapacity = await (await call(pilot.url,capacityPath)).json();
   await call(pilot.url,capacityPath,{method:'PATCH',body:{expectedVersion:initialCapacity.version,members:[{userId:assigneeId,dailyMinutes:240}]}});
+  const teamCapacity = await (await call(pilot.url,teamCapacityPath)).json();
+  const savedTeamCapacity = await (await call(pilot.url,teamCapacityPath,{
+    method:'PATCH',body:{expectedVersion:teamCapacity.version,exceptions:[{userId:assigneeId,date:workloadDate,availableMinutes:320}]},
+  })).json();
   const issue = await (await call(pilot.url, '/issues', {
     method:'POST', status:201, body:{projectId,title:'파일럿 백업 복원 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,estimate:2,plannedEffortMinutes:300},
+  })).json();
+  const parallelProjectId = workspace.projects[1].id;
+  const parallel = await (await call(pilot.url,'/issues',{
+    method:'POST',status:201,body:{projectId:parallelProjectId,title:'파일럿 병행 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,plannedEffortMinutes:90},
   })).json();
   const document = await (await call(pilot.url,'/documents',{
     method:'POST',status:201,body:{projectId,title:'파일럿 백업 복원 문서',content:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'고정할 원본 문서'}]}]}},
@@ -208,6 +218,15 @@ try {
   assert.equal(restoredLoadRow?.scheduledMinutes,300);
   assert.equal(restoredLoadRow?.availableMinutes,240);
   assert.equal(restoredLoadRow?.overloadedDays,1);
+  assert.deepEqual(await (await call(copy.url,teamCapacityPath)).json(),savedTeamCapacity);
+  const restoredTeam = await (await call(copy.url,teamWorkloadPath)).json();
+  const restoredTeamRow = restoredTeam.rows.find(row=>row.userId===assigneeId);
+  assert.equal(restoredTeamRow?.scheduledMinutes,390);
+  assert.equal(restoredTeamRow?.availableMinutes,320);
+  assert.equal(restoredTeamRow?.overloadedDays,1);
+  assert.deepEqual(new Map(restoredTeamRow.days[0].allocations.map(allocation=>[allocation.issueId,allocation.projectId])),new Map([
+    [issue.id,projectId],[parallel.id,parallelProjectId],
+  ]));
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();
   assert.equal(restoredCollaboration.enabled,true);
   assert.equal(restoredCollaboration.document.plainText,collaboration.document.plainText);

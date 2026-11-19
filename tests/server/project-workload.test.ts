@@ -7,7 +7,9 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { defaultWorkCalendar } from '../../shared/calendar.js';
 import { calculateProjectWorkload, defaultWorkloadCapacity, WorkloadError } from '../../shared/project-workload.js';
-import type { ApiKeyCreated, Issue, Project, ProjectWorkloadCapacity, ProjectWorkloadResult, WorkspaceSnapshot } from '../../shared/types.js';
+import type {
+  ApiKeyCreated, Issue, Project, ProjectWorkloadCapacity, ProjectWorkloadResult, TeamWorkloadCapacity, TeamWorkloadResult, WorkspaceSnapshot,
+} from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const alice = 'user-min';
@@ -220,7 +222,7 @@ test('native workload backup preserves live and archived effort and rejects inva
   const removal = await f.call<{trashEntryId:string}>(`/issues/${archived.id}`, 'DELETE', { expectedVersion:archived.version });
   const archivePath = `/trash/${removal.trashEntryId}/restore`;
   const backup = await f.export();
-  assert.equal(backup.schemaVersion, 18);
+  assert.equal(backup.schemaVersion, 19);
   assert.equal(backup.issues.find(value => value.id === live.id)?.plannedEffortMinutes, 0);
   assert.equal(backup.trashEntries.find(value => value.id === removal.trashEntryId)?.resource.plannedEffortMinutes, 321);
   assert.deepEqual(backup.workloadCapacities?.find(value => value.projectId === f.project.id), saved);
@@ -263,4 +265,107 @@ test('native workload backup preserves live and archived effort and rejects inva
   assert.equal(legacyIssues.find(value => value.id === live.id)?.plannedEffortMinutes ?? null, null);
   assert.equal(legacyIssues.find(value => value.id === archived.id)?.plannedEffortMinutes ?? null, null);
   assert.equal(legacyIssues.find(value => value.id === archived.id)?.estimate, 8);
+});
+
+test('team workload combines project calendars against one availability per person and date', async t => {
+  const f = await fixture(t);
+  const other = await f.call<Project>('/projects', 'POST', { name:'합성 병행 프로젝트', key:'WLO' }, 201);
+  for (const { id, exceptions } of [
+    { id:f.project.id, exceptions:[{date:saturday,isWorking:true,label:'주말 투입'}] },
+    { id:other.id, exceptions:[{date:friday,isWorking:false,label:'대체 휴무'},{date:saturday,isWorking:true,label:'주말 투입'}] },
+  ]) {
+    const path = `/projects/${id}/calendar`;
+    const { version } = await f.call<{version:number}>(path);
+    await f.call(path, 'PATCH', {expectedVersion:version,exceptions});
+  }
+  const localPath = `/projects/${f.project.id}/workload-capacity`;
+  const projectCapacity = await f.call<ProjectWorkloadCapacity>(localPath);
+  await f.call(localPath, 'PATCH', {expectedVersion:projectCapacity.version,defaultDailyMinutes:1100});
+  const first = await f.issue({ startDate:friday,endDate:monday,plannedEffortMinutes:361 });
+  const second = await f.issue({ projectId:other.id,startDate:friday,endDate:monday,plannedEffortMinutes:400 });
+  const incomplete = await f.issue({ projectId:other.id,assigneeId:null,startDate:null,endDate:null,plannedEffortMinutes:25 });
+  await f.issue({ projectId:other.id,startDate:friday,endDate:monday,plannedEffortMinutes:900,status:'done' });
+
+  const capacityPath = '/workload-capacity';
+  const initial = await f.call<TeamWorkloadCapacity>(capacityPath);
+  const capacity = await f.call<TeamWorkloadCapacity>(capacityPath, 'PATCH', {
+    expectedVersion:initial.version,
+    members:[{userId:alice,dailyMinutes:300}],
+    calendarExceptions:[{date:monday,isWorking:false,label:'팀 휴무'}],
+    exceptions:[{userId:alice,date:saturday,availableMinutes:250},{userId:alice,date:monday,availableMinutes:320}],
+  });
+  const range = `/workload?startDate=${friday}&endDate=${monday}`;
+  const path = `${range}&projectId=${f.project.id}&projectId=${other.id}`;
+  const both = await f.call<TeamWorkloadResult>(path);
+  assert.deepEqual(new Set(both.projectIds), new Set([f.project.id, other.id]));
+  assert.equal(both.capacityVersion, capacity.version);
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).teamWorkloadCapacity, capacity);
+  assert.deepEqual(both.days.map(day => [day.date, day.working]), [[friday,true],[saturday,false],[sunday,false],[monday,false]]);
+  const person = both.rows.find(row => row.userId === alice)!;
+  assert.deepEqual(person.days.map(day => [day.scheduledMinutes,day.availableMinutes]), [[121,300],[320,250],[0,0],[320,320]]);
+  assert.equal(person.overloadedDays, 1);
+  assert.equal(both.overloadedCells, 1);
+  assert.equal(both.totalScheduledMinutes, 761);
+  assert.deepEqual(new Map(person.days[1].allocations.map(value => [value.issueId, [value.projectId,value.minutes]])), new Map([
+    [first.id,[f.project.id,120]], [second.id,[other.id,200]],
+  ]));
+  assert.deepEqual(both.incomplete, [{ issueId:incomplete.id,projectId:other.id,reasons:['unassigned','missing-dates'] }]);
+  const single = await f.call<TeamWorkloadResult>(`${range}&projectId=${other.id}`);
+  assert.equal(single.totalAvailableMinutes, both.totalAvailableMinutes);
+  assert.equal(single.totalScheduledMinutes, 400);
+  assert.equal(single.overloadedCells, 0);
+  assert.ok((await f.call<TeamWorkloadResult>(range)).projectIds.includes(other.id));
+  await f.call(`${range}&projectId=${other.id}&projectId=${other.id}`, 'GET', undefined, 400);
+  await f.call(`${range}&projectId=absent-project`, 'GET', undefined, 404);
+  await f.call(`${range}&ignored=1`, 'GET', undefined, 400);
+  await f.call(`/workload?startDate=${friday}&endDate=2027-12-01`, 'GET', undefined, 400);
+  const reader = await f.call<ApiKeyCreated>('/api-keys', 'POST', {name:'프로젝트 범위 키',access:'read',projectIds:[other.id]}, 201);
+  await f.call(`/v1${path}`, 'GET', undefined, 403, reader.token);
+  await f.call(`/v1${capacityPath}`, 'GET', undefined, 403, reader.token);
+  await f.call('/v1/workspace', 'GET', undefined, 403, reader.token);
+});
+
+test('workspace availability survives restart and restore, and old backups retain project planning with a fresh team calendar', async t => {
+  const f = await fixture(t);
+  const path = '/workload-capacity';
+  const initial = await f.call<TeamWorkloadCapacity>(path);
+  const planned = await f.issue({plannedEffortMinutes:180});
+  const draft = {
+    expectedVersion:initial.version, defaultDailyMinutes:390, workingWeekdays:[6,1,2,3,4],
+    calendarExceptions:[{date:friday,isWorking:true,label:'합성 근무'}],
+    members:[{userId:alice,dailyMinutes:300}], exceptions:[{userId:alice,date:friday,availableMinutes:0}],
+  };
+  await f.call(path, 'PATCH', {...draft,workingWeekdays:[1,1]}, 400);
+  await f.call(path, 'PATCH', {...draft,calendarExceptions:[...draft.calendarExceptions,...draft.calendarExceptions]}, 400);
+  await f.call(path, 'PATCH', {...draft,members:[{userId:'absent-user',dailyMinutes:0}]}, 400);
+  assert.deepEqual(await f.call(path), initial);
+  const saved = await f.call<TeamWorkloadCapacity>(path, 'PATCH', draft);
+  assert.deepEqual(saved.workingWeekdays, [1,2,3,4,6]);
+  await f.call(path, 'PATCH', draft, 409);
+  await f.restart();
+  assert.deepEqual(await f.call(path), saved);
+
+  const backup = await f.export();
+  assert.equal(backup.schemaVersion, 19);
+  assert.deepEqual(backup.teamWorkloadCapacity, saved);
+  const changed = await f.call<TeamWorkloadCapacity>(path, 'PATCH', {expectedVersion:saved.version,defaultDailyMinutes:75});
+  const malformed = structuredClone(backup);
+  malformed.teamWorkloadCapacity!.exceptions[0].userId = 'absent-user';
+  await f.call('/import', 'POST', {data:malformed}, 400);
+  await f.call('/import', 'POST', {data:{...backup,schemaVersion:18}}, 400);
+  assert.deepEqual(await f.call(path), changed);
+  await f.call('/import', 'POST', {data:backup});
+  const restored = await f.call<TeamWorkloadCapacity>(path);
+  assert.ok(restored.version > changed.version);
+  assert.deepEqual({...restored,version:saved.version}, saved);
+  await f.call(path, 'PATCH', {expectedVersion:changed.version,defaultDailyMinutes:100}, 409);
+
+  const legacy = structuredClone(backup);
+  legacy.schemaVersion = 18;
+  delete legacy.teamWorkloadCapacity;
+  await f.call('/import', 'POST', {data:legacy});
+  const defaults = await f.call<TeamWorkloadCapacity>(path);
+  assert.ok(defaults.version > restored.version);
+  assert.deepEqual({ ...defaults,version:initial.version,updatedAt:initial.updatedAt }, initial);
+  assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).issues.find(issue => issue.id === planned.id)?.plannedEffortMinutes, 180);
 });

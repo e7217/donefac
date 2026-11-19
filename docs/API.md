@@ -51,6 +51,10 @@ curl --fail-with-body \
 
 `GET /projects/:id/workload-capacity`의 `version`을 `expectedVersion`으로 보내고 `defaultDailyMinutes`, `members` 또는 `exceptions`를 지정해 변경한다. `members`는 `{userId,dailyMinutes}`, `exceptions`는 `{userId,date,availableMinutes}` 배열이다. 배열을 보낼 때 해당 목록을 교체하며 빈 배열로 초기화할 수 있다. 가용 시간 허용 범위는 0~1,440분이다. 이전 버전으로 저장하면 `409`를 반환한다.
 
+브라우저의 `GET /api/workload?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`로 프로젝트 간 작업량을 조회한다. 조회할 프로젝트를 고를 때는 `projectId`를 프로젝트마다 한 번 보낸다. 생략하면 전체를 조회한다. 양끝 날짜를 포함해 최대 180일·100개 프로젝트·10,000개 대상 업무를 조회한다. 요청 한도에는 팀원과 날짜 조합 36,000개, 날짜별 업무 배분 100,000개도 적용된다. 응답의 `capacityVersion`은 사용한 팀 가용 시간의 버전이다. 배분과 입력 확인에는 원래 `projectId`가 포함된다.
+
+`GET /api/workload-capacity`의 `version`으로 `PATCH /api/workload-capacity`를 호출한다. `workingWeekdays`는 일요일 0부터 토요일 6까지이고, `calendarExceptions`는 `{date,isWorking,label}` 배열이다. `defaultDailyMinutes`, `members`, `exceptions`의 형식은 프로젝트 설정과 같다. 팀원 날짜 예외는 팀 근무일 여부보다 우선한다. 팀 전역 설정과 합산 조회는 브라우저 API에서 사용한다.
+
 ## 첨부와 버전
 
 최초 업로드는 `POST /attachments?resourceType=document&resourceId=<문서 ID>&filename=<파일명>`을 사용한다. 업무의 `resourceType`은 `issue`다. 업로드 본문은 최대 20MiB의 `application/octet-stream`이며 `filename`은 URL 인코딩한다. 응답의 `id`는 첨부에 고정되고 `currentVersionId`는 최신 파일을 가리킨다. 파일명·MIME·크기·SHA-256·작성자·시각은 최신 파일 기준이다. `versionCount`는 최초 파일과 이관 이력을 함께 센다.
