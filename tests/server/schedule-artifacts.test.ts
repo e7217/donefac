@@ -110,7 +110,7 @@ test('current backup round-trips historical rows and calendar snapshots, bumps r
     await source.request(`/issues/${issue.id}?expectedVersion=1`, 'DELETE');
     const currentItem = (await snapshot(source)).milestones!.find(value => value.id === item.id)!;
     await source.request(`/milestones/${item.id}?expectedVersion=${currentItem.version}`, 'DELETE');
-    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 9);
+    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 10);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
     let imported = await snapshot(target); assert.deepEqual(imported.baselines!.find(value => value.id === captured.id), captured);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);

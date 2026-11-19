@@ -1,4 +1,101 @@
 export type StatusCategory = 'backlog' | 'todo' | 'in_progress' | 'review' | 'done' | 'cancelled';
+export interface ReportingCoverage {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  reason: 'initial' | 'restore';
+}
+export interface ReportIssueState {
+  issueId: string;
+  projectId: string;
+  key: string;
+  title: string;
+  type: string;
+  statusId: string;
+  statusLabel: string;
+  category: StatusCategory;
+  assigneeId: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  dueDate: string | null;
+}
+export interface IssueReportEvent {
+  id: string;
+  sequence: number;
+  coverageId: string;
+  projectId: string;
+  issueId: string;
+  occurredAt: string;
+  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted';
+  actorId: string | null;
+  origin: MutationOrigin;
+  workflowVersion: number;
+  before: ReportIssueState | null;
+  after: ReportIssueState | null;
+}
+export interface ReportingLedgerData { coverage: ReportingCoverage[]; events: IssueReportEvent[] }
+export interface ReportQuery {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  timeZone: string;
+  issueType: string | null;
+  assigneeId: string | null;
+}
+export interface ReportDay {
+  date: string;
+  coverage: 'complete' | 'partial' | 'unobserved';
+  state: Record<StatusCategory, number> | null;
+  created: number;
+  completed: number;
+  reopened: number;
+}
+export interface ReportIssueMetric {
+  issue: ReportIssueState;
+  completed: number;
+  reopened: number;
+  lastCompletedAt: string | null;
+  cycleHours: number | null;
+  deleted: boolean;
+}
+export interface ProjectReport {
+  definitionVersion: 1;
+  query: ReportQuery;
+  generatedAt: string;
+  rangeStartAt: string;
+  rangeEndAt: string;
+  observedThrough: string | null;
+  coverage: ReportingCoverage[];
+  current: {
+    total: number;
+    state: Record<StatusCategory, number>;
+    overdue: number;
+    dueSoon: number;
+  };
+  period: {
+    created: number;
+    deleted: number;
+    completedIssues: number;
+    completionTransitions: number;
+    repeatedCompletions: number;
+    reopened: number;
+    reclassified: number;
+    medianCycleHours: number | null;
+    cycleSamples: number;
+  };
+  days: ReportDay[];
+  issues: ReportIssueMetric[];
+}
+export interface ReportSnapshot {
+  id: string;
+  projectId: string;
+  actorId: string;
+  title: string;
+  createdAt: string;
+  documentId: string;
+  report: ProjectReport;
+}
+export type ReportSnapshotSummary = Omit<ReportSnapshot, 'report'> & { query: ReportQuery };
 export interface WorkflowStatus { id: string; label: string; color: string; category: StatusCategory }
 export const STATUS: Record<string, Omit<WorkflowStatus, 'id'>> = {
   backlog: { label: '백로그', color: '#8b93a5', category: 'backlog' },

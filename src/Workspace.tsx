@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Users, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Users, X } from 'lucide-react';
 import type { FeatureProps, WorkspaceSnapshot } from '../shared/types';
 import { STATUS, type StatusCategory } from '../shared/types';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -18,22 +18,25 @@ const LegacyImportSettings = lazy(() => import('./features/LegacyImportSettings'
 const ApiKeysSettings = lazy(() => import('./features/ApiKeysSettings').then(module => ({default: module.ApiKeysSettings})));
 const Development = lazy(() => import('./features/Development').then(module => ({default:module.Development})));
 const Planning = lazy(() => import('./features/Planning').then(module => ({default: module.Planning})));
+const Reports = lazy(() => import('./features/Reports').then(module => ({default: module.Reports})));
 const Documents = lazy(() => import('./features/Documents').then(module => ({default: module.Documents})));
 
-type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'documents' | 'development' | 'settings' | 'mywork';
+type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'development' | 'settings' | 'mywork';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
   { id: 'gantt', label: '간트 · 일정', icon: SquareChartGantt },
   { id: 'planning', label: '사이클 · 모듈 · 릴리스', icon: FolderPlus },
+  { id: 'reports', label: '보고서', icon: BarChart3 },
   { id: 'documents', label: '문서', icon: BookOpen },
   { id: 'development', label: '개발 · GitLab', icon: GitBranch },
 ] as const;
 
-type WorkspaceRoute = { projectId: string; view: View; documentId: string | null; issueId: string | null };
-const validViews: View[] = ['overview','issues','gantt','planning','documents','development','settings','mywork'];
+type WorkspaceRoute = { projectId: string; view: View; documentId: string | null; reportId?: string | null; issueId: string | null };
+const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','development','settings','mywork'];
 function routeHash(route: WorkspaceRoute) {
-  return `#/${encodeURIComponent(route.projectId)}/${route.view}${route.view === 'documents' && route.documentId ? '/' + encodeURIComponent(route.documentId) : ''}${route.issueId ? '?issue=' + encodeURIComponent(route.issueId) : ''}`;
+  const detail = route.view === 'documents' ? route.documentId : route.view === 'reports' ? route.reportId : null;
+  return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${route.issueId ? '?issue=' + encodeURIComponent(route.issueId) : ''}`;
 }
 function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRoute {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
@@ -50,7 +53,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedIssue = new URLSearchParams(query).get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) { issueId = issue.id; projectId = issue.projectId; if (view === 'documents' || view === 'settings') { view = 'issues'; documentId = null; } }
-  return { projectId, view, documentId, issueId };
+  const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
+  return { projectId, view, documentId, issueId, reportId };
 }
 
 export default function Workspace() {
@@ -62,6 +66,7 @@ export default function Workspace() {
   const [view, setView] = useState<View>('overview');
   const [issueId, setIssueId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
+  const [reportId, setReportId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
@@ -106,7 +111,7 @@ export default function Workspace() {
     acceptedRouteRef.current = route;
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
-    setDocumentId(route.documentId); setIssueId(route.issueId);
+    setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -149,7 +154,7 @@ export default function Workspace() {
   const openIssue = (id: string) => {
     const issue = dataRef.current?.issues.find(i => i.id === id);
     if (!issue) return;
-    if (requestRoute({projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null, issueId:id})) setSearchOpen(false);
+    if (requestRoute({projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null, reportId:issue.projectId === projectId ? reportId : null, issueId:id})) setSearchOpen(false);
   };
   const openDocument = (id: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
@@ -192,13 +197,14 @@ export default function Workspace() {
         {view === 'issues' && <Issues {...props}/>}
         {view === 'gantt' && <Gantt {...props}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props}/></Suspense>}
+        {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument}/></Suspense>}
         {view === 'development' && <Development {...props}/>}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}
         {!project && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,issueId:null})}/>}
+    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,issueId:null})}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
@@ -265,8 +271,8 @@ function WorkspaceSettings(props:FeatureProps) {
     <Suspense fallback={<div className="card settings-card"><p>API 키를 불러오는 중입니다.</p></div>}><ApiKeysSettings actorId={props.actorId} projects={props.data.projects} notify={props.notify}/></Suspense>
     <Suspense fallback={<div className="card settings-card"><p>원본 이관 분석을 불러오는 중입니다.</p></div>}><LegacyImportSettings {...props}/></Suspense>
     <Suspense fallback={null}><MigrationApplySettings {...props}/></Suspense>
-    <section className="card settings-card"><div className="card-heading"><h2>데이터 내보내기 · 가져오기</h2><ArrowDownToLine size={19}/></div><p className="muted">티켓·문서·관계와 변경 이력을 자체 JSON 형식으로 보관합니다. API 키, GitLab 토큰과 외부 웹훅 설정·비밀값·전송 기록은 포함되지 않습니다.</p><div className="data-actions"><button className="btn btn-secondary" onClick={async()=>{try{const payload=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(payload)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`teamspace-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);props.notify('데이터를 내보냈습니다.');}catch(e){props.notify((e as Error).message,'error');}}}><ArrowDownToLine size={16}/>전체 데이터 내보내기</button><label className="btn btn-ghost"><ArrowUpFromLine size={16}/>백업 가져오기<input className="sr-only" type="file" accept="application/json,.json" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>64*1024*1024-1024){props.notify('가져오기 파일은 64MB 미만이어야 합니다.','error');e.target.value='';return;}try{const parsed=JSON.parse(await file.text());if(!parsed || typeof parsed!=='object' || ![1,2,3,4,5,6,7,8,9].includes(parsed.schemaVersion))throw new Error('Teamspace 내보내기 파일(schemaVersion 1~9)을 선택해주세요.');setImportData(parsed);setImportName(file.name);}catch(error){props.notify(error instanceof SyntaxError ? '올바른 JSON 파일이 아닙니다.' : (error as Error).message,'error');}e.target.value='';}}/></label></div></section>
-    <section className="card settings-card"><div className="card-heading"><h2>이 개발 버전의 범위</h2><span className="badge">개발 중</span></div><p>팀원 선택은 작업자 기록을 위한 기능입니다. 프로젝트별 워크플로와 공유 보기, 문서별 공동 편집을 사용할 수 있습니다.</p><p className="muted">실제 Jira·Confluence 파일 이관 리허설, 팀 보고서, 팀 사용과 운영 배포는 후속 개발·검증 범위입니다.</p></section>
-    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
+    <section className="card settings-card"><div className="card-heading"><h2>데이터 내보내기 · 가져오기</h2><ArrowDownToLine size={19}/></div><p className="muted">티켓·문서·관계, 보고서 보관본과 변경 이력을 자체 JSON 형식으로 보관합니다. API 키, GitLab 토큰과 외부 웹훅 설정·비밀값·전송 기록은 포함되지 않습니다.</p><div className="data-actions"><button className="btn btn-secondary" onClick={async()=>{try{const payload=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(payload)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`teamspace-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);props.notify('데이터를 내보냈습니다.');}catch(e){props.notify((e as Error).message,'error');}}}><ArrowDownToLine size={16}/>전체 데이터 내보내기</button><label className="btn btn-ghost"><ArrowUpFromLine size={16}/>백업 가져오기<input className="sr-only" type="file" accept="application/json,.json" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>64*1024*1024-1024){props.notify('가져오기 파일은 64MB 미만이어야 합니다.','error');e.target.value='';return;}try{const parsed=JSON.parse(await file.text());if(!parsed || typeof parsed!=='object' || ![1,2,3,4,5,6,7,8,9,10].includes(parsed.schemaVersion))throw new Error('Teamspace 내보내기 파일(schemaVersion 1~10)을 선택해주세요.');setImportData(parsed);setImportName(file.name);}catch(error){props.notify(error instanceof SyntaxError ? '올바른 JSON 파일이 아닙니다.' : (error as Error).message,'error');}e.target.value='';}}/></label></div></section>
+    <section className="card settings-card"><div className="card-heading"><h2>이 개발 버전의 범위</h2><span className="badge">개발 중</span></div><p>팀원 선택은 작업자 기록을 위한 기능입니다. 프로젝트별 워크플로와 공유 보기, 문서별 공동 편집, 팀 보고서와 주간 문서를 사용할 수 있습니다.</p><p className="muted">실제 Jira·Confluence 파일 이관 리허설, 운영 GitLab 연결과 팀 사용 검증이 남아 있습니다.</p></section>
+    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부·보고서 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
   </div>;
 }
