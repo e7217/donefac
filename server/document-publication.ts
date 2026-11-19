@@ -163,6 +163,13 @@ export class DocumentPublicationService {
   all(): DocumentPublicationState[] {
     return (this.store.db.prepare('SELECT json FROM document_publications ORDER BY document_id').all() as { json: string }[]).map(row => JSON.parse(row.json) as DocumentPublicationState);
   }
+  archiveState(documentId: string): DocumentPublicationState | null {
+    const state = this.state(documentId);
+    return state.version ? state : null;
+  }
+  restoreArchived(state: DocumentPublicationState): void {
+    this.put({ ...state, version: version(state.version + 1, 1) });
+  }
   validateRestore(value: unknown, documents: DocPage[], users: User[], revisions: DocRevision[], exportedAt: unknown): DocumentPublicationState[] {
     if (!Array.isArray(value) || value.length > 100000) fail(400, '백업의 문서 검토·발행 목록이 필요합니다.');
     if (!value.length) return [];

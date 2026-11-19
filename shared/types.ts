@@ -26,7 +26,7 @@ export interface IssueReportEvent {
   projectId: string;
   issueId: string;
   occurredAt: string;
-  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted';
+  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted' | 'restored';
   actorId: string | null;
   origin: MutationOrigin;
   workflowVersion: number;
@@ -298,6 +298,25 @@ export interface ResourceLink { id: string; issueId: string; documentId: string;
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface AttachmentHead extends Attachment { currentVersionId: string; versionCount: number; hasVersionHistory: boolean }
+export type TrashResourceType = 'issue' | 'document';
+export interface TrashEntrySummary {
+  id: string;
+  resourceType: TrashResourceType;
+  resourceId: string;
+  projectId: string | null;
+  title: string;
+  issueKey: string | null;
+  deletedAt: string;
+  deletedById: string;
+  parentId: string | null;
+}
+export interface TrashPage { items: TrashEntrySummary[]; total: number; offset: number; limit: number }
+export interface TrashRestoreResult {
+  resourceType: TrashResourceType;
+  resourceId: string;
+  projectId: string | null;
+  warnings: string[];
+}
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-comment', 'document-comment', 'document-review-requested',
@@ -344,7 +363,7 @@ export interface AutomationRun extends AutomationOutcome {
 }
 export interface AutomationPreview { outcomes: AutomationOutcome[]; warnings: string[] }
 export type OutboundEventType = 'issue.created' | 'issue.updated' | 'issue.deleted' | 'document.created' | 'document.updated' | 'document.deleted' | 'comment.created';
-export type MutationOrigin = 'user' | 'gitlab' | 'automation' | 'system' | 'import';
+export type MutationOrigin = 'user' | 'gitlab' | 'automation' | 'system' | 'import' | 'restore';
 export interface WebhookEndpoint {
   id: string; name: string; url: string; projectIds: string[] | null; eventTypes: OutboundEventType[];
   enabled: boolean; secretConfigured: boolean; version: number; createdAt: string; updatedAt: string;

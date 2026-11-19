@@ -508,20 +508,24 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const captured = draftRef.current;
     if (!captured || savingRef.current) return;
     const capturedActor = actorRef.current;
-    if (data.documents.some(page => page.parentId === captured.id)) { notify('하위 문서를 먼저 이동하거나 삭제해주세요.', 'error'); return; }
-    if (!window.confirm(`“${captured.title}” 문서를 삭제할까요?${captured.dirty ? ' 저장하지 않은 편집 내용도 사라집니다.' : ''}`)) return;
+    if (data.documents.some(page => page.parentId === captured.id)) { notify('하위 문서를 먼저 다른 위치나 휴지통으로 옮겨 주세요.', 'error'); return; }
+    if (liveStateRef.current?.pending || commentBusy) { notify('공동 편집과 댓글 전송이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
+    const hasDraft = captured.dirty || Boolean(commentBodyRef.current.trim());
+    if (!window.confirm(`“${captured.title}” 문서를 휴지통으로 옮길까요?${hasDraft ? ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.' : ''}`)) return;
     savingRef.current = true; setSaving(true);
     try {
       await remove(`/documents/${captured.id}?expectedVersion=${captured.expectedVersion}`);
+      window.dispatchEvent(new Event('teamspace:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
       rememberComment('', { actorId: capturedActor, documentId: captured.id });
       const sameContext = draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
       if (sameContext) { draftRef.current = null; setDraft(null); commentBodyRef.current = ''; setCommentBody(''); }
-      await refresh();
+      try { await refresh(); }
+      catch { notify('문서를 휴지통으로 옮겼습니다. 문서 목록을 불러오지 못했습니다.', 'error'); return; }
       const next = scoped.find(page => page.id !== captured.id);
       if (next && sameContext) onSelectDocument(next.id);
-      notify('문서를 삭제했습니다.', 'success');
-    } catch (error) { notify(error instanceof Error ? error.message : '문서를 삭제하지 못했습니다.', 'error'); }
+      notify('문서를 휴지통으로 옮겼습니다.', 'success');
+    } catch (error) { notify(error instanceof Error ? error.message : '문서를 휴지통으로 옮기지 못했습니다.', 'error'); }
     finally { savingRef.current = false; setSaving(false); }
   }
 

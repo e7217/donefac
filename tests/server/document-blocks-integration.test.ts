@@ -62,7 +62,7 @@ test('native schema7 restores macro JSON and CRDT state with missing targets; in
     const target=await make(f,'사라질 원문'),source=await make(f,'포함 기록',body(reference('documentInclude',target.id,'보관할 제목'),details));
     const enabled=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration/enable`,'POST',{expectedVersion:source.version})).data;
     await f.call(`/documents/${target.id}?expectedVersion=1`,'DELETE');
-    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,16);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,2);
+    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,17);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,2);
     const current=await snapshot(f),bad=structuredClone(backup);bad.documents.find(document=>document.id===source.id)!.content=body(reference('documentInclude',source.id,'순환'));
     assert.equal((await f.call('/import','POST',{data:bad})).status,422);assert.deepEqual(await snapshot(f),current);
     const downgraded={...backup,schemaVersion:6};assert.equal((await f.call('/import','POST',{data:downgraded})).status,400);assert.deepEqual(await snapshot(f),current);

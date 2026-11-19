@@ -12,7 +12,7 @@ import { ScheduleArtifactService, ScheduleArtifactError } from '../../server/sch
 import { defaultWorkCalendar } from '../../shared/calendar.js';
 import type { Issue, Milestone, Project, ScheduleBaseline, User, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
-type Export = WorkspaceSnapshot & { schemaVersion: number; comments: unknown[]; revisions: unknown[]; attachments: unknown[]; attachmentContents: unknown[] };
+type Export = WorkspaceSnapshot & { schemaVersion: number; comments: unknown[]; revisions: unknown[]; attachments: unknown[]; attachmentContents: unknown[]; trashEntries?: unknown[] };
 async function fixture(withSeed = true) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-artifacts-'));
   const service = createApp({ dataDir: dir, seed: withSeed }); const server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -110,7 +110,7 @@ test('current backup round-trips historical rows and calendar snapshots, bumps r
     await source.request(`/issues/${issue.id}?expectedVersion=1`, 'DELETE');
     const currentItem = (await snapshot(source)).milestones!.find(value => value.id === item.id)!;
     await source.request(`/milestones/${item.id}?expectedVersion=${currentItem.version}`, 'DELETE');
-    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 16);
+    const exported = (await source.request<Export>('/export')).data; assert.equal(exported.schemaVersion, 17);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
     let imported = await snapshot(target); assert.deepEqual(imported.baselines!.find(value => value.id === captured.id), captured);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
@@ -119,7 +119,7 @@ test('current backup round-trips historical rows and calendar snapshots, bumps r
     assert.equal((await target.request(`/baselines/${captured.id}?expectedVersion=1`, 'DELETE')).status, 409);
     const malformed = structuredClone(exported); malformed.baselines![0].calendar.exceptions = [{ date: '2026-02-30', isWorking: true, label: 'invalid' }];
     const before = await snapshot(target); assert.equal((await target.request('/import', 'POST', { data: malformed })).status, 400); assert.deepEqual(await snapshot(target), before);
-    for (const schemaVersion of [1, 2, 3, 4]) { const legacy = structuredClone(exported); legacy.schemaVersion = schemaVersion; assert.equal((await target.request('/import', 'POST', { data: legacy })).status, 200); imported = await snapshot(target); assert.deepEqual(imported.milestones, []); assert.deepEqual(imported.baselines, []); assert.equal(imported.calendars!.length, imported.projects.length); }
+    for (const schemaVersion of [1, 2, 3, 4]) { const legacy = structuredClone(exported); legacy.schemaVersion = schemaVersion; delete legacy.trashEntries; assert.equal((await target.request('/import', 'POST', { data: legacy })).status, 200); imported = await snapshot(target); assert.deepEqual(imported.milestones, []); assert.deepEqual(imported.baselines, []); assert.equal(imported.calendars!.length, imported.projects.length); }
   } finally { await source.close(); await target.close(); }
 });
 

@@ -134,7 +134,11 @@ export class CollaborationService {
     }
   }
   invalidateAll(reason:string){for(const id of new Set([...this.peers].map(peer=>peer.documentId)))this.reset(id,reason);}
-  exportStates():CollaborationExport[]{return(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>{const state=this.state(row.document_id)!;return{documentId:state.documentId,epoch:state.epoch,schemaVersion:state.schemaVersion,state:state.state.toString('base64')};});}
+  exportState(documentId:string):CollaborationExport|null{
+    const state=this.state(documentId);
+    return state?{documentId:state.documentId,epoch:state.epoch,schemaVersion:state.schemaVersion,state:state.state.toString('base64')}:null;
+  }
+  exportStates():CollaborationExport[]{return(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>this.exportState(row.document_id)!);}
   validateImport(value:unknown,documents:DocPage[]):State[]{
     if(!Array.isArray(value)||value.length>100000)invalid('공동 편집 상태 목록이 필요합니다.');
     const normalizedDocuments=documents.map(document=>({...document,...normalizeContent(document.content)}));
@@ -148,6 +152,10 @@ export class CollaborationService {
     });
   }
   replaceImported(states:State[]){this.store.db.exec('DELETE FROM collaboration_requests;DELETE FROM collaboration_documents;');for(const state of states){this.write(state);this.store.put('documents',this.deriveSnapshot(this.document(state.documentId)));}}
+  restoreState(snapshot:CollaborationExport,document:DocPage):void{
+    const [state]=this.validateImport([snapshot],[document]);
+    this.write(state);
+  }
   private handle(peer:Peer,raw:Buffer){
     let message:CollaborationClientMessage;try{message=JSON.parse(raw.toString('utf8'));}catch{return invalid('공동 편집 메시지가 올바른 JSON이 아닙니다.');}
     if(message?.type==='ping'){this.send(peer,{type:'pong'});return;}

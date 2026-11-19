@@ -321,7 +321,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
       const cycle = isCompletion && cycleStartedAt.has(event.issueId)
         ? (at - cycleStartedAt.get(event.issueId)!) / HOUR
         : null;
-      if (event.kind === 'baseline')
+      if (event.kind === 'baseline' || event.kind === 'restored')
         cycleStartedAt.delete(event.issueId);
       else if (event.kind === 'reclassified') {
         if (before?.category !== after?.category)
@@ -338,7 +338,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
         if (enteredWork && !cycleStartedAt.has(event.issueId))
           cycleStartedAt.set(event.issueId, at);
       }
-      if (at > generated || at < rangeStart || at >= rangeEnd || event.kind === 'baseline')
+      if (at > generated || at < rangeStart || at >= rangeEnd || event.kind === 'baseline' || event.kind === 'restored')
         return;
       const day = local.day(at);
       const reportDay = dayMap.get(day);

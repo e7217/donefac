@@ -31,15 +31,17 @@ curl --fail-with-body \
 | `GET /comments?resourceType=issue&resourceId=...` | 업무 또는 문서 댓글 조회 |
 | `GET /attachments?resourceType=issue&resourceId=...` · `GET /attachments/:id/versions` | 업무·문서의 첨부 목록, 각 첨부의 버전 이력 |
 | `GET /attachments/:id/content` · `GET /attachment-versions/:id/download` | 지정된 파일 버전의 바이너리 |
-| `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·삭제 |
-| `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·삭제 |
+| `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·휴지통 이동 |
+| `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·휴지통 이동 |
 | `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
 | `POST /attachments` · `POST /attachments/:id/versions` | 첨부 생성 또는 새 버전 업로드 |
 
 표의 경로 앞에는 `/api/v1`이 붙는다. 읽기 키는 조회만 허용하며 쓰기 키는 조회와 표의 변경 요청을 허용한다. 프로젝트 범위는 조회·원래 대상·이동 대상·상위 항목·계획 참조에 적용한다. 공통 문서는 전체 프로젝트 키로 접근한다.
 
-백업·가져오기·연동 설정·키 관리·팀 알림함·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
+백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
+
+업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
 
 ## 첨부와 버전
 

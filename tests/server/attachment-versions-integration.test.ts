@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -170,15 +170,17 @@ test('append uses the observed head, preserves immutable byte URLs, and survives
   await read(f.upload(path, winningBytes), 409);
   await read(f.json(`/attachments/${first.id}?expectedVersionId=${first.id}`, 'DELETE'), 409);
   assert.deepEqual(entries(f), [first.id, latest.currentVersionId].sort());
-  await read(f.json('/issues/issue-2', 'DELETE'));
+  const archived = await read<{trashEntryId:string}>(f.json('/issues/issue-2', 'DELETE'));
   for (const id of [first.id, latest.currentVersionId]) {
     await read(f.request(content(id)), 404);
     await read(f.request(download(id)), 404);
   }
+  assert.deepEqual(entries(f), [first.id, latest.currentVersionId].sort());
+  await read(f.json(`/trash/${archived.trashEntryId}`, 'DELETE'));
   assert.deepEqual(entries(f), []);
 });
 
-test('native 16 carries exact immutable version bytes and rejects invalid history atomically', async t => {
+test('native backup carries exact immutable version bytes and rejects invalid history atomically', async t => {
   const f = await fixture(t);
   const doc = await read<DocPage>(f.json('/documents', 'POST', { title: '버전 백업 검사' }), 201);
   const parent = f.forParent('document', doc.id);
@@ -193,7 +195,7 @@ test('native 16 carries exact immutable version bytes and rejects invalid histor
   assert.deepEqual(history.slice(0, 2).map(version => version.localRevision), [3, 2]);
 
   const backup = await read<Backup>(f.json('/export'));
-  assert.equal(backup.schemaVersion, 16);
+  assert.equal(backup.schemaVersion, 17);
   assert.equal(backup.attachments.length, 1);
   assert.equal(backup.attachments[0].id, first.id);
   assert.equal(backup.attachments[0].filename, 'first.txt');
@@ -265,4 +267,14 @@ test('interrupted per-version journals keep committed files and remove only aban
   await exact(f, content(first.id), originalBytes);
   await exact(f, content(committed.id), secondPdf);
   await read(f.request(content(abandonedId)), 404);
+
+  const archived = await read<{trashEntryId:string}>(f.json('/issues/issue-2', 'DELETE'));
+  const pendingJournal = join(f.dir, `.append-${committed.id}.json`);
+  writeFileSync(pendingJournal, JSON.stringify({id:committed.id,stage:`.append-stage-${committed.id}`,files:[committed.id]}));
+  await f.restart();
+  assert.ok(!readdirSync(f.dir).some(name => name.startsWith('.append-')));
+  assert.deepEqual(readFileSync(join(f.dir, 'uploads', committed.id)), secondPdf);
+  await read(f.request(content(committed.id)), 404);
+  await read(f.json(`/trash/${archived.trashEntryId}/restore`, 'POST', {}));
+  await exact(f, content(committed.id), secondPdf);
 });

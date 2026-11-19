@@ -38,7 +38,7 @@ function changed(before: unknown, after: unknown, fields: string[]) {
   if (!a || !b) return fields.filter(field => semanticField((b || a)!, field) !== null && stable(semanticField((b || a)!, field)) !== stable([]) && stable(semanticField((b || a)!, field)) !== stable({}));
   return fields.filter(field => stable(semanticField(a, field)) !== stable(semanticField(b, field)));
 }
-function safeOrigin(origin: MutationOrigin): MutationOrigin { return ['user', 'gitlab', 'automation', 'system', 'import'].includes(origin) ? origin : 'system'; }
+function safeOrigin(origin: MutationOrigin): MutationOrigin { return ['user', 'gitlab', 'automation', 'system', 'import', 'restore'].includes(origin) ? origin : 'system'; }
 
 /** Transactional outbox plus an at-least-once leased HTTP worker. Destination
  * configuration and secrets never enter native workspace exports. */
@@ -150,7 +150,7 @@ export class OutboundWebhookService {
   private capture(change: StoreChange) {
     if (this.closed || change.context.origin === 'import') return;
     const before = change.before as Issue | DocPage | Comment | null, after = change.after as Issue | DocPage | Comment | null;
-    if (!before && !after || change.table === 'comments' && (before || !after)) return;
+    if (!before && !after || change.table === 'comments' && (before || !after || change.context.origin === 'restore')) return;
     const record = (after || before)!;
     let projectId: string | null, type: OutboundEventType, resource: WebhookEnvelope['resource'], previous: WebhookEnvelope['previous'], changedFields: string[];
     if (change.table === 'comments') {

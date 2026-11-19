@@ -132,8 +132,22 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
-    if (!issue || savingRef.current) return; savingRef.current = true; setSaving(true); setError('');
-    try { await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`); dirtyRef.current = false; await refresh(); notify(`${issue.key} 업무를 삭제했습니다.`); savingRef.current = false; onClose(); } catch (err) { setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
+    if (!issue || savingRef.current || commenting) return;
+    savingRef.current = true; setSaving(true); setError('');
+    try {
+      await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
+      window.dispatchEvent(new Event('teamspace:trash-changed'));
+      dirtyRef.current = false;
+      try {
+        await refresh();
+        notify(`${issue.key} 업무를 휴지통으로 옮겼습니다.`);
+      } catch {
+        notify(`${issue.key} 업무를 휴지통으로 옮겼습니다. 업무 목록을 불러오지 못했습니다.`, 'error');
+      }
+      savingRef.current = false;
+      onClose();
+    } catch (err) { setError(errorMessage(err)); }
+    finally { savingRef.current = false; setSaving(false); }
   }
   async function addComment(event: FormEvent) {
     event.preventDefault(); if (!commentBody.trim()) return; setCommenting(true); setCommentError('');
@@ -183,7 +197,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       {dependencies.length > 0 && <section className="issue-related-section"><h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>{dependencies.map(dep => { const isPredecessor = dep.predecessorId === issueId; const related = data.issues.find(i => i.id === (isPredecessor ? dep.successorId : dep.predecessorId)); return related && <button key={dep.id} className="issue-related-row" onClick={() => navigateIssue(related.id)}><span className="muted">{isPredecessor ? '후행' : '선행'}</span><span className="issue-key">{related.key}</span><span>{related.title}</span><ChevronRight size={14} /></button>; })}</section>}
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments"><h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>{loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => { const user = data.users.find(u => u.id === comment.authorId); return <article key={comment.id} className="issue-comment"><span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span><div><header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>; })}{commentError && <div className="issue-form-error" role="alert">{commentError}</div>}<form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form></section>
-      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 삭제할까요?</strong><br /><span>업무와 관련 댓글 및 연결 정보가 삭제됩니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving}>삭제하기</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
+      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentBody.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackWorklogDraft}/>
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>

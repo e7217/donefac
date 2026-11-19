@@ -103,7 +103,7 @@ test('attachments persist bytes and hashes, reject unsafe names and oversized up
 test('native export/import includes exact attachment bytes and accepts legacy schema2 while rolling back invalid packages',async()=>{
  const f=await fixture();try{
   const a=await upload(f,Buffer.from('보존할 첨부파일'),'설계.txt');const b=await upload(f,onePixelPng,'image.png','document','doc-retry','image/png');
-  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,16);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
+  const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,17);assert.equal(exported.attachments.length,2);assert.equal(exported.attachmentContents.find((x:any)=>x.id===b.data.id).data,onePixelPng.toString('base64'));
   const extra=await upload(f,Buffer.from('나중 파일'),'later.txt','issue','issue-2');
   const corrupt=structuredClone(exported);corrupt.attachmentContents[0].data=Buffer.from('손상됨').toString('base64');assert.equal((await f.request('/import','POST',{data:corrupt})).status,400);
   assert.equal(existsSync(join(f.dir,'uploads',extra.data.id)),true);assert.deepEqual(readFileSync(join(f.dir,'uploads',b.data.id)),onePixelPng);
@@ -112,8 +112,16 @@ test('native export/import includes exact attachment bytes and accepts legacy sc
   const imported=await f.request('/import','POST',{data:exported});assert.equal(imported.status,200);assert.equal(imported.data.counts.attachments,2);assert.equal(existsSync(join(f.dir,'uploads',extra.data.id)),false);
   const download=await fetch(`${f.base}/api/attachments/${b.data.id}/content?inline=1`);assert.equal(download.status,200);assert.deepEqual(Buffer.from(await download.arrayBuffer()),onePixelPng);
   const schema2=structuredClone(exported);schema2.schemaVersion=2;delete schema2.workflows;delete schema2.savedViews;delete schema2.collabStates;assert.equal((await f.request('/import','POST',{data:schema2})).status,200);const legacyDownload=await fetch(`${f.base}/api/attachments/${b.data.id}/content`);assert.equal(legacyDownload.status,200);assert.deepEqual(Buffer.from(await legacyDownload.arrayBuffer()),onePixelPng);
-  await f.request('/documents/doc-retry','DELETE');assert.equal(existsSync(join(f.dir,'uploads',b.data.id)),false);
-  const issueFile=await upload(f,Buffer.from('parent cleanup'),'cleanup.txt','issue','issue-2');await f.request('/issues/issue-2','DELETE');assert.equal(existsSync(join(f.dir,'uploads',issueFile.data.id)),false);
+  const documentTrash=(await f.request('/documents/doc-retry','DELETE')).data.trashEntryId;
+  assert.equal(existsSync(join(f.dir,'uploads',b.data.id)),true);
+  assert.equal((await fetch(`${f.base}/api/attachments/${b.data.id}/content`)).status,404);
+  assert.equal((await f.request(`/trash/${documentTrash}`,'DELETE')).status,200);
+  assert.equal(existsSync(join(f.dir,'uploads',b.data.id)),false);
+  const issueFile=await upload(f,Buffer.from('parent cleanup'),'cleanup.txt','issue','issue-2');
+  const issueTrash=(await f.request('/issues/issue-2','DELETE')).data.trashEntryId;
+  assert.equal(existsSync(join(f.dir,'uploads',issueFile.data.id)),true);
+  assert.equal((await f.request(`/trash/${issueTrash}`,'DELETE')).status,200);
+  assert.equal(existsSync(join(f.dir,'uploads',issueFile.data.id)),false);
   writeFileSync(join(f.dir,'uploads',a.data.id),Buffer.from('disk corruption'));assert.equal((await f.request('/export')).status,503);
   const legacy=structuredClone(exported);legacy.schemaVersion=1;delete legacy.attachments;delete legacy.attachmentContents;assert.equal((await f.request('/import','POST',{data:legacy})).status,200);assert.equal((await f.request('/attachments?resourceType=issue&resourceId=issue-1')).data.length,0);
  }finally{await f.close();f.remove();}

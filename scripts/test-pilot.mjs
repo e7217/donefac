@@ -162,6 +162,8 @@ try {
   await call(pilot.url,'/integrations/gitlab',{
     method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken},
   });
+  const trashedIssue = await (await call(pilot.url,`/issues/${issue.id}?expectedVersion=${issue.version}`,{method:'DELETE'})).json();
+  await call(pilot.url,`/attachments/${attachment.id}/content`,{status:404});
   const locked = cli('backup',source,backup);
   assert.equal(locked.status,75,locked.stderr);
   assert.equal(existsSync(backup),false);
@@ -182,6 +184,11 @@ try {
   assert.equal(fileHash(join(source,'.credential-key')),fileHash(join(restored,'.credential-key')));
 
   const copy = await start(restored);
+  const restoredTrash = await (await call(copy.url,`/trash?scope=project&projectId=${projectId}`)).json();
+  assert.equal(restoredTrash.items.find(item=>item.id===trashedIssue.trashEntryId)?.resourceId,issue.id);
+  await call(copy.url,`/attachments/${attachment.id}/content`,{status:404});
+  const undone = await (await call(copy.url,`/trash/${trashedIssue.trashEntryId}/restore`,{method:'POST',body:{}})).json();
+  assert.equal(undone.resourceId,issue.id);
   const restoredIssue = await (await call(copy.url,`/v1/issues/${issue.id}`,{
     headers:{Authorization:`Bearer ${key.token}`},
   })).json();

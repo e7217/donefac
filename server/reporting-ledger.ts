@@ -26,7 +26,7 @@ function date(value: unknown): string | null {
   return value;
 }
 const categories = new Set(['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled']);
-const origins = new Set<MutationOrigin>(['user', 'gitlab', 'automation', 'system', 'import']);
+const origins = new Set<MutationOrigin>(['user', 'gitlab', 'automation', 'system', 'import', 'restore']);
 function positive(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || Number(value) < 1) invalid(`${label}을(를) 확인해 주세요.`); return Number(value); }
 function parseState(value: unknown): ReportIssueState {
   const source = object(value);
@@ -123,7 +123,8 @@ export class ReportingLedger {
       if (!before && !after) return;
       const workflow = this.lookup((after || before)!.projectId), oldState = before ? this.state(before, workflow) : null, newState = after ? this.state(after, workflow) : null;
       if (same(oldState, newState)) return;
-      this.append(!before ? 'created' : !after ? 'deleted' : 'changed', oldState, newState, change.context, workflow.version);
+      const kind = !before ? (change.context.origin === 'restore' ? 'restored' : 'created') : !after ? 'deleted' : 'changed';
+      this.append(kind, oldState, newState, change.context, workflow.version);
       return;
     }
     const next = change.after as ProjectWorkflow | undefined;
@@ -183,10 +184,10 @@ export class ReportingLedger {
           typeof value.origin !== 'string' || !origins.has(value.origin as MutationOrigin)) {
         invalid('보고 사건의 참조·순서·발생 시각이 올바르지 않습니다.');
       }
-      if (!['baseline', 'created', 'changed', 'reclassified', 'deleted'].includes(String(value.kind))) invalid('보고 사건 종류를 확인해 주세요.');
+      if (!['baseline', 'created', 'changed', 'reclassified', 'deleted', 'restored'].includes(String(value.kind)) || (value.kind === 'restored') !== (value.origin === 'restore')) invalid('보고 사건 종류를 확인해 주세요.');
       const before = value.before === null ? null : parseState(value.before), after = value.after === null ? null : parseState(value.after), kind = value.kind as IssueReportEvent['kind'];
       for (const state of [before, after]) if (state && (state.issueId !== issueId || state.projectId !== projectId)) invalid('보고 사건과 업무 상태의 ID가 다릅니다.');
-      const invalidCreation = (kind === 'baseline' || kind === 'created') && (before !== null || after === null);
+      const invalidCreation = (kind === 'baseline' || kind === 'created' || kind === 'restored') && (before !== null || after === null);
       const invalidDeletion = kind === 'deleted' && (before === null || after !== null);
       const invalidChange = (kind === 'changed' || kind === 'reclassified') && (before === null || after === null || same(before, after));
       if (invalidCreation || invalidDeletion || invalidChange) invalid('보고 사건의 이전·이후 상태가 올바르지 않습니다.');

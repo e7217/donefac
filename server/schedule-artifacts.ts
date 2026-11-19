@@ -96,6 +96,23 @@ export class ScheduleArtifactService {
     for (const milestone of changed) this.putMilestone(milestone);
     return changed;
   }
+  restoreIssueLinks(issue: Pick<Issue, 'id' | 'projectId'>, milestoneIds: string[]): { attached: Milestone[]; unavailable: number } {
+    const attached: Milestone[] = [];
+    let unavailable = 0;
+    for (const id of milestoneIds) {
+      const milestone = this.store.get<Milestone>('milestones', id);
+      if (!milestone || milestone.projectId !== issue.projectId) {
+        unavailable++;
+        continue;
+      }
+      if (milestone.issueIds.includes(issue.id)) continue;
+      const next = { ...milestone, issueIds: [...milestone.issueIds, issue.id], version: milestone.version + 1, updatedAt: iso() };
+      if (!Number.isSafeInteger(next.version)) fail(409, '복원할 이정표의 버전 범위를 초과했습니다.');
+      this.putMilestone(next);
+      attached.push(next);
+    }
+    return { attached, unavailable };
+  }
 
   validateImport(rawMilestones: unknown, rawBaselines: unknown, projects: Project[], users: User[], issues: Issue[]): ImportedScheduleArtifacts {
     const milestones = array(rawMilestones, '이정표').map(value => this.parseMilestone(value, projects, users, issues));
