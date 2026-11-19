@@ -18,6 +18,7 @@ import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttPlanningControls } from './GanttPlanningControls';
 import { GanttPlanAssignment } from './GanttPlanAssignment';
+import { PlanScheduleShiftDialog } from './PlanScheduleShiftDialog';
 import './issues.css';
 import './gantt.css';
 
@@ -49,6 +50,7 @@ function ProjectGantt(props: GanttProps) {
   const [selectedPlanningId, setSelectedPlanningId] = useState<string | null>(initialPlan?.id ?? null);
   const [linkedOnly, setLinkedOnly] = useState(false);
   const [planAssignment, setPlanAssignment] = useState<PlanAssignmentInput | null>(null);
+  const [planShift, setPlanShift] = useState<PlanningItem | null>(null);
   const [query, setQuery] = useState('');
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -86,11 +88,13 @@ function ProjectGantt(props: GanttProps) {
         if (!window.confirm('저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?')) event.preventDefault();
         else {
           const discardPaste = draftsRef.current.has('schedule-paste');
+          const discardPlanShift = draftsRef.current.has('plan-schedule-shift');
           afterAcceptedNavigation(event, () => {
             previewRef.current = null;
             draftsRef.current.clear();
             setPreview(null); setPreviewError(''); setCreateOpen(false); setLinkOpen(false); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
             if (discardPaste) setPasteOpen(false);
+            if (discardPlanShift) setPlanShift(null);
             setDraftEpoch(value => value + 1);
           });
         }
@@ -103,6 +107,7 @@ function ProjectGantt(props: GanttProps) {
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
+  const shiftPlan = planShift && (projectPlans.find(item => item.id === planShift.id) ?? planShift);
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
   const planningRows = planningExpanded ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
   const planStats = useMemo(() => planMembershipStats(projectPlans, projectIssues), [projectPlans, projectIssues]);
@@ -200,7 +205,14 @@ function ProjectGantt(props: GanttProps) {
   }
   async function undo() {
     if (!undoId) return; markBusy(true);
-    try { const result = await post<{ updated: Issue[]; warnings?: string[] }>('/schedule/undo', { undoId }); setUndoId(null); setScheduleWarnings(result.warnings || []); await refresh(); notify('마지막 일정 변경을 되돌렸습니다.'); }
+    try {
+      const result = await post<{ updated: Issue[]; warnings?: string[]; plan?:PlanningItem }>('/schedule/undo', { undoId });
+      setUndoId(null); setScheduleWarnings(result.warnings || []);
+      await refresh();
+      const date = result.plan && (result.plan.startDate ?? result.plan.targetDate ?? result.plan.endDate);
+      if (date && result.plan?.id === selectedPlanningId && outside(date)) showDate(date);
+      notify(result.plan ? '계획과 연결 업무의 일정 변경을 되돌렸습니다.' : '마지막 일정 변경을 되돌렸습니다.');
+    }
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
   async function unlink(id: string) { markBusy(true); try { await remove(`/dependencies/${id}`); await refresh(); notify('선행·후행 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); } }
@@ -261,6 +273,9 @@ function ProjectGantt(props: GanttProps) {
     }} selectedPlanningId={selectedPlanningId} onSelectPlanning={choosePlan} onDraftChange={trackDraft} draftEpoch={draftEpoch} />
     {planningExpanded && selectedPlan && <div className="gantt-planning-actions">
       <label className="gantt-checkbox-label"><input type="checkbox" checked={linkedOnly} disabled={busy} onChange={event => setPlanningFilter(event.target.checked)} />연결된 업무만</label>
+      <button className="btn" disabled={busy} onClick={() => {
+        if (canLeave()) setPlanShift(selectedPlan);
+      }}><MoveHorizontal size={14} />계획 일정 함께 이동</button>
       <button className="btn" disabled={busy || !selectedIssues.length || selectedIssues.length > 1000} onClick={() => {
         if (canLeave()) setPlanAssignment({ item:selectedPlan, issues:selectedIssues });
       }}><Link2 size={14} />선택 업무 연결</button>
@@ -320,6 +335,16 @@ function ProjectGantt(props: GanttProps) {
         updated.forEach(issue => next.delete(issue.id));
         return next;
       })} />}
+    {shiftPlan && <PlanScheduleShiftDialog plan={shiftPlan} actorId={props.actorId} refresh={refresh} notify={notify} onDraftChange={trackDraft}
+      onClose={() => setPlanShift(null)} onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        await refresh();
+        const date = result.plan.startDate ?? result.plan.targetDate ?? result.plan.endDate;
+        if (date && outside(date)) showDate(date);
+        setPlanShift(null);
+        notify(result.updated.length ? `계획과 ${result.updated.length}개 업무의 일정을 이동했습니다.` : '계획 일정을 이동했습니다.');
+      }} />}
   </div>;
 }
 

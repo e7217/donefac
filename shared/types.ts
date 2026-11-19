@@ -398,6 +398,17 @@ export interface SchedulePastePreview {
   unchanged: number;
 }
 export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; warnings: string[] }
+export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
+export interface PlanScheduleShiftPreview {
+  previewId: string | null;
+  expiresAt: string | null;
+  plan: Pick<PlanningItem, 'id' | 'name' | 'kind' | 'version'> & { from: PlanScheduleDates; to: PlanScheduleDates };
+  changes: ScheduleChange[];
+  skipped: { id: string; key: string; title: string; reason: 'terminal' | 'unscheduled' }[];
+  warnings: string[];
+  blocking: string[];
+}
+export interface PlanScheduleShiftResult extends SchedulePasteApplyResult { plan: PlanningItem }
 export interface FeatureProps {
   data: WorkspaceSnapshot; projectId: string; actorId: string;
   refresh: () => Promise<void>; notify: (message: string, kind?: 'success' | 'error') => void;

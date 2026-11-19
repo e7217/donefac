@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
-import type { Issue, PlanningItem, PlanningKind, PlanningStatus, Project, User } from '../shared/types.js';
+import type { Issue, PlanningItem, PlanningKind, PlanningStatus, PlanScheduleDates, Project, User } from '../shared/types.js';
 import { planningFields, PLANNING_META } from '../shared/planning-helpers.js';
 import { Store } from './store.js';
 
@@ -121,6 +121,14 @@ export class PlanningService{
   replaceImported(items:PlanningItem[],previousVersions=new Map(this.all().map(item=>[item.id,item.version]))):void{
     this.store.db.exec('DELETE FROM planning_items');
     for(const item of items){const old=previousVersions.get(item.id);this.put({...item,version:old===undefined?item.version:Math.max(old,item.version)+1});}
+  }
+  /** The combined schedule apply/undo transaction owns this date-only write. */
+  writeScheduleDates(id:string,expectedVersion:number,dates:PlanScheduleDates):PlanningItem{
+    const old=this.get(id);
+    version(expectedVersion,old.version);
+    const updated=this.parse({...old,startDate:dates.startDate,endDate:dates.endDate,targetDate:dates.targetDate,version:old.version+1,updatedAt:now()});
+    this.put(updated);
+    return updated;
   }
   registerRoutes(app:Express,hooks:Hooks):void{
     const route=(handler:(req:Request,res:Response)=>unknown)=>(req:Request,res:Response,next:NextFunction)=>{try{handler(req,res);}catch(error){if(error instanceof PlanningError)return res.status(error.status).json({error:error.message,details:error.details});if(String((error as Error)?.message).includes('planning_items.project_id, planning_items.kind, planning_items.name'))return res.status(409).json({error:'같은 종류와 이름의 계획 항목이 이미 있습니다.'});next(error);}};

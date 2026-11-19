@@ -1,0 +1,369 @@
+.plan-shift-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 290;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgb(18 38 31 / 42%);
+}
+
+.plan-shift-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 100%);
+  max-height: calc(100dvh - 56px);
+  overflow: hidden;
+  border: 1px solid #dce5df;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 20px 80px rgb(20 45 34 / 18%);
+  color: #263e35;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.plan-shift-header,
+.plan-shift-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 21px 25px;
+}
+
+.plan-shift-header {
+  border-bottom: 1px solid #e0e8e2;
+}
+
+.plan-shift-header > div {
+  min-width: 0;
+}
+
+.plan-shift-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.plan-shift-header p {
+  margin: 7px 0 0;
+  color: #526b60;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-content {
+  display: grid;
+  gap: 20px;
+  min-height: 0;
+  padding: 24px 25px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.plan-shift-dialog fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.plan-shift-days-label {
+  display: grid;
+  gap: 7px;
+  max-width: 220px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.plan-shift-dialog .field {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  font-size: 16px;
+}
+
+.plan-shift-help {
+  margin: 10px 0 0;
+  color: #526b60;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  margin-top: 15px;
+  font-size: 14px;
+}
+
+.plan-shift-checkbox input {
+  flex: 0 0 auto;
+}
+
+.plan-shift-condition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.plan-shift-condition-actions > span {
+  color: #526b60;
+  font-size: 13px;
+}
+
+.plan-shift-dialog .btn {
+  min-height: 38px;
+  font-size: 14px;
+}
+
+.plan-shift-error,
+.plan-shift-warning,
+.plan-shift-recovery,
+.plan-shift-success,
+.plan-shift-messages {
+  margin: 0;
+  padding: 13px 15px;
+  border-radius: 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-error,
+.plan-shift-messages.is-error {
+  background: #fff0ed;
+  color: #98372b;
+}
+
+.plan-shift-warning,
+.plan-shift-recovery,
+.plan-shift-messages.is-warning {
+  background: #fff6df;
+  color: #72531f;
+}
+
+.plan-shift-success {
+  background: #edf8f0;
+  color: #2b6143;
+}
+
+.plan-shift-success p,
+.plan-shift-recovery p {
+  margin: 0 0 12px;
+}
+
+.plan-shift-success p {
+  margin-top: 6px;
+}
+
+.plan-shift-preview {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  padding-top: 21px;
+  border-top: 1px solid #e0e8e2;
+}
+
+.plan-shift-preview h3 {
+  margin: 0 0 5px;
+  font-size: 19px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-preview > header > span {
+  color: #526b60;
+  font-size: 13px;
+}
+
+.plan-shift-table-scroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.plan-shift-table-scroll table {
+  width: 100%;
+  min-width: 425px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 14px;
+}
+
+.plan-shift-table-scroll th,
+.plan-shift-table-scroll td {
+  padding: 12px;
+  border-bottom: 1px solid #e3eae5;
+  text-align: left;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-table-scroll thead th {
+  background: #f3f7f4;
+  color: #526b60;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plan-shift-table-scroll .is-changed {
+  color: #126f62;
+  font-weight: 600;
+}
+
+.plan-shift-table-scroll th > small,
+.plan-shift-table-scroll th > strong {
+  display: block;
+}
+
+.plan-shift-table-scroll th > small {
+  margin-bottom: 5px;
+  color: #526b60;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.plan-shift-table-scroll th > strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.plan-shift-messages > ul {
+  margin: 9px 0 0;
+  padding-left: 21px;
+}
+
+.plan-shift-messages li + li {
+  margin-top: 5px;
+}
+
+.plan-shift-issues,
+.plan-shift-skipped {
+  min-width: 0;
+}
+
+.plan-shift-issues h4,
+.plan-shift-skipped h4 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.plan-shift-skipped ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-shift-skipped li {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid #e3eae5;
+  font-size: 13px;
+}
+
+.plan-shift-skipped li > span:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
+.plan-shift-skipped strong {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.plan-shift-skipped small,
+.plan-shift-skipped li > span:last-child {
+  color: #526b60;
+  font-size: 12px;
+}
+
+.plan-shift-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.plan-shift-pagination > span {
+  margin-right: auto;
+  font-size: 12px;
+}
+
+.plan-shift-footer {
+  align-items: center;
+  flex-wrap: wrap;
+  border-top: 1px solid #e0e8e2;
+  background: #f8faf8;
+}
+
+.plan-shift-footer > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.plan-shift-footer > div > span {
+  color: #526b60;
+  font-size: 12px;
+}
+
+@media (max-width: 600px) {
+  .plan-shift-backdrop {
+    padding: 10px;
+  }
+
+  .plan-shift-dialog {
+    max-height: calc(100dvh - 20px);
+    border-radius: 11px;
+  }
+
+  .plan-shift-header,
+  .plan-shift-footer {
+    padding: 16px;
+  }
+
+  .plan-shift-header h2 {
+    gap: 7px;
+    font-size: 18px;
+  }
+
+  .plan-shift-content {
+    padding: 18px 16px;
+  }
+
+  .plan-shift-days-label {
+    max-width: none;
+  }
+
+  .plan-shift-condition-actions > .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .plan-shift-footer > div:last-child {
+    width: 100%;
+  }
+
+  .plan-shift-footer > div:last-child > .btn {
+    flex: 1;
+    justify-content: center;
+  }
+}
