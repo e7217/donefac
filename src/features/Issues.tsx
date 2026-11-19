@@ -2,14 +2,16 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, Plus, Search, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type FeatureProps, type Issue, type IssueStatus } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type FeatureProps, type Issue, type IssueFieldFilter, type IssueStatus, type SavedViewState } from '../../shared/types';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dateLabel, patch, post } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
-import { issueSearchText, issueTypeMeta, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
+import { issueSearchText, issueTypeMeta, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { CustomFields, CustomFieldSummary, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect } from './PlanningSelectors';
 import { SavedViews } from './SavedViews';
+import { IssueFieldFilters } from './IssueFieldFilters';
+import { createIssueFieldMatcher } from '../../shared/issue-field-filter';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 
@@ -28,6 +30,11 @@ export function Issues(props: FeatureProps) {
   const [status, setStatus] = useState('all');
   const [assignee, setAssignee] = useState('all');
   const [type, setType] = useState('all');
+  const [projectFieldFilters, setProjectFieldFilters] = useState(() => new Map<string, IssueFieldFilter>());
+  const [fieldEditorEpoch, setFieldEditorEpoch] = useState(0);
+  const fieldFilter = projectFieldFilters.get(projectId);
+  const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
+  const matchesFields = useMemo(() => createIssueFieldMatcher(fieldFilter, schema), [fieldFilter, schema]);
   const [creating, setCreating] = useState(false);
   const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');
   const [busy, setBusy] = useState<string | null>(null);
@@ -35,10 +42,33 @@ export function Issues(props: FeatureProps) {
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => data.issues.filter(i => isAll(projectId) || i.projectId === projectId), [data.issues, projectId]);
-  const issues = projectIssues.filter(i => (!query || issueSearchText(data, i).toLowerCase().includes(query.toLowerCase())) && (status === 'all' || i.status === status) && (assignee === 'all' || (assignee === 'none' ? !i.assigneeId : i.assigneeId === assignee)) && (type === 'all' || i.type === type));
+  const issues = projectIssues.filter(i => (!query || issueSearchText(data, i).toLowerCase().includes(query.toLowerCase())) && (status === 'all' || i.status === status) && (assignee === 'all' || (assignee === 'none' ? !i.assigneeId : i.assigneeId === assignee)) && (type === 'all' || i.type === type) && matchesFields(i));
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '';
+  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter);
+  function updateFieldFilter(value: IssueFieldFilter | undefined) {
+    setProjectFieldFilters(previous => {
+      const next = new Map(previous);
+      if (value) next.set(projectId, value);
+      else next.delete(projectId);
+      return next;
+    });
+  }
+  function applySavedView(value: SavedViewState) {
+    setView(value.layout);
+    setQuery(value.filters.query);
+    setStatus(value.filters.status);
+    setAssignee(value.filters.assigneeId);
+    setType(value.filters.type);
+    updateFieldFilter(value.filters.fieldFilter);
+    setFieldEditorEpoch(epoch => epoch + 1);
+  }
+  function clearFilters() {
+    if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
+    setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
+    updateFieldFilter(undefined);
+    setFieldEditorEpoch(epoch => epoch + 1);
+  }
   async function changeStatus(issue: Issue, next: IssueStatus) {
     if (issue.status === next || busy) return;
     if (!allowedNextStatuses(data, issue).some(value => value.id === next)) { notify('이 업무 유형에 허용되지 않은 상태 전이입니다.', 'error'); return; }
@@ -54,9 +84,15 @@ export function Issues(props: FeatureProps) {
       <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
       <select className="issue-filter" aria-label="담당자 필터" value={assignee} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
       <select className="issue-filter" aria-label="유형 필터" value={type} onChange={e => setType(e.target.value)}><option value="all">모든 유형</option>{type !== 'all' && !issueTypes.some(item => item.id === type) && <option value={type}>{type} (저장된 조건)</option>}{issueTypes.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (보관됨)' : ''}</option>)}</select>
-      {activeFilters && <button className="btn btn-ghost issue-clear-filter" onClick={() => { setQuery(''); setStatus('all'); setAssignee('all'); setType('all'); }}><X size={14} /> 초기화</button>}
+      {activeFilters && <button className="btn btn-ghost issue-clear-filter" onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
-    <SavedViews projectId={projectId} actorId={props.actorId} current={{layout:view,filters:{query,status,assigneeId:assignee,type}}} onApply={value => {setView(value.layout);setQuery(value.filters.query);setStatus(value.filters.status);setAssignee(value.filters.assigneeId);setType(value.filters.type);}} notify={notify} />
+    {!isAll(projectId) && (schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters
+      key={`${projectId}:${fieldEditorEpoch}`} schema={schema} users={data.users} value={fieldFilter}
+      onApply={updateFieldFilter} notify={notify}
+    />}
+    <SavedViews projectId={projectId} actorId={props.actorId}
+      current={{layout:view,filters:{query,status,assigneeId:assignee,type,...(fieldFilter ? {fieldFilter} : {})}}}
+      onApply={applySavedView} notify={notify} />
     <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? '카드를 끌어 상태 변경 · 카드에서 업무 상세 확인' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>
     {view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr><th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map(issue => {
       const user = data.users.find(u => u.id === issue.assigneeId);

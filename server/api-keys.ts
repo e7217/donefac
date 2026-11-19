@@ -164,6 +164,13 @@ export class ApiKeyService {
     if (Number(result.changes) !== 1) unauthorized();
   }
   private authorize(key: ApiKeyRecord, path: string, request: Request, response: Response, next: NextFunction) {
+    if (request.method === 'POST' && path === '/api/issues/query') {
+      this.query(request, []);
+      if (typeof request.body.projectId !== 'string' || !request.body.projectId) fail(400, '필터를 적용할 프로젝트가 필요합니다.');
+      this.allowedProject(key, request.body.projectId);
+      this.used(key);
+      return next();
+    }
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     if (request.method === 'GET') {
       if (worklogs && !worklogs[2]) {

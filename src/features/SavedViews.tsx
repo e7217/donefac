@@ -70,6 +70,7 @@ function ProjectSavedViews({projectId, current, onApply, notify}: Props) {
   return <div className="saved-views">
     <div className="saved-views-picker"><Bookmark size={15}/><select aria-label="저장된 업무 보기" disabled={loading || busy} value={selectedId} onChange={event => {
       const next = views.find(view => view.id === event.target.value);
+      if (next && !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
       setSelectedId(event.target.value);
       if (next) onApply(next);
     }}><option value="">{loading ? '보기를 불러오는 중…' : '저장된 보기 선택'}</option>{views.map(view => <option key={view.id} value={view.id}>{view.name}</option>)}</select></div>
@@ -78,12 +79,13 @@ function ProjectSavedViews({projectId, current, onApply, notify}: Props) {
     {error && <span className="saved-view-error" role="alert">{error}<button className="text-link" onClick={() => reload().catch(e => notify(e.message,'error'))}>다시 불러오기</button></span>}
     {editing && <div className="modal-backdrop"><form className="modal-card saved-view-dialog" role="dialog" aria-modal="true" aria-labelledby="saved-view-title" onSubmit={save}>
       <div className="card-heading"><h2 id="saved-view-title">{editing === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
-      <p className="muted">현재 검색어·상태·담당자·유형 필터와 {current.layout === 'board' ? '보드' : '목록'} 화면을 프로젝트의 공유 보기로 저장합니다.</p>
+      <p className="muted">적용된 검색어·상태·담당자·유형·사용자 정의 필드 조건과 {current.layout === 'board' ? '보드' : '목록'} 화면을 프로젝트의 공유 보기로 저장합니다.</p>
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
-      <div className="saved-view-definition"><span>{current.layout === 'board' ? '보드' : '목록'}</span><span>{current.filters.status === 'all' ? '모든 상태' : `상태: ${current.filters.status}`}</span>{current.filters.query && <span>검색: {current.filters.query}</span>}{current.filters.type !== 'all' && <span>유형: {current.filters.type}</span>}</div>
+      <div className="saved-view-definition"><span>{current.layout === 'board' ? '보드' : '목록'}</span><span>{current.filters.status === 'all' ? '모든 상태' : `상태: ${current.filters.status}`}</span>{current.filters.query && <span>검색: {current.filters.query}</span>}{current.filters.type !== 'all' && <span>유형: {current.filters.type}</span>}{current.filters.fieldFilter && <span>사용자 정의 필드 {current.filters.fieldFilter.rules.length}개</span>}</div>
       {dialogError && <p className="error-text" role="alert">{dialogError}</p>}
       {conflicted && <button type="button" className="btn" disabled={busy} onClick={async () => {
         if (!window.confirm('입력한 보기 이름을 버리고 최신 보기 설정을 적용할까요?')) return;
+        if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
         setBusy(true);
         try {const list = await api<SavedView[]>(`/views?projectId=${encodeURIComponent(projectId)}`);if (!mounted.current) return;setViews(list);const latest = list.find(view => view.id === selectedId);if (!latest) {setSelectedId('');setEditing(null);notify('이 보기는 삭제되었습니다.','error');return;}setName(latest.name);onApply(latest);setConflicted(false);setDialogError('');}
         catch (error) {if (mounted.current) setDialogError((error as Error).message);}

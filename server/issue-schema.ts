@@ -69,11 +69,21 @@ export class IssueSchemaService{
       const typeReferences=new Set([...issues.map(issue=>issue.type),...workflows.flatMap(workflow=>[...workflow.transitions.flatMap(edge=>edge.issueTypes),...workflow.fieldRules.map(rule=>rule.issueType).filter(type=>type!=='*')]),...views.map(view=>view.filters.type).filter(type=>type!=='all'),...automation.flatMap(rule=>rule.issueTypes)]);
       for(const type of old.issueTypes)if(!next.issueTypes.some(candidate=>candidate.id===type.id)&&typeReferences.has(type.id))fail(`참조 중인 업무 유형을 삭제할 수 없습니다: ${type.name}`,409);
       const requiredReferences=new Set(workflows.flatMap(workflow=>[...workflow.transitions.flatMap(edge=>edge.requiredFields),...workflow.fieldRules.flatMap(rule=>rule.requiredFields)]).filter(field=>field.startsWith('custom:')).map(field=>field.slice(7)));
+      const viewReferences = new Map<string, Set<string>>();
+      for (const view of views) for (const rule of view.filters.fieldFilter?.rules ?? []) {
+        const values = viewReferences.get(rule.fieldId) ?? new Set<string>();
+        if (typeof rule.value === 'string') values.add(rule.value);
+        viewReferences.set(rule.fieldId, values);
+      }
       for(const field of old.fields){const updated=next.fields.find(candidate=>candidate.id===field.id),used=issues.some(issue=>hasCustomValue(ownValue(issue.customFields,field.id)));
         if(updated&&updated.kind!==field.kind)fail(`기존 필드 종류는 변경할 수 없습니다: ${field.name}`);
+        if(!updated&&viewReferences.has(field.id))fail(`저장된 보기에서 사용하는 필드는 삭제할 수 없습니다: ${field.name}`,409);
         if(!updated&&(used||requiredReferences.has(field.id)))fail(`값 또는 워크플로 참조가 있는 필드는 삭제할 수 없습니다: ${field.name}`,409);
         if(updated?.archived&&requiredReferences.has(field.id))fail(`워크플로에서 필수로 사용하는 필드는 규칙을 수정한 뒤 보관해 주세요: ${field.name}`,409);
-        if(updated)for(const option of field.options)if(!updated.options.some(candidate=>candidate.id===option.id)&&issues.some(issue=>{const value=ownValue(issue.customFields,field.id);return Array.isArray(value)?value.includes(option.id):value===option.id;}))fail(`사용 중인 선택지는 삭제할 수 없습니다: ${option.name}`,409);
+        if(updated)for(const option of field.options)if(!updated.options.some(candidate=>candidate.id===option.id)){
+          if(viewReferences.get(field.id)?.has(option.id))fail(`저장된 보기에서 사용하는 선택지는 삭제할 수 없습니다: ${option.name}`,409);
+          if(issues.some(issue=>{const value=ownValue(issue.customFields,field.id);return Array.isArray(value)?value.includes(option.id):value===option.id;}))fail(`사용 중인 선택지는 삭제할 수 없습니다: ${option.name}`,409);
+        }
       }
       for(const fieldId of requiredReferences)if(!next.fields.some(field=>field.id===fieldId&&!field.archived))fail('워크플로에서 사용하는 필수 필드를 유지해 주세요.',409);
       const removed=new Set(old.fields.filter(field=>!next.fields.some(candidate=>candidate.id===field.id)).map(field=>field.id));

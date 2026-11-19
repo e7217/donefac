@@ -258,3 +258,35 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 Jira 이관 작업에는 `sourceRecordId`와 `durationSeconds`가 함께 반환된다. 이관 기록의 `minutes`와 보고서 합계는 초를 분으로 표현하므로 소수일 수 있다. 이관 기록의 PATCH에서 생략한 날짜·메모·시간은 유지된다. `minutes`를 생략하면 초 단위 시간도 유지된다. 분을 명시하면 1~1,440분 범위의 새 시간으로 변경한다. 기본 작업 기록은 분 입력이 필요하다. schema12 백업에서 이관 시간의 원본 ID와 초 단위를 보관·검증한다.
 
 Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorklogs` 건수가 포함된다. 관리자 XML의 Worklog 및 업무 JSON에 포함된 REST·Importers 개별 작업 기록이 대상이다. 업무 단위 합계만 있는 파일에서는 개별 작업 시간을 생성하지 않는다. 원래 작성자를 팀원으로 매핑하고 작업일과 길이를 확인할 수 있는 기록을 집계에 반영한다. 시작 시각·작성자·원본 메모는 원본 기록에서도 볼 수 있다. 제한된 작업 기록은 이관에서 명시적으로 제외할 때까지 적용을 차단한다. 상대 날짜나 설정에 따라 달라지는 일·주 길이는 원본에 보관하고 진단에서 확인한다. [Jira Data Center 작업 기록 API](https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue/), [Jira JSON 작업 시간 예시](https://confluence.atlassian.com/servicedeskcloud/importing-data-from-json-1097176631.html#ImportingdatafromJSON-Worklogs).
+
+
+## 사용자 정의 필드 조건
+
+업무 화면에서 적용한 필드 조건은 검색·상태·담당자·유형 필터와 함께 적용한다. 공유 보기는 `filters.fieldFilter`에 아래 그룹을 조건과 동일한 ID로 저장한다. 가능한 연산자는 필드 종류에 따라 달라진다.
+
+| 필드 | 비교 연산자 |
+| --- | --- |
+| 모든 종류 | `is_set` 값 있음, `is_empty` 값 비어 있음 |
+| 문자·URL | `equals`, `not_equals`, `contains` |
+| 숫자·날짜 | `equals`, `not_equals`, `gte`, `lte` |
+| 확인 여부·단일 선택·팀원 | `equals`, `not_equals` |
+| 다중 선택 | `includes`, `excludes` |
+
+날짜는 YYYY-MM-DD, 숫자는 JSON 숫자, 확인 여부는 `true`·`false`, 선택지와 팀원은 각각 ID를 사용한다. 값 유무 연산자에는 `value`를 넣지 않는다. 비교의 대소문자는 전체 값 비교에서 그대로 적용하고 부분 문자열 검색에서는 구분하지 않는다. 값이 없으면 값 비교와 포함·제외 조건에 일치하지 않는다. 그 업무 유형에 적용되는 필드만 비교한다. 값 유무 검사에서 숫자 0과 `false`는 값이 있는 것으로 센다.
+
+`POST /api/v1/issues/query`는 읽기 키로 호출할 수 있다. 브라우저의 같은 경로는 `/api/issues/query`다. `projectId`를 지정하고 `fieldFilter.match`에 `all` 또는 `any`와 1~8개 조건을 보낸다. 응답은 조건에 맞는 업무 배열이다.
+
+```json
+{
+  "projectId": "project-id",
+  "fieldFilter": {
+    "match": "all",
+    "rules": [
+      {"fieldId": "risk-score", "operator": "gte", "value": 0},
+      {"fieldId": "reviewed", "operator": "equals", "value": false}
+    ]
+  }
+}
+```
+
+사용 중인 필드·선택지는 이름 변경과 보관 후에도 같은 ID로 조회할 수 있다. 필드나 선택지를 삭제하려면 이를 사용하는 공유 보기를 먼저 수정한다. 보기 저장·수정의 필터 객체에서 필드 그룹을 생략하거나 `null`로 보내면 해당 조건을 제거한다. 필드 그룹이 저장된 보기는 schema13 백업에서 복원한다. 조건 없이 저장한 기존 보기와 이전 백업도 계속 사용할 수 있다.

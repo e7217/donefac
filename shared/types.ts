@@ -291,7 +291,13 @@ export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'colla
 export interface WorkflowTransition { from: string; to: string; issueTypes: string[]; requiredFields: IssueRequiredField[] }
 export interface WorkflowFieldRule { issueType: string; statusId: string; requiredFields: IssueRequiredField[] }
 export interface ProjectWorkflow { id: string; projectId: string; version: number; initialStatusId: string; statuses: WorkflowStatus[]; transitions: WorkflowTransition[]; fieldRules: WorkflowFieldRule[]; updatedAt: string }
-export interface SavedViewState { layout: 'list' | 'board'; filters: { query: string; status: string; assigneeId: string; type: string } }
+export type IssueFieldOperator = 'is_set' | 'is_empty' | 'equals' | 'not_equals' | 'contains' | 'gte' | 'lte' | 'includes' | 'excludes';
+export interface IssueFieldRule { fieldId: string; operator: IssueFieldOperator; value?: string | number | boolean }
+export interface IssueFieldFilter { match: 'all' | 'any'; rules: IssueFieldRule[] }
+export interface SavedViewState {
+  layout: 'list' | 'board';
+  filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter };
+}
 export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];

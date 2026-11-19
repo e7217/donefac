@@ -1,0 +1,216 @@
+.issue-field-filters {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+  color: #254137;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.issue-field-filter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.issue-field-filters .btn,
+.issue-field-filters .field,
+.issue-field-filters label {
+  font-size: 0.875rem;
+}
+
+.issue-field-filters .btn {
+  min-height: 36px;
+}
+
+.issue-field-filter-active {
+  background: #e9f6ef;
+  color: #176c5c;
+  border-color: #a8d1bd;
+}
+
+.issue-field-filter-active > span {
+  font-size: 0.8125rem;
+  padding-left: 0.25rem;
+}
+
+.issue-field-filter-editor {
+  width: min(840px, 100%);
+  max-height: 75vh;
+  overflow: auto;
+  margin-top: 0.7rem;
+  padding: 1.2rem;
+  background: white;
+  border: 1px solid #cbded2;
+  border-radius: 9px;
+  box-shadow: 0 14px 42px #21453721;
+}
+
+.issue-field-filters.is-open {
+  display: block;
+  flex: 1 0 100%;
+  width: 100%;
+}
+
+.issue-field-filter-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.issue-field-filter-editor h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.issue-field-filter-editor header p {
+  margin: 0.3rem 0 0;
+  font-size: 1rem;
+  color: #536e61;
+}
+
+.issue-field-filters .field {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-top: 0.3rem;
+}
+
+.issue-field-filter-match {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.issue-field-filter-match label {
+  flex: 1;
+  max-width: 340px;
+}
+
+.issue-field-filter-match > span {
+  padding-bottom: 0.55rem;
+  white-space: nowrap;
+  color: #536d60;
+  font-size: 0.8125rem;
+}
+
+.issue-field-filter-rule {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.25fr) minmax(135px, 1fr) minmax(140px, 1.2fr) 36px;
+  align-items: end;
+  gap: 0.65rem;
+  padding: 0.8rem 0;
+  border-top: 1px solid #e1eae4;
+}
+
+.issue-field-filter-rule > label {
+  min-width: 0;
+}
+
+.issue-field-filter-remove {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.issue-field-filter-no-value {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  font-size: 0.8125rem;
+  color: #5b7467;
+}
+
+.issue-field-filter-empty {
+  padding: 0.85rem 0;
+  margin: 0;
+  font-size: 1rem;
+  color: #526d5e;
+}
+
+.issue-field-filter-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  margin: 0.65rem 0;
+}
+
+.issue-field-filter-add small {
+  color: #526c5f;
+  font-size: 0.8125rem;
+}
+
+.issue-field-filter-error {
+  margin: 0.85rem 0;
+  border: 1px solid #e7c1c4;
+  border-radius: 6px;
+  padding: 0.75rem 0.85rem;
+  color: #943e43;
+  background: #fff4f4;
+  font-size: 0.875rem;
+}
+
+.issue-field-filter-editor > footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #dce7df;
+}
+
+.issue-field-filters select.field {
+  appearance: none;
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23516965' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+}
+
+.issue-field-filters button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.issue-field-filters button:focus-visible,
+.issue-field-filters .field:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 2px;
+}
+
+@media (max-width: 800px) {
+  .issue-field-filters {
+    display: block;
+    width: 100%;
+  }
+
+  .issue-field-filter-editor {
+    position: static;
+    width: 100%;
+    max-height: none;
+    margin-top: 0.7rem;
+  }
+
+  .issue-field-filter-rule {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 36px;
+  }
+
+  .issue-field-filter-rule > label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .issue-field-filter-rule > .issue-field-filter-value {
+    grid-column: 2;
+  }
+
+  .issue-field-filter-rule > .issue-field-filter-remove {
+    grid-column: 3;
+  }
+}
