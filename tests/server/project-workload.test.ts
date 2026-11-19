@@ -9,7 +9,7 @@ import { defaultWorkCalendar } from '../../shared/calendar.js';
 import { calculateProjectWorkload, defaultWorkloadCapacity, WorkloadError } from '../../shared/project-workload.js';
 import type {
   ApiKeyCreated, Dependency, Issue, Project, ProjectWorkloadCapacity, ProjectWorkloadResult,
-  TeamWorkloadCapacity, TeamWorkloadResult, WorkloadLevelPreview, WorkspaceSnapshot,
+  TeamWorkloadCapacity, TeamWorkloadLevelPreview, TeamWorkloadResult, User, WorkloadLevelPreview, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -394,6 +394,95 @@ test('team workload combines project calendars against one availability per pers
   await f.call(`/v1${path}`, 'GET', undefined, 403, reader.token);
   await f.call(`/v1${capacityPath}`, 'GET', undefined, 403, reader.token);
   await f.call('/v1/workspace', 'GET', undefined, 403, reader.token);
+});
+
+test('team workload proposal counts fixed projects, applies across calendars once and undoes all moves', async t => {
+  const f = await fixture(t);
+  const another = await f.call<Project>('/projects', 'POST', { name: '병행 조정 프로젝트', key: 'LVL' }, 201);
+  const background = await f.call<Project>('/projects', 'POST', { name: '그대로 둘 프로젝트', key: 'FIX' }, 201);
+  const assignee = await f.call<User>('/users', 'POST', { name: '합성 팀 작업 담당자', email: 'team-level@example.test' }, 201);
+  const wednesday = '2026-11-25', thursday = '2026-11-26';
+  await f.call('/workload-capacity', 'PATCH', { expectedVersion: 1, defaultDailyMinutes: 100,
+    exceptions: [{ userId: assignee.id, date: tuesday, availableMinutes: 0 }] });
+  await f.call(`/projects/${another.id}/calendar`, 'PATCH', { expectedVersion: 1,
+    exceptions: [{ date: wednesday, isWorking: false, label: '프로젝트 휴무' }] });
+  const start = { startDate: monday, endDate: monday, assigneeId: assignee.id, plannedEffortMinutes: 60, priority: 'low' } as const;
+  const first = await f.issue({ ...start, title: '수요일에 가능한 업무' });
+  const second = await f.issue({ ...start, projectId: another.id, title: '목요일에 가능한 업무' });
+  const fixed = await f.issue({ ...start, projectId: background.id, title: '선택에서 제외한 업무' });
+
+  const input = { startDate: monday, endDate: thursday, projectIds: [f.project.id, another.id], userIds: [assignee.id] };
+  const previewPath = '/schedule/team-workload-preview';
+  const applyPath = '/schedule/team-workload-apply';
+  const workspace = async () => (await f.call<WorkspaceSnapshot>('/workspace')).issues;
+  const preview = await f.call<TeamWorkloadLevelPreview>(previewPath, 'POST', input);
+  assert.deepEqual(preview.movableProjectIds, input.projectIds);
+  assert.equal(preview.before.overloadedCells, 1);
+  assert.equal(preview.before.excessMinutes, 80);
+  assert.equal(preview.after.excessMinutes, 0);
+  assert.deepEqual(new Map(preview.changes.map(change => [change.id, [change.projectId, change.toStart, change.toEnd]])), new Map([
+    [first.id, [f.project.id, wednesday, wednesday]], [second.id, [another.id, thursday, thursday]],
+  ]));
+  assert.deepEqual(new Map(preview.projectCompletions.map(value => [value.projectId, [value.before, value.after]])), new Map([
+    [f.project.id, [monday, wednesday]], [another.id, [monday, thursday]],
+  ]));
+  assert.deepEqual((await workspace()).filter(issue => [first.id, second.id, fixed.id].includes(issue.id)), [first, second, fixed]);
+  const request = { previewId: preview.previewId };
+  const receiptPath = `/schedule/team-workload-result/${preview.previewId}`;
+  assert.deepEqual(await f.call(receiptPath), { applied: false });
+  await f.call(receiptPath, 'GET', undefined, 409, undefined, bob);
+  await f.call(applyPath, 'POST', request, 409, undefined, bob);
+  await f.call('/schedule/workload-apply', 'POST', request, 404);
+  await f.call(`/schedule/workload-result/${preview.previewId}`, 'GET', undefined, 404);
+  const applied = await f.call<{ undoId: string; updated: Issue[] }>(applyPath, 'POST', request);
+  assert.deepEqual(new Map(applied.updated.map(issue => [issue.id, [issue.startDate, issue.version]])), new Map([
+    [first.id, [wednesday, first.version + 1]], [second.id, [thursday, second.version + 1]],
+  ]));
+  assert.deepEqual((await workspace()).find(issue => issue.id === fixed.id), fixed);
+  await f.restart();
+  assert.deepEqual(await f.call(receiptPath), applied);
+  assert.deepEqual(await f.call(applyPath, 'POST', request), applied);
+  const workload = await f.call<TeamWorkloadResult>(`/workload?startDate=${monday}&endDate=${thursday}`);
+  const row = rowFor(workload, assignee.id);
+  assert.deepEqual(row.days.map(cell => [cell.scheduledMinutes, cell.availableMinutes]), [[60, 100], [0, 0], [60, 100], [60, 100]]);
+  const undone = await f.call<{ updated: Issue[] }>('/schedule/undo', 'POST', { undoId: applied.undoId });
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, issue.startDate])), new Map([[first.id, monday], [second.id, monday]]));
+});
+
+test('team workload proposal rejects changes to fixed activity, calendars, team capacity and the project set', async t => {
+  const f = await fixture(t);
+  const fixedProject = await f.call<Project>('/projects', 'POST', { name: '고정 주변 프로젝트', key: 'BGW' }, 201);
+  const assignee = await f.call<User>('/users', 'POST', { name: '합성 충돌 확인 담당자', email: 'team-guard@example.test' }, 201);
+  await f.call('/workload-capacity', 'PATCH', { expectedVersion: 1, defaultDailyMinutes: 100 });
+  const dates = { startDate: monday, endDate: monday, assigneeId: assignee.id, plannedEffortMinutes: 60 };
+  const movable = await f.issue(dates);
+  const fixed = await f.issue({ ...dates, projectId: fixedProject.id });
+  const input = { startDate: monday, endDate: '2026-11-27', projectIds: [f.project.id], userIds: [assignee.id] };
+  const route = '/schedule/team-workload-preview';
+  const token = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '프로젝트 작성 키', access: 'write', projectIds: [f.project.id] }, 201);
+  await f.call(`/v1${route}`, 'POST', input, 403, token.token);
+  await f.call(route, 'POST', { ...input, projectIds: [] }, 400);
+  await f.call(route, 'POST', { ...input, projectIds: ['missing-project'] }, 404);
+  const preview = () => f.call<TeamWorkloadLevelPreview>(route, 'POST', input);
+  const stale = (before: TeamWorkloadLevelPreview) => f.call<{ error: string }>('/schedule/team-workload-apply', 'POST', { previewId: before.previewId }, 409);
+
+  let before = await preview();
+  assert.equal(before.changes[0].id, movable.id);
+  await f.call(`/issues/${fixed.id}`, 'PATCH', { expectedVersion: fixed.version, plannedEffortMinutes: 70 });
+  assert.match((await stale(before)).error, /업무/u);
+  before = await preview();
+  await f.call(`/projects/${fixedProject.id}/calendar`, 'PATCH', { expectedVersion: 1, name: '고정 일정의 새 달력' });
+  assert.match((await stale(before)).error, /작업 달력/u);
+  before = await preview();
+  await f.call('/workload-capacity', 'PATCH', { expectedVersion: 2, defaultDailyMinutes: 105 });
+  assert.match((await stale(before)).error, /팀 가용 시간/u);
+  before = await preview();
+  await f.call('/projects', 'POST', { name: '새로 포함할 프로젝트', key: 'ADD' }, 201);
+  assert.match((await stale(before)).error, /프로젝트 목록/u);
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).issues.find(value => value.id === movable.id), movable);
+  const unapplied = await preview();
+  await f.call('/import', 'POST', { data: await f.export() });
+  await f.call(`/schedule/team-workload-result/${unapplied.previewId}`, 'GET', undefined, 404);
 });
 
 test('workspace availability survives restart and restore, and old backups retain project planning with a fresh team calendar', async t => {

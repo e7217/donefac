@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { CalendarClock, Check, RefreshCw, X } from 'lucide-react';
-import type { Issue, User, WorkloadLevelPreview } from '../../shared/types';
+import type { Issue, Project, TeamWorkloadLevelPreview, User, WorkloadLevelPreview } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
@@ -14,35 +14,45 @@ const PAGE_SIZE = 15;
 type Pending = 'preview' | 'apply' | 'receipt' | 'refresh';
 type Receipt = ScheduleApplyResult | { applied: false };
 
+type TeamScope = {
+  projectIds: string[];
+  projects: ReadonlyMap<string, Project>;
+  initialUserId?: string;
+};
+
 type Props = {
-  projectId: string;
-  projectName: string;
   actorId: string;
   startDate: string;
   endDate: string;
   availableUserIds: string[];
-  selectedIssueIds?: string[];
   users: ReadonlyMap<string, User>;
   issues: ReadonlyMap<string, Issue>;
   onDraftChange?: (id: string, dirty: boolean, pending?: boolean) => void;
   onClose: () => void;
   onApplied: (result: ScheduleApplyResult) => Promise<void> | void;
-};
+} & (
+  | { projectId: string; projectName: string; selectedIssueIds?: string[]; team?: never }
+  | { team: TeamScope; projectId?: never; projectName?: never; selectedIssueIds?: never }
+);
+
+type Preview = WorkloadLevelPreview | TeamWorkloadLevelPreview;
 
 function isApplyResult(value: Receipt | null): value is ScheduleApplyResult {
   return Boolean(value && typeof value === 'object' && 'undoId' in value && typeof value.undoId === 'string' && value.undoId && Array.isArray(value.updated));
 }
 
-export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate, endDate, availableUserIds,
+export function WorkloadLevelDialog({ projectId, projectName, team, actorId, startDate, endDate, availableUserIds,
   selectedIssueIds, users, issues, onDraftChange, onClose, onApplied }: Props) {
   const titleId = useId();
+  const descriptionId = `${titleId}-description`;
   const dialog = useRef<HTMLDialogElement>(null);
   const assigneeInput = useRef<HTMLSelectElement>(null);
   const request = useRef<AbortController | null>(null);
-  const [userId, setUserId] = useState('');
+  const initialUserId = team?.initialUserId ?? '';
+  const [userId, setUserId] = useState(initialUserId);
   const [selectedIds] = useState(() => selectedIssueIds ?? []);
   const [selectedOnly, setSelectedOnly] = useState(false);
-  const [preview, setPreview] = useState<WorkloadLevelPreview | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [error, setError] = useState('');
   const [expired, setExpired] = useState(false);
@@ -51,10 +61,15 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
   const [applied, setApplied] = useState<ScheduleApplyResult | null>(null);
   const [changePage, setChangePage] = useState(0);
   const [remainingPage, setRemainingPage] = useState(0);
-  const dirty = !applied && Boolean(userId || selectedOnly || preview || receiptUnknown);
+  const [completionPage, setCompletionPage] = useState(0);
+  const dirty = !applied && Boolean(userId !== initialUserId || selectedOnly || preview || receiptUnknown);
   const busy = pending !== null;
-  const loadBlocked = !availableUserIds.length || Boolean(userId && !availableUserIds.includes(userId));
+  const loadBlocked = !availableUserIds.length || Boolean(userId && !availableUserIds.includes(userId)) || team?.projectIds.length === 0;
   const headers = { 'X-Actor-Id': actorId };
+  const title = team ? '프로젝트 간 과부하 조정' : '과부하 일정 조정';
+  const route = team ? '/schedule/team-workload' : '/schedule/workload';
+  const projectCompletions = preview && 'projectCompletions' in preview ? preview.projectCompletions : [];
+  const projectTitle = (id: string) => team?.projects.get(id)?.name ?? id;
 
   useEffect(() => {
     const element = dialog.current;
@@ -119,14 +134,15 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
     if (loadBlocked || applied || receiptUnknown) return;
     void run('preview', async signal => {
       setApplyRejected(true);
-      const result = await api<WorkloadLevelPreview>('/schedule/workload-preview', {
+      const scope = team ? { projectIds: team.projectIds } : { projectId, ...(selectedOnly ? { issueIds: selectedIds } : {}) };
+      const result = await api<Preview>(`${route}-preview`, {
         method: 'POST', headers, signal,
-        body: JSON.stringify({ projectId, startDate, endDate, ...(userId ? { userIds: [userId] } : {}),
-          ...(selectedOnly ? { issueIds: selectedIds } : {}) }),
+        body: JSON.stringify({ ...scope, startDate, endDate, ...(userId ? { userIds: [userId] } : {}) }),
       });
       if (signal.aborted) return;
       setPreview(result);
       setChangePage(0);
+      setCompletionPage(0);
       setRemainingPage(0);
       setExpired(!(Date.parse(result.expiresAt) > Date.now()));
       setApplyRejected(false);
@@ -146,7 +162,7 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
   }
 
   async function checkReceipt(previewId: string, signal: AbortSignal) {
-    const receipt = await api<Receipt>(`/schedule/workload-result/${encodeURIComponent(previewId)}`, { headers, signal });
+    const receipt = await api<Receipt>(`${route}-result/${encodeURIComponent(previewId)}`, { headers, signal });
     if (signal.aborted) return;
     if (isApplyResult(receipt)) await reflect(receipt, signal);
     else if (receipt?.applied === false) {
@@ -164,7 +180,7 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
     void run('apply', async signal => {
       let result: ScheduleApplyResult;
       try {
-        const response = await api<ScheduleApplyResult>('/schedule/workload-apply', {
+        const response = await api<ScheduleApplyResult>(`${route}-apply`, {
           method: 'POST', headers, signal, body: JSON.stringify({ previewId: preview.previewId }),
         });
         if (!isApplyResult(response)) throw new Error('적용 응답을 확인하지 못했습니다.');
@@ -184,14 +200,19 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
   }
 
   const canApply = Boolean(preview && !preview.blocking.length && preview.changes.length && !expired && !applyRejected);
-  return <dialog ref={dialog} aria-labelledby={titleId} className="workload-level-dialog" onCancel={event => { event.preventDefault(); close(); }}>
+  return <dialog ref={dialog} aria-labelledby={titleId} aria-describedby={descriptionId} className="workload-level-dialog" onCancel={event => { event.preventDefault(); close(); }}>
     <header>
-      <div><h2 id={titleId}><CalendarClock size={20} aria-hidden="true" />과부하 일정 조정</h2><p>{projectName} · {startDate} ~ {endDate}</p></div>
-      <button className="issue-icon-button" type="button" aria-label="과부하 일정 조정 닫기" disabled={busy} onClick={close}><X size={20} /></button>
+      <div><h2 id={titleId}><CalendarClock size={20} aria-hidden="true" />{title}</h2><p>{projectName && <>{projectName} · </>}{startDate} ~ {endDate}</p></div>
+      <button className="issue-icon-button" type="button" aria-label={`${title} 닫기`} disabled={busy} onClick={close}><X size={20} /></button>
     </header>
     <div className="workload-level-body" aria-busy={busy}>
       <form onSubmit={requestPreview}>
-        <p>근무일 수와 마감일, 업무 연결을 지키면서 가용 시간이 있는 날짜로 업무를 미룹니다.</p>
+        <p id={descriptionId}>{team ? '모든 프로젝트의 작업량과 팀 가용 시간을 비교하고, 선택한 프로젝트의 업무만 각 프로젝트의 근무일과 마감일, 업무 연결을 지켜 뒤로 옮깁니다.' :
+          '근무일 수와 마감일, 업무 연결을 지키면서 가용 시간이 있는 날짜로 업무를 미룹니다.'}</p>
+        {team && <details className="workload-level-projects" open={team.projectIds.length <= 4}>
+          <summary>이동할 프로젝트 <small>{team.projectIds.length.toLocaleString('ko-KR')}개</small></summary>
+          <ul>{team.projectIds.map(id => <li key={id}>{projectTitle(id)}</li>)}</ul>
+        </details>}
         <div className="workload-level-form-row">
           <label>조정 대상 담당자
             <select ref={assigneeInput} aria-label="조정 대상 담당자" className="field" value={userId}
@@ -211,15 +232,29 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
         </label>}
       </form>
       {preview && <>
-        <WorkloadLevelSummary preview={preview} />
+        <WorkloadLevelSummary preview={preview} team={Boolean(team)} />
+        {projectCompletions.length > 0 && <section className="workload-level-section" aria-label="프로젝트별 계획 종료일">
+          <h3>프로젝트별 계획 종료일</h3>
+          <table className="workload-level-changes" aria-label="프로젝트별 계획 종료일">
+            <thead><tr><th scope="col">프로젝트</th><th scope="col">현재 종료일</th><th scope="col">제안 종료일</th></tr></thead>
+            <tbody>{projectCompletions.slice(completionPage * PAGE_SIZE, (completionPage + 1) * PAGE_SIZE).map(project => <tr key={project.projectId}>
+              <th scope="row">{projectTitle(project.projectId)}</th><td>{project.before ?? '미정'}</td><td>{project.after ?? '미정'}</td>
+            </tr>)}</tbody>
+          </table>
+          <ResultPaging title="프로젝트" count={projectCompletions.length} page={completionPage} disabled={busy} onChange={setCompletionPage} />
+        </section>}
         {preview.changes.length ? <section className="workload-level-section" aria-label="조정 제안 업무">
           <h3>조정 제안 업무 <small>{preview.changes.length.toLocaleString('ko-KR')}개</small></h3>
           <table className="workload-level-changes" aria-label="조정 제안 업무">
             <thead><tr><th scope="col">업무</th><th scope="col">현재 일정</th><th scope="col">제안 일정</th></tr></thead>
-            <tbody>{preview.changes.slice(changePage * PAGE_SIZE, (changePage + 1) * PAGE_SIZE).map(change => <tr key={change.id}>
-              <th scope="row"><small>{change.key}</small><span>{change.title}</span></th>
-              <td><DatePair start={change.fromStart} end={change.fromEnd} /></td><td><DatePair start={change.toStart} end={change.toEnd} /></td>
-            </tr>)}</tbody>
+            <tbody>{preview.changes.slice(changePage * PAGE_SIZE, (changePage + 1) * PAGE_SIZE).map(change => {
+              const changedProjectId = 'projectId' in change && typeof change.projectId === 'string' ? change.projectId : issues.get(change.id)?.projectId;
+              return <tr key={change.id}>
+                <th scope="row">{team && changedProjectId && <span className="workload-level-project-name">{projectTitle(changedProjectId)}</span>}
+                  <small>{change.key}</small><span>{change.title}</span></th>
+                <td><DatePair start={change.fromStart} end={change.fromEnd} /></td><td><DatePair start={change.toStart} end={change.toEnd} /></td>
+              </tr>;
+            })}</tbody>
           </table>
           <ResultPaging title="업무" count={preview.changes.length} page={changePage} disabled={busy} onChange={setChangePage} />
         </section> : <p className="workload-level-info">현재 조건에서 조정할 일정이 없습니다.</p>}
@@ -228,7 +263,10 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
           <ul>{preview.remaining.slice(remainingPage * PAGE_SIZE, (remainingPage + 1) * PAGE_SIZE).map(conflict => <li key={`${conflict.userId}:${conflict.date}`}>
             <strong>{users.get(conflict.userId)?.name ?? conflict.userId} · <time dateTime={conflict.date}>{conflict.date}</time></strong>
             <span>{formatWorklogMinutes(conflict.excessMinutes)} 초과</span>
-            <small>{conflict.issueIds.map(id => issues.get(id)?.key ?? id).join(', ')}</small>
+            <small>{conflict.issueIds.map(id => {
+              const issue = issues.get(id);
+              return issue && team ? `${projectTitle(issue.projectId)} · ${issue.key}` : issue?.key ?? id;
+            }).join(', ')}</small>
           </li>)}</ul>
           <ResultPaging title="과부하" count={preview.remaining.length} page={remainingPage} disabled={busy} onChange={setRemainingPage} />
           {preview.remaining.length < preview.after.overloadedCells && <p>남은 과부하 중 {preview.remaining.length}건의 업무 상세를 표시합니다.</p>}
@@ -252,13 +290,13 @@ export function WorkloadLevelDialog({ projectId, projectName, actorId, startDate
   </dialog>;
 }
 
-function WorkloadLevelSummary({ preview: { before, after } }: { preview: WorkloadLevelPreview }) {
+function WorkloadLevelSummary({ preview: { before, after }, team }: { preview: WorkloadLevelPreview; team: boolean }) {
   return <section className="workload-level-section" aria-label="조정 전후 작업량">
     <h3>조정 전후 작업량</h3>
     <dl className="workload-level-summary">
       <div><dt>초과한 담당자·일</dt><dd>{before.overloadedCells.toLocaleString('ko-KR')} → {after.overloadedCells.toLocaleString('ko-KR')}</dd></div>
       <div><dt>초과 시간</dt><dd>{formatWorklogMinutes(before.excessMinutes)} → {formatWorklogMinutes(after.excessMinutes)}</dd></div>
-      <div><dt>프로젝트 계획 종료일</dt><dd>{before.completionDate ?? '미정'} → {after.completionDate ?? '미정'}</dd></div>
+      <div><dt>{team ? '전체 프로젝트 계획 종료일' : '프로젝트 계획 종료일'}</dt><dd>{before.completionDate ?? '미정'} → {after.completionDate ?? '미정'}</dd></div>
     </dl>
   </section>;
 }

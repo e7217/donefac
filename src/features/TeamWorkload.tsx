@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, Layers3, RefreshCw, SlidersHorizontal, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CalendarClock, ChevronDown, Layers3, RefreshCw, SlidersHorizontal, X } from 'lucide-react';
 import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar';
 import { defaultTeamWorkloadCapacity } from '../../shared/team-workload-capacity';
 import type { FeatureProps, TeamWorkloadCapacity, TeamWorkloadResult } from '../../shared/types';
@@ -9,6 +9,8 @@ import { api } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import { WORKLOAD_INCOMPLETE_REASONS, WorkloadIssueLink, WorkloadTable, type WorkloadSelection } from './ProjectWorkload';
 import { WorkloadCapacityEditor } from './WorkloadCapacityEditor';
+import { WorkloadLevelDialog } from './WorkloadLevelDialog';
+import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import { errorMessage } from './schedule-utils';
 import './project-workload.css';
 
@@ -18,10 +20,15 @@ const FIRST_DAY = calendarDay(MIN_CALENDAR_DATE);
 const LAST_DAY = calendarDay(MAX_CALENDAR_DATE);
 const CAPACITY_ROUTE = '/workload-capacity';
 
-type TeamWorkloadProps = Pick<FeatureProps, 'data' | 'refresh' | 'notify' | 'openIssue'> & {
+type TeamWorkloadProps = Pick<FeatureProps, 'data' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStartDate: string;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
+  onBeforeLevel?: () => boolean;
+  scheduleBusy?: boolean;
+  onScheduleApplied?: (result: ScheduleApplyResult) => Promise<void> | void;
 };
+
+type LevelSelection = { projectIds: string[]; startDate: string; endDate: string; initialUserId?: string };
 
 type LoadResponse = {
   route: string;
@@ -49,17 +56,20 @@ function groupByProject<T extends { projectId: string }>(items: readonly T[]) {
   return [...groups];
 }
 
-export function TeamWorkload({ data, initialStartDate, refresh, notify, openIssue, onDraftChange }: TeamWorkloadProps) {
+export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify, openIssue, onDraftChange,
+  onBeforeLevel, scheduleBusy, onScheduleApplied }: TeamWorkloadProps) {
   const [startOverride, setStartOverride] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<Set<string> | null>(null);
   const [userFilter, setUserFilter] = useState('');
   const [selected, setSelected] = useState<WorkloadSelection | null>(null);
   const [missingPage, setMissingPage] = useState(0);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [levelSelection, setLevelSelection] = useState<LevelSelection | null>(null);
   const [localCapacity, setLocalCapacity] = useState<{ source: FeatureProps['data']; value: TeamWorkloadCapacity } | null>(null);
   const [revision, setRevision] = useState(0);
   const [received, setReceived] = useState<LoadResponse | null>(null);
   const settingsButton = useRef<HTMLButtonElement>(null);
+  const levelButton = useRef<HTMLButtonElement>(null);
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
   const usersById = useMemo(() => new Map(data.users.map(user => [user.id, user])), [data.users]);
   const issuesById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
@@ -121,6 +131,14 @@ export function TeamWorkload({ data, initialStartDate, refresh, notify, openIssu
     setEditorOpen(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
   }
+  function openLevel() {
+    if (onBeforeLevel && !onBeforeLevel()) return;
+    setLevelSelection({ projectIds: chosenProjects.map(project => project.id), startDate, endDate, initialUserId: member?.id });
+  }
+  function closeLevel() {
+    setLevelSelection(null);
+    requestAnimationFrame(() => (levelButton.current ?? settingsButton.current)?.focus());
+  }
   function updateCapacity(value: TeamWorkloadCapacity) {
     setLocalCapacity({ source: data, value });
     setRevision(value => value + 1);
@@ -138,10 +156,21 @@ export function TeamWorkload({ data, initialStartDate, refresh, notify, openIssu
   return <section className="project-workload team-workload card" aria-label="프로젝트 간 작업량">
     <header className="workload-heading">
       <div><h2><Layers3 size={17} />프로젝트 간 작업량</h2><p>업무의 계획 시간은 각 프로젝트의 근무일에 나눕니다. 가용 시간은 팀원 한 명당 하루에 한 번 계산합니다.</p></div>
-      <button ref={settingsButton} className="btn" type="button" aria-expanded={editorOpen} disabled={editorOpen} onClick={() => setEditorOpen(true)}>
-        <SlidersHorizontal size={15} />팀 가용 시간 설정
-      </button>
+      <div className="workload-heading-actions">
+        {onScheduleApplied && <button ref={levelButton} className="btn" type="button" aria-haspopup="dialog"
+          disabled={!actorId || !chosenProjects.length || !data.users.length || editorOpen || scheduleBusy || Boolean(levelSelection)} onClick={openLevel}>
+          <CalendarClock size={15} aria-hidden="true" />프로젝트 간 과부하 조정
+        </button>}
+        <button ref={settingsButton} className="btn" type="button" aria-expanded={editorOpen} disabled={editorOpen} onClick={() => setEditorOpen(true)}>
+          <SlidersHorizontal size={15} aria-hidden="true" />팀 가용 시간 설정
+        </button>
+      </div>
     </header>
+    {levelSelection && onScheduleApplied && <WorkloadLevelDialog actorId={actorId}
+      startDate={levelSelection.startDate} endDate={levelSelection.endDate}
+      team={{ projectIds: levelSelection.projectIds, initialUserId: levelSelection.initialUserId, projects: projectsById }}
+      availableUserIds={data.users.map(user => user.id)} users={usersById} issues={issuesById}
+      onDraftChange={onDraftChange} onClose={closeLevel} onApplied={onScheduleApplied} />}
     {editorOpen && <WorkloadCapacityEditor route={CAPACITY_ROUTE} users={data.users} current={capacity} defaultDate={startDate}
       onSnapshot={updateCapacity} onClose={closeEditor} onDraftChange={onDraftChange} refresh={refresh} notify={notify} />}
     <div className="team-workload-filters">

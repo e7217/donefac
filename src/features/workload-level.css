@@ -33,6 +33,11 @@
 .workload-level-form-row select { min-width: 0; }
 .workload-level-selected { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12px; }
 .workload-level-selected small { color: #52675c; }
+.workload-level-projects { margin-top: 8px; padding: 6px 9px; border-radius: 6px; background: var(--canvas); font-size: 12px; }
+.workload-level-projects summary { cursor: pointer; font-weight: 600; }
+.workload-level-projects small { margin-inline-start: 5px; color: #52675c; }
+.workload-level-projects ul { display: flex; flex-wrap: wrap; gap: 3px 14px; margin: 4px 0 0; padding-inline-start: 16px; }
+.workload-level-projects li { min-width: 0; overflow-wrap: anywhere; }
 
 .workload-level-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
 .workload-level-section h3 { margin: 0 0 5px; font-size: 13px; }
@@ -48,6 +53,7 @@
 .workload-level-changes thead th:first-child { width: 43%; }
 .workload-level-changes tbody th { overflow-wrap: anywhere; font-weight: 500; }
 .workload-level-changes tbody th small { display: block; color: var(--accent); }
+.workload-level-project-name { display: block; color: #52675c; font-size: 11px; }
 .workload-level-changes tbody td { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .workload-level-changes tbody td:last-child { color: var(--accent-hover); font-weight: 600; }
 

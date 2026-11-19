@@ -567,6 +567,11 @@ export interface WorkloadLevelPlan {
   reason?: 'search-limit';
 }
 export type WorkloadLevelPreview = AutomaticSchedulePreview & WorkloadLevelPlan;
+export interface TeamWorkloadLevelPlan extends Omit<WorkloadLevelPlan, 'changes'> {
+  changes: (ScheduleChange & { projectId: string })[];
+  projectCompletions: { projectId: string; before: string | null; after: string | null }[];
+}
+export type TeamWorkloadLevelPreview = Omit<AutomaticSchedulePreview, 'changes'> & TeamWorkloadLevelPlan & { movableProjectIds: string[] };
 export interface ScheduleAnalysisTask {
   issueId: string;
   key: string;

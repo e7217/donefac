@@ -386,7 +386,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.set('Cache-Control', 'no-store').json(analysis);
   });
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges},{
-    capacity:projectId=>workload.get(projectId),workflow:projectId=>workflows.get(projectId),validateChange:validateScheduleChange,
+    capacity:projectId=>workload.get(projectId),teamCapacity:()=>teamCapacity.get(),
+    workflow:projectId=>workflows.get(projectId),validateChange:validateScheduleChange,
   });
   schedulePaste.registerRoutes(app,{
     actor,
