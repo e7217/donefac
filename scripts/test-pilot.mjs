@@ -129,6 +129,14 @@ try {
   const publication = await (await call(pilot.url,`${documentPath}/publication`,{
     method:'POST',headers:{'X-Actor-Id':workspace.users[1].id},body:{action:'publish',expectedVersion:requested.version,workspaceGeneration:requested.workspaceGeneration},
   })).json();
+  const reviewerHeaders = {'X-Actor-Id':workspace.users[1].id};
+  const inbox = await (await call(pilot.url,'/notifications',{headers:reviewerHeaders})).json();
+  const reviewNotification = inbox.items.find(item=>item.targetId===document.id && item.kind==='document-review-requested');
+  assert.ok(reviewNotification);
+  await call(pilot.url,`/notifications/${reviewNotification.id}/read`,{method:'PATCH',headers:reviewerHeaders});
+  const readInbox = await (await call(pilot.url,'/notifications',{headers:reviewerHeaders})).json();
+  const readNotification = readInbox.items.find(item=>item.id===reviewNotification.id);
+  assert.equal(typeof readNotification?.readAt,'string');
   const file = Buffer.from('Teamspace pilot attachment\n동일한 첨부 바이트\n');
   const target = `/attachments?resourceType=issue&resourceId=${encodeURIComponent(issue.id)}&filename=pilot.bin`;
   const attachment = await (await call(pilot.url,target,{
@@ -177,6 +185,8 @@ try {
   assert.equal(restoredCollaboration.document.plainText,collaboration.document.plainText);
   const restoredPublication = await (await call(copy.url,`${documentPath}/publication`)).json();
   assert.deepEqual(restoredPublication.publishedRevision,publication.publishedRevision);
+  const restoredInbox = await (await call(copy.url,'/notifications',{headers:reviewerHeaders})).json();
+  assert.deepEqual(restoredInbox.items.find(item=>item.id===reviewNotification.id),readNotification);
   const restoredFile = await call(copy.url,`/attachments/${attachment.id}/content`);
   assert.deepEqual(Buffer.from(await restoredFile.arrayBuffer()),file);
   const restoredPackage = await (await call(copy.url,`/legacy-import/packages/${archive.id}`)).json();

@@ -1,0 +1,211 @@
+.team-notifications {
+  position: relative;
+}
+
+.team-notifications-trigger {
+  position: relative;
+}
+
+.team-notifications-trigger[aria-expanded='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.team-notifications-trigger:disabled {
+  opacity: .45;
+}
+
+.team-notifications-badge {
+  position: absolute;
+  top: -2px;
+  right: -5px;
+  min-width: 16px;
+  border: 1px solid var(--surface);
+  border-radius: 12px;
+  padding: 0 3px;
+  background: var(--accent);
+  color: var(--surface);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+.team-notifications-panel {
+  position: absolute;
+  z-index: 44;
+  top: calc(100% + 12px);
+  right: -32px;
+  display: flex;
+  flex-direction: column;
+  width: min(364px, calc(100vw - 24px));
+  max-height: min(520px, calc(100dvh - 80px));
+  overflow: hidden;
+  border: 1px solid #dce7e0;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 12px 36px #243d3130;
+}
+
+.team-notifications-header,
+.team-notifications-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 9px 12px;
+}
+
+.team-notifications-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+}
+
+.team-notifications-controls {
+  justify-content: space-between;
+  padding-top: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.team-notifications-filters {
+  display: flex;
+  gap: 4px;
+}
+
+.team-notifications-filter,
+.team-notifications-mark-all {
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: #52645a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.team-notifications-mark-all {
+  color: var(--accent-hover);
+  font-weight: 600;
+}
+
+.team-notifications-filter[aria-pressed='true'],
+.team-notifications-mark-all:hover:not(:disabled),
+.team-notifications-filter:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+.team-notifications-panel button:focus-visible,
+.team-notifications-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.team-notifications-panel button:disabled {
+  cursor: default;
+}
+
+.team-notifications-panel .team-notifications-mark-all:disabled,
+.team-notifications-panel .team-notifications-filter:disabled {
+  opacity: .56;
+}
+
+.team-notifications-results {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.team-notifications-empty,
+.team-notifications-error {
+  margin: 0;
+  padding: 21px 14px;
+  color: #63736a;
+  font-size: 12px;
+  text-align: center;
+}
+
+.team-notifications-error {
+  color: var(--danger);
+}
+
+.team-notifications-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.team-notifications-list > li {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-right: 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.team-notifications-list > li.is-unread {
+  background: #f1f8f4;
+}
+
+.team-notifications-target {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 4px 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 10px 5px 10px 13px;
+  text-align: left;
+}
+
+.team-notifications-panel .team-notifications-target:focus-visible {
+  outline-offset: -3px;
+}
+
+.team-notifications-target strong {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.is-unread .team-notifications-target strong::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 2px;
+  content: '';
+}
+
+.team-notifications-target span,
+.team-notifications-target time {
+  overflow: hidden;
+  color: #63736a;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-notifications-target:hover:not([aria-disabled='true']) strong {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.team-notifications-mark {
+  color: var(--accent-hover);
+}
+
+.team-notifications-more {
+  display: flex;
+  margin: 10px auto;
+}
+
+@media (max-width: 680px) {
+  .team-notifications-panel {
+    position: fixed;
+    top: 53px;
+    right: 12px;
+    width: min(364px, calc(100% - 24px));
+  }
+}

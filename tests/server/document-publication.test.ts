@@ -18,6 +18,7 @@ import type {
   DocumentPublicationState,
   DocumentPublicationView,
   RichContent,
+  TeamNotification,
   WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -26,6 +27,7 @@ type Backup = WorkspaceSnapshot & {
   exportedAt: string;
   revisions: DocRevision[];
   documentPublications: DocumentPublicationState[];
+  teamNotifications: TeamNotification[];
 };
 type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
 const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
@@ -328,7 +330,7 @@ test('native14 preserves publication snapshots, rejects invalid/older references
     const backupResponse = await f.call<Backup>('/export');
     assert.equal(backupResponse.status, 200);
     const backup = backupResponse.data;
-    assert.equal(backup.schemaVersion, 14);
+    assert.equal(backup.schemaVersion, 15);
     assert.deepEqual(backup.documentPublications, [{ documentId: state.documentId, version: state.version, review: state.review, published: state.published }]);
     assert.deepEqual(backup.revisions.find(value => value.id === reviewSnapshot.id), reviewSnapshot);
     assert.deepEqual(backup.revisions.find(value => value.id === publishedSnapshot.id), publishedSnapshot);
@@ -380,9 +382,10 @@ test('native14 preserves publication snapshots, rejects invalid/older references
     const roundtrip = (await f.call<Backup>('/export')).data;
     assert.deepEqual(roundtrip.documentPublications, backup.documentPublications);
 
-    const legacy = structuredClone(backup) as Omit<Backup, 'documentPublications'> & { documentPublications?: DocumentPublicationState[] };
+    const legacy = structuredClone(backup) as Partial<Backup> & Pick<Backup, 'documents'>;
     legacy.schemaVersion = 13;
     delete legacy.documentPublications;
+    delete legacy.teamNotifications;
     legacy.documents.find(value => value.id === doc.id)!.status = 'published';
     assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
     const reset = await publication(f, doc.id);

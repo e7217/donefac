@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion, DocumentReview, User } from '../shared/types.js';
+import type { DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion, DocumentReview, TeamNotificationKind, User } from '../shared/types.js';
+import type { NotificationsService } from './notifications.js';
 import type { Store } from './store.js';
 
 export class DocumentPublicationError extends Error {
@@ -31,7 +32,7 @@ type RevisionSummary = Pick<DocRevision, 'id' | 'version' | 'title'>;
 /** Publication owns pointers to immutable revisions. It never rewrites the
  * working document, the collaboration room, or the document's status field. */
 export class DocumentPublicationService {
-  constructor(private readonly store: Store) {
+  constructor(private readonly store: Store, private readonly notifications: NotificationsService) {
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS document_publications(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS revisions_document ON revisions(document_id);
@@ -112,6 +113,8 @@ export class DocumentPublicationService {
       if (current.version >= Number.MAX_SAFE_INTEGER - 1) fail(409, '문서 검토 버전 범위를 초과했습니다.');
       const at = new Date().toISOString(), next = { ...current, version: current.version + 1 };
       if ([current.review?.requestedAt, current.review?.changesRequested?.at, current.published?.publishedAt].some(value => value && value > at)) fail(409, '현재 시각이 이전 검토·발행보다 이전입니다. 문서 상태와 서버 시각을 확인해 주세요.');
+      const document = this.store.get<DocPage>('documents', documentId)!;
+      let notification: {kind: TeamNotificationKind; recipientIds: string[]; targetLabel: string};
       if (body.action === 'request') {
         if (current.review && !current.review.changesRequested) fail(409, '진행 중인 검토 요청을 먼저 처리하거나 철회해 주세요.');
         if (version(body.expectedDocumentVersion, 1) !== documentVersion) fail(409, '검토 요청 전에 문서가 변경되었습니다. 저장된 최신 문서를 다시 확인해 주세요.');
@@ -120,12 +123,12 @@ export class DocumentPublicationService {
         const requestNote = note(body.note ?? '').trim();
         const publishedRevision = this.summary(documentId, current.published?.revisionId);
         if (publishedRevision && publishedRevision.version >= documentVersion) fail(409, '이미 발행한 문서 버전입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
-        const document = this.store.get<DocPage>('documents', documentId)!;
         const revision = this.capture(document, actorId, at);
         if (revision.id === current.published?.revisionId) fail(409, '이미 발행한 저장본입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
         if (!Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(at)) fail(409, '저장본 시각이 현재보다 미래입니다. 문서 이력을 확인해 주세요.');
         next.review = { revisionId: revision.id, requestedById: actorId, reviewerId, requestedAt: at, note: requestNote, changesRequested: null };
         this.audit(documentId, actorId, '문서 검토 요청', `${revision.title} · 저장본 v${revision.version} · 검토자 ${reviewer.name}${requestNote ? ` · ${requestNote}` : ''}`, at);
+        notification = {kind:'document-review-requested',recipientIds:[reviewerId],targetLabel:revision.title};
       } else if (body.action === 'publish' || body.action === 'request_changes') {
         const review = current.review;
         if (!review || review.changesRequested) fail(409, '처리할 검토 요청이 없습니다.');
@@ -137,10 +140,12 @@ export class DocumentPublicationService {
           next.published = { revisionId: review.revisionId, publishedById: actorId, publishedAt: at, note: publicationNote, requestedById: review.requestedById, reviewerId: review.reviewerId, requestedAt: review.requestedAt };
           next.review = null;
           this.audit(documentId, actorId, '문서 발행', `${revision.title} · 검토한 저장본 v${revision.version}${publicationNote ? ` · ${publicationNote}` : ''}`, at);
+          notification = {kind:'document-published',recipientIds:[review.requestedById],targetLabel:revision.title};
         } else {
           const feedback = note(body.note, true).trim();
           next.review = { ...review, changesRequested: { byId: actorId, at, note: feedback } };
           this.audit(documentId, actorId, '문서 수정 요청', `${revision.title} · 저장본 v${revision.version} · ${feedback}`, at);
+          notification = {kind:'document-changes-requested',recipientIds:[review.requestedById],targetLabel:revision.title};
         }
       } else if (body.action === 'withdraw') {
         const review = current.review;
@@ -148,8 +153,10 @@ export class DocumentPublicationService {
         if (review.requestedById !== actorId) fail(403, '검토 요청자만 요청을 철회할 수 있습니다.');
         next.review = null;
         this.audit(documentId, actorId, '문서 검토 철회', `저장본 ${review.revisionId}${review.note ? ` · ${review.note}` : ''}`, at);
+        notification = {kind:'document-review-withdrawn',recipientIds:[review.reviewerId],targetLabel:document.title};
       } else fail(400, '지원하지 않는 문서 검토 작업입니다.');
       this.put(next);
+      this.notifications.notify({...notification,actorId,projectId:document.projectId,targetId:documentId,createdAt:at});
       return this.get(documentId);
     });
   }

@@ -298,6 +298,28 @@ export interface ResourceLink { id: string; issueId: string; documentId: string;
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
+export const TEAM_NOTIFICATION_KINDS = [
+  'issue-assigned', 'issue-comment', 'document-comment', 'document-review-requested',
+  'document-changes-requested', 'document-published', 'document-review-withdrawn',
+] as const;
+export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];
+export type TeamNotificationFilter = 'all' | 'unread';
+export interface TeamNotification {
+  id: string;
+  recipientId: string;
+  actorId: string;
+  kind: TeamNotificationKind;
+  projectId: string | null;
+  targetId: string;
+  targetLabel: string;
+  createdAt: string;
+  readAt: string | null;
+}
+export interface TeamNotificationPage {
+  items: TeamNotification[];
+  nextCursor: string | null;
+  unreadCount: number;
+}
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
 export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';

@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Users, X } from 'lucide-react';
-import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, WorkspaceSnapshot } from '../shared/types';
+import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, WorkspaceSnapshot } from '../shared/types';
 import { STATUS, type StatusCategory } from '../shared/types';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -11,6 +11,7 @@ import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
 import { IssuePanel } from './features/IssuePanel';
+import TeamNotifications from './features/TeamNotifications';
 const WorkflowSettings = lazy(() => import('./features/WorkflowSettings').then(module => ({default: module.WorkflowSettings})));
 const IssueSchemaSettings = lazy(() => import('./features/IssueSchemaSettings').then(module => ({default: module.IssueSchemaSettings})));
 const CalendarSettings = lazy(() => import('./features/CalendarSettings').then(module => ({default: module.CalendarSettings})));
@@ -96,6 +97,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경'}: {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const acceptedRouteRef = useRef<WorkspaceRoute | null>(null);
   const publicationOpenRequest = useRef(0);
+  const notificationOpenRequest = useRef(0);
   const routeIndexRef = useRef(0);
   const rollbackHashRef = useRef<string | null>(null);
 
@@ -193,6 +195,27 @@ export default function Workspace({environmentLabel = '로컬 개발 환경'}: {
     if (!document) return;
     if (requestRoute({projectId:document.projectId || projectId, view:'documents',documentId:id,issueId:null})) setSearchOpen(false);
   };
+  const openNotification = async (notification: TeamNotification) => {
+    const request = ++notificationOpenRequest.current;
+    const routeIndex = routeIndexRef.current;
+    const active = () => request === notificationOpenRequest.current && routeIndex === routeIndexRef.current;
+    try { await refresh(); }
+    catch (cause) {
+      if (active()) notify((cause as Error).message, 'error');
+      return false;
+    }
+    if (!active()) return false;
+    const snapshot = dataRef.current;
+    if (notification.kind === 'issue-assigned' || notification.kind === 'issue-comment') {
+      const issue = snapshot?.issues.find(value => value.id === notification.targetId);
+      if (issue) return requestRoute({ projectId:issue.projectId, view:'issues', documentId:null, issueId:issue.id });
+    } else {
+      const doc = snapshot?.documents.find(value => value.id === notification.targetId);
+      if (doc) return requestRoute({ projectId:doc.projectId || projectId, view:'documents', documentId:doc.id, issueId:null });
+    }
+    notify('알림의 대상이 삭제되었거나 현재 워크스페이스에 없습니다.', 'error');
+    return false;
+  };
   const openPublication = async (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string) => {
     const request = ++publicationOpenRequest.current;
     const from = location.hash;
@@ -248,7 +271,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경'}: {
       <div className="sidebar-footer"><button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={17}/><span>워크스페이스 설정</span></button><div className="local-status"><span/>{environmentLabel} <span className="version-label">v0.1</span></div></div>
     </aside>
     <div className="workspace-content">
-      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions"><PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/><button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button><div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {if(!window.dispatchEvent(new Event('teamspace:navigate',{cancelable:true})))return;publicationOpenRequest.current++;setActorId(e.target.value); setActor(e.target.value); localStorage.setItem('teamspace.actor', e.target.value);}}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div></div></header>
+      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions">
+        <PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/>
+        {actorId && <TeamNotifications actorId={actorId} users={data.users} onOpen={openNotification}/>}
+        <button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button>
+        <div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {
+          if(!window.dispatchEvent(new Event('teamspace:navigate',{cancelable:true})))return;
+          publicationOpenRequest.current++;notificationOpenRequest.current++;
+          setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
+        }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
+      </div></header>
       <main className={`main-content view-${view}`}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'mywork' && <MyWork {...props}/>}
@@ -369,8 +401,8 @@ function WorkspaceSettings(props:FeatureProps) {
     <Suspense fallback={<div className="card settings-card"><p>API 키를 불러오는 중입니다.</p></div>}><ApiKeysSettings actorId={props.actorId} projects={props.data.projects} notify={props.notify}/></Suspense>
     <Suspense fallback={<div className="card settings-card"><p>원본 이관 분석을 불러오는 중입니다.</p></div>}><LegacyImportSettings {...props}/></Suspense>
     <Suspense fallback={null}><MigrationApplySettings {...props}/></Suspense>
-    <section className="card settings-card"><div className="card-heading"><h2>데이터 내보내기 · 가져오기</h2><ArrowDownToLine size={19}/></div><p className="muted">티켓·문서·관계, 문서 검토·발행 기록, 작업 시간과 보고서 보관본, 변경 이력을 자체 JSON 형식으로 보관합니다. API 키, GitLab 토큰과 외부 웹훅 설정·비밀값·전송 기록은 포함되지 않습니다.</p><div className="data-actions"><button className="btn btn-secondary" onClick={async()=>{try{const payload=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(payload)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`teamspace-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);props.notify('데이터를 내보냈습니다.');}catch(e){props.notify((e as Error).message,'error');}}}><ArrowDownToLine size={16}/>전체 데이터 내보내기</button><label className="btn btn-ghost"><ArrowUpFromLine size={16}/>백업 가져오기<input className="sr-only" type="file" accept="application/json,.json" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>64*1024*1024-1024){props.notify('가져오기 파일은 64MB 미만이어야 합니다.','error');e.target.value='';return;}try{const parsed=JSON.parse(await file.text());if(!parsed || typeof parsed!=='object' || !supportsNativeBackupVersion(parsed.schemaVersion))throw new Error(`Teamspace 내보내기 파일(schemaVersion 1~${NATIVE_BACKUP_SCHEMA_VERSION})을 선택해주세요.`);setImportData(parsed);setImportName(file.name);}catch(error){props.notify(error instanceof SyntaxError ? '올바른 JSON 파일이 아닙니다.' : (error as Error).message,'error');}e.target.value='';}}/></label></div></section>
+    <section className="card settings-card"><div className="card-heading"><h2>데이터 내보내기 · 가져오기</h2><ArrowDownToLine size={19}/></div><p className="muted">티켓·문서·관계, 문서 검토·발행 기록, 팀 알림, 작업 시간과 보고서 보관본, 변경 이력을 자체 JSON 형식으로 보관합니다. API 키, GitLab 토큰과 외부 웹훅 설정·비밀값·전송 기록은 포함되지 않습니다.</p><div className="data-actions"><button className="btn btn-secondary" onClick={async()=>{try{const payload=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(payload)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`teamspace-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);props.notify('데이터를 내보냈습니다.');}catch(e){props.notify((e as Error).message,'error');}}}><ArrowDownToLine size={16}/>전체 데이터 내보내기</button><label className="btn btn-ghost"><ArrowUpFromLine size={16}/>백업 가져오기<input className="sr-only" type="file" accept="application/json,.json" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>64*1024*1024-1024){props.notify('가져오기 파일은 64MB 미만이어야 합니다.','error');e.target.value='';return;}try{const parsed=JSON.parse(await file.text());if(!parsed || typeof parsed!=='object' || !supportsNativeBackupVersion(parsed.schemaVersion))throw new Error(`Teamspace 내보내기 파일(schemaVersion 1~${NATIVE_BACKUP_SCHEMA_VERSION})을 선택해주세요.`);setImportData(parsed);setImportName(file.name);}catch(error){props.notify(error instanceof SyntaxError ? '올바른 JSON 파일이 아닙니다.' : (error as Error).message,'error');}e.target.value='';}}/></label></div></section>
     <section className="card settings-card"><div className="card-heading"><h2>이 개발 버전의 범위</h2><span className="badge">개발 중</span></div><p>팀원 선택은 작업자 기록을 위한 기능입니다. 프로젝트별 워크플로와 공유 보기, 문서별 공동 편집, 팀 보고서와 주간 문서를 사용할 수 있습니다.</p><p className="muted">실제 Jira·Confluence 파일 이관 리허설, 운영 GitLab 연결과 팀 사용 검증이 남아 있습니다.</p></section>
-    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부·작업 시간·보고서 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
+    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부·작업 시간·보고서·팀 알림 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
   </div>;
 }
