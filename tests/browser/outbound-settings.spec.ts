@@ -139,6 +139,7 @@ test('한 번 발급한 웹훅 키를 확인하고 활성화하면 실제 서명
   page.once('dialog', value => value.accept());
   await dialog.getByRole('button', { name: '확인하고 닫기', exact: true }).click();
   await expect(dialog).toHaveCount(0);
+  await settings.screenshot({ path: 'docs/screenshots/integrations.png' });
   await page.reload();
   await expect(settings.locator('.webhook-endpoint-card').filter({ hasText: renamed })).toBeVisible();
   await expect(page.getByLabel('발급한 웹훅 서명 키', { exact: true })).toHaveCount(0);

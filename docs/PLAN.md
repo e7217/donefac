@@ -32,7 +32,7 @@ GitLab 상태 자동화는 명시적으로 활성화한 규칙과 현재 워크�
 
 ## 기존 도구 원본 이관
 
-기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 아직 구현 완료한 기능은 아니다.
+기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 오프라인 분석·원문 보관·진단/객체/파일 미리보기는 구현했다. 작성자·상태 매핑, 문서 변환과 실제 적용은 아직 구현하지 않았다.
 
 주 입력은 Jira 관리자 XML 백업과 별도 첨부파일 묶음, Confluence Server 전체 공간 XML ZIP이다. Jira CSV의 반복 Comment/Attachment 헤더, 검색 XML과 REST/Importers JSON은 별도 형식으로 판별한다. CSV만으로 작성자·전체 이력·첨부 바이트가 보존된다고 판단하지 않는다. Jira 관리자 백업에도 첨부 바이트는 별도이며, JSON Importers 명세를 UI의 완전한 JSON 내보내기 명세로 취급하지 않는다.
 
@@ -40,7 +40,7 @@ GitLab 상태 자동화는 명시적으로 활성화한 규칙과 현재 워크�
 
 서버가 보관한 미리보기 계획에 패키지 해시·매핑 버전·대상 버전을 고정한다. 같은 패키지 재적용은 중복 생성하지 않고, 대상 변경은 충돌로 중단한다. 적용은 DB와 새 첨부 바이트를 복구 가능하게 묶으며 기존 업로드를 전체 교체하지 않는다. `origin:import`를 사용해 상태 자동화와 외부 발신 이벤트를 만들지 않는다. 완료 근거는 개수·원본 ID·작성자·이력·첨부 해시·양방향 링크 대조와 실패/재시작 복구다.
 
-순서는 공통 분석/보존 모델과 손실 보고, Jira XML·Confluence XML 적용, CSV/JSON 어댑터 보완과 실제 오프라인 패키지 리허설이다. 6.9.1 세부 자료 포함 범위는 실제 오프라인 샘플로 검증해야 한다. 지금은 공식 문서 조사와 설계까지만 완료했다.
+순서는 공통 분석/보존 모델과 손실 보고, Jira XML·Confluence XML 적용, CSV/JSON 어댑터 보완과 실제 오프라인 패키지 리허설이다. 6.9.1 세부 자료 포함 범위는 실제 오프라인 샘플로 검증해야 한다. 지금은 공식 문서 조사와 합성 자료 기반 분석·보존 단계까지 구현했다. 실제 오프라인 원본 리허설과 적용 완료를 증명한 상태는 아니다.
 
 근거: [Jira 검색 내보내기](https://confluence.atlassian.com/jirasoftware/working-with-search-results-1528533257.html), [관리자 XML 백업과 첨부 범위](https://confluence.atlassian.com/adminjiraserver/backing-up-data-938847673.html), [Jira Importers JSON](https://confluence.atlassian.com/adminjiraserver100/importing-data-from-json-1442845835.html), [Confluence XML 객체/이력 구조](https://confluence.atlassian.com/confkb/use-space-site-xml-export-entities-xml-to-find-confluence-objects-1283686755.html), [Confluence 저장 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html).
 

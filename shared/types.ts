@@ -13,6 +13,29 @@ export const PRIORITY = { urgent: '긴급', high: '높음', medium: '보통', lo
 export type Priority = keyof typeof PRIORITY;
 export const ISSUE_TYPES = ['큰틀', '작업', '부작업', '버그', '개선', '신규', '요구사항', '회의', '기획'] as const;
 export interface User { id: string; name: string; email: string; color: string }
+export type LegacyFormat = 'jira-backup-xml' | 'jira-search-xml' | 'jira-csv' | 'jira-json' | 'confluence-xml';
+export type LegacyRecordKind = 'identity' | 'project' | 'issue' | 'page' | 'comment' | 'revision' | 'history' | 'attachment' | 'relation' | 'field' | 'option' | 'workflow';
+export type LegacyValue = string | number | boolean | null | LegacyValue[] | {[key:string]:LegacyValue};
+export interface LegacySource { product:'jira'|'confluence'; format:LegacyFormat; instanceKey:string; declaredVersion:string|null; timezone:string|null }
+export interface LegacyReference { kind:LegacyRecordKind; sourceId:string; relation:string }
+export interface LegacyRecord {
+  id:string; kind:LegacyRecordKind; sourceId:string; title:string; containerId:string|null; parentId:string|null;
+  authorId:string|null; createdAt:string|null; updatedAt:string|null; text:string;
+  textFormat:'none'|'plain'|'jira-wiki'|'confluence-storage'|'adf'|'json';
+  metadata:{[key:string]:LegacyValue}; references:LegacyReference[];
+}
+export interface LegacyDiagnostic { id:string; severity:'error'|'warning'|'info'; code:string; message:string; recordId:string|null; path:string|null }
+export interface LegacyDataset { source:LegacySource; records:LegacyRecord[]; diagnostics:LegacyDiagnostic[]; unsupported:{type:string;count:number}[] }
+export interface LegacyFile { path:string; size:number; sha256:string }
+export interface LegacyPackageSummary {
+  id:string; filename:string; sha256:string; size:number; version:number; createdAt:string; actorId:string;
+  source:LegacySource; counts:Partial<Record<LegacyRecordKind,number>>; errors:number; warnings:number;
+  fileCount:number; expandedBytes:number; applySupported:false;
+}
+export interface LegacyPackageDetail { summary:LegacyPackageSummary; files:LegacyFile[]; unsupported:{type:string;count:number}[] }
+export type LegacyRecordSummary=Omit<LegacyRecord,'text'|'metadata'|'references'>&{textPreview:string;textBytes:number;referenceCount:number};
+export interface LegacyRecordPage { records:LegacyRecordSummary[]; total:number; offset:number; limit:number }
+export interface LegacyDiagnosticPage { diagnostics:LegacyDiagnostic[]; total:number; offset:number; limit:number }
 export interface Project { id: string; key: string; name: string; description: string; color: string; createdAt: string }
 export type PlanningKind = 'cycle' | 'module' | 'release';
 export type PlanningStatus = 'planned' | 'active' | 'completed' | 'archived';

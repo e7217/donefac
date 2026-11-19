@@ -171,3 +171,21 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 전송은 최대4건씩, 요청당 최대10초, 자동 최대5회다. 실패 후 기본5·10·20·40초 간격으로 재시도한다. 최소 한 번 전달 방식이므로 수신 측은 이벤트 ID를 중복 처리해야 한다. 응답 본문은 읽거나 기록하지 않는다. 설정·활성화·키 변경은 이전 대기 전송을 취소한다. 명시적 재시도는 현재 활성 수신처의 프로젝트·이벤트 범위로 검사하고 현재 키를 사용한다. 종료된 전송은30일 보관하고 전체 전송 기록 상한50000건에 도달하면 원본 변경도 함께 거절한다.
 
 자체 백업 schema8에는 규칙 정의만 포함한다. 복원한 규칙은 비활성으로 시작한다. 외부 수신처·서명 키·전송 이력·GitLab 수신 기록은 제외하고, 가져오기가 성공하면 초기화한다. 실패한 가져오기는 기존 설정·대기 전송·세대 값을 보존한다.
+
+## 기존 도구 원본 분석
+
+설정의 **기존 도구 원본 분석**에서 Jira·Confluence 내보내기 XML/CSV/JSON/ZIP을 선택하고 원본 서버를 구분할 이름을 입력한다. 같은 원본 서버의 자료에는 같은 이름을 사용한다. 외부 서비스에는 연결하지 않는다. 현재는 분석·미리보기 단계이며 실제 업무·문서 적용은 제공하지 않는다.
+
+| 요청 | 동작 |
+| --- | --- |
+| `GET /api/legacy-import/packages` | 보관한 분석 요약 |
+| `POST /api/legacy-import/packages?filename=...&instanceKey=...&product=auto` | `application/octet-stream` 원본 파일 분석, 신규201·동일 원본200 |
+| `GET /api/legacy-import/packages/:id` | 요약·파일 크기/SHA-256·미지원 객체 종류/개수 |
+| `GET /api/legacy-import/packages/:id/records?kind=issue&q=...&offset=0&limit=50` | 종류·제목·원본 ID/티켓 키 검색, 본문 없는 요약·600자 미리보기 |
+| `GET /api/legacy-import/packages/:id/records/:recordId` | 정확한 원문·작성자·원래 시각·메타데이터·관계, ID는 URL 인코딩 |
+| `GET /api/legacy-import/packages/:id/diagnostics?severity=warning&offset=0&limit=50` | 오류·경고·정보 진단 |
+| `DELETE /api/legacy-import/packages/:id?expectedVersion=1` | 분석 메타데이터·보관 원본 삭제 |
+
+목록 페이지 크기는1~100이다. `product`는 `auto`·`jira`·`confluence` 중 하나다. 입력/개별 ZIP 파일64MiB·총 해제256MiB·5000파일·정규화 객체100000개 한도이며, 한 번에 한 패키지를 최대25초 분석한다. 분석 원본 보관은20개·512MiB까지다. ZIP 경로·심볼릭 링크·중복 경로·CRC와 XML 선언/엔티티/구조를 검증한다. 누락 첨부나 링크는 자동 다운로드하지 않는다.
+
+관리 경로는 `/api/v1` 키로 사용할 수 없다. 분석 패키지는 현재 신뢰하는 관리 브라우저 범위에서 접근하며, 기존 도구의 권한을 재현하는 기능은 아니다. 제한된 콘텐츠는 진단으로 표시하고 실제 적용 단계에서 검토해야 한다. 자체 JSON 백업에는 분석 패키지·원본이 포함되지 않고 백업 가져오기 후에도 유지되므로, 분석 자료까지 백업하려면 서버 DB와 `data/legacy-imports/`를 함께 보관한다.

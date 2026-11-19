@@ -17,6 +17,9 @@ import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { AutomationService, AutomationError } from './automation.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
+import { LegacyImportService } from './legacy-import.js';
+import { LegacyImportError } from './legacy-import-model.js';
+import { LegacyArchiveError } from './legacy-import-archive.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment } from '../shared/types.js';
@@ -53,9 +56,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
+  const legacyImport=new LegacyImportService(store,dataDir);
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
+  app.use('/api/legacy-import/packages',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'원본 패키지는 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_PACKAGE_BYTES})(req,res,next);});
   app.use('/api/integrations/gitlab/webhook',express.json({limit:2*1024*1024,verify:(req,_res,buffer)=>{(req as Request & {gitlabRawBody:Buffer}).gitlabRawBody=Buffer.from(buffer);}}));
   app.use(express.json({limit:MAX_PACKAGE_BYTES}));
   app.use((req,res,next)=>{req.body??={};if(req.method!=='GET'&&(typeof req.body!=='object'||Array.isArray(req.body)))return res.status(400).json({error:'JSON 객체가 필요합니다.'});next();});
@@ -150,6 +155,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{processEvent:event=>automation.processEvent(event),onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next)});
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
+  legacyImport.registerRoutes(app,{actor,activity});
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
   issueSchemas.registerRoutes(app,{actor,activity});
@@ -318,11 +324,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{outbound.close();collaboration.close();store.db.close();}};
+  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{legacyImport.close();outbound.close();collaboration.close();store.db.close();}};
 }
