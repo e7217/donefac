@@ -227,3 +227,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 제목은 공백을 제외해 1~200자다. 서버가 집계하고 저장한 값을 읽기 전용으로 제공하며 주간 문서는 계속 편집할 수 있다. 문서의 업무 참조는 최대 30개이고 전체 행은 보관본에서 확인한다. 경로는 신뢰하는 로컬 브라우저 범위에서 제공한다.
 
 자체 백업 schema10은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
+
+
+## 스프레드시트 일정 붙여넣기
+
+브라우저의 `POST /api/schedule/paste-preview`에 `{projectId, text}`를 보낸다. `text`는 헤더가 있는 TSV 또는 CSV다. `key`·`startDate`·`endDate` 또는 `업무 키`·`시작일`·`종료일`에 대응하며 날짜 열은 한 개 이상 필요하다. 빈 날짜 값은 유지하고 `-`는 지운다. 다른 헤더가 명시된 열은 무시한다. 최대 500행, UTF-8 128KiB를 처리한다.
+
+응답의 `changes`는 업무별 현재·제안 일정, `warnings`는 변경 관련 선후행 경고, `errors`는 적용을 막는 줄 번호별 진단이다. `unchanged`는 값이 바뀌지 않는 행 수다. 오류 없이 변경이 있는 경우에만 `previewId`와 `expiresAt`을 발급한다.
+
+`POST /api/schedule/paste-apply`에 `{previewId}`를 보낸다. 미리보기 작업자와 정책·달력·선후행·업무 버전을 검사해 30분 이내의 계획을 적용한다. 같은 ID의 적용을 7일 안에 재요청하면 같은 `{undoId,updated,warnings}`를 반환한다. 날짜·이력·되돌리기 기록·적용 응답을 같은 트랜잭션으로 저장한다. 되돌리기는 기존 `POST /api/schedule/undo`를 사용한다. 미리보기와 영수증은 자체 백업 범위 밖에 있으며 복원 시 초기화한다.

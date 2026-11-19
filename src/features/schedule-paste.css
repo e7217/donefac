@@ -1,0 +1,338 @@
+.schedule-paste-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #17352e66;
+}
+
+.schedule-paste-dialog {
+  width: 940px;
+  max-width: 100%;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #cddfd7;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 24px 80px #12392e30;
+  overflow: auto;
+  color: #264238;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.schedule-paste-dialog > header,
+.schedule-paste-dialog > footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+}
+
+.schedule-paste-dialog > header {
+  border-bottom: 1px solid #dce7e1;
+}
+
+.schedule-paste-dialog h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.schedule-paste-dialog h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.schedule-paste-dialog h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+}
+
+.schedule-paste-dialog p {
+  margin: 0.6rem 0;
+  font-size: 1rem;
+}
+
+.schedule-paste-dialog .btn,
+.schedule-paste-dialog .field,
+.schedule-paste-dialog label {
+  font-size: 0.875rem;
+}
+
+.schedule-paste-dialog .btn {
+  min-height: 36px;
+}
+
+.schedule-paste-input,
+.schedule-paste-results {
+  padding: 1.25rem 1.5rem;
+}
+
+.schedule-paste-results:empty {
+  display: none;
+}
+
+.schedule-paste-input fieldset {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.schedule-paste-input label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.schedule-paste-input textarea {
+  width: 100%;
+  min-height: 170px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.65;
+  tab-size: 4;
+}
+
+.schedule-paste-input textarea:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 2px;
+}
+
+.schedule-paste-examples {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d6e4dc;
+  border-radius: 7px;
+  font-size: 0.875rem;
+}
+
+.schedule-paste-examples summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.schedule-paste-examples pre {
+  white-space: pre;
+  overflow-x: auto;
+  padding: 0.6rem;
+  font-size: 0.8125rem;
+  background: #f3f8f5;
+  border-radius: 4px;
+  tab-size: 4;
+}
+
+.schedule-paste-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #146c5e;
+}
+
+.schedule-paste-error,
+.schedule-paste-rejected,
+.schedule-paste-warnings,
+.schedule-paste-stale,
+.schedule-paste-success,
+.schedule-paste-noop {
+  border: 1px solid #d2e3da;
+  border-radius: 7px;
+  padding: 0.85rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.schedule-paste-error,
+.schedule-paste-rejected {
+  color: #913c40;
+  border-color: #e7c4c6;
+  background: #fff4f4;
+}
+
+.schedule-paste-rejected ul,
+.schedule-paste-warnings ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.schedule-paste-rejected li,
+.schedule-paste-warnings li {
+  margin: 0.4rem 0;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-paste-rejected li strong {
+  display: block;
+}
+
+.schedule-paste-warnings,
+.schedule-paste-stale {
+  color: #7f5e28;
+  background: #fff9ee;
+  border-color: #e8d5b1;
+}
+
+.schedule-paste-success,
+.schedule-paste-noop {
+  color: #176c5a;
+  background: #edf7f1;
+}
+
+.schedule-paste-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.8rem;
+}
+
+.schedule-paste-review-heading p,
+.schedule-paste-dialog > footer > span {
+  font-size: 0.8125rem;
+  color: #526f62;
+}
+
+.schedule-paste-approval {
+  flex-shrink: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8125rem;
+  border-radius: 5px;
+  color: #805e2b;
+  background: #fff4dd;
+}
+
+.schedule-paste-approval.is-valid {
+  color: #146a58;
+  background: #e5f4eb;
+}
+
+.schedule-paste-table-scroll {
+  overflow-x: auto;
+}
+
+.schedule-paste-change-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.schedule-paste-change-table th,
+.schedule-paste-change-table td {
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #dce7e1;
+  padding: 0.8rem 0.6rem;
+}
+
+.schedule-paste-change-table thead th {
+  color: #536b60;
+  background: #f5f9f6;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.schedule-paste-change-table tbody th {
+  min-width: 180px;
+  max-width: 260px;
+  overflow-wrap: anywhere;
+}
+
+.schedule-paste-change-table tbody th small,
+.schedule-paste-date small {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: #526d5d;
+}
+
+.schedule-paste-change-table tbody th strong {
+  display: block;
+  margin-top: 0.2rem;
+  font-weight: 500;
+}
+
+.schedule-paste-date {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+
+.schedule-paste-date strong {
+  font-weight: 500;
+}
+
+.schedule-paste-date.is-changed {
+  color: #146c5c;
+}
+
+.schedule-paste-date.is-removed,
+.schedule-paste-date.is-removed small {
+  color: #9a4747;
+}
+
+.schedule-paste-date.is-unchanged {
+  color: #62766b;
+}
+
+.schedule-paste-dialog > footer {
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 1px solid #dce7e1;
+}
+
+.schedule-paste-dialog > footer > span {
+  margin-right: auto;
+}
+
+.schedule-paste-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.schedule-paste-pagination > span {
+  margin-right: auto;
+}
+
+.schedule-paste-dialog button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 700px) {
+  .schedule-paste-overlay {
+    padding: 12px;
+  }
+
+  .schedule-paste-dialog > header,
+  .schedule-paste-dialog > footer,
+  .schedule-paste-input,
+  .schedule-paste-results {
+    padding: 1rem;
+  }
+
+  .schedule-paste-review-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .schedule-paste-dialog > footer {
+    flex-wrap: wrap;
+  }
+
+  .schedule-paste-dialog > footer > span {
+    width: 100%;
+  }
+}

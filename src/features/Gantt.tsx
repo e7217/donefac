@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { AlertCircle, ArrowRight, CalendarDays, Check, Diamond, Link2, MoveHorizontal, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
+import { AlertCircle, ArrowRight, CalendarDays, Check, ClipboardPaste, Diamond, Link2, MoveHorizontal, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
 import { type CustomFieldValue, type FeatureProps, type Issue, type SchedulePreview, type User, type Project } from '../../shared/types';
 import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar, shiftWorkingDate } from '../../shared/calendar';
@@ -14,6 +14,7 @@ import { IssueTypeIcon } from './Issues';
 import { dayNumber, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
+import { SchedulePasteDialog } from './SchedulePasteDialog';
 import './issues.css';
 import './gantt.css';
 
@@ -47,6 +48,7 @@ function ProjectGantt(props: FeatureProps) {
   const [drag, setDrag] = useState<DragState | null>(null);
   const [hideDone, setHideDone] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
   const [windowStart, setWindowStart] = useState<string | null>(null);
@@ -62,7 +64,16 @@ function ProjectGantt(props: FeatureProps) {
       if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
         if (!window.confirm('저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?')) event.preventDefault();
-        else afterAcceptedNavigation(event, () => { previewRef.current = null; draftsRef.current.clear(); setPreview(null); setPreviewError(''); setCreateOpen(false); setLinkOpen(false); setShiftOpen(false); setDrag(null); setDraftEpoch(value => value + 1); });
+        else {
+          const discardPaste = draftsRef.current.has('schedule-paste');
+          afterAcceptedNavigation(event, () => {
+            previewRef.current = null;
+            draftsRef.current.clear();
+            setPreview(null); setPreviewError(''); setCreateOpen(false); setLinkOpen(false); setShiftOpen(false); setDrag(null);
+            if (discardPaste) setPasteOpen(false);
+            setDraftEpoch(value => value + 1);
+          });
+        }
       }
     };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
@@ -169,7 +180,7 @@ function ProjectGantt(props: FeatureProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   return <div className="gantt-feature">
-    <div className="feature-heading"><div><div className="feature-eyebrow">PLAN WITH CLARITY</div><h1>일정 · 간트</h1><p>업무와 일정이 하나로. 직접 입력하고, 연결하고, 함께 조정하세요.</p></div><div className="gantt-heading-actions"><button className="btn" disabled={busy} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
+    <div className="feature-heading"><div><div className="feature-eyebrow">PLAN WITH CLARITY</div><h1>일정 · 간트</h1><p>업무와 일정이 하나로. 직접 입력하고, 연결하고, 함께 조정하세요.</p></div><div className="gantt-heading-actions"><button className="btn" disabled={busy || !data.projects.some(project => project.id === projectId)} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{projectIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{projectIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{data.dependencies.filter(d => projectIssues.some(i => i.id === d.predecessorId) && projectIssues.some(i => i.id === d.successorId)).length}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button></div>
     {shiftOpen && <form className="gantt-shift-form" onSubmit={e => { e.preventDefault(); void requestPreview(selectedIssues.map(i => i.id), days, workingDays); }}><span><strong>{selectedIssues.length}개</strong> 업무를</span><input className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650" value={days} onChange={e => setDays(Number(e.target.value))} required /><span>일 이동</span><label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label><small>음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용</small><button className="btn btn-primary" type="submit" disabled={busy}>변경 미리보기</button><button className="issue-icon-button" type="button" onClick={() => setShiftOpen(false)} aria-label="일정 이동 닫기"><X size={16} /></button></form>}
@@ -206,6 +217,16 @@ function ProjectGantt(props: FeatureProps) {
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row"><button onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button><button className="btn btn-ghost" disabled={busy} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button></div>) : <div className="gantt-bottom-empty"><Check size={17} />모든 업무에 일정이 잡혀 있습니다.</div>}</section><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><Link2 size={16} />업무 연결 <span>{dependencies.length}</span></h3><button className="btn btn-ghost" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Plus size={13} /> 연결 추가</button></div>{dependencies.length ? dependencies.map(dependency => { const predecessor = data.issues.find(i => i.id === dependency.predecessorId)!; const successor = data.issues.find(i => i.id === dependency.successorId)!; return <div key={dependency.id} className="gantt-dependency-row"><button title={predecessor.title} onClick={() => openIssue(predecessor.id)}>{predecessor.key}</button><ArrowRight size={13} /><button title={successor.title} onClick={() => openIssue(successor.id)}>{successor.key}</button><span>완료 후 시작{dependency.lagDays ? ` · +${dependency.lagDays}근무일` : ''}</span><button className="issue-icon-button" onClick={() => unlink(dependency.id)} disabled={busy} aria-label={`${predecessor.key}와 ${successor.key} 연결 해제`}><X size={14} /></button></div>; }) : <div className="gantt-bottom-empty">선행 업무를 연결해 일정의 흐름을 확인하세요.</div>}</section></div>
     {preview && <div className="issue-modal-overlay"><section className="gantt-preview-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={() => setPreview(null)} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>{preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}{previewError && <div className="issue-form-error gantt-preview-error" role="alert">{previewError}<br />미리보기와 입력 내용은 유지됩니다. 취소 후 최신 일정을 확인하고 다시 조정하세요.</div>}<div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div><footer><span className="muted">적용 후 마지막 변경을 되돌릴 수 있습니다.</span><button className="btn btn-ghost" onClick={() => setPreview(null)} disabled={busy}>취소</button><button className="btn btn-primary" disabled={busy || !preview.changes.length} onClick={() => applyChanges(preview)}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button></footer></section></div>}
     {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={selectedIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
+    {pasteOpen && <SchedulePasteDialog
+      projectId={projectId} notify={notify} onDraftChange={trackDraft} onClose={() => setPasteOpen(false)}
+      onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        await refresh();
+        setPasteOpen(false);
+        notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);
+      }}
+    />}
     {linkOpen && <DependencyModal key={draftEpoch} issues={projectIssues} busy={busy} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setLinkOpen(false); }} onSubmit={async (predecessorId, successorId, lagDays) => { markBusy(true); try { await post('/dependencies', { predecessorId, successorId, lagDays }); await refresh(); setLinkOpen(false); notify('선행·후행 업무를 연결했습니다.'); } catch (err) { throw err; } finally { markBusy(false); } }} />}
   </div>;
 }

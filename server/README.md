@@ -28,6 +28,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `POST /api/resource-links`, `DELETE /api/resource-links/:id`
 - `POST /api/dependencies`, `DELETE /api/dependencies/:id`
 - `POST /api/schedule/preview`, `POST /api/schedule/apply`, `POST /api/schedule/undo`
+- `POST /api/schedule/paste-preview`, `POST /api/schedule/paste-apply`
 - `GET|PATCH /api/projects/:id/calendar`, `POST /api/schedule/auto-preview`, `POST /api/schedule/auto-apply`
 - `GET|POST /api/milestones`, `GET|PATCH|DELETE /api/milestones/:id`
 - `GET|POST /api/baselines`, `GET|DELETE /api/baselines/:id`
@@ -171,3 +172,8 @@ Confluence storage XML, Jira wiki, ADF and plaintext use the same editor schema 
 The reporting ledger observes issue and workflow writes in the same SQLite transaction as the canonical change. It stores the report-relevant before and after fields with event source, actor, workflow version, collection epoch and sequence. The first run and successful legacy migration record existing records as baselines. A native export closes the current epoch in the package. A native restore keeps validated closed epochs from the package, begins a new epoch and records restored issues as a baseline. A failed restore rolls back the reporting state, snapshots and workspace together.
 
 Date boundaries use the requested IANA zone. Reports expose current status and due metrics alongside actual period transitions, separate workflow reclassifications and daily coverage. The snapshot endpoint recalculates at capture time and stores the immutable result, editable weekly draft, revision and issue links atomically. See [local reporting routes](../docs/API.md#프로젝트-보고서와-주간-문서).
+
+
+## Spreadsheet schedule paste
+
+Paste resolves headed CSV or TSV against the current project's unique ticket keys. A blank date leaves the stored date in place. A hyphen explicitly clears it. A successful preview stores normalized changes and a read guard for referenced and directly linked tickets, incident dependencies, workflow, field schema and calendar. The apply transaction checks that guard and uses the existing schedule mutation, audit and undo paths. The same transaction stores the idempotent response. Proposal and receipt records expire and are cleared on native restore. The [paste API](../docs/API.md#스프레드시트-일정-붙여넣기) documents sizes and retention.

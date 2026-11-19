@@ -11,6 +11,7 @@ import { PlanningService, PlanningError } from './planning.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
+import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, hasVersionTwoNodes } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
@@ -27,7 +28,7 @@ import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
-import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency } from '../shared/types.js';
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
@@ -64,6 +65,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
+  const schedulePaste=new SchedulePasteService(store);
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation);
@@ -128,14 +130,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const todo=[d.successorId],seen=new Set();
     while(todo.length){const id=todo.pop();if(id===d.predecessorId)fail('의존성에 순환 관계가 생깁니다.');if(seen.has(id))continue;seen.add(id);edges.filter(x=>x.predecessorId===id).forEach(x=>todo.push(x.successorId));}
   };
-  const scheduleWarnings = (issues: Issue[]) => {
+  const scheduleWarnings = (issues: Issue[], dependencies=store.all<Dependency>('dependencies')) => {
     const map=new Map(issues.map(i=>[i.id,i])); const warnings:string[]=[];const mathCache=new Map<string,ReturnType<typeof createCalendarMath>>();
     const mathFor=(projectId:string)=>{let math=mathCache.get(projectId);if(!math){math=createCalendarMath(calendars.get(projectId));mathCache.set(projectId,math);}return math;};
-    for(const dep of store.all<any>('dependencies')){const a=map.get(dep.predecessorId),b=map.get(dep.successorId);if(a?.endDate&&b?.startDate){try{if(b.startDate<mathFor(a.projectId).shift(a.endDate,dep.lagDays+1))warnings.push(`${a.key} → ${b.key}: 선행 업무 종료 후 ${dep.lagDays}근무일 간격 조건과 일정이 맞지 않습니다. 수동 일정은 자동 이동하지 않습니다.`);}catch{warnings.push(`${a.key} → ${b.key}: 달력 계산 범위를 확인해 주세요. 수동 일정은 자동 이동하지 않습니다.`);}}}
+    for(const dep of dependencies){const a=map.get(dep.predecessorId),b=map.get(dep.successorId);if(a?.endDate&&b?.startDate){try{if(b.startDate<mathFor(a.projectId).shift(a.endDate,dep.lagDays+1))warnings.push(`${a.key} → ${b.key}: 선행 업무 종료 후 ${dep.lagDays}근무일 간격 조건과 일정이 맞지 않습니다. 수동 일정은 자동 이동하지 않습니다.`);}catch{warnings.push(`${a.key} → ${b.key}: 달력 계산 범위를 확인해 주세요. 수동 일정은 자동 이동하지 않습니다.`);}}}
     return warnings;
   };
   /** Caller owns the transaction, shared by manual edits and guarded proposals. */
-  const commitScheduleChanges=(req:Request,changes:unknown)=>{
+  const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[])=>{
     if(!Array.isArray(changes)||!changes.length||changes.length>1000)return fail('변경할 일정을 선택해 주세요.');
     const seen=new Set<string>(),records:any[]=[],updated:Issue[]=[];
     for(const c of changes){
@@ -148,7 +150,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       activity(req,'issue',i.id,'일정 변경',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);updated.push(i);
     }
     const undoId=uid();store.put('schedule_undos',{id:undoId,records,used:false});activity(req,'schedule',undoId,'일정 일괄 변경',`${updated.length}개 티켓`);
-    return{undoId,updated,warnings:scheduleWarnings(store.all<Issue>('issues').filter(issue=>updated.some(changed=>changed.projectId===issue.projectId)))};
+    const projectIds=new Set(updated.map(issue=>issue.projectId));
+    return{undoId,updated,warnings:scheduleWarnings(store.all<Issue>('issues').filter(issue=>projectIds.has(issue.projectId)),dependencies)};
   };
   const checkCalendarVersions=(value:unknown,changes:any[])=>{
     if(value===undefined)return;
@@ -217,6 +220,27 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   planning.registerRoutes(app,{actor,activity,validateIssue});apiKeys.registerManagementRoutes(app,{actor,activity});
   calendars.registerRoutes(app,{actor,activity});
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges});
+  schedulePaste.registerRoutes(app,{
+    actor,
+    versions:projectId=>({
+      calendar:calendars.get(projectId).version,
+      workflow:workflows.get(projectId).version,
+      schema:issueSchemas.get(projectId).version,
+    }),
+    validateChange(issue,change) {
+      try {
+        validateIssue({...issue,startDate:change.startDate,endDate:change.endDate},issue,{checkTransition:false});
+        return null;
+      } catch (error) {
+        if (error instanceof ApiError||error instanceof WorkflowError||error instanceof IssueSchemaError||error instanceof PlanningError) {
+          if (error.status<500) return error.message;
+        }
+        throw error;
+      }
+    },
+    warnings:scheduleWarnings,
+    commitChanges:commitScheduleChanges,
+  });
   scheduleArtifacts.registerRoutes(app,{actor,activity,getCalendar:projectId=>calendars.get(projectId)});
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
@@ -379,7 +403,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
       const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
       outbound.resetForImport();gitlab.resetForImport();migrations.resetForNativeImport();
-      for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
+      for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
@@ -415,7 +439,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
