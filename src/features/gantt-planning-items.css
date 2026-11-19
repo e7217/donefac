@@ -1,0 +1,315 @@
+.gantt-planning-controls {
+  min-width: 0;
+  color: #263d37;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.gantt-planning-toggle-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.gantt-planning-toggle-row > span {
+  color: #526b62;
+  font-size: 13px;
+}
+
+.gantt-planning-toggle svg:last-child {
+  transition: transform 120ms ease;
+}
+
+.gantt-planning-toggle svg.is-expanded {
+  transform: rotate(180deg);
+}
+
+.gantt-planning-panel {
+  margin-top: 12px;
+  padding: 22px;
+  border: 1px solid #dce6e0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.gantt-planning-heading,
+.gantt-planning-editor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.gantt-planning-heading h3,
+.gantt-planning-editor h4 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.gantt-planning-heading p {
+  margin: 5px 0 0;
+  color: #526b62;
+  font-size: 14px;
+}
+
+.gantt-planning-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.85fr) minmax(300px, 1.15fr);
+  align-items: start;
+  gap: 24px;
+  margin-top: 22px;
+}
+
+.gantt-planning-list-panel {
+  min-width: 0;
+}
+
+.gantt-planning-filters {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.gantt-planning-filters label,
+.gantt-planning-date-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.gantt-planning-controls .field {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.gantt-planning-search {
+  position: relative;
+  display: block;
+}
+
+.gantt-planning-search > svg {
+  position: absolute;
+  top: 13px;
+  left: 10px;
+  color: #60776e;
+  pointer-events: none;
+}
+
+.gantt-planning-search > input {
+  padding-left: 31px;
+}
+
+.gantt-planning-archive {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin: 12px 0;
+  font-size: 13px;
+  color: #526b62;
+}
+
+.gantt-planning-list {
+  display: grid;
+  gap: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+}
+
+.gantt-planning-item {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #e0e7e3;
+  border-radius: 8px;
+  background: #fff;
+  color: #263d37;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.gantt-planning-item:hover {
+  background: #f6faf7;
+}
+
+.gantt-planning-item.is-selected {
+  border-color: #177c72;
+  background: #eff8f4;
+  box-shadow: inset 3px 0 #177c72;
+}
+
+.gantt-planning-item:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 2px;
+}
+
+.gantt-planning-item strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.gantt-planning-item > span:not(.gantt-planning-item-meta),
+.gantt-planning-item small {
+  color: #526b62;
+  font-size: 13px;
+}
+
+.gantt-planning-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px;
+  color: #526b62;
+  font-size: 12px;
+}
+
+.gantt-planning-empty,
+.gantt-planning-editor-empty {
+  color: #526b62;
+  font-size: 14px;
+}
+
+.gantt-planning-editor-empty {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  min-height: 240px;
+  padding: 20px;
+  border: 1px dashed #d5e2da;
+  border-radius: 10px;
+  background: #fafcfb;
+  text-align: center;
+}
+
+.gantt-planning-editor-empty p {
+  margin: 0;
+}
+
+.gantt-planning-editor {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #e0e7e3;
+  border-radius: 10px;
+  background: #fafcfb;
+}
+
+.gantt-planning-editor > header > div > span {
+  display: block;
+  margin-bottom: 4px;
+  color: #526b62;
+  font-size: 12px;
+}
+
+.gantt-planning-editor fieldset {
+  min-width: 0;
+  margin: 20px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.gantt-planning-date-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+}
+
+.gantt-planning-date-help {
+  margin: 14px 0 0;
+  color: #526b62;
+  font-size: 13px;
+}
+
+.gantt-planning-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.gantt-planning-controls .btn {
+  min-height: 36px;
+  font-size: 14px;
+}
+
+.gantt-planning-warning,
+.gantt-planning-error {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 7px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-planning-warning {
+  background: #fff6df;
+  color: #72531f;
+}
+
+.gantt-planning-error {
+  background: #fff0ee;
+  color: #9b362a;
+}
+
+.gantt-planning-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.gantt-planning-pagination > span {
+  margin-right: auto;
+  color: #526b62;
+  font-size: 12px;
+}
+
+@media (max-width: 850px) {
+  .gantt-planning-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gantt-planning-editor-empty {
+    min-height: 140px;
+  }
+}
+
+@media (max-width: 480px) {
+  .gantt-planning-panel {
+    padding: 15px;
+  }
+
+  .gantt-planning-heading {
+    flex-direction: column;
+  }
+
+  .gantt-planning-filters,
+  .gantt-planning-date-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gantt-planning-editor {
+    padding: 14px;
+  }
+
+  .gantt-planning-editor-actions > .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+}

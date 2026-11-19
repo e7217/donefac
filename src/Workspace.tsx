@@ -32,10 +32,11 @@ const navigation = [
   { id: 'development', label: '개발 · GitLab', icon: GitBranch },
 ] as const;
 
-type WorkspaceRoute = { projectId: string; view: View; documentId: string | null; reportId?: string | null; issueId: string | null };
+type WorkspaceRoute = { projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null };
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','development','settings','mywork'];
 function routeHash(route: WorkspaceRoute) {
-  const detail = route.view === 'documents' ? route.documentId : route.view === 'reports' ? route.reportId : null;
+  const detail = route.view === 'documents' ? route.documentId : route.view === 'reports' ? route.reportId :
+    (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${route.issueId ? '?issue=' + encodeURIComponent(route.issueId) : ''}`;
 }
 function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRoute {
@@ -54,7 +55,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) { issueId = issue.id; projectId = issue.projectId; if (view === 'documents' || view === 'settings') { view = 'issues'; documentId = null; } }
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
-  return { projectId, view, documentId, issueId, reportId };
+  const planningId = (view === 'planning' || view === 'gantt') && projectId === parts[0] &&
+    snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
+  return { projectId, view, documentId, issueId, reportId, planningId };
 }
 
 export default function Workspace() {
@@ -67,6 +70,7 @@ export default function Workspace() {
   const [issueId, setIssueId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+  const [planningId, setPlanningId] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
@@ -111,7 +115,7 @@ export default function Workspace() {
     acceptedRouteRef.current = route;
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
-    setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null);
+    setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -154,8 +158,14 @@ export default function Workspace() {
   const openIssue = (id: string) => {
     const issue = dataRef.current?.issues.find(i => i.id === id);
     if (!issue) return;
-    if (requestRoute({projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null, reportId:issue.projectId === projectId ? reportId : null, issueId:id})) setSearchOpen(false);
+    const sameProject = issue.projectId === projectId;
+    if (requestRoute({
+      projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
+      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, issueId:id,
+    })) setSearchOpen(false);
   };
+  const openPlanIn = (nextView: 'planning' | 'gantt', id: string) =>
+    requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
   const openDocument = (id: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
     if (!document) return;
@@ -195,8 +205,8 @@ export default function Workspace() {
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'mywork' && <MyWork {...props}/>}
         {view === 'issues' && <Issues {...props}/>}
-        {view === 'gantt' && <Gantt {...props}/>}
-        {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props}/></Suspense>}
+        {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} onOpenPlanning={id => openPlanIn('planning',id)}/>}
+        {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument}/></Suspense>}
         {view === 'development' && <Development {...props}/>}
@@ -204,7 +214,7 @@ export default function Workspace() {
         {!project && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,issueId:null})}/>}
+    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,issueId:null})}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}

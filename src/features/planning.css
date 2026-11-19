@@ -3,3 +3,5 @@
 @media(max-width:800px){.planning-layout{grid-template-columns:1fr}.planning-list-content{max-height:330px}.planning-list-heading{padding:15px}.planning-list-heading p{display:none}.planning-list-heading>.planning-search{margin-top:12px}.planning-kind-tabs{gap:22px}.planning-kind-tabs>button{font-size:11px}.planning-editor{padding:18px}.planning-editor-heading h2{font-size:18px}.planning-form-grid{gap:12px}.planning-feature .feature-heading h1{font-size:23px}.planning-membership-heading{align-items:center}}
 
 @media(max-width:680px){.planning-feature{padding:25px 17px 40px}.planning-feature .feature-heading{align-items:flex-start}.planning-feature .feature-heading h1{font-size:21px}.planning-feature .feature-heading>.btn{font-size:10px;white-space:nowrap}}
+.planning-detail-column { min-width: 0; }
+.planning-gantt-link { margin-bottom: 10px; text-decoration: none; }

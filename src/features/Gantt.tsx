@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { AlertCircle, ArrowRight, CalendarDays, Check, ClipboardPaste, Diamond, Link2, MoveHorizontal, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { type CustomFieldValue, type FeatureProps, type Issue, type SchedulePreview, type User, type Project } from '../../shared/types';
+import { AlertCircle, ArrowRight, CalendarDays, CalendarRange, Check, ClipboardPaste, Diamond, Link2, MoveHorizontal, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
+import type { CustomFieldValue, FeatureProps, Issue, PlanningItem, PlanningKind, Project, SchedulePreview, User } from '../../shared/types';
 import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar, shiftWorkingDate } from '../../shared/calendar';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { post, remove } from '../lib/api';
 import { issueSearchText, requiredFieldLabels } from '../../shared/issue-schema';
+import { planningFields } from '../../shared/planning-helpers';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
@@ -15,6 +16,8 @@ import { dayNumber, errorMessage, isoDay, moveDate, todayDate } from './schedule
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { SchedulePasteDialog } from './SchedulePasteDialog';
+import { GanttPlanningControls } from './GanttPlanningControls';
+import { GanttPlanAssignment } from './GanttPlanAssignment';
 import './issues.css';
 import './gantt.css';
 
@@ -22,16 +25,30 @@ type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
+type GanttProps = FeatureProps & { initialPlanningId?: string | null; onOpenPlanning?: (id: string) => void };
+type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
+const PLANNING_KINDS: PlanningKind[] = ['cycle', 'module', 'release'];
 const LEFT_WIDTH = 538;
 const ROW_HEIGHT = 56;
 const HEADER_HEIGHT = 62;
 const MAX_TIMELINE_DAYS = 180;
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
-export function Gantt(props: FeatureProps) { return <ProjectGantt key={`${props.projectId}:${props.actorId}`} {...props} />; }
+const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
+const windowForDate = (date: string) => isoDay(clampWindowStart(dayNumber(date) - 7));
 
-function ProjectGantt(props: FeatureProps) {
-  const { data, projectId, refresh, notify, openIssue } = props;
+export function Gantt(props: GanttProps) {
+  return <ProjectGantt key={`${props.projectId}:${props.actorId}:${props.initialPlanningId ?? ''}`} {...props} />;
+}
+
+function ProjectGantt(props: GanttProps) {
+  const { data, projectId, refresh, notify, openIssue, initialPlanningId } = props;
+  const projectPlans = useMemo(() => (data.planningItems ?? []).filter(item => item.projectId === projectId), [data.planningItems, projectId]);
+  const initialPlan = projectPlans.find(item => item.id === initialPlanningId);
+  const [planningExpanded, setPlanningExpanded] = useState(Boolean(initialPlan));
+  const [selectedPlanningId, setSelectedPlanningId] = useState<string | null>(initialPlan?.id ?? null);
+  const [linkedOnly, setLinkedOnly] = useState(false);
+  const [planAssignment, setPlanAssignment] = useState<PlanAssignmentInput | null>(null);
   const [query, setQuery] = useState('');
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -51,7 +68,10 @@ function ProjectGantt(props: FeatureProps) {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
-  const [windowStart, setWindowStart] = useState<string | null>(null);
+  const [windowStart, setWindowStart] = useState<string | null>(() => {
+    const date = initialPlan && (initialPlan.startDate || initialPlan.targetDate || initialPlan.endDate);
+    return date ? windowForDate(date) : null;
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean }>());
@@ -69,7 +89,7 @@ function ProjectGantt(props: FeatureProps) {
           afterAcceptedNavigation(event, () => {
             previewRef.current = null;
             draftsRef.current.clear();
-            setPreview(null); setPreviewError(''); setCreateOpen(false); setLinkOpen(false); setShiftOpen(false); setDrag(null);
+            setPreview(null); setPreviewError(''); setCreateOpen(false); setLinkOpen(false); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
             if (discardPaste) setPasteOpen(false);
             setDraftEpoch(value => value + 1);
           });
@@ -82,21 +102,32 @@ function ProjectGantt(props: FeatureProps) {
   }, [notify]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
-  const issues = projectIssues.filter(i => (!hideDone || !isTerminalStatus(data,i.projectId,i.status)) && (!query || issueSearchText(data, i).toLowerCase().includes(query.toLowerCase())));
+  const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
+  const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
+  const planningRows = planningExpanded ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
+  const planStats = useMemo(() => planMembershipStats(projectPlans, projectIssues), [projectPlans, projectIssues]);
+  function visibleIssues(text: string, hideTerminal: boolean, scope?: PlanningItem) {
+    const search = text.toLowerCase();
+    return projectIssues.filter(issue => (!scope || issue[planningFields(scope.kind).idField] === scope.id) &&
+      (!hideTerminal || !isTerminalStatus(data, issue.projectId, issue.status)) &&
+      (!search || issueSearchText(data, issue).toLowerCase().includes(search)));
+  }
+  const issues = visibleIssues(query, hideDone, planningScope);
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
   const milestones = useMemo(() => (data.milestones || []).filter(value => value.projectId === projectId), [data.milestones, projectId]);
-  const historicalIssues = baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
+  const historicalIssues = planningScope ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
   const historicalMilestones = baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
   const calendar = data.calendars?.find(value => value.projectId === projectId) || defaultWorkCalendar(projectId);
   const calendarMath = createCalendarMath(calendar);
   const extent = (() => {
     const today = dayNumber(todayDate());
-    const dates = [...projectIssues.flatMap(value => [value.startDate, value.endDate]), ...milestones.map(value => value.date), ...(baseline?.issues.flatMap(value => [value.startDate, value.endDate]) || []), ...(baseline?.milestones.map(value => value.date) || [])].filter((value): value is string => Boolean(value)).map(dayNumber).filter(Number.isFinite);
+    const dates = [...projectIssues.flatMap(value => [value.startDate, value.endDate]), ...planningRows.flatMap(value => [value.startDate, value.endDate, value.targetDate]), ...milestones.map(value => value.date), ...(baseline?.issues.flatMap(value => [value.startDate, value.endDate]) || []), ...(baseline?.milestones.map(value => value.date) || [])].filter((value): value is string => Boolean(value)).map(dayNumber).filter(Number.isFinite);
     const start = Math.min(today - 7, ...dates) - 2, end = Math.max(today + 35, ...dates) + 3;
     return { start, end, days: end - start + 1 };
   })();
-  const requestedStart = windowStart ? dayNumber(windowStart) : extent.days <= MAX_TIMELINE_DAYS ? extent.start : dayNumber(todayDate()) - 9;
-  const rangeStart = Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, Number.isFinite(requestedStart) ? requestedStart : dayNumber(todayDate()) - 9));
+  const defaultRangeStart = clampWindowStart(extent.days <= MAX_TIMELINE_DAYS ? extent.start : dayNumber(todayDate()) - 9);
+  const requestedStart = windowStart ? dayNumber(windowStart) : defaultRangeStart;
+  const rangeStart = Number.isFinite(requestedStart) ? clampWindowStart(requestedStart) : defaultRangeStart;
   const rangeDays = windowStart || extent.days > MAX_TIMELINE_DAYS ? MAX_TIMELINE_DAYS : Math.min(MAX_TIMELINE_DAYS, extent.days);
   const range = { start: rangeStart, end: rangeStart + rangeDays - 1, days: rangeDays };
   const dayWidth = zoom === 'day' ? 32 : zoom === 'week' ? 15 : 6;
@@ -107,9 +138,40 @@ function ProjectGantt(props: FeatureProps) {
   const ticks = useMemo(() => Array.from({ length: range.days }, (_, index) => { const day = range.start + index; const date = new Date(day * 86_400_000); return { day, date, iso: isoDay(day), index, weekday: date.getUTCDay() }; }), [range.start, range.days]);
   const rowIndex = new Map(issues.map((i, index) => [i.id, index]));
   const todayPosition = (dayNumber(todayDate()) - range.start) * dayWidth;
-  const chartRowCount = issues.length + historicalIssues.length + milestones.length + historicalMilestones.length;
-  function changeVisibility(nextQuery: string, nextHideDone: boolean) { const visibleIds = new Set(projectIssues.filter(issue => (!nextHideDone || !isTerminalStatus(data, issue.projectId, issue.status)) && (!nextQuery || `${issue.key} ${issue.title}`.toLowerCase().includes(nextQuery.toLowerCase()))).map(issue => issue.id)); if ([...draftsRef.current.entries()].some(([id, value]) => id.startsWith('dates:') && (value.dirty || value.pending) && !visibleIds.has(id.slice(6))) && !canLeave()) return; setQuery(nextQuery); setHideDone(nextHideDone); }
-  function showDate(date: string) { setWindowStart(isoDay(Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, dayNumber(date) - 7)))); }
+  const chartRowCount = planningRows.length + issues.length + historicalIssues.length + milestones.length + historicalMilestones.length;
+  function canHideRows(nextIssues: Issue[]) {
+    const visibleIds = new Set(nextIssues.map(issue => issue.id));
+    return ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6))) || canLeave();
+  }
+  function changeVisibility(nextQuery: string, nextHideDone: boolean) {
+    if (!canHideRows(visibleIssues(nextQuery, nextHideDone, planningScope))) return;
+    setQuery(nextQuery); setHideDone(nextHideDone);
+  }
+  function setPlanningFilter(only: boolean) {
+    if (canHideRows(visibleIssues(query, hideDone, only ? selectedPlan : undefined))) setLinkedOnly(only);
+  }
+  function scrollToDate(date: number, start: number, behavior: ScrollBehavior = 'auto') {
+    const offset = (date - start) * dayWidth;
+    requestAnimationFrame(() => {
+      const scroll = scrollRef.current;
+      const header = scroll?.querySelector('.gantt-left-header');
+      if (!scroll || !header) return;
+      const pinned = getComputedStyle(header).position === 'sticky';
+      scroll.scrollTo({ left: Math.max(0, offset + (pinned ? -72 : LEFT_WIDTH - 44)), behavior });
+    });
+  }
+  function showDate(date: string) {
+    const start = windowForDate(date);
+    setWindowStart(start);
+    scrollToDate(dayNumber(date), dayNumber(start));
+  }
+  function choosePlan(id: string | null) {
+    setSelectedPlanningId(id);
+    if (!id) { setLinkedOnly(false); return; }
+    const item = projectPlans.find(plan => plan.id === id);
+    const date = item && (item.startDate || item.targetDate || item.endDate);
+    if (date && outside(date)) showDate(date);
+  }
   function outside(date: string) { const day = dayNumber(date); return day < range.start || day > range.end; }
   function capturedStyle(startDate: string, endDate: string): CSSProperties { const start = Math.max(range.start, dayNumber(startDate)), end = Math.min(range.end, dayNumber(endDate)); return end < start ? { display: 'none' } : { left: (start - range.start) * dayWidth + 2, width: Math.max(3, (end - start + 1) * dayWidth - 4) }; }
 
@@ -142,7 +204,11 @@ function ProjectGantt(props: FeatureProps) {
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
   async function unlink(id: string) { markBusy(true); try { await remove(`/dependencies/${id}`); await refresh(); notify('선행·후행 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); } }
-  function goToToday() { const today = dayNumber(todayDate()); if (today < range.start || today > range.end) { setWindowStart(isoDay(Math.max(MIN_TIMELINE_DAY, today - 9))); requestAnimationFrame(() => scrollRef.current?.scrollTo({ left: Math.max(0, 9 * dayWidth - 100), behavior: 'smooth' })); } else scrollRef.current?.scrollTo({ left: Math.max(0, todayPosition - 100), behavior: 'smooth' }); }
+  function goToToday() {
+    const date = todayDate();
+    if (outside(date)) showDate(date);
+    else scrollToDate(dayNumber(date), range.start, 'smooth');
+  }
   function previewResize(issue: Issue, edge: 'start' | 'end', delta: number) {
     if (!issue.startDate || !issue.endDate || !delta) return;
     const toStart = edge === 'start' ? moveDate(issue.startDate, delta) : issue.startDate;
@@ -180,20 +246,39 @@ function ProjectGantt(props: FeatureProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   return <div className="gantt-feature">
-    <div className="feature-heading"><div><div className="feature-eyebrow">PLAN WITH CLARITY</div><h1>일정 · 간트</h1><p>업무와 일정이 하나로. 직접 입력하고, 연결하고, 함께 조정하세요.</p></div><div className="gantt-heading-actions"><button className="btn" disabled={busy || !data.projects.some(project => project.id === projectId)} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
+    <div className="feature-heading"><div><div className="feature-eyebrow">PLAN WITH CLARITY</div><h1>일정 · 간트</h1><p>업무와 일정이 하나로. 직접 입력하고, 연결하고, 함께 조정하세요.</p></div><div className="gantt-heading-actions"><button className="btn" disabled={busy || !data.projects.some(project => project.id === projectId)} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || Boolean(planningScope && !issues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{projectIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{projectIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{data.dependencies.filter(d => projectIssues.some(i => i.id === d.predecessorId) && projectIssues.some(i => i.id === d.successorId)).length}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button></div>
     {shiftOpen && <form className="gantt-shift-form" onSubmit={e => { e.preventDefault(); void requestPreview(selectedIssues.map(i => i.id), days, workingDays); }}><span><strong>{selectedIssues.length}개</strong> 업무를</span><input className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650" value={days} onChange={e => setDays(Number(e.target.value))} required /><span>일 이동</span><label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label><small>음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용</small><button className="btn btn-primary" type="submit" disabled={busy}>변경 미리보기</button><button className="issue-icon-button" type="button" onClick={() => setShiftOpen(false)} aria-label="일정 이동 닫기"><X size={16} /></button></form>}
-    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} projects={data.projects} users={data.users} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setCreateOpen(false); }} onCreated={async issue => { await refresh(); setCreateOpen(false); setQuery(''); setHideDone(false); notify(`${issue.key} 업무를 간트에 추가했습니다.`); }} />}
+    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} projects={data.projects} users={data.users} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setCreateOpen(false); }} onCreated={async issue => {
+      await refresh(); setCreateOpen(false); setQuery(''); setHideDone(false);
+      if (planningScope && issue[planningFields(planningScope.kind).idField] !== planningScope.id) setLinkedOnly(false);
+      notify(`${issue.key} 업무를 간트에 추가했습니다.`);
+    }} />}
+    <GanttPlanningControls {...props} expanded={planningExpanded} onExpandedChange={expanded => {
+      setPlanningExpanded(expanded);
+      if (!expanded) setLinkedOnly(false);
+    }} selectedPlanningId={selectedPlanningId} onSelectPlanning={choosePlan} onDraftChange={trackDraft} draftEpoch={draftEpoch} />
+    {planningExpanded && selectedPlan && <div className="gantt-planning-actions">
+      <label className="gantt-checkbox-label"><input type="checkbox" checked={linkedOnly} disabled={busy} onChange={event => setPlanningFilter(event.target.checked)} />연결된 업무만</label>
+      <button className="btn" disabled={busy || !selectedIssues.length || selectedIssues.length > 1000} onClick={() => {
+        if (canLeave()) setPlanAssignment({ item:selectedPlan, issues:selectedIssues });
+      }}><Link2 size={14} />선택 업무 연결</button>
+      {selectedIssues.length > 1000 && <span>한 번에 최대 1,000개 업무를 연결하거나 해제할 수 있습니다.</span>}
+      {!selectedIssues.length && <span>간트에서 업무를 선택해 계획에 연결하거나 해제할 수 있습니다.</span>}
+    </div>}
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}
     <div className="gantt-hint" id="gantt-editing-help"><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 변경 후 미리보기</span><span>날짜 입력 후 Enter로 저장 · Esc로 최신 날짜 · 핸들은 ← → 키도 지원해요.</span></div>
-    <div className="gantt-window-controls"><span>표시 범위</span><button className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(Math.max(MIN_TIMELINE_DAY, range.start - 60)))}>←</button><input className="field" type="date" aria-label="간트 표시 시작일" min="0000-01-01" max="9999-12-31" value={isoDay(range.start)} onChange={event => { if (event.target.value) setWindowStart(event.target.value); }} /><span>— {isoDay(range.end)}</span><button className="btn btn-ghost" aria-label="간트 다음 60일" onClick={() => setWindowStart(isoDay(Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, range.start + 60)))}>→</button><button className="btn btn-ghost" onClick={() => { setWindowStart(null); goToToday(); }}>오늘 중심</button><small>최대 {MAX_TIMELINE_DAYS}일 표시 · 범위 밖 기록은 행의 날짜로 이동하세요.</small></div>
+    <div className="gantt-window-controls"><span>표시 범위</span><button className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button><input className="field" type="date" aria-label="간트 표시 시작일" min="0000-01-01" max="9999-12-31" value={isoDay(range.start)} onChange={event => { if (event.target.value) setWindowStart(event.target.value); }} /><span>— {isoDay(range.end)}</span><button className="btn btn-ghost" aria-label="간트 다음 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start + 60)))}>→</button><button className="btn btn-ghost" onClick={() => { setWindowStart(null); scrollToDate(dayNumber(todayDate()), defaultRangeStart, 'smooth'); }}>오늘 중심</button><small>최대 {MAX_TIMELINE_DAYS}일 표시 · 범위 밖 기록은 행의 날짜로 이동하세요.</small></div>
     <div className="gantt-scroll" ref={scrollRef}><div className="gantt-canvas" style={{ width: LEFT_WIDTH + timelineWidth, '--gantt-day-width': `${dayWidth}px` } as CSSProperties}>
       <div className="gantt-chart-header"><div className="gantt-left gantt-left-header"><label><input type="checkbox" aria-label="표시된 업무 전체 선택" checked={issues.length > 0 && issues.every(i => selected.has(i.id))} onChange={e => setSelected(e.target.checked ? new Set(issues.map(i => i.id)) : new Set())} /></label><span>업무 <small>{issues.length}</small></span><span>시작일</span><span>종료일</span></div><div className="gantt-date-header" style={{ width: timelineWidth }}><div className="gantt-months">{months.map((tick, index) => <span key={tick.iso} style={{ left: tick.index * dayWidth, width: ((months[index + 1]?.index ?? range.days) - tick.index) * dayWidth }}>{tick.date.getUTCFullYear()}년 {tick.date.getUTCMonth() + 1}월</span>)}</div><div className="gantt-days">{ticks.map(tick => <span key={tick.iso} data-date={tick.iso} className={`${!calendarMath.isWorking(tick.iso) ? 'weekend' : ''} ${tick.iso === todayDate() ? 'today' : ''}`} style={{ width: dayWidth }}>{zoom === 'day' ? <>{tick.date.getUTCDate()}<small>{['일', '월', '화', '수', '목', '금', '토'][tick.weekday]}</small></> : zoom === 'week' && (tick.weekday === 1 || tick.index === 0) ? tick.date.getUTCDate() : zoom === 'month' && tick.date.getUTCDate() === 15 ? '15' : ''}</span>)}</div></div></div>
       {ticks.filter(t => !calendarMath.isWorking(t.iso)).map(tick => <div key={tick.iso} className="gantt-weekend-band" style={{ left: LEFT_WIDTH + tick.index * dayWidth, width: dayWidth, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />)}
       {todayPosition >= 0 && todayPosition < timelineWidth && <div className="gantt-today-line" style={{ left: LEFT_WIDTH + todayPosition + dayWidth / 2, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />}
-      <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT }} aria-hidden="true"><defs><marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#8a9b9b" /></marker></defs>{dependencies.map(dependency => { const predecessor = issues.find(i => i.id === dependency.predecessorId); const successor = issues.find(i => i.id === dependency.successorId); if (!predecessor?.endDate || !successor?.startDate) return null; const x1 = (dayNumber(predecessor.endDate) - range.start + 1) * dayWidth; const x2 = (dayNumber(successor.startDate) - range.start) * dayWidth; const y1 = (rowIndex.get(predecessor.id)! + .5) * ROW_HEIGHT; const y2 = (rowIndex.get(successor.id)! + .5) * ROW_HEIGHT; const turn = Math.max(x1 + 12, x2 - 15); return <path key={dependency.id} d={`M${x1},${y1} H${turn} V${y2} H${x2 - 3}`} fill="none" stroke="#8a9b9b" strokeWidth="1.3" strokeDasharray="3 3" markerEnd="url(#gantt-arrow)" />; })}</svg>
+      <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true"><defs><marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#8a9b9b" /></marker></defs>{dependencies.map(dependency => { const predecessor = issues.find(i => i.id === dependency.predecessorId); const successor = issues.find(i => i.id === dependency.successorId); if (!predecessor?.endDate || !successor?.startDate) return null; const x1 = (dayNumber(predecessor.endDate) - range.start + 1) * dayWidth; const x2 = (dayNumber(successor.startDate) - range.start) * dayWidth; const y1 = (rowIndex.get(predecessor.id)! + .5) * ROW_HEIGHT; const y2 = (rowIndex.get(successor.id)! + .5) * ROW_HEIGHT; const turn = Math.max(x1 + 12, x2 - 15); return <path key={dependency.id} d={`M${x1},${y1} H${turn} V${y2} H${x2 - 3}`} fill="none" stroke="#8a9b9b" strokeWidth="1.3" strokeDasharray="3 3" markerEnd="url(#gantt-arrow)" />; })}</svg>
+      {planningRows.map(item => <PlanningTimelineRow key={item.id} item={item} selected={item.id === selectedPlanningId}
+        stats={planStats.get(item.id)} range={range} dayWidth={dayWidth} showDate={showDate} capturedStyle={capturedStyle}
+        onSelect={() => { if (item.id !== selectedPlanningId && canLeave()) choosePlan(item.id); }} />)}
       {issues.map(issue => {
         const user = data.users.find(u => u.id === issue.assigneeId); const start = issue.startDate ? dayNumber(issue.startDate) : null; const end = issue.endDate ? dayNumber(issue.endDate) : null; const dragging = drag?.issue.id === issue.id; const offset = dragging ? drag.delta : 0; const startOffset = dragging && drag.mode !== 'end' ? offset : 0; const endOffset = dragging && drag.mode !== 'start' ? offset : 0; const hasSchedule = start !== null && end !== null; const visibleStart = hasSchedule ? Math.max(range.start, start! + startOffset) : 0; const visibleEnd = hasSchedule ? Math.min(range.end, end! + endOffset) : -1; const visibleSchedule = hasSchedule && visibleStart <= visibleEnd; const color = statusMeta(data,issue.projectId,issue.status).color; const captured = baseline?.issues.find(value => value.issueId === issue.id); const endDelta = captured?.endDate && issue.endDate ? dayNumber(issue.endDate) - dayNumber(captured.endDate) : null;
         return <div data-issue-id={issue.id} className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}`} key={issue.id}><div className="gantt-left"><label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label><button className="gantt-issue-name" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span><small>{issue.key} · <IssueTypeName data={data} issue={issue} /></small><strong title={issue.title}>{issue.title}</strong>{endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>{user && <span className="issue-avatar" style={{ background: user.color }} title={user.name}>{user.name.slice(0, 1)}</span>}</button><DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy} onSave={(source, startDate, endDate) => saveDates(source, startDate, endDate)} /></div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>
@@ -216,7 +301,7 @@ function ProjectGantt(props: FeatureProps) {
     <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span><span><span className="gantt-legend-line" />선행 → 후행</span><span><span className="gantt-legend-today" />오늘</span><span><Diamond size={12} />마일스톤</span><span><span className="gantt-nonworking-key" />비근무일</span>{baseline && <span><span className="gantt-baseline-key" />기준선</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row"><button onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button><button className="btn btn-ghost" disabled={busy} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button></div>) : <div className="gantt-bottom-empty"><Check size={17} />모든 업무에 일정이 잡혀 있습니다.</div>}</section><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><Link2 size={16} />업무 연결 <span>{dependencies.length}</span></h3><button className="btn btn-ghost" onClick={() => { if (canLeave()) setLinkOpen(true); }}><Plus size={13} /> 연결 추가</button></div>{dependencies.length ? dependencies.map(dependency => { const predecessor = data.issues.find(i => i.id === dependency.predecessorId)!; const successor = data.issues.find(i => i.id === dependency.successorId)!; return <div key={dependency.id} className="gantt-dependency-row"><button title={predecessor.title} onClick={() => openIssue(predecessor.id)}>{predecessor.key}</button><ArrowRight size={13} /><button title={successor.title} onClick={() => openIssue(successor.id)}>{successor.key}</button><span>완료 후 시작{dependency.lagDays ? ` · +${dependency.lagDays}근무일` : ''}</span><button className="issue-icon-button" onClick={() => unlink(dependency.id)} disabled={busy} aria-label={`${predecessor.key}와 ${successor.key} 연결 해제`}><X size={14} /></button></div>; }) : <div className="gantt-bottom-empty">선행 업무를 연결해 일정의 흐름을 확인하세요.</div>}</section></div>
     {preview && <div className="issue-modal-overlay"><section className="gantt-preview-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={() => setPreview(null)} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>{preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}{previewError && <div className="issue-form-error gantt-preview-error" role="alert">{previewError}<br />미리보기와 입력 내용은 유지됩니다. 취소 후 최신 일정을 확인하고 다시 조정하세요.</div>}<div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div><footer><span className="muted">적용 후 마지막 변경을 되돌릴 수 있습니다.</span><button className="btn btn-ghost" onClick={() => setPreview(null)} disabled={busy}>취소</button><button className="btn btn-primary" disabled={busy || !preview.changes.length} onClick={() => applyChanges(preview)}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button></footer></section></div>}
-    {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={selectedIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
+    {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={(selectedIssues.length || !planningScope ? selectedIssues : issues).map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
     {pasteOpen && <SchedulePasteDialog
       projectId={projectId} notify={notify} onDraftChange={trackDraft} onClose={() => setPasteOpen(false)}
       onApplied={async result => {
@@ -228,15 +313,78 @@ function ProjectGantt(props: FeatureProps) {
       }}
     />}
     {linkOpen && <DependencyModal key={draftEpoch} issues={projectIssues} busy={busy} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setLinkOpen(false); }} onSubmit={async (predecessorId, successorId, lagDays) => { markBusy(true); try { await post('/dependencies', { predecessorId, successorId, lagDays }); await refresh(); setLinkOpen(false); notify('선행·후행 업무를 연결했습니다.'); } catch (err) { throw err; } finally { markBusy(false); } }} />}
+    {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
+      onClose={() => { if (canLeave()) setPlanAssignment(null); }}
+      onApplied={updated => setSelected(previous => {
+        const next = new Set(previous);
+        updated.forEach(issue => next.delete(issue.id));
+        return next;
+      })} />}
   </div>;
 }
 
-function InlineIssueForm({ data, projectId, projects, users, onClose, onCreated, onDraftChange }: { data:FeatureProps['data']; projectId: string; projects: Project[]; users: User[]; onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft }) {
+type PlanMembership = { total: number; outside: number };
+function planMembershipStats(plans: PlanningItem[], issues: Issue[]) {
+  const items = new Map(plans.map(item => [item.id, item]));
+  const results = new Map(plans.map(item => [item.id, { total: 0, outside: 0 }]));
+  for (const issue of issues) {
+    for (const kind of PLANNING_KINDS) {
+      const id = issue[planningFields(kind).idField];
+      const item = id ? items.get(id) : undefined;
+      if (!item) continue;
+      const counts = results.get(item.id)!;
+      counts.total++;
+      const first = issue.startDate ?? issue.endDate;
+      const last = issue.endDate ?? issue.startDate;
+      if ((item.startDate && first && first < item.startDate) || (item.endDate && last && last > item.endDate)) counts.outside++;
+    }
+  }
+  return results;
+}
+
+function PlanningTimelineRow({ item, selected, stats, range, dayWidth, showDate, capturedStyle, onSelect }: {
+  item: PlanningItem; selected: boolean; stats?: PlanMembership; range: {start:number; end:number}; dayWidth: number;
+  showDate: (date:string) => void; capturedStyle: (start:string,end:string) => CSSProperties; onSelect: () => void;
+}) {
+  const { name, kind, startDate, endDate, targetDate } = item;
+  const hasPeriod = Boolean(startDate && endDate);
+  const periodInView = startDate && endDate && dayNumber(startDate) <= range.end && dayNumber(endDate) >= range.start;
+  const inView = (date: string) => dayNumber(date) >= range.start && dayNumber(date) <= range.end;
+  const pointX = (date: string) => (dayNumber(date) - range.start + .5) * dayWidth;
+  const partial = hasPeriod ? null : startDate ?? endDate;
+  const jump = !periodInView && (startDate || endDate || targetDate) && !(partial && inView(partial)) && !(targetDate && inView(targetDate));
+  const firstDate = startDate ?? targetDate ?? endDate;
+  return <div data-planning-id={item.id} className={`gantt-row gantt-plan-row is-${kind}${selected ? ' is-focused-plan' : ''}`}>
+    <div className="gantt-left">
+      <CalendarRange size={14} />
+      <div className="gantt-plan-name">
+        <button type="button" aria-pressed={selected} aria-label={`${name} 계획 일정 편집`} title={name} onClick={onSelect}>{name}</button>
+        <div className="gantt-plan-row-meta">
+          <span>{PLAN_LABELS[kind]}{item.status === 'archived' ? ' · 보관됨' : ''} · 업무 {stats?.total ?? 0}개</span>
+          {Boolean(stats?.outside) && <span className="gantt-plan-outside">기간 밖 {stats!.outside}개</span>}
+          {targetDate && <button type="button" className="gantt-history-date" onClick={() => showDate(targetDate)} title="목표일로 이동">목표 {targetDate}</button>}
+        </div>
+      </div>
+      {[['시작일', startDate], ['종료일', endDate]].map(([label,date]) => <button key={label} type="button" className="gantt-history-date" disabled={!date} onClick={() => date && showDate(date)} aria-label={`${name} 계획 ${label}${date ? ` ${date}` : ' 미정'}`}>{date ?? '미정'}</button>)}
+    </div>
+    <div className="gantt-row-timeline">
+      {startDate && endDate && periodInView && <span role="img" className="gantt-plan-period" style={capturedStyle(startDate,endDate)} aria-label={`${name} 계획 기간 ${startDate} ~ ${endDate}`} title={`${name} · ${startDate} ~ ${endDate}`} />}
+      {partial && inView(partial) && <span role="img" className="gantt-plan-partial" style={{ left:pointX(partial) }} aria-label={`${name} 계획 ${startDate ? '시작일' : '종료일'} ${partial}`} title={partial} />}
+      {targetDate && inView(targetDate) && <span role="img" className="gantt-plan-target" style={{ left:pointX(targetDate) }} aria-label={`${name} 계획 목표일 ${targetDate}`} title={`${name} 목표 ${targetDate}`} />}
+      {jump && firstDate && <button type="button" className="gantt-jump-date" onClick={() => showDate(firstDate)}>{firstDate} · 계획 일정으로 이동 →</button>}
+      {!firstDate && <span className="gantt-no-schedule">계획 날짜 미정</span>}
+    </div>
+  </div>;
+}
+
+function InlineIssueForm({ data, projectId, projects, users, initialPlan, onClose, onCreated, onDraftChange }: { data:FeatureProps['data']; projectId: string; projects: Project[]; users: User[]; initialPlan?: PlanningItem; onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft }) {
   const [title, setTitle] = useState('');
   const [type, setType] = useState(() => initialIssueType(data, projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || ''));
   const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
   const [assigneeId, setAssigneeId] = useState('');
   const [selectedProject, setSelectedProject] = useState(projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || '');
+  const [plansByProject, setPlansByProject] = useState<Record<string, Partial<Record<PlanningKind, string | null>>>>(() =>
+    initialPlan ? { [initialPlan.projectId]: { [initialPlan.kind]:initialPlan.id } } : {});
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [error, setError] = useState('');
@@ -258,7 +406,10 @@ function InlineIssueForm({ data, projectId, projects, users, onClose, onCreated,
   return <form className="gantt-inline-create" aria-label="간트에서 업무 만들기" onSubmit={submit} onChange={() => setTouched(true)}>
     <div className="gantt-inline-create-heading"><div><strong><Plus size={15} /> 간트에 업무 추가</strong><span>날짜는 나중에 정해도 괜찮아요. 저장하면 같은 간트에 표시됩니다.</span></div><button className="issue-icon-button" type="button" onClick={onClose} disabled={saving} aria-label="간트 업무 추가 닫기"><X size={17} /></button></div>
     <div className="gantt-create-fields"><label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} disabled={saving} /></label><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} disabled={saving} ariaLabel="추가할 업무 유형" /></label><label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)} disabled={saving}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} disabled={saving} /></label><label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} disabled={saving} /></label>{(!projectId || projectId === 'all') && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} disabled={saving} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}</div>
-    <div className="issue-form-grid">{(['cycle','module','release'] as const).map(kind=><label key={kind} className="issue-form-label">{PLAN_LABELS[kind]}<PlanningSelect data={data} projectId={selectedProject} kind={kind} ariaLabel={`추가할 업무 ${PLAN_LABELS[kind]}`} disabled={saving}/></label>)}</div>
+    <div className="issue-form-grid">{PLANNING_KINDS.map(kind => <label key={kind} className="issue-form-label">{PLAN_LABELS[kind]}
+      <PlanningSelect data={data} projectId={selectedProject} kind={kind} ariaLabel={`추가할 업무 ${PLAN_LABELS[kind]}`} disabled={saving}
+        value={plansByProject[selectedProject]?.[kind] ?? null} onChange={id => setPlansByProject(previous => ({ ...previous, [selectedProject]:{ ...previous[selectedProject], [kind]:id } }))} />
+    </label>)}</div>
     <CustomFields data={data} projectId={selectedProject} issueType={type} values={customFields} onChange={next => { setTouched(true); setValuesByProject(previous => ({ ...previous, [selectedProject]: next })); }} disabled={saving} requiredFields={required} labelPrefix="추가할 업무 " />
     {required.length > 0 && <p className="issue-section-empty">기본 상태의 필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}
     {extraFields.length > 0 && <div className="issue-form-grid">{extraFields.map(field=><label key={field} className="issue-form-label">{REQUIRED_FIELD_LABELS[field]}{field === 'description' ? <textarea className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} disabled={saving} rows={3}/> : field === 'parentId' ? <select className="field" name={field} aria-label="추가할 업무 상위 업무" disabled={saving}><option value="">없음</option>{data.issues.filter(issue=>issue.projectId===selectedProject).map(issue=><option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select> : field === 'collaboratorIds' ? <select className="field" name={field} aria-label="추가할 업무 참여자" multiple disabled={saving}>{users.map(user=><option key={user.id} value={user.id}>{user.name}</option>)}</select> : <input className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} disabled={saving} type={field === 'dueDate'?'date':field==='estimate'?'number':'text'} min={field==='estimate'?0:undefined} step={field==='estimate'?'0.5':undefined} placeholder={field==='labels'?'쉼표로 구분':undefined}/>}</label>)}</div>}
