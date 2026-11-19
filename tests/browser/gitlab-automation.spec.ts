@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import type { AutomationRule,GitlabSettings,Issue,WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule,GitlabSettings,GitlabSyncPreview,Issue,WorkspaceSnapshot } from '../../shared/types';
 
 test('자동화 미리보기는 업무를 유지하고 명시적으로 활성화한 규칙은 인증된 새 MR 이벤트를 적용한다',async({page,request})=>{
   const initial=await(await request.get('/api/workspace')).json() as WorkspaceSnapshot,project=initial.projects[0];
@@ -29,5 +29,96 @@ test('자동화 미리보기는 업무를 유지하고 명시적으로 활성화
   }finally{
     if(ruleId){const rules=await(await request.get('/api/automation-rules')).json() as AutomationRule[],current=rules.find(rule=>rule.id===ruleId);if(current)await request.delete(`/api/automation-rules/${ruleId}?expectedVersion=${current.version}`);}
     await request.delete(`/api/issues/${issue.id}`);const current=await(await request.get('/api/integrations/gitlab')).json() as GitlabSettings;await request.patch('/api/integrations/gitlab',{data:{expectedVersion:current.version,baseUrl:'',projectIds:[],webhookSecret:'',signingToken:'',token:''}});await new Promise<void>(resolve=>mock.close(()=>resolve()));
+  }
+});
+
+test('저장 전 GitLab 연결에서 저장소별 결과와 티켓 후보를 확인하고 저장 후 같은 링크를 동기화한다',async({page,request})=>{
+  const workspace = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const before = await workspace();
+  const project = before.projects[0];
+  const created = await request.post('/api/issues',{data:{projectId:project.id,title:`GitLab 연결 검증 ${randomUUID()}`}});
+  expect(created.status()).toBe(201);
+  const issue = await created.json() as Issue;
+  const settings = async () => await (await request.get('/api/integrations/gitlab')).json() as GitlabSettings;
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const token = `synthetic-browser-read-${randomUUID()}`;
+  const received: { method:string|undefined; token:string|string[]|undefined }[] = [];
+  const at = new Date(Date.now()-5_000).toISOString();
+  const mock = createServer((req,res) => {
+    received.push({method:req.method,token:req.headers['private-token']});
+    res.setHeader('Content-Type','application/json');
+    if (req.url?.includes('/projects/99/')) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({message:'synthetic access denial'}));
+    } else if (req.url?.includes('/merge_requests?')) {
+      res.end(JSON.stringify([{id:701,iid:1,title:`${issue.key} MR 연결`,source_branch:'feature/reused',sha:'head-new',state:'opened',updated_at:at,web_url:'https://git.example.test/mr/1'}]));
+    } else {
+      res.end(JSON.stringify([
+        {id:801,ref:'feature/reused',sha:'head-new',status:'success',updated_at:at,web_url:'https://git.example.test/pipelines/801'},
+        {id:802,ref:'feature/reused',sha:'head-old',status:'failed',updated_at:at,web_url:'https://git.example.test/pipelines/802'},
+      ]));
+    }
+  });
+  mock.listen(0,'127.0.0.1');
+  await once(mock,'listening');
+  const url = `http://127.0.0.1:${(mock.address() as {port:number}).port}`;
+  try {
+    await page.setViewportSize({width:360,height:820});
+    await page.goto(`/#/${project.id}/development`);
+    const address = page.getByLabel('GitLab 주소',{exact:true});
+    const ids = page.getByLabel(/GitLab 프로젝트 ID/);
+    const privateToken = page.getByLabel(/읽기 API 토큰/);
+    await address.fill(url);
+    await ids.fill('42, 99');
+    await privateToken.fill(token);
+    await page.getByLabel('웹훅 Secret Token',{exact:true}).fill('synthetic-inbound-only');
+    expect(received).toHaveLength(0);
+    const checked = page.waitForResponse(response=>new URL(response.url()).pathname==='/api/integrations/gitlab/sync-preview');
+    await page.getByRole('button',{name:'연결 미리보기',exact:true}).click();
+    const response = await checked;
+    expect(response.ok(),await response.text()).toBeTruthy();
+    const postData = response.request().postDataJSON() as Record<string,unknown>;
+    expect(postData).not.toHaveProperty('webhookSecret');
+    expect(postData).not.toHaveProperty('signingToken');
+    const preview = await response.json() as GitlabSyncPreview;
+    expect(preview.counts.create).toBe(2);
+    const result = page.getByRole('region',{name:'GitLab 연결 미리보기',exact:true});
+    await expect(result.getByRole('region',{name:'저장소 42',exact:true})).toContainText('조회 가능');
+    await expect(result.getByRole('region',{name:'저장소 99',exact:true})).toContainText('조회 실패');
+    const candidates = result.getByRole('region',{name:'티켓 연결 후보',exact:true});
+    await expect(candidates).toContainText(`${issue.key} MR 연결`);
+    await expect(candidates.getByRole('button',{name:`업무 ${issue.key} 열기`,exact:true})).toHaveCount(2);
+    expect(await settings()).toEqual(original);
+    expect((await workspace()).gitlabLinks.filter(link=>link.issueId===issue.id)).toHaveLength(0);
+    expect(received.every(value=>value.method==='GET' && value.token===token)).toBeTruthy();
+
+    page.once('dialog',dialog=>dialog.dismiss());
+    await candidates.getByRole('button',{name:`업무 ${issue.key} 열기`,exact:true}).first().click();
+    await expect(result).toBeVisible();
+    await expect(address).toHaveValue(url);
+    await expect(privateToken).toHaveValue(token);
+    await ids.fill('42');
+    await expect(result).toHaveCount(0);
+    const saved = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab' && value.request().method()==='PATCH');
+    await page.getByRole('button',{name:'연결 설정 저장',exact:true}).click();
+    expect((await saved).ok()).toBeTruthy();
+    const synced = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab/sync');
+    await page.getByRole('button',{name:'지금 동기화',exact:true}).click();
+    const applied = await synced;
+    expect(applied.ok(),await applied.text()).toBeTruthy();
+    expect(await applied.json()).toMatchObject({scanned:3,linked:2});
+    const snapshot = await workspace();
+    expect(snapshot.gitlabLinks.filter(link=>link.issueId===issue.id).map(link=>link.kind).sort()).toEqual(['merge_request','pipeline']);
+    expect(snapshot.gitlabLinks.some(link=>link.issueId===issue.id && link.iid===802)).toBe(false);
+    expect(snapshot.issues.find(item=>item.id===issue.id)).toMatchObject({status:issue.status,version:issue.version});
+  } finally {
+    try {
+      const current = await settings();
+      if(current.baseUrl) expect((await request.patch('/api/integrations/gitlab',{data:{expectedVersion:current.version,baseUrl:'',projectIds:[],token:'',webhookSecret:'',signingToken:''}})).ok()).toBeTruthy();
+      await request.delete(`/api/issues/${issue.id}`);
+    } finally {
+      await new Promise<void>(resolve=>mock.close(()=>resolve()));
+    }
   }
 });

@@ -414,6 +414,22 @@ export interface TeamNotificationPage {
 }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
+export interface GitlabSyncPreviewCounts {
+  mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;
+  create: number; update: number; unchanged: number;
+}
+export interface GitlabSyncPreviewCandidate {
+  projectId: number; kind: 'merge_request' | 'pipeline'; objectId: string; title: string; state: string;
+  issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged';
+}
+export interface GitlabSyncPreview {
+  settingsVersion: number; baseUrl: string; projectIds: number[];
+  repositories: {
+    projectId: number; status: 'ok' | 'error'; counts: GitlabSyncPreviewCounts;
+    error: { stage: 'merge-requests' | 'pipelines'; httpStatus: number | null; message: string } | null;
+  }[];
+  counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
+}
 export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
 export interface AutomationRule {
   id: string; projectId: string; name: string; enabled: boolean; trigger: GitlabAutomationTrigger;

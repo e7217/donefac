@@ -157,6 +157,7 @@ curl --fail-with-body \
 | --- | --- |
 | `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전 |
 | `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명 변경 |
+| `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인의 티켓 연결 후보 확인 |
 | `POST /api/integrations/gitlab/sync` | MR·파이프라인 읽기 동기화, 상태 자동화 실행 없음 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
@@ -165,7 +166,11 @@ curl --fail-with-body \
 | `POST /api/automation/preview` | `{rule,issueIds,sample:{trigger,gitlabProjectId,branch}}` 모의 검토 |
 | `GET /api/automation-runs?projectId=...&limit=100` | 최근 실행·차단·무시 이유, 최대500건 |
 
-자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 생략하면 유지하고 빈 문자열이면 지운다. GET은 설정 여부만 반환한다. 초기 설정 버전은1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 변경 중인 동기화 결과는 폐기한다.
+자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
+
+**연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`을 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
+
+미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 
 규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `branchPattern`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. 브랜치는 `*`·`?`만 와일드카드로 사용하는 최대128자 패턴이다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. 미리보기는 티켓이나 실행 기록을 쓰지 않고 외부 요청도 하지 않는다.
 

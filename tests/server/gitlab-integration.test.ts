@@ -4,7 +4,7 @@ import { mkdtempSync,rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash,createHmac,randomUUID } from 'node:crypto';
-import { createServer,type ServerResponse } from 'node:http';
+import { createServer,type IncomingMessage,type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import type { Request } from 'express';
 import { Store } from '../../server/store.js';
@@ -18,7 +18,7 @@ function mr(values:Record<string,unknown>={}){return{object_kind:'merge_request'
 function pipeline(values:Record<string,unknown>={}){return{object_kind:'pipeline',project:{id:42,web_url:'https://git.example.test/team/repo'},object_attributes:{id:200,ref:'feature/NEO-1',sha:'sha-a',status:'success',finished_at:new Date(Date.now()-1000).toISOString(),...values}};}
 function rejects(action:()=>unknown,status=400){assert.throws(action,(error:unknown)=>error instanceof GitlabIntegrationError&&error.status===status);}
 const links=(f:ReturnType<typeof fixture>)=>f.store.all<GitlabLink>('gitlab_links');
-async function mockServer(handler:(path:string,response:ServerResponse)=>void){const server=createServer((req,res)=>handler(req.url||'',res));server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No mock address');return{url:`http://127.0.0.1:${address.port}`,close:async()=>{await new Promise<void>(resolve=>server.close(()=>resolve()));}};}
+async function mockServer(handler:(path:string,response:ServerResponse,request:IncomingMessage)=>void){const server=createServer((req,res)=>handler(req.url||'',res,req));server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No mock address');return{url:`http://127.0.0.1:${address.port}`,close:async()=>{await new Promise<void>(resolve=>server.close(()=>resolve()));}};}
 
 test('config CAS normalizes URLs and persists only encrypted write-only credentials with rollback-safe hooks',()=>{
   const f=fixture();try{assert.equal(f.service.settings().version,1);rejects(()=>f.service.configure({baseUrl:'https://git.example.test'}));const key=`whsec_${Buffer.alloc(32,9).toString('base64')}`;const settings=f.configure({baseUrl:'HTTPS://GIT.EXAMPLE.TEST///',token:'private-token',signingToken:key});assert.equal(settings.baseUrl,'https://git.example.test');assert.equal(settings.version,2);assert.ok(settings.tokenConfigured&&settings.webhookSecretConfigured&&settings.signingTokenConfigured);assert.ok(!JSON.stringify(settings).includes('private-token'));const stored=JSON.stringify(f.store.setting('gitlab'));for(const secret of ['private-token','legacy-secret',key])assert.ok(!stored.includes(secret));rejects(()=>f.service.configure({expectedVersion:1,token:'new-token'}),409);rejects(()=>f.configure({baseUrl:'https://name:secret@example.test'}));rejects(()=>f.configure({signingToken:'whsec_bad'}));assert.equal(f.connections.length,1);
@@ -68,4 +68,108 @@ test('sync cannot regress a webhook received during fetch or replace an existing
   try{f.configure({baseUrl:mock.url});const pending=f.service.sync();await reached;f.service.webhook(request(mr({state:'merged',updated_at:new Date(Date.now()-100).toISOString()})));held!.end(JSON.stringify([{id:101,iid:7,title:'NEO-1 과거 조회',state:'opened',source_branch:'feature/NEO-1',updated_at:new Date(Date.now()-10000).toISOString(),web_url:'https://git.example.test/mr/7'}]));assert.equal((await pending).linked,0);assert.equal(links(f)[0].state,'merged');assert.equal(f.events.length,1);
     f.store.db.exec('DELETE FROM gitlab_object_cursors');const secondRequest=nextRequest(),next=f.service.sync();await secondRequest;held!.end(JSON.stringify([{id:101,iid:7,title:'NEO-1 시각 없음',state:'opened',source_branch:'feature/NEO-1',web_url:'https://git.example.test/mr/7'}]));assert.equal((await next).linked,0);assert.equal(links(f)[0].state,'merged');
   }finally{await mock.close();f.close();}
+});
+
+test('draft sync preview is read-only and predicts actual MR and exact branch/head pipeline links', async () => {
+  const f = fixture();
+  const draftToken = `synthetic-preview-${randomUUID()}`;
+  const at = new Date(Date.now() - 30_000).toISOString();
+  let mrTime = at;
+  let mrState = 'opened';
+  const calls: { method:string|undefined; token:string|string[]|undefined }[] = [];
+  const mock = await mockServer((path, res, req) => {
+    calls.push({method:req.method,token:req.headers['private-token']});
+    res.setHeader('Content-Type','application/json');
+    if (path.includes('/projects/99/')) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({message:`synthetic remote diagnostic ${draftToken}`}));
+    } else if (path.includes('/merge_requests?')) {
+      res.end(JSON.stringify([
+        {id:101,iid:7,title:'NEO-1 원본 브랜치',description:'synthetic remote body not displayed',source_branch:'feature/reused',sha:'head-a',state:mrState,updated_at:mrTime,web_url:'https://git.example.test/mr/7'},
+        {id:102,iid:8,title:'OLD-999 없는 업무',updated_at:at,web_url:'https://git.example.test/mr/8'},
+        {id:103,iid:9,title:'NEO-1 URL 없음',updated_at:at},
+      ]));
+    } else {
+      res.end(JSON.stringify([
+        {id:201,ref:'feature/reused',sha:'head-a',status:'success',updated_at:at,web_url:'https://git.example.test/pipelines/201'},
+        {id:202,ref:'feature/reused',sha:'head-b',status:'failed',updated_at:at,web_url:'https://git.example.test/pipelines/202'},
+        {id:203,ref:'fix/NEO-2',sha:'head-c',status:'running',updated_at:at,web_url:'https://git.example.test/pipelines/203'},
+      ]));
+    }
+  });
+  try {
+    const original = f.configure({token:'synthetic-saved-token'});
+    const originalRow = f.store.setting('gitlab');
+    const preview = await f.service.previewSync({expectedVersion:original.version,baseUrl:mock.url,projectIds:[42,99],token:draftToken});
+    assert.equal(preview.settingsVersion, original.version);
+    assert.equal(preview.baseUrl, mock.url);
+    assert.deepEqual(preview.projectIds, [42,99]);
+    const inaccessible = preview.repositories.find(repo => repo.projectId === 99);
+    assert.equal(inaccessible?.status, 'error');
+    assert.equal(inaccessible.error?.httpStatus, 404);
+    assert.equal(inaccessible.error?.stage, 'merge-requests');
+    assert.deepEqual(preview.counts, {mergeRequests:3,pipelines:3,matched:3,unmatched:2,skipped:1,create:3,update:0,unchanged:0});
+    assert.deepEqual(new Map(preview.candidates.map(link => [link.objectId,link.issueKey])), new Map([['101','NEO-1'],['201','NEO-1'],['203','NEO-2']]));
+    assert.ok(preview.candidates.every(link => link.action === 'create'));
+    assert.ok(!JSON.stringify(preview).includes(draftToken));
+    assert.ok(!JSON.stringify(preview).includes('synthetic remote body not displayed'));
+    assert.deepEqual(f.service.settings(), original);
+    assert.deepEqual(f.store.setting('gitlab'), originalRow);
+    assert.equal(f.connections.length, 1);
+    assert.deepEqual(links(f), []);
+    assert.deepEqual(f.events, []);
+    assert.ok(calls.length >= 3 && calls.every(call => call.method === 'GET' && call.token === draftToken));
+
+    const saved = f.configure({baseUrl:mock.url,projectIds:[42],token:draftToken});
+    const actual = await f.service.sync();
+    assert.equal(actual.scanned, 6);
+    assert.equal(actual.linked, preview.counts.create);
+    assert.deepEqual(new Map(links(f).map(link => [link.id.split(':').at(-2),link.issueId])), new Map([['101','issue-1'],['201','issue-1'],['203','issue-2']]));
+    assert.deepEqual(f.events, []);
+    mrTime = new Date(Date.now() - 10_000).toISOString();
+    mrState = 'merged';
+    const refresh = await f.service.previewSync({expectedVersion:saved.version});
+    assert.equal(refresh.counts.update, 1);
+    assert.equal(refresh.counts.unchanged, 2);
+    assert.equal(refresh.candidates.find(link => link.objectId === '101')?.state, 'merged');
+    assert.equal(links(f).find(link => link.id.includes(':101:'))?.state, 'opened');
+    assert.deepEqual(f.service.settings(), actual.settings);
+  } finally { await mock.close(); f.close(); }
+});
+
+test('preview only reuses a saved token on its own URL and rejects settings changed in flight', async () => {
+  const f = fixture();
+  const token = `synthetic-stored-${randomUUID()}`;
+  const seenTokens: (string|string[]|undefined)[] = [];
+  let hold = false;
+  let held: ServerResponse | undefined;
+  let announce = () => {};
+  const received = new Promise<void>(resolve => { announce = resolve; });
+  const mock = await mockServer((path,res,req) => {
+    seenTokens.push(req.headers['private-token']);
+    if (hold && path.includes('/merge_requests?')) { held = res; announce(); return; }
+    res.end('[]');
+  });
+  try {
+    const first = f.configure({baseUrl:`${mock.url}/old`,token});
+    const nextUrl = `${mock.url}/new`;
+    await f.service.previewSync({expectedVersion:first.version,baseUrl:`${mock.url}/old/`});
+    assert.deepEqual(seenTokens.splice(0), [token,token]);
+    await f.service.previewSync({expectedVersion:first.version,baseUrl:nextUrl});
+    assert.deepEqual(seenTokens.splice(0), [undefined,undefined]);
+    assert.equal(f.service.settings().tokenConfigured, true);
+
+    hold = true;
+    const pending = f.service.previewSync({expectedVersion:first.version});
+    await received;
+    const changed = f.service.configure({expectedVersion:first.version,baseUrl:nextUrl});
+    assert.equal(changed.tokenConfigured, false);
+    held!.end('[]');
+    await assert.rejects(pending, (error:unknown) => error instanceof GitlabIntegrationError && error.status === 409);
+    const beforeStale = seenTokens.length;
+    await assert.rejects(f.service.previewSync({expectedVersion:first.version}), (error:unknown) => error instanceof GitlabIntegrationError && error.status === 409);
+    assert.equal(seenTokens.length, beforeStale);
+    assert.deepEqual(f.service.settings(), changed);
+    assert.deepEqual(links(f), []);
+  } finally { held?.end(); await mock.close(); f.close(); }
 });
