@@ -77,7 +77,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   return { projectId, view, documentId, issueId, reportId, planningId, publicationTab, publication };
 }
 
-export default function Workspace() {
+export default function Workspace({environmentLabel = '로컬 개발 환경'}: { environmentLabel?: string } = {}) {
   const [data, setData] = useState<WorkspaceSnapshot | null>(null);
   const dataRef = useRef<WorkspaceSnapshot | null>(null);
   const [failure, setFailure] = useState('');
@@ -245,7 +245,7 @@ export default function Workspace() {
       <div className="project-list">{data.projects.map(p => <button key={p.id} className={`project-item ${p.id === projectId ? 'selected' : ''}`} onClick={() => navigate('overview', p.id)}><span className="project-symbol" style={{background: p.color + '17', color: p.color}}>{p.key.slice(0,1)}</span><span>{p.name}</span>{p.id === projectId && <ChevronDown size={14}/>}</button>)}</div>
       {project && <nav className="project-navigation">{navigation.map(item => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={17}/><span>{item.label}</span>{item.id === 'issues' && <span className="nav-count">{projectIssues.length}</span>}</button>)}</nav>}
       <div className="sidebar-note"><Sparkles size={17}/><strong>업무와 지식을 한곳에</strong><p>계획에서 구현, 그리고 문서까지.<br/>우리 팀의 흐름을 연결하세요.</p></div>
-      <div className="sidebar-footer"><button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={17}/><span>워크스페이스 설정</span></button><div className="local-status"><span/>로컬 개발 환경 <span className="version-label">v0.1</span></div></div>
+      <div className="sidebar-footer"><button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={17}/><span>워크스페이스 설정</span></button><div className="local-status"><span/>{environmentLabel} <span className="version-label">v0.1</span></div></div>
     </aside>
     <div className="workspace-content">
       <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions"><PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/><button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button><div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {if(!window.dispatchEvent(new Event('teamspace:navigate',{cancelable:true})))return;publicationOpenRequest.current++;setActorId(e.target.value); setActor(e.target.value); localStorage.setItem('teamspace.actor', e.target.value);}}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div></div></header>
