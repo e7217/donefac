@@ -24,10 +24,12 @@ test('360px에서 지정한 검토자가 고정된 버전을 확인하고 발행
   try {
     const included = await create(`포함 대상 ${suffix}`, body(paragraph('현재 포함 문서 원문')));
     const issueListLabel = `검토 업무 목록 ${suffix}`;
+    const issueSummaryLabel = `검토 업무 현황 ${suffix}`;
     const original = await create(`검토 문서 ${suffix}`, body(
       paragraph('검토 대상 원문'),
       { type: 'documentInclude', attrs: { documentId: included.id, label: included.title } },
       { type: 'issueList', attrs: { projectId: project.id, savedViewId: null, label: issueListLabel } },
+      { type: 'issueSummary', attrs: { projectId: project.id, savedViewId: null, label: issueSummaryLabel, groupBy: 'priority' } },
     ));
     const location = `/#/${project.id}/documents/${original.id}`;
     const endpoint = `/api/documents/${original.id}/publication`;
@@ -71,7 +73,7 @@ test('360px에서 지정한 검토자가 고정된 버전을 확인하고 발행
 
     const laterTitle = `${original.title} 다음 편집`;
     const later = await request.patch(`/api/documents/${original.id}`, { data: {
-      expectedVersion: submission.documentVersion, contentSchemaVersion:3, title: laterTitle, content: body(paragraph('다음 편집에만 있는 본문')),
+      expectedVersion: submission.documentVersion, contentSchemaVersion:4, title: laterTitle, content: body(paragraph('다음 편집에만 있는 본문')),
     } });
     expect(later.status(), await later.text()).toBe(200);
     const changedInclude = await request.patch(`/api/documents/${included.id}`, { data: {
@@ -92,6 +94,10 @@ test('360px에서 지정한 검토자가 고정된 버전을 확인하고 발행
     await expect(frozenReview).toContainText(included.title);
     await expect(frozenReview).toContainText(issueListLabel);
     await expect(frozenReview).toContainText('이 저장본에는 목록 조건이 보관됩니다.');
+    await expect(frozenReview).toContainText(issueSummaryLabel);
+    await expect(frozenReview).toContainText('우선순위 기준');
+    await expect(frozenReview).toContainText('이 저장본에는 집계 설정이 보관됩니다.');
+    await expect(frozenReview.getByRole('region', {name:'업무 현황',exact:true})).toHaveCount(0);
     await expect(frozenReview.getByRole('button', { name:/목록 업무 열기/ })).toHaveCount(0);
     await expect(frozenReview).not.toContainText('다음 편집에만 있는 본문');
     await expect(frozenReview).not.toContainText('변경 후 포함 문서에만 있는 본문');
@@ -110,6 +116,9 @@ test('360px에서 지정한 검토자가 고정된 버전을 확인하고 발행
     await expect(frozenPublication).toContainText(reviewTitle);
     await expect(frozenPublication).toContainText('검토 대상 원문');
     await expect(frozenPublication).toContainText(issueListLabel);
+    await expect(frozenPublication).toContainText(issueSummaryLabel);
+    await expect(frozenPublication).toContainText('우선순위 기준');
+    await expect(frozenPublication.getByRole('region', {name:'업무 현황',exact:true})).toHaveCount(0);
     await expect(frozenPublication.getByRole('button', { name:/목록 업무 열기/ })).toHaveCount(0);
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();

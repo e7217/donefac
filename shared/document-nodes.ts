@@ -2,10 +2,20 @@ import { Node, mergeAttributes } from '@tiptap/core';
 import type { ContentReference, RichContent } from './types.js';
 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
-export const MAX_DOCUMENT_ISSUE_LISTS = 30;
+export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
+export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 4;
+export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
+export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
+export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
+  status: '상태', assignee: '담당자', priority: '우선순위',
+};
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 
-export function documentNodeSchemaVersion(nodeType: string): 1 | 2 | 3 {
+type DocumentSchemaVersion = 1 | 2 | 3 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+
+export function documentNodeSchemaVersion(nodeType: string): DocumentSchemaVersion {
+  if (nodeType === 'issueSummary') return 4;
   if (nodeType === 'issueList') return 3;
   return versionTwoNodes.has(nodeType) ? 2 : 1;
 }
@@ -19,12 +29,12 @@ function* documentNodes(content: RichContent): Generator<RichContent> {
   }
 }
 
-export function documentContentSchemaVersion(content: RichContent): 1 | 2 | 3 {
-  let version: 1 | 2 = 1;
+export function documentContentSchemaVersion(content: RichContent): DocumentSchemaVersion {
+  let version: DocumentSchemaVersion = 1;
   for (const node of documentNodes(content)) {
     const minimum = documentNodeSchemaVersion(node.type);
-    if (minimum === 3) return 3;
-    if (minimum === 2) version = 2;
+    if (minimum === DOCUMENT_CONTENT_SCHEMA_VERSION) return minimum;
+    if (minimum > version) version = minimum;
   }
   return version;
 }
@@ -35,18 +45,30 @@ export interface DocumentIssueList {
   label: string;
 }
 
-/** Stored list selectors. Dynamic query results do not form individual document references. */
-export function documentIssueLists(content: RichContent): DocumentIssueList[] {
-  const lists: DocumentIssueList[] = [];
+export interface DocumentIssueSummary extends DocumentIssueList { groupBy: IssueSummaryGroupBy }
+
+export function isIssueSummaryGroupBy(value: unknown): value is IssueSummaryGroupBy {
+  return ISSUE_SUMMARY_GROUP_BY.some(group => group === value);
+}
+
+export type DocumentIssueBlockTarget = {
+  type: 'issueList' | 'issueSummary';
+  projectId: string;
+  savedViewId: string | null;
+};
+
+/** Dynamic query results do not form individual document references. */
+export function documentIssueBlocks(content: RichContent): DocumentIssueBlockTarget[] {
+  const blocks: DocumentIssueBlockTarget[] = [];
   for (const node of documentNodes(content)) {
-    if (node.type !== 'issueList' || typeof node.attrs?.projectId !== 'string') continue;
-    lists.push({
+    if ((node.type !== 'issueList' && node.type !== 'issueSummary') || typeof node.attrs?.projectId !== 'string') continue;
+    blocks.push({
+      type: node.type,
       projectId: node.attrs.projectId,
       savedViewId: typeof node.attrs.savedViewId === 'string' ? node.attrs.savedViewId : null,
-      label: typeof node.attrs.label === 'string' ? node.attrs.label : '',
     });
   }
-  return lists;
+  return blocks;
 }
 
 function referenceNode(name: string, idAttribute: string, label: string) {
@@ -65,18 +87,27 @@ function referenceNode(name: string, idAttribute: string, label: string) {
 export const IssueReference = referenceNode('issueReference', 'issueId', '업무 참조');
 export const DocumentReference = referenceNode('documentReference', 'documentId', '문서 참조');
 export const DocumentInclude = referenceNode('documentInclude', 'documentId', '문서 포함');
-export const IssueList = Node.create({
-  name: 'issueList', group: 'block', atom: true, selectable: true, draggable: true,
-  addAttributes() { return {
-    projectId: { default: '', parseHTML: element => element.getAttribute('data-project-id') || '', renderHTML: attributes => ({ 'data-project-id': attributes.projectId }) },
-    savedViewId: { default: null, parseHTML: element => element.getAttribute('data-saved-view-id') || null, renderHTML: attributes => typeof attributes.savedViewId === 'string' ? { 'data-saved-view-id': attributes.savedViewId } : {} },
-    label: { default: '', parseHTML: element => element.getAttribute('data-label') || '', renderHTML: attributes => ({ 'data-label': attributes.label }) },
-  }; },
-  parseHTML() { return [{ tag: 'div[data-teamspace-node="issueList"]' }]; },
-  renderHTML({ node, HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'issueList' }), String(node.attrs.label || '업무 목록')];
-  },
-});
+function issueBlockNode(name: 'issueList' | 'issueSummary', label: string) {
+  return Node.create({
+    name, group: 'block', atom: true, selectable: true, draggable: true,
+    addAttributes() { return {
+      projectId: { default: '', parseHTML: element => element.getAttribute('data-project-id') || '', renderHTML: attributes => ({ 'data-project-id': attributes.projectId }) },
+      savedViewId: { default: null, parseHTML: element => element.getAttribute('data-saved-view-id') || null, renderHTML: attributes => typeof attributes.savedViewId === 'string' ? { 'data-saved-view-id': attributes.savedViewId } : {} },
+      label: { default: '', parseHTML: element => element.getAttribute('data-label') || '', renderHTML: attributes => ({ 'data-label': attributes.label }) },
+      ...(name === 'issueSummary' ? { groupBy: {
+        default: 'status',
+        parseHTML: (element: HTMLElement) => element.getAttribute('data-group-by') ?? 'status',
+        renderHTML: (attributes: Record<string, unknown>) => ({ 'data-group-by': attributes.groupBy }),
+      } } : {}),
+    }; },
+    parseHTML() { return [{ tag: `div[data-teamspace-node="${name}"]` }]; },
+    renderHTML({ node, HTMLAttributes }) {
+      return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': name }), String(node.attrs.label || label)];
+    },
+  });
+}
+export const IssueList = issueBlockNode('issueList', '업무 목록');
+export const IssueSummary = issueBlockNode('issueSummary', '업무 현황');
 export const Details = Node.create({
   name: 'details', group: 'block', content: 'detailsSummary detailsContent', defining: true, isolating: true,
   parseHTML() { return [{ tag: 'details[data-teamspace-node="details"]' }]; },
@@ -91,7 +122,7 @@ export const DetailsContent = Node.create({
   name: 'detailsContent', content: 'block+', defining: true,
   parseHTML() { return [{ tag: 'div[data-teamspace-details-content]' }]; }, renderHTML() { return ['div', { 'data-teamspace-details-content': '' }, 0]; },
 });
-export function documentNodeExtensions() { return [IssueReference, DocumentReference, DocumentInclude, IssueList, Details, DetailsSummary, DetailsContent]; }
+export function documentNodeExtensions() { return [IssueReference, DocumentReference, DocumentInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent]; }
 
 /** Stored references only; included documents are deliberately not expanded. */
 export function contentReferences(content: RichContent): ContentReference[] {
@@ -114,10 +145,12 @@ export function documentPlainText(node: RichContent): string {
     const label = String(node.attrs?.label || id);
     return `[${node.type === 'issueReference' ? '업무' : node.type === 'documentInclude' ? '문서 포함' : '문서'}: ${label} (${id})]`;
   }
-  if (node.type === 'issueList') {
+  if (node.type === 'issueList' || node.type === 'issueSummary') {
     const project = String(node.attrs?.projectId || '');
     const view = node.attrs?.savedViewId ? ` / ${String(node.attrs.savedViewId)}` : '';
-    return `[업무 목록: ${String(node.attrs?.label || project)} (${project}${view})]`;
+    const group = isIssueSummaryGroupBy(node.attrs?.groupBy) ? node.attrs.groupBy : 'status';
+    const kind = node.type === 'issueSummary' ? `업무 현황 · ${ISSUE_SUMMARY_GROUP_LABELS[group]}별` : '업무 목록';
+    return `[${kind}: ${String(node.attrs?.label || project)} (${project}${view})]`;
   }
   if (node.type === 'image') return String(node.attrs?.alt || '');
   const separator = node.type === 'tableRow' ? '\t' : ['paragraph', 'heading', 'codeBlock', 'detailsSummary'].includes(node.type) ? '' : '\n';

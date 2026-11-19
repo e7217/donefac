@@ -1,5 +1,5 @@
 import type { RichContent } from '../../shared/types';
-import { documentPlainText } from '../../shared/document-nodes';
+import { ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isIssueSummaryGroupBy } from '../../shared/document-nodes';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
 const heading = (text: string): RichContent => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
@@ -58,13 +58,18 @@ export function contentMarkdown(node: RichContent): string {
     case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
     case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
     case 'documentInclude': return `> 문서 포함: [${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
-    case 'issueList': {
+    case 'issueList':
+    case 'issueSummary': {
       const projectId = String(node.attrs?.projectId || '');
       const savedViewId = typeof node.attrs?.savedViewId === 'string' ? node.attrs.savedViewId : null;
       const escape = (value: string) => value.replace(/\s+/g, ' ').replace(/([\\`*_\[\]<>])/g, '\\$1');
-      const label = escape(String(node.attrs?.label || projectId || '업무 목록'));
+      const blockLabel = node.type === 'issueSummary' ? '업무 현황' : '업무 목록';
+      const label = escape(String(node.attrs?.label || projectId || blockLabel));
       const path = encodeURIComponent(projectId).replace(/\(/g, '%28').replace(/\)/g, '%29');
-      return `> 업무 목록: [${label}](#/${path}/issues)${savedViewId ? ` · 공유 보기 ${escape(savedViewId)}` : ''}\n\n`;
+      const groupBy = isIssueSummaryGroupBy(node.attrs?.groupBy) ? node.attrs.groupBy : 'status';
+      const group = node.type === 'issueSummary' ? ` · ${ISSUE_SUMMARY_GROUP_LABELS[groupBy]} 기준` : '';
+      const prefix = node.type === 'issueSummary' ? '업무 현황 ·' : '업무 목록:';
+      return `> ${prefix} [${label}](#/${path}/issues)${savedViewId ? ` · 공유 보기 ${escape(savedViewId)}` : ''}${group}\n\n`;
     }
     case 'details': return `<details>\n${inline()}</details>\n\n`;
     case 'detailsSummary': return `<summary>${summaryHtml(node)}</summary>\n\n`;

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion, DocumentReview, TeamNotificationKind, User } from '../shared/types.js';
+import type { DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion, DocumentReview, RichContent, TeamNotificationKind, User } from '../shared/types.js';
 import type { NotificationsService } from './notifications.js';
 import type { Store } from './store.js';
 
@@ -101,7 +101,7 @@ export class DocumentPublicationService {
     if (!row) fail(409, '검토·발행 저장본이 변경되었거나 삭제되었습니다.');
     return JSON.parse(row.json) as DocRevision;
   }
-  transition(documentId: string, actorId: string, body: Record<string, unknown>): DocumentPublicationView {
+  transition(documentId: string, actorId: string, body: Record<string, unknown>, authorizeBody?: (content: RichContent) => void): DocumentPublicationView {
     return this.store.transaction(() => {
       const documentVersion = this.documentVersion(documentId), current = this.state(documentId);
       this.actor(actorId);
@@ -123,6 +123,7 @@ export class DocumentPublicationService {
         const requestNote = note(body.note ?? '').trim();
         const publishedRevision = this.summary(documentId, current.published?.revisionId);
         if (publishedRevision && publishedRevision.version >= documentVersion) fail(409, '이미 발행한 문서 버전입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
+        authorizeBody?.(document.content);
         const revision = this.capture(document, actorId, at);
         if (revision.id === current.published?.revisionId) fail(409, '이미 발행한 저장본입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
         if (!Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(at)) fail(409, '저장본 시각이 현재보다 미래입니다. 문서 이력을 확인해 주세요.');
@@ -134,6 +135,7 @@ export class DocumentPublicationService {
         if (!review || review.changesRequested) fail(409, '처리할 검토 요청이 없습니다.');
         if (review.reviewerId !== actorId) fail(403, '지정된 검토자만 발행하거나 수정을 요청할 수 있습니다.');
         const revision = this.snapshot(documentId, 'review', review.revisionId);
+        authorizeBody?.(revision.content);
         if (at < review.requestedAt) fail(409, '검토 요청보다 현재 시각이 이전입니다. 잠시 후 다시 시도해 주세요.');
         if (body.action === 'publish') {
           const publicationNote = note(body.note ?? '').trim();

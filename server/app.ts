@@ -14,7 +14,7 @@ import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
-import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueLists } from './document-content.js';
+import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { AutomationService, AutomationError } from './automation.js';
@@ -40,7 +40,7 @@ import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
-import { documentContentSchemaVersion } from '../shared/document-nodes.js';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
@@ -77,8 +77,9 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 4 && backupVersion < 22) fail('업무 현황 블록은 schemaVersion 22 백업이 필요합니다.');
   if (version >= 2 && backupVersion < 7) fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');
-  if (version === 3 && backupVersion < 20) fail('업무 목록 블록은 schemaVersion 20 백업이 필요합니다.');
+  if (version >= 3 && backupVersion < 20) fail('업무 목록 블록은 schemaVersion 20 백업이 필요합니다.');
   return normalized;
 }
 function shiftDate(value: string, days: number, working: boolean): string {
@@ -453,8 +454,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
       const fields=['projectId','parentId','title','content','icon','status'];
       let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);
-      if(bodyChanged&&req.body.contentSchemaVersion!==3&&documentContentSchemaVersion(old.content)===3&&documentContentSchemaVersion(d.content)<3){
-        fail('업무 목록이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.',409,{currentVersion:old.version,contentSchemaVersion:3});
+      if (bodyChanged) {
+        const existingSchema = documentContentSchemaVersion(old.content);
+        const clientSchema = req.body.contentSchemaVersion;
+        if (existingSchema === 4 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && JSON.stringify(d.content) !== JSON.stringify(old.content)) {
+          fail('업무 현황이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: 4 });
+        }
+        if (existingSchema === 3 && clientSchema !== 3 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && documentContentSchemaVersion(d.content) < 3) {
+          fail('업무 목록이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: 3 });
+        }
       }
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
       store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
@@ -560,10 +568,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/documents/:id/publication/snapshot',(req,res)=>{
     const {kind,revisionId}=req.query;
     if((kind!=='review'&&kind!=='published')||typeof revisionId!=='string'||!revisionId)return fail('조회할 검토본 또는 발행본 버전을 확인해 주세요.');
-    res.json(documentPublication.snapshot(req.params.id,kind,revisionId));
+    const revision=documentPublication.snapshot(req.params.id,kind,revisionId);
+    apiKeys.authorizeDocumentBody(req,revision.content);
+    res.json(revision);
   });
   app.post('/api/documents/:id/publication',(req,res)=>{
-    res.json(documentPublication.transition(req.params.id,actor(req),req.body));
+    res.json(documentPublication.transition(req.params.id,actor(req),req.body,content=>apiKeys.authorizeDocumentBody(req,content)));
   });
   app.post('/api/documents/:id/restore',(req,res)=>{
     const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d=validateDocument({...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});store.put('documents',d);d=collaboration.replaceBody(d,{allowMissing:true});revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});
@@ -766,7 +776,6 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedRevisions = (data.revisions as DocRevision[]).map(importDocument);
     data.documents=importedDocuments;
     data.revisions=importedRevisions;
-    const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents);
     const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
     if(data.schemaVersion<13&&Array.isArray(data.savedViews)&&data.savedViews.some((value:unknown)=>
@@ -776,11 +785,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas);
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
-    const issueListTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
+    const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
     const firstDocument = importedDocuments[0];
     documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
-      { allowMissing: true, documents: importedDocuments, issues: data.issues, issueListTargets });
-    validateDocumentIssueLists([...importedDocuments.slice(1), ...importedRevisions].map(value => value.content), issueListTargets, { allowMissing: true });
+      { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets });
+    validateDocumentIssueBlocks([...importedDocuments.slice(1), ...importedRevisions].map(value => value.content), issueBlockTargets, { allowMissing: true });
+    const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents,issueBlockTargets);
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
@@ -822,8 +832,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if(entry.resourceType==='document'){
         entry.resource=importDocument(entry.resource);
         entry.revisions=entry.revisions.map(importDocument);
-        validateDocumentIssueLists([entry.resource, ...entry.revisions].map(value => value.content), issueListTargets, { allowMissing: true });
-        if(entry.collaboration)collaboration.validateImport([entry.collaboration],[entry.resource]);
+        validateDocumentIssueBlocks([entry.resource, ...entry.revisions].map(value => value.content), issueBlockTargets, { allowMissing: true });
+        if(entry.collaboration)collaboration.validateImport([entry.collaboration],[entry.resource],issueBlockTargets);
         if(entry.publication)[entry.publication]=documentPublication.validateRestore([entry.publication],[entry.resource],data.users,entry.revisions,data.exportedAt);
       }
     }

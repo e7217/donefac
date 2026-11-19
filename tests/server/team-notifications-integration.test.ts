@@ -229,7 +229,7 @@ test('notification history and read state survive restart and schema 15 restore,
   const saved = await inbox(f, reviewer);
   assert.ok(saved.items[0].readAt);
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 21);
+  assert.equal(backup.schemaVersion, 22);
   assert.deepEqual(backup.teamNotifications, saved.items);
   await f.restart();
   assert.deepEqual(await inbox(f, reviewer), saved);

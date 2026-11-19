@@ -10,17 +10,18 @@ import type { DocPage, RichContent, WorkspaceSnapshot } from '../../shared/types
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT } from '../../shared/document-nodes';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
-import { IssueListCard, issueListAttrs, type OpenIssueList } from './DocumentIssueList';
+import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
+import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import './document-blocks.css';
 
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude';
 export type ReferenceSelection = { kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string };
 const MAX_INCLUDE_DEPTH = 5, TOTAL_INCLUDE_NODES = 4000;
-type Context = { data: WorkspaceSnapshot; documentId: string | null; openIssue: (id: string) => void; openDocument: (id: string) => void; openIssueList?: OpenIssueList; includeBudget: number };
+type Context = { data: WorkspaceSnapshot; documentId: string | null; openIssue: (id: string) => void; openDocument: (id: string) => void; openIssueBlock?: OpenIssueBlock; includeBudget: number };
 const BlockContext = createContext<Context | null>(null);
-export function DocumentBlocksProvider({ data, documentId, content, openIssue, openDocument, openIssueList, children }: { data: WorkspaceSnapshot; documentId: string | null; content?: RichContent; openIssue: Context['openIssue']; openDocument: Context['openDocument']; openIssueList?: OpenIssueList; children: ReactNode }) {
+export function DocumentBlocksProvider({ data, documentId, content, openIssue, openDocument, openIssueBlock, children }: { data: WorkspaceSnapshot; documentId: string | null; content?: RichContent; openIssue: Context['openIssue']; openDocument: Context['openDocument']; openIssueBlock?: OpenIssueBlock; children: ReactNode }) {
   const count = content ? contentReferences(content).filter(reference => reference.kind === 'include').length : 0;
-  const value = useMemo(() => ({ data, documentId, openIssue, openDocument, openIssueList, includeBudget: Math.floor(TOTAL_INCLUDE_NODES / Math.max(1, count)) }), [data, documentId, openIssue, openDocument, openIssueList, count]);
+  const value = useMemo(() => ({ data, documentId, openIssue, openDocument, openIssueBlock, includeBudget: Math.floor(TOTAL_INCLUDE_NODES / Math.max(1, count)) }), [data, documentId, openIssue, openDocument, openIssueBlock, count]);
   return <BlockContext.Provider value={value}>{children}</BlockContext.Provider>;
 }
 function contextOf(value: Context | null): Context { if (!value) throw new Error('문서 블록을 표시할 문맥이 없습니다.'); return value; }
@@ -67,11 +68,15 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (node.type === 'issueReference') return issueCard(context, textAttr(node, 'issueId'), textAttr(node, 'label'), key);
   if (node.type === 'documentReference') return documentCard(context, textAttr(node, 'documentId'), textAttr(node, 'label'), false, key);
   if (node.type === 'documentInclude') return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key);
-  if (node.type === 'issueList') {
+  if (node.type === 'issueList' || node.type === 'issueSummary') {
     const limit = Math.min(state.remaining, DOCUMENT_ISSUE_LIST_LIMIT);
-    state.remaining -= limit;
     if (limit < DOCUMENT_ISSUE_LIST_LIMIT) state.exhausted = true;
-    return limit > 0 ? <IssueListCard key={key} data={context.data} attrs={issueListAttrs(node.attrs)} openIssue={context.openIssue} limit={limit} /> : null;
+    if (limit <= 0) return null;
+    state.remaining -= limit;
+    const props = { data: context.data, openIssue: context.openIssue, limit };
+    return node.type === 'issueSummary'
+      ? <IssueSummaryCard key={key} {...props} attrs={issueSummaryAttrs(node.attrs)} />
+      : <IssueListCard key={key} {...props} attrs={issueListAttrs(node.attrs)} />;
   }
   const nested = { ...state, structuralDepth: state.structuralDepth + 1 };
   const children = (node.content || []).map((child, index) => renderNode(child, context, nested, `${key}:${index}`));
@@ -118,14 +123,20 @@ function ReferenceNodeView({ node, selected, deleteNode, editor }: NodeViewProps
     {editor.isEditable && <button className="doc-reference-remove" type="button" aria-label={`${included ? '문서 포함' : '참조'} 블록 삭제`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (editor.isEditable) deleteNode(); }}><X size={12} /></button>}
   </NodeViewWrapper>;
 }
-function IssueListNodeView({ node, selected, getPos, deleteNode, editor }: NodeViewProps) {
+function IssueBlockNodeView({ node, selected, getPos, deleteNode, editor }: NodeViewProps) {
   const context = contextOf(useContext(BlockContext));
-  const attrs = issueListAttrs(node.attrs);
-  const canEdit = editor.isEditable && Boolean(context.openIssueList);
-  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node="issueList">
-    <IssueListCard data={context.data} attrs={attrs} openIssue={context.openIssue}
-      onEdit={canEdit ? () => { if (editor.isEditable) context.openIssueList?.(editor, { getPos, attrs }); } : undefined}
-      onDelete={canEdit ? () => { if (editor.isEditable) deleteNode(); } : undefined} />
+  const nodeType = node.type.name === 'issueSummary' ? 'issueSummary' : 'issueList';
+  const summaryAttrs = nodeType === 'issueSummary' ? issueSummaryAttrs(node.attrs) : null;
+  const attrs = summaryAttrs ?? issueListAttrs(node.attrs);
+  const canEdit = editor.isEditable && Boolean(context.openIssueBlock);
+  const props = {
+    data: context.data,
+    openIssue: context.openIssue,
+    onEdit: canEdit ? () => { if (editor.isEditable) context.openIssueBlock?.(editor, nodeType, { getPos, attrs }); } : undefined,
+    onDelete: canEdit ? () => { if (editor.isEditable) deleteNode(); } : undefined,
+  };
+  return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node={nodeType}>
+    {summaryAttrs ? <IssueSummaryCard {...props} attrs={summaryAttrs} /> : <IssueListCard {...props} attrs={attrs} />}
   </NodeViewWrapper>;
 }
 function detailsBody(editor: Editor): boolean {
@@ -140,7 +151,7 @@ function detailsBody(editor: Editor): boolean {
   return false;
 }
 export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExtension[] {
-  return extensions.map(extension => extension.name === 'issueList' ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueListNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
+  return extensions.map(extension => (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
     addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.teamspaceNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
     addKeyboardShortcuts() { return { Enter: () => detailsBody(this.editor), ArrowDown: () => this.editor.state.selection.$from.parentOffset === this.editor.state.selection.$from.parent.content.size && detailsBody(this.editor) }; },
   }) : extension);

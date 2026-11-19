@@ -4,18 +4,23 @@ import { useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type
 import type { Editor } from '@tiptap/react';
 import type { SelectionBookmark, Transaction } from '@tiptap/pm/state';
 import { ListFilter, SlidersHorizontal, X } from 'lucide-react';
-import { DOCUMENT_ISSUE_LIST_LIMIT, MAX_DOCUMENT_ISSUE_LISTS, type DocumentIssueList as IssueListAttrs } from '../../shared/document-nodes';
+import {
+  DOCUMENT_ISSUE_LIST_LIMIT, ISSUE_SUMMARY_GROUP_LABELS, MAX_DOCUMENT_ISSUE_BLOCKS,
+  isIssueSummaryGroupBy, type DocumentIssueList as IssueListAttrs, type IssueSummaryGroupBy,
+} from '../../shared/document-nodes';
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import type { Issue, WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 
-type IssueListTarget = { getPos: () => number | undefined; attrs: IssueListAttrs };
-export type OpenIssueList = (editor: Editor, target?: IssueListTarget) => void;
-type IssueListSelectionBase = { editor: Editor; documentId: string; opener: HTMLElement | null };
-export type IssueListSelection = IssueListSelectionBase & (
+type IssueBlockType = 'issueList' | 'issueSummary';
+type IssueBlockAttrs = IssueListAttrs & { groupBy?: IssueSummaryGroupBy };
+type IssueBlockTarget = { getPos: () => number | undefined; attrs: IssueBlockAttrs };
+export type OpenIssueBlock = (editor: Editor, nodeType: IssueBlockType, target?: IssueBlockTarget) => void;
+type IssueBlockSelectionBase = { editor: Editor; documentId: string; opener: HTMLElement | null; nodeType: IssueBlockType };
+export type IssueBlockSelection = IssueBlockSelectionBase & (
   { kind: 'insert'; bookmark: SelectionBookmark } |
-  { kind: 'edit'; target: IssueListTarget }
+  { kind: 'edit'; target: IssueBlockTarget }
 );
 
 export function issueListAttrs(attrs: Record<string, unknown> | undefined): IssueListAttrs {
@@ -26,8 +31,13 @@ export function issueListAttrs(attrs: Record<string, unknown> | undefined): Issu
   };
 }
 
-function sameIssueList(a: IssueListAttrs, b: IssueListAttrs) {
-  return a.projectId === b.projectId && a.savedViewId === b.savedViewId && a.label === b.label;
+function issueBlockAttrs(nodeType: IssueBlockType, raw: Record<string, unknown>): IssueBlockAttrs {
+  const attrs = issueListAttrs(raw);
+  return nodeType === 'issueSummary' ? { ...attrs, groupBy: isIssueSummaryGroupBy(raw.groupBy) ? raw.groupBy : 'status' } : attrs;
+}
+
+function sameIssueBlock(a: IssueBlockAttrs, b: IssueBlockAttrs) {
+  return a.projectId === b.projectId && a.savedViewId === b.savedViewId && a.label === b.label && a.groupBy === b.groupBy;
 }
 
 export function keepDocumentSelection(event: MouseEvent<HTMLButtonElement>) {
@@ -93,24 +103,27 @@ export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_L
   </section>;
 }
 
-export function IssueListChooser({ selection, data, preferredProjectId, onClose }: {
-  selection: IssueListSelection;
+export function IssueBlockChooser({ selection, data, preferredProjectId, onClose }: {
+  selection: IssueBlockSelection;
   data: WorkspaceSnapshot;
   preferredProjectId: string | null;
   onClose: () => void;
 }) {
   const [projectId, setProjectId] = useState(() => selection.kind === 'edit' ? selection.target.attrs.projectId : preferredProjectId ?? data.projects[0]?.id ?? '');
   const [savedViewId, setSavedViewId] = useState(() => selection.kind === 'edit' ? selection.target.attrs.savedViewId ?? '' : '');
+  const [groupBy, setGroupBy] = useState<IssueSummaryGroupBy>(() => selection.kind === 'edit' ? selection.target.attrs.groupBy ?? 'status' : 'status');
   const [error, setError] = useState('');
   const projectSelect = useRef<HTMLSelectElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const restoreFocus = useRef(true);
   const bookmark = useRef(selection.kind === 'insert' ? selection.bookmark : null);
-  const { editor } = selection;
+  const { editor, nodeType } = selection;
+  const isSummary = nodeType === 'issueSummary';
+  const blockLabel = isSummary ? '업무 현황' : '업무 목록';
   const project = data.projects.find(item => item.id === projectId);
   const views = data.savedViews?.filter(item => item.projectId === projectId) ?? [];
   const view = views.find(item => item.id === savedViewId);
-  const title = selection.kind === 'edit' ? '업무 목록 설정' : '업무 목록 삽입';
+  const title = `${blockLabel} ${selection.kind === 'edit' ? '설정' : '삽입'}`;
 
   useLayoutEffect(() => {
     const map = ({ transaction }: { transaction: Transaction }) => { if (bookmark.current) bookmark.current = bookmark.current.map(transaction.mapping); };
@@ -126,31 +139,32 @@ export function IssueListChooser({ selection, data, preferredProjectId, onClose 
     event.preventDefault();
     if (!project || savedViewId && !view) return;
     if (editor.isDestroyed || !editor.isEditable) { setError('현재 편집할 문서를 다시 확인해 주세요.'); return; }
-    const attrs: IssueListAttrs = { projectId, savedViewId: view?.id ?? null, label: `${project.name} · ${view?.name ?? '전체 업무'}`.slice(0, 300) };
+    const source: IssueListAttrs = { projectId, savedViewId: view?.id ?? null, label: `${project.name} · ${view?.name ?? '전체 업무'}`.slice(0, 300) };
+    const attrs = isSummary ? { ...source, groupBy } : source;
     try {
       if (selection.kind === 'edit') {
         const { target } = selection;
         const position = target.getPos();
         const previous = position === undefined ? null : editor.state.doc.nodeAt(position);
-        if (position === undefined || previous?.type.name !== 'issueList' || !sameIssueList(issueListAttrs(previous.attrs), target.attrs)) {
-          setError('업무 목록이 변경되었거나 삭제되었습니다. 최신 블록에서 다시 열어 주세요.');
+        if (position === undefined || previous?.type.name !== nodeType || !sameIssueBlock(issueBlockAttrs(nodeType, previous.attrs), target.attrs)) {
+          setError(`${blockLabel} 블록이 변경되었거나 삭제되었습니다. 최신 블록에서 다시 열어 주세요.`);
           return;
         }
-        if (!sameIssueList(attrs, target.attrs)) editor.view.dispatch(editor.state.tr.setNodeMarkup(position, undefined, attrs));
+        if (!sameIssueBlock(attrs, target.attrs)) editor.view.dispatch(editor.state.tr.setNodeMarkup(position, undefined, attrs));
       } else {
         if (!bookmark.current) throw new Error('삽입할 위치를 다시 선택해 주세요.');
-        let listCount = 0;
-        editor.state.doc.descendants(node => { if (node.type.name === 'issueList') listCount++; });
-        if (listCount >= MAX_DOCUMENT_ISSUE_LISTS) throw new Error(`업무 목록은 문서당 최대 ${MAX_DOCUMENT_ISSUE_LISTS}개까지 추가할 수 있습니다.`);
+        let blockCount = 0;
+        editor.state.doc.descendants(node => { if (node.type.name === 'issueList' || node.type.name === 'issueSummary') blockCount++; });
+        if (blockCount >= MAX_DOCUMENT_ISSUE_BLOCKS) throw new Error(`업무 목록과 업무 현황은 문서당 합계 ${MAX_DOCUMENT_ISSUE_BLOCKS}개까지 추가할 수 있습니다.`);
         const position = bookmark.current.resolve(editor.state.doc);
         const placed = editor.chain().command(({ tr }) => { tr.setSelection(position); return true; })
-          .insertContent([{ type: 'issueList', attrs }, { type: 'paragraph' }]).run();
-        if (!placed) throw new Error('이 위치에는 업무 목록을 넣을 수 없습니다.');
+          .insertContent([{ type: nodeType, attrs }, { type: 'paragraph' }]).run();
+        if (!placed) throw new Error(`이 위치에는 ${blockLabel} 블록을 넣을 수 없습니다.`);
         restoreFocus.current = false;
         requestAnimationFrame(() => { if (!editor.isDestroyed && editor.isEditable) editor.view.focus(); });
       }
       onClose();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '업무 목록을 적용하지 못했습니다.'); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : `${blockLabel} 블록을 적용하지 못했습니다.`); }
   }
 
   function keyboard(event: KeyboardEvent<HTMLFormElement>) {
@@ -166,20 +180,23 @@ export function IssueListChooser({ selection, data, preferredProjectId, onClose 
 
   return <div className="doc-reference-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <form ref={form} role="dialog" aria-modal="true" aria-label={title} className="doc-reference-chooser doc-issue-list-chooser" onSubmit={apply} onKeyDown={keyboard}>
-      <header><div><h3>{title}</h3><p>프로젝트 전체 업무 또는 공유 보기에 해당하는 업무를 표시합니다.</p></div><button type="button" className="btn btn-ghost" aria-label="업무 목록 닫기" onClick={onClose}><X size={16} /></button></header>
+      <header><div><h3>{title}</h3><p>{isSummary ? '프로젝트나 공유 보기의 업무 수를 선택한 기준으로 집계합니다.' : '프로젝트 전체 업무 또는 공유 보기에 해당하는 업무를 표시합니다.'}</p></div><button type="button" className="btn btn-ghost" aria-label={`${blockLabel} 닫기`} onClick={onClose}><X size={16} /></button></header>
       <div className="doc-issue-list-fields">
-        <label>프로젝트<select ref={projectSelect} className="field" aria-label="업무 목록 프로젝트" value={projectId} onChange={event => { setProjectId(event.target.value); setSavedViewId(''); setError(''); }}>
+        <label>프로젝트<select ref={projectSelect} className="field" aria-label={`${blockLabel} 프로젝트`} value={projectId} onChange={event => { setProjectId(event.target.value); setSavedViewId(''); setError(''); }}>
           {!project && <option value={projectId} disabled>{projectId ? '찾을 수 없는 프로젝트' : '프로젝트를 선택하세요.'}</option>}
           {data.projects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select></label>
-        <label>공유 보기<select className="field" aria-label="업무 목록 공유 보기" disabled={!project} value={savedViewId} onChange={event => { setSavedViewId(event.target.value); setError(''); }}>
+        <label>공유 보기<select className="field" aria-label={`${blockLabel} 공유 보기`} disabled={!project} value={savedViewId} onChange={event => { setSavedViewId(event.target.value); setError(''); }}>
           <option value="">프로젝트 전체 업무</option>
           {savedViewId && !view && <option value={savedViewId} disabled>찾을 수 없는 공유 보기</option>}
           {views.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select></label>
+        {isSummary && <label>그룹 기준<select className="field" aria-label="업무 현황 그룹 기준" value={groupBy} onChange={event => { const value = event.target.value; if (isIssueSummaryGroupBy(value)) setGroupBy(value); setError(''); }}>
+          {Object.entries(ISSUE_SUMMARY_GROUP_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select></label>}
         {error && <p role="alert">{error}</p>}
       </div>
-      <footer><button type="button" className="btn btn-ghost" onClick={onClose}>취소</button><button type="submit" className="btn btn-primary" disabled={!project || Boolean(savedViewId && !view)}>{selection.kind === 'edit' ? '업무 목록 적용' : title}</button></footer>
+      <footer><button type="button" className="btn btn-ghost" onClick={onClose}>취소</button><button type="submit" className="btn btn-primary" disabled={!project || Boolean(savedViewId && !view)}>{selection.kind === 'edit' ? `${blockLabel} 적용` : title}</button></footer>
     </form>
   </div>;
 }

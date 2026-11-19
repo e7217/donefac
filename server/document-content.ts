@@ -1,5 +1,5 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
-import { contentReferences, documentIssueLists, documentPlainText, MAX_DOCUMENT_ISSUE_LISTS, type DocumentIssueList } from '../shared/document-nodes.js';
+import { contentReferences, documentIssueBlocks, documentPlainText, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS, type DocumentIssueBlockTarget } from '../shared/document-nodes.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
 
@@ -20,7 +20,7 @@ function referenceLabel(value: unknown): boolean {
 export function normalizeDocumentContent(value:unknown):{content:RichContent;plainText:string}{
   let serialized:string|undefined;try{serialized=JSON.stringify(value);}catch{invalid('문서 내용이 JSON 형식이 아닙니다.');}
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
-  let count=0, issueListCount=0;
+  let count=0, issueBlockCount=0;
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
     const node=object(value);if(typeof node.type!=='string')invalid('문서 노드 종류가 필요합니다.');const type=schema.nodes[node.type];if(!type)invalid('지원하지 않는 문서 노드입니다.');
@@ -34,11 +34,13 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
       if(!referenceId(id))invalid('참조 대상 ID는 1~200자여야 합니다.');
       if(!referenceLabel(attributes.label))invalid('참조 이름은 300자 이하여야 합니다.');
     }
-    if (node.type === 'issueList') {
-      if (++issueListCount > MAX_DOCUMENT_ISSUE_LISTS) invalid(`문서에 업무 목록을 최대 ${MAX_DOCUMENT_ISSUE_LISTS}개까지 넣을 수 있습니다.`);
-      if (!referenceId(attributes.projectId)) invalid('업무 목록의 프로젝트 ID는 1~200자여야 합니다.');
-      if (attributes.savedViewId != null && !referenceId(attributes.savedViewId)) invalid('업무 목록의 공유 보기 ID는 1~200자여야 합니다.');
-      if (!referenceLabel(attributes.label)) invalid('업무 목록 이름은 300자 이하여야 합니다.');
+    if (node.type === 'issueList' || node.type === 'issueSummary') {
+      const label = node.type === 'issueList' ? '업무 목록' : '업무 현황';
+      if (++issueBlockCount > MAX_DOCUMENT_ISSUE_BLOCKS) invalid(`문서에 업무 목록과 업무 현황을 합쳐 최대 ${MAX_DOCUMENT_ISSUE_BLOCKS}개까지 넣을 수 있습니다.`);
+      if (!referenceId(attributes.projectId)) invalid(`${label}의 프로젝트 ID는 1~200자여야 합니다.`);
+      if (attributes.savedViewId != null && !referenceId(attributes.savedViewId)) invalid(`${label}의 공유 보기 ID는 1~200자여야 합니다.`);
+      if (!referenceLabel(attributes.label)) invalid(`${label} 이름은 300자 이하여야 합니다.`);
+      if (node.type === 'issueSummary' && attributes.groupBy !== undefined && !isIssueSummaryGroupBy(attributes.groupBy)) invalid('업무 현황의 집계 기준을 확인해 주세요.');
     }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
@@ -47,33 +49,35 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
   catch(error){if(error instanceof DocumentContentError)throw error;return invalid('지원하지 않는 문서 노드·속성·서식입니다.');}
 }
 
-interface IssueListTargets {
+export interface IssueBlockTargets {
   hasProject(projectId: string): boolean;
   viewProject(viewId: string): string | undefined;
 }
 
-const issueListKey = ({ projectId, savedViewId }: DocumentIssueList) => JSON.stringify([projectId, savedViewId]);
+const issueBlockKey = ({ type, projectId, savedViewId }: DocumentIssueBlockTarget) => JSON.stringify([type, projectId, savedViewId]);
 
-export function validateDocumentIssueLists(contents: Iterable<RichContent>, targets: IssueListTargets, {
+export function validateDocumentIssueBlocks(contents: Iterable<RichContent>, targets: IssueBlockTargets, {
   allowMissing = false, previousContent,
 }: { allowMissing?: boolean; previousContent?: RichContent } = {}): void {
-  const previous = new Set(previousContent ? documentIssueLists(previousContent).map(issueListKey) : []);
+  const previous = new Set(previousContent ? documentIssueBlocks(previousContent).map(issueBlockKey) : []);
   const checked = new Set<string>();
-  for (const content of contents) for (const list of documentIssueLists(content)) {
-    const key = issueListKey(list);
+  for (const content of contents) for (const block of documentIssueBlocks(content)) {
+    const key = issueBlockKey(block);
     if (checked.has(key)) continue;
     checked.add(key);
-    const viewProject = list.savedViewId === null ? undefined : targets.viewProject(list.savedViewId);
-    if (viewProject !== undefined && viewProject !== list.projectId) {
-      invalid('업무 목록의 공유 보기는 같은 프로젝트에 있어야 합니다.', 422, 'ISSUE_LIST_VIEW_PROJECT_MISMATCH');
+    const viewProject = block.savedViewId === null ? undefined : targets.viewProject(block.savedViewId);
+    const isList = block.type === 'issueList';
+    const label = isList ? '업무 목록' : '업무 현황';
+    if (viewProject !== undefined && viewProject !== block.projectId) {
+      invalid(`${label}의 공유 보기는 같은 프로젝트에 있어야 합니다.`, 422, isList ? 'ISSUE_LIST_VIEW_PROJECT_MISMATCH' : 'ISSUE_SUMMARY_VIEW_PROJECT_MISMATCH');
     }
     if (allowMissing || previous.has(key)) continue;
-    if (!targets.hasProject(list.projectId)) invalid('업무 목록의 프로젝트를 찾을 수 없습니다.', 422, 'REFERENCE_NOT_FOUND');
-    if (list.savedViewId !== null && viewProject === undefined) invalid('업무 목록의 공유 보기를 찾을 수 없습니다.', 422, 'REFERENCE_NOT_FOUND');
+    if (!targets.hasProject(block.projectId)) invalid(`${label}의 프로젝트를 찾을 수 없습니다.`, 422, 'REFERENCE_NOT_FOUND');
+    if (block.savedViewId !== null && viewProject === undefined) invalid(`${label}의 공유 보기를 찾을 수 없습니다.`, 422, 'REFERENCE_NOT_FOUND');
   }
 }
 
-export interface DocumentValidationOptions{allowMissing?:boolean;documents?:DocPage[];issues?:Issue[];issueListTargets?:IssueListTargets}
+export interface DocumentValidationOptions{allowMissing?:boolean;documents?:DocPage[];issues?:Issue[];issueBlockTargets?:IssueBlockTargets}
 export class DocumentContentService{
   constructor(private readonly store:Store){}
   normalize(value:unknown){return normalizeDocumentContent(value);}
@@ -82,7 +86,7 @@ export class DocumentContentService{
     const documentIds=new Set([...documents.map(document=>document.id),documentId]),issueIds=new Set(issues.map(issue=>issue.id));
     const previous=new Set(contentReferences(previousContent||{type:'doc'}).map(reference=>`${reference.type}:${reference.kind}:${reference.id}`));
     for(const reference of contentReferences(content))if(!(reference.type==='issue'?issueIds:documentIds).has(reference.id)&&!options.allowMissing&&!previous.has(`${reference.type}:${reference.kind}:${reference.id}`))invalid(`참조 대상을 찾을 수 없습니다: ${reference.id}`,422,'REFERENCE_NOT_FOUND');
-    validateDocumentIssueLists([content], options.issueListTargets ?? {
+    validateDocumentIssueBlocks([content], options.issueBlockTargets ?? {
       hasProject: id => Boolean(this.store.get('projects', id)),
       viewProject: id => this.store.get<SavedView>('saved_views', id)?.projectId,
     }, { allowMissing: options.allowMissing, previousContent });

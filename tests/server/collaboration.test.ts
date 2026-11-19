@@ -110,6 +110,42 @@ test('invalid, oversized and unsupported-schema edits never mutate the canonical
   }finally{peers.forEach(p=>p.dispose());await f.close();f.remove();}
 });
 
+test('current peers commit an issue summary and reject a newly missing saved view atomically', async () => {
+  const f = await fixture();
+  const peers: Peer[] = [];
+  try {
+    const session = await make(f);
+    const {id} = session.document;
+    const writer = await connected(f,id,'user-min',session.epoch);
+    const reader = await connected(f,id,'user-seo',session.epoch);
+    peers.push(writer.p,reader.p);
+    const vector = Y.encodeStateVector(writer.p.doc);
+    const summary = new Y.XmlElement('issueSummary');
+    summary.setAttribute('projectId','project-neo');
+    summary.setAttribute('label','공동 회의 업무 현황');
+    summary.setAttribute('groupBy','assignee');
+    writer.p.doc.getXmlFragment('default').push([summary]);
+    const accepted = await sendUpdate(writer.p,session.epoch,Y.encodeStateAsUpdate(writer.p.doc,vector));
+    assert.equal(accepted.document.version,session.document.version+1);
+    assert.deepEqual(accepted.document.content.content.at(-1), {
+      type:'issueSummary', attrs:{projectId:'project-neo',savedViewId:null,label:'공동 회의 업무 현황',groupBy:'assignee'},
+    });
+    const replicated = await reader.p.next('update');
+    Y.applyUpdate(reader.p.doc,Buffer.from(replicated.update,'base64'));
+    assert.deepEqual(content(reader.p),content(writer.p));
+
+    const previous = Y.encodeStateVector(writer.p.doc);
+    summary.setAttribute('savedViewId','gone-while-editing');
+    writer.p.send({
+      type:'update', epoch:session.epoch, requestId:randomUUID(),
+      update:Buffer.from(Y.encodeStateAsUpdate(writer.p.doc,previous)).toString('base64'),
+    });
+    assert.equal((await writer.p.next('error')).code,'REFERENCE_NOT_FOUND');
+    const persisted = await f.request(`/documents/${id}/collaboration`);
+    assert.deepEqual(persisted.data.document,accepted.document);
+  } finally { peers.forEach(p=>p.dispose()); await f.close(); f.remove(); }
+});
+
 test('restore and native import rotate epochs and reject old offline edits; rejected imports preserve live rooms',async()=>{
   const f=await fixture();const peers:Peer[]=[];
   try{
@@ -120,7 +156,7 @@ test('restore and native import rotate epochs and reject old offline edits; reje
     const stale=await peer(f,id,'user-min',s.epoch);peers.push(stale);assert.equal((await stale.next('reset')).epoch,reset.epoch);assert.equal(await stale.closed,4409);
     const fresh=await connected(f,id,'user-seo',reset.epoch);peers.push(fresh.p);assert.equal(text(fresh.p).toString(),'원본');
     fresh.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.from(offline).toString('base64')});assert.equal((await fresh.p.next('reset')).epoch,reset.epoch);assert.equal(await fresh.p.closed,4409);
-    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,21);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
+    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,22);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
     const mismatch=structuredClone(exported);mismatch.documents.find((d:any)=>d.id===id).content={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'불일치 내용'}]}]};const rejected=await f.request('/import','POST',{data:mismatch});assert.equal(rejected.status,422);assert.equal((await f.request(`/documents/${id}/collaboration`)).data.epoch,reset.epoch);live.p.send({type:'ping'});assert.equal((await live.p.next('pong')).type,'pong');
     const imported=await f.request('/import','POST',{data:exported});assert.equal(imported.status,200);const importedReset=await live.p.next('reset');assert.notEqual(importedReset.epoch,reset.epoch);assert.equal(await live.p.closed,4409);const latest=(await f.request(`/documents/${id}/collaboration`)).data;assert.equal(latest.epoch,importedReset.epoch);assert.equal(latest.document.plainText,'원본');assert.ok(latest.document.version>restored.data.version);
     const old=await peer(f,id,'user-min',reset.epoch);peers.push(old);assert.equal((await old.next('reset')).epoch,latest.epoch);assert.equal(await old.closed,4409);

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-react';
+import { ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
 import type {
   DocPage,
   DocRevision,
@@ -36,6 +37,15 @@ const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 
 /** Includes are stored references, not snapshots of their mutable target bodies. */
 function snapshotContent(node: RichContent): RichContent {
+  if (node.type === 'issueSummary') {
+    const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
+    const projectId = typeof node.attrs?.projectId === 'string' ? node.attrs.projectId : '';
+    const groupBy = isIssueSummaryGroupBy(node.attrs?.groupBy) ? node.attrs.groupBy : 'status';
+    return {
+      type: 'paragraph',
+      content: [{ type: 'text', text: `업무 현황 · ${label || projectId || '이름 없음'} · ${ISSUE_SUMMARY_GROUP_LABELS[groupBy]} 기준 · 이 저장본에는 집계 설정이 보관됩니다.` }],
+    };
+  }
   if (node.type === 'issueList') {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
     const projectId = typeof node.attrs?.projectId === 'string' ? node.attrs.projectId : '';

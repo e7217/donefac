@@ -1,9 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
-import { contentReferences, documentIssueLists } from '../shared/document-nodes.js';
+import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -102,6 +102,17 @@ export class ApiKeyService {
     if (key.projectIds === null) return;
     if (typeof projectId !== 'string' || !key.projectIds.includes(projectId)) fail(403, '이 API 키에서 허용하지 않은 프로젝트입니다.');
   }
+  private canReadDocumentBody(key: ApiKeyRecord, content: RichContent): boolean {
+    const projects = key.projectIds;
+    return projects === null || documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId));
+  }
+  private requireDocumentBody(key: ApiKeyRecord, content: RichContent) {
+    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키에서 허용하지 않은 프로젝트의 업무 현황이 있습니다.');
+  }
+  authorizeDocumentBody(request: Request, content: RichContent) {
+    const context = this.contexts.get(request);
+    if (context) this.requireDocumentBody(this.valid(this.get(context.id)), content);
+  }
   private resource(key: ApiKeyRecord, table: 'issues' | 'documents' | 'planning_items', id: unknown): Issue | DocPage | PlanningItem {
     if (typeof id !== 'string' || !id) fail(400, '대상 ID를 확인해 주세요.');
     const record = this.store.get<Issue | DocPage | PlanningItem>(table, id as string);
@@ -140,7 +151,7 @@ export class ApiKeyService {
         if (!this.store.get(table, reference.id) && historical.has(`${reference.type}:${reference.kind}:${reference.id}`)) continue;
         this.resource(key, table, reference.id);
       }
-      for (const { projectId } of documentIssueLists(content)) this.allowedProject(key, projectId);
+      for (const { projectId } of documentIssueBlocks(content)) this.allowedProject(key, projectId);
     }
   }
 
@@ -254,19 +265,24 @@ export class ApiKeyService {
         if (query.projectId) { this.allowedProject(key, query.projectId); if (!this.store.get('projects', query.projectId)) fail(404, '프로젝트를 찾을 수 없습니다.'); }
         if (query.kind && !['cycle', 'module', 'release'].includes(query.kind)) fail(400, '계획 종류를 확인해 주세요.');
         const table = path === '/api/issues' ? 'issues' : path === '/api/documents' ? 'documents' : 'planning_items';
-        const values = this.store.all<Issue | DocPage | PlanningItem>(table).filter(record => (key.projectIds === null || (record.projectId !== null && key.projectIds.includes(record.projectId))) && (!query.projectId || record.projectId === query.projectId) && (!query.kind || ('kind' in record && record.kind === query.kind)));
+        const values = this.store.all<Issue | DocPage | PlanningItem>(table).filter(record =>
+          (key.projectIds === null || (record.projectId !== null && key.projectIds.includes(record.projectId))) &&
+          (!query.projectId || record.projectId === query.projectId) &&
+          (!query.kind || ('kind' in record && record.kind === query.kind)) &&
+          (!('content' in record) || this.canReadDocumentBody(key, record.content)));
         this.used(key); response.json(values); return;
       }
       const detail = /^\/api\/(issues|documents|planning-items)\/([^/]+)$/.exec(path);
       if (detail) {
         this.query(request, []);
         const record = this.resource(key, detail[1] === 'planning-items' ? 'planning_items' : detail[1] as 'issues' | 'documents', this.decode(detail[2]));
+        if ('content' in record) this.requireDocumentBody(key, record.content);
         this.used(key); response.json(record); return;
       }
       const revisions = /^\/api\/documents\/([^/]+)\/revisions$/.exec(path);
       if (revisions) {
         this.query(request, []); const id = this.decode(revisions[1]); this.resource(key, 'documents', id);
-        this.used(key); response.json(this.store.all<DocRevision>('revisions').filter(revision => revision.documentId === id).sort((a, b) => b.version - a.version)); return;
+        this.used(key); response.json(this.store.all<DocRevision>('revisions').filter(revision => revision.documentId === id && this.canReadDocumentBody(key, revision.content)).sort((a, b) => b.version - a.version)); return;
       }
       if (path === '/api/comments') {
         const query = this.query(request, ['resourceType', 'resourceId']);
@@ -285,6 +301,7 @@ export class ApiKeyService {
     } else if ((request.method === 'PATCH' || request.method === 'DELETE') && detail) {
       const id = this.decode(detail[2]);
       const source = this.resource(key, detail[1] as 'issues' | 'documents', id);
+      if ('content' in source) this.requireDocumentBody(key, source.content);
       const query = this.query(request, request.method === 'DELETE' ? ['expectedVersion'] : []);
       if (request.method === 'DELETE') {
         const fromQuery = query.expectedVersion === undefined ? undefined : /^\d+$/.test(query.expectedVersion) ? Number(query.expectedVersion) : NaN;

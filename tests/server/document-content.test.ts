@@ -20,6 +20,7 @@ const now='2026-11-16T00:00:00.000Z',schema=createEditorSchema();
 const body=(text='원본'):RichContent=>({type:'doc',content:[{type:'paragraph',content:text?[{type:'text',text}]:undefined}]});
 const ref=(type:string,id:string,label=''):RichContent=>({type,attrs:{[type==='issueReference'?'issueId':'documentId']:id,label}});
 const issueList=():RichContent=>({type:'issueList',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무'}});
+const issueSummary=():RichContent=>({type:'issueSummary',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무 현황',groupBy:'priority'}});
 const document=(id:string,content=body()):DocPage=>({id,projectId:'project-test',parentId:null,title:id,content,plainText:'원본',icon:'📄',status:'draft',version:1,authorId:'user-test',createdAt:now,updatedAt:now});
 function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-document-content-')),store=new Store(dir);store.put('users',{id:'user-test',name:'문서 담당',email:'doc@example.test',color:'#668899'});store.put('projects',{id:'project-test',key:'DOC',name:'문서',description:'',color:'#668899',createdAt:now});
@@ -65,19 +66,22 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 and v2 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades v1 through v3 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
     initial.close();
     const a=insertState(f.store,'doc-a',body('보존할 원본'));
     const b=insertState(f.store,'doc-b',{type:'doc',content:[ref('documentReference','doc-c','두 번째 원본')]},2);
+    f.store.put('documents',document('doc-d'));
+    const d=insertState(f.store,'doc-d',{type:'doc',content:[issueList()]},3);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
+    request.run('doc-d',d.epoch,'old-request-v3','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -111,8 +115,13 @@ test('one invalid persisted room prevents every migration write, and legacy impo
       const listed=document('doc-c',f.contents.normalize({type:'doc',content:[issueList()]}).content);
       const current={documentId:'doc-c',epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA,state:encode(listed.content).toString('base64')};
       assert.equal(service.validateImport([current],[listed])[0].schemaVersion,COLLABORATION_SCHEMA);
+      assert.equal(service.validateImport([{...current,schemaVersion:3}],[listed])[0].schemaVersion,COLLABORATION_SCHEMA);
       assert.throws(()=>service.validateImport([{...current,schemaVersion:2}],[listed]),(error:unknown)=>error instanceof CollaborationError&&error.code==='SCHEMA_MISMATCH');
       assert.throws(()=>service.validateImport([{...current,schemaVersion:99}],[listed]),CollaborationError);
+      const summarized=document('doc-c',f.contents.normalize({type:'doc',content:[issueSummary()]}).content);
+      const richState={...current,state:encode(summarized.content).toString('base64')};
+      assert.equal(service.validateImport([richState],[summarized])[0].schemaVersion,COLLABORATION_SCHEMA);
+      assert.throws(()=>service.validateImport([{...richState,schemaVersion:3}],[summarized]),(error:unknown)=>error instanceof CollaborationError&&error.code==='SCHEMA_MISMATCH');
       f.store.transaction(()=>{f.store.put('documents',legacyDoc);service.replaceImported(valid);});assert.ok(service.session('doc-a').document.plainText.includes('기존 형식'));
     }finally{service.close();}
   }finally{f.close();}
@@ -138,11 +147,11 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('live updates validate references/includes before durable ACK and reject v1 and v2 protocol clients',async()=>{
+test('live updates validate references/includes before durable ACK and reject v1 through v3 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{
     const session=service.enable('doc-a',1,'user-test');
-    for(const schemaVersion of [1,2]){
+    for(const schemaVersion of [1,2,3]){
       const old=new Peer(url);
       peers.push(old);
       await once(old.ws,'open');

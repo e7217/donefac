@@ -13,7 +13,7 @@ import {
 import { documentContentSchemaVersion } from '../shared/document-nodes.js';
 import type { DocPage, DocRevision, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
-import { DocumentContentService,DocumentContentError,normalizeDocumentContent } from './document-content.js';
+import { DocumentContentService,DocumentContentError,normalizeDocumentContent,type IssueBlockTargets } from './document-content.js';
 
 export const MAX_COLLABORATION_UPDATE=1024*1024;
 const MAX_STATE=16*1024*1024;
@@ -227,11 +227,11 @@ export class CollaborationService {
     return state?{documentId:state.documentId,epoch:state.epoch,schemaVersion:state.schemaVersion,state:state.state.toString('base64')}:null;
   }
   exportStates():CollaborationExport[]{return(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>this.exportState(row.document_id)!);}
-  validateImport(value:unknown,documents:DocPage[]):State[]{
+  validateImport(value:unknown,documents:DocPage[],issueBlockTargets?:IssueBlockTargets):State[]{
     if(!Array.isArray(value)||value.length>100000)invalid('공동 편집 상태 목록이 필요합니다.');
     const normalizedDocuments=documents.map(document=>({...document,...normalizeContent(document.content)}));
     const documentsById=new Map(normalizedDocuments.map(document=>[document.id,document]));
-    if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[]}));}
+    if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[],issueBlockTargets}));}
     const seen = new Set<string>();
     return value.map(item => {
       if (!item || typeof item.documentId !== 'string' || seen.has(item.documentId) || !supportsCollaborationSchema(item.schemaVersion)
