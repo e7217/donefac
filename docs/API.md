@@ -45,6 +45,12 @@ curl --fail-with-body \
 
 업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
 
+## 선후행 업무 연결
+
+브라우저의 `POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
+
+`PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?}`를 보내 연결 유형과 간격을 바꾼다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
+
 ## 담당자 작업량
 
 업무 생성·수정의 `plannedEffortMinutes`에는 0~1,000,000 정수 분 또는 `null`을 보낸다. 포인트 필드 `estimate`와 별도이다. `GET /projects/:id/workload?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`로 최대 180일을 양끝 날짜 포함으로 조회한다. 응답의 `rows`에는 팀원별 일자와 `scheduledMinutes`, `availableMinutes`, 업무별 `allocations`가 있다. `incomplete`에는 배분에 필요한 정보가 부족한 업무와 이유를 반환한다.

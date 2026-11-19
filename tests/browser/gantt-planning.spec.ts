@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import type { AutomaticSchedulePreview, Issue, Milestone, ScheduleBaseline, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Dependency, Issue, Milestone, ScheduleBaseline, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const snapshot = async (request: APIRequestContext) => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
 const addDays = (date: string, amount: number) => new Date(Date.parse(`${date}T00:00:00Z`) + amount * 86_400_000).toISOString().slice(0, 10);
@@ -8,6 +8,68 @@ const nextMonday = () => { const today = new Date().toISOString().slice(0, 10); 
 async function issue(request: APIRequestContext, projectId: string, title: string, startDate: string | null, endDate: string | null) { const response = await request.post('/api/issues', { data: { projectId, title, startDate, endDate } }); expect(response.ok()).toBeTruthy(); return await response.json() as Issue; }
 async function capture(request: APIRequestContext, projectId: string, name: string) { const data = await snapshot(request); const response = await request.post('/api/baselines', { data: { projectId, name, expectedIssueVersions: Object.fromEntries(data.issues.filter(value => value.projectId === projectId).map(value => [value.id, value.version])), expectedMilestoneVersions: Object.fromEntries((data.milestones || []).filter(value => value.projectId === projectId).map(value => [value.id, value.version])), expectedCalendarVersion: data.calendars!.find(value => value.projectId === projectId)!.version } }); expect(response.ok()).toBeTruthy(); return await response.json() as ScheduleBaseline; }
 async function cleanup(request: APIRequestContext, issues: string[], milestones: string[] = [], baselines: string[] = []) { for (const id of issues) await request.delete(`/api/issues/${id}`); const data = await snapshot(request); for (const id of milestones) { const item = data.milestones?.find(value => value.id === id); if (item) await request.delete(`/api/milestones/${id}?expectedVersion=${item.version}`); } for (const id of baselines) { const item = data.baselines?.find(value => value.id === id); if (item) await request.delete(`/api/baselines/${id}?expectedVersion=${item.version}`); } }
+
+test('360px 간트에서 업무 연결 유형과 음수 간격을 수정하고 종료 조건의 일정을 검토해 적용한다', async ({page,request}) => {
+  const data = await snapshot(request), project = data.projects[0], monday = nextMonday();
+  const tuesday = addDays(monday,1), wednesday = addDays(monday,2), thursday = addDays(monday,3);
+  const prefix = `간트 연결 경계 ${Date.now()}`;
+  const predecessor = await issue(request,project.id,`${prefix} 선행`,monday,thursday);
+  const successor = await issue(request,project.id,`${prefix} 후행`,monday,tuesday);
+  try {
+    await page.setViewportSize({width:360,height:820});
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색').fill(prefix);
+    const connectionList = page.getByRole('region',{name:'업무 연결 목록',exact:true});
+    await connectionList.getByRole('button',{name:'연결 추가',exact:true}).click();
+    const create = page.getByRole('dialog',{name:'선행·후행 업무 연결',exact:true});
+    await create.getByLabel('선행 업무',{exact:true}).selectOption(predecessor.id);
+    await create.getByLabel('후행 업무',{exact:true}).selectOption(successor.id);
+    await create.getByLabel('연결 유형',{exact:true}).selectOption('SS');
+    await create.getByLabel('추가 간격 근무일',{exact:true}).fill('1');
+    const created = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/dependencies'&&value.request().method()==='POST');
+    await create.getByRole('button',{name:'업무 연결',exact:true}).click();
+    const response = await created;
+    expect(response.status(),await response.text()).toBe(201);
+    const dependency = await response.json() as Dependency;
+    expect(dependency).toMatchObject({type:'SS',lagDays:1});
+    await expect(create).toHaveCount(0);
+    const path = page.locator(`[data-dependency-id="${dependency.id}"]`);
+    await expect(path).toHaveAttribute('data-dependency-type','SS');
+    await expect(path).toHaveAttribute('data-predecessor-anchor','startDate');
+    await expect(path).toHaveAttribute('data-successor-anchor','startDate');
+
+    await connectionList.getByRole('button',{name:`${predecessor.key}와 ${successor.key} 연결 수정`,exact:true}).click();
+    const edit = page.getByRole('dialog',{name:'업무 연결 수정',exact:true});
+    await expect(edit.getByLabel('연결 유형',{exact:true})).toHaveValue('SS');
+    await edit.getByLabel('연결 유형',{exact:true}).selectOption('FF');
+    await edit.getByLabel('추가 간격 근무일',{exact:true}).fill('-1');
+    const updated = page.waitForResponse(value=>new URL(value.url()).pathname===`/api/dependencies/${dependency.id}`&&value.request().method()==='PATCH');
+    await edit.getByRole('button',{name:'연결 변경 저장',exact:true}).click();
+    const mutation = await updated;
+    expect(mutation.ok(),await mutation.text()).toBeTruthy();
+    expect(mutation.request().postDataJSON()).toMatchObject({expectedVersion:dependency.version??1,type:'FF',lagDays:-1});
+    await expect(edit).toHaveCount(0);
+    await expect(connectionList).toContainText('-1근무일');
+    await expect(path).toHaveAttribute('data-dependency-type','FF');
+    await expect(path).toHaveAttribute('data-predecessor-anchor','endDate');
+    await expect(path).toHaveAttribute('data-successor-anchor','endDate');
+    expect((await snapshot(request)).issues.find(value=>value.id===successor.id)?.endDate).toBe(tuesday);
+
+    await page.getByRole('checkbox',{name:`${successor.key} 선택`,exact:true}).check();
+    await page.getByRole('button',{name:'자동 일정',exact:true}).click();
+    const proposal = page.getByRole('dialog',{name:'자동 일정 제안',exact:true});
+    await proposal.getByRole('button',{name:'자동 일정 미리보기',exact:true}).click();
+    await expect(proposal.locator('.automatic-new-dates')).toContainText(wednesday);
+    expect((await snapshot(request)).issues.find(value=>value.id===successor.id)?.endDate).toBe(tuesday);
+    await proposal.getByRole('button',{name:'자동 일정 적용',exact:true}).click();
+    await expect(proposal).toHaveCount(0);
+    await expect.poll(async () => (await snapshot(request)).issues.find(value=>value.id===successor.id)?.endDate).toBe(wednesday);
+    const current = (await snapshot(request)).issues.find(value=>value.id===successor.id);
+    expect(current?.startDate).toBe(tuesday);
+    await page.getByRole('button',{name:'되돌리기',exact:true}).click();
+    await expect.poll(async () => (await snapshot(request)).issues.find(value=>value.id===successor.id)?.startDate).toBe(monday);
+  } finally { await cleanup(request,[successor.id,predecessor.id]); }
+});
 
 test('업무 달력의 날짜 예외를 저장하고 근무일 이동은 달력 변경 충돌을 보존한다', async ({ page, request }) => {
   const initial = await snapshot(request), project = initial.projects[0], original = initial.calendars!.find(value => value.projectId === project.id)!;

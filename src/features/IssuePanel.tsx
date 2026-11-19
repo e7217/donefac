@@ -15,7 +15,7 @@ import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { IssueWorklogs } from './IssueWorklogs';
 import { afterAcceptedNavigation } from '../lib/navigation';
-import { errorMessage } from './schedule-utils';
+import { dependencyLabel, errorMessage } from './schedule-utils';
 import './issues.css';
 
 function editableIssue(issue: Issue, labels: string) {
@@ -196,7 +196,19 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} />
       <section className="issue-related-section"><h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>{linkedDocuments.map(link => { const doc = data.documents.find(d => d.id === link.documentId); return doc && <div className="issue-related-row" key={link.id}><FileText size={15} /><button onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button><button className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button></div>; })}<div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div></section>
       <section className="issue-related-section"><h3><GitMerge size={16} /> GitLab <span>{gitlabLinks.length}</span></h3>{gitlabLinks.length ? gitlabLinks.map(link => <a className="issue-related-row issue-gitlab-row" key={link.id} href={/^https?:\/\//.test(link.webUrl) ? link.webUrl : '#'} target="_blank" rel="noreferrer"><GitMerge size={15} /><div><strong>{link.kind === 'merge_request' ? `!${link.iid}` : `#${link.iid}`} {link.title}</strong><small>{link.kind} · {link.state}</small></div><ExternalLink size={14} /></a>) : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab 설정 후 업무 번호로 연결할 수 있습니다.</p>}</section>
-      {dependencies.length > 0 && <section className="issue-related-section"><h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>{dependencies.map(dep => { const isPredecessor = dep.predecessorId === issueId; const related = data.issues.find(i => i.id === (isPredecessor ? dep.successorId : dep.predecessorId)); return related && <button key={dep.id} className="issue-related-row" onClick={() => navigateIssue(related.id)}><span className="muted">{isPredecessor ? '후행' : '선행'}</span><span className="issue-key">{related.key}</span><span>{related.title}</span><ChevronRight size={14} /></button>; })}</section>}
+      {dependencies.length > 0 && <section className="issue-related-section">
+        <h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>
+        {dependencies.map(dependency => {
+          const isPredecessor = dependency.predecessorId === issueId;
+          const related = data.issues.find(issue => issue.id === (isPredecessor ? dependency.successorId : dependency.predecessorId));
+          return related && <button key={dependency.id} className="issue-related-row" onClick={() => navigateIssue(related.id)}>
+            <span className="muted">{isPredecessor ? '후행' : '선행'}</span>
+            <span className="issue-key">{related.key}</span>
+            <span className="issue-dependency-description"><span>{related.title}</span><small>{dependencyLabel(dependency)}</small></span>
+            <ChevronRight size={14} />
+          </button>;
+        })}
+      </section>}
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments"><h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>{loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => { const user = data.users.find(u => u.id === comment.authorId); return <article key={comment.id} className="issue-comment"><span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span><div><header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>; })}{commentError && <div className="issue-form-error" role="alert">{commentError}</div>}<form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form></section>
       <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentBody.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>

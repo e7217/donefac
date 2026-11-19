@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { Store } from '../../server/store.js';
 import { CalendarError,defaultCalendar,validateWorkCalendar,isWorkingDate,shiftWorkingDate,countWorkingDays,createCalendarMath } from '../../shared/calendar.js';
-import type { Issue } from '../../shared/types.js';
+import type { Dependency, DependencyType, Issue, ScheduleChange } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
   const service=createApp({dataDir:dir}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
@@ -18,7 +18,7 @@ async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),cre
 }
 type Fixture=Awaited<ReturnType<typeof fixture>>;
 async function makeIssue(f:Fixture,title:string,startDate:string|null,endDate:string|null,extra:Record<string,unknown>={}){const r=await f.request('/issues','POST',{projectId:f.projectId,title,startDate,endDate,...extra});assert.equal(r.status,201,JSON.stringify(r.data));return r.data as Issue;}
-async function dep(f:Fixture,a:Issue,b:Issue,lagDays=0){const r=await f.request('/dependencies','POST',{predecessorId:a.id,successorId:b.id,lagDays});assert.equal(r.status,201);return r.data;}
+async function dep(f:Fixture,a:Issue,b:Issue,lagDays=0,type?:DependencyType){const r=await f.request('/dependencies','POST',{predecessorId:a.id,successorId:b.id,lagDays,...(type?{type}:{})});assert.equal(r.status,201);return r.data as Dependency;}
 async function preview(f:Fixture,issueIds:string[],extra:Record<string,unknown>={}){const r=await f.request('/schedule/auto-preview','POST',{projectId:f.projectId,issueIds,...extra});assert.equal(r.status,200,JSON.stringify(r.data));return r.data;}
 async function getIssue(f:Fixture,id:string){return(await f.request('/workspace')).data.issues.find((i:Issue)=>i.id===id) as Issue;}
 function editProposal(f:Fixture,id:string,update:(p:any)=>any){const store=new Store(f.dir);try{const value=store.get('automatic_schedule_previews',id);store.put('automatic_schedule_previews',update(value));}finally{store.db.close();}}
@@ -38,7 +38,7 @@ test('calendar CAS guards manual workday previews; native backup preserves custo
     assert.equal((await f.request(path,'PATCH',{expectedVersion:2,exceptions:[]})).status,200);const changes=p.changes.map((c:any)=>({id:c.id,expectedVersion:c.version,startDate:c.toStart,endDate:c.toEnd}));assert.equal((await f.request('/schedule/apply','POST',{changes,calendarVersions:p.calendarVersions})).status,409);assert.equal((await getIssue(f,a.id)).startDate,a.startDate);
     const latest=(await f.request('/schedule/preview','POST',{issueIds:[a.id],days:1,workingDays:true})).data;assert.equal(latest.changes[0].toStart,'2026-11-23');const result=await f.request('/schedule/apply','POST',{changes:latest.changes.map((c:any)=>({id:c.id,expectedVersion:c.version,startDate:c.toStart,endDate:c.toEnd})),calendarVersions:latest.calendarVersions});assert.equal(result.status,200);assert.equal((await f.request('/schedule/undo','POST',{undoId:result.data.undoId})).status,200);assert.equal((await getIssue(f,a.id)).startDate,a.startDate);
     const current=(await f.request(path)).data;assert.equal((await f.request(path,'PATCH',{expectedVersion:current.version,workingWeekdays:[0,1,2,3,4],exceptions:[{date:'2026-11-20',isWorking:false,label:'배포 휴무'}]})).status,200);
-    const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,20);assert.equal((await target.request('/import','POST',{data:exported})).status,200);assert.deepEqual((await target.request(path)).data.workingWeekdays,[0,1,2,3,4]);assert.equal((await target.request(path)).data.exceptions[0].label,'배포 휴무');
+    const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,21);assert.equal((await target.request('/import','POST',{data:exported})).status,200);assert.deepEqual((await target.request(path)).data.workingWeekdays,[0,1,2,3,4]);assert.equal((await target.request(path)).data.exceptions[0].label,'배포 휴무');
     const missing=structuredClone(exported);missing.calendars=missing.calendars.filter((c:any)=>c.projectId!==f.projectId);assert.equal((await target.request('/import','POST',{data:missing})).status,400);assert.deepEqual((await target.request(path)).data.workingWeekdays,[0,1,2,3,4]);
     for(const schemaVersion of[1,2,3,4]){const legacy={...exported,schemaVersion};assert.equal((await target.request('/import','POST',{data:legacy})).status,200);const calendar=(await target.request(path)).data;assert.deepEqual(calendar.workingWeekdays,[1,2,3,4,5]);assert.deepEqual(calendar.exceptions,[]);}
   }finally{for(const x of[f,target]){await x.close();x.remove();}}
@@ -66,8 +66,100 @@ test('automatic scheduling treats missing/partial dates and negative lags explic
     const cancelled=await makeIssue(f,'취소 고정','2026-11-23','2026-11-24',{status:'cancelled'});const terminalSeed=await preview(f,[cancelled.id],{seedChanges:[{id:cancelled.id,expectedVersion:cancelled.version,startDate:'2026-11-24',endDate:'2026-11-25'}]});assert.ok(terminalSeed.blocking.length);assert.equal(terminalSeed.changes.length,0);
     const seed=await makeIssue(f,'초기 변경','2026-11-16','2026-11-17'),successor=await makeIssue(f,'초기 변경 후속','2026-11-16','2026-11-17');await dep(f,seed,successor);const seeded=await preview(f,[seed.id],{seedChanges:[{id:seed.id,expectedVersion:seed.version,startDate:'2026-11-18',endDate:'2026-11-19'}]});assert.equal(seeded.changes.find((change:any)=>change.id===seed.id).toStart,'2026-11-18');assert.equal(seeded.changes.find((change:any)=>change.id===successor.id).toStart,'2026-11-20');const earlier=await preview(f,[seed.id],{seedChanges:[{id:seed.id,expectedVersion:seed.version,startDate:'2026-11-12',endDate:'2026-11-13'}]});assert.equal(earlier.changes.length,1);assert.equal(earlier.changes[0].id,seed.id);
     assert.equal((await f.request('/schedule/auto-preview','POST',{projectId:f.projectId,issueIds:[seed.id],seedChanges:[{id:seed.id,expectedVersion:999,startDate:'2026-11-18',endDate:'2026-11-19'}]})).status,409);
-    const negative=await makeIssue(f,'음수 연결','2026-11-16','2026-11-17');await dep(f,fixed,negative,-1);assert.ok((await preview(f,[negative.id])).blocking.some((message:string)=>message.includes('음수')));
+    const negative=await makeIssue(f,'음수 연결','2026-11-16','2026-11-17');await dep(f,fixed,negative,-1);
+    const overlap=await preview(f,[negative.id]);assert.deepEqual(overlap.blocking,[]);assert.equal(overlap.changes[0].toStart,'2026-11-20');assert.equal(overlap.changes[0].toEnd,'2026-11-23');
   }finally{await f.close();f.remove();}
+});
+
+test('all dependency types use their calendar anchors and keep working duration through mixed constraints and undo', async () => {
+  const f = await fixture();
+  const mon = '2026-11-23', tue = '2026-11-24', thu = '2026-11-26', fri = '2026-11-27', sat = '2026-11-28', next = '2026-11-30';
+  try {
+    const calendar = await f.request(`/projects/${f.projectId}/calendar`, 'PATCH', {expectedVersion:1,exceptions:[
+      {date:'2026-11-25',isWorking:false,label:'중간 휴무'}, {date:sat,isWorking:true,label:'토요일 근무'},
+    ]});
+    assert.equal(calendar.status, 200);
+    const anchor = await makeIssue(f, '선행 기준', mon, thu);
+    const start = await makeIssue(f, '시작을 기다리는 업무', mon, mon);
+    const finish = await makeIssue(f, '완료를 기다리는 업무', mon, tue);
+    const handoff = await makeIssue(f, '착수 후 종료', mon, mon);
+    const lead = await makeIssue(f, '끝나기 전 시작', mon, mon);
+    const mixed = await makeIssue(f, '두 조건 적용', mon, tue);
+    const fixedGood = await makeIssue(f, '종료 조건을 만족한 완료 업무', mon, fri, {status:'done'});
+    await dep(f, anchor, start, 1, 'SS');
+    const finishEdge = await dep(f, anchor, finish, 1, 'FF');
+    await dep(f, anchor, handoff, 3, 'SF');
+    await dep(f, anchor, lead, -2);
+    await dep(f, anchor, mixed, 1, 'FF');
+    await dep(f, start, mixed, 3, 'SS');
+    await dep(f, anchor, fixedGood, 1, 'FF');
+    assert.equal((await f.request('/dependencies','POST',{predecessorId:anchor.id,successorId:finish.id,type:'SS',lagDays:0})).status,409);
+    assert.equal((await f.request('/dependencies','POST',{predecessorId:finish.id,successorId:anchor.id,type:'SF',lagDays:0})).status,400);
+
+    const manual = await f.request('/schedule/preview', 'POST', {issueIds:[finish.id],days:0,workingDays:true});
+    assert.equal(manual.status,200);
+    assert.ok(manual.data.warnings.some((warning:string) => warning.includes(finish.key) && warning.includes('FF') && warning.includes(fri)));
+    const pending = await preview(f,[anchor.id]);
+    assert.deepEqual(pending.blocking,[]);
+    const earlierVersion = finishEdge.version ?? 1;
+    const changed = await f.request(`/dependencies/${finishEdge.id}`, 'PATCH', {expectedVersion:earlierVersion, type:'SS',lagDays:-1});
+    assert.equal(changed.status,200);
+    assert.equal(changed.data.version, earlierVersion+1);
+    assert.equal((await f.request(`/dependencies/${finishEdge.id}`,'PATCH',{expectedVersion:earlierVersion,lagDays:1})).status,409);
+    assert.equal((await f.request(`/dependencies/${finishEdge.id}?expectedVersion=${earlierVersion}`,'DELETE')).status,409);
+    const reverted = await f.request(`/dependencies/${finishEdge.id}`, 'PATCH', {expectedVersion:changed.data.version,type:'FF',lagDays:1});
+    assert.equal(reverted.status,200);
+    assert.equal((await f.request('/schedule/auto-apply','POST',{previewId:pending.previewId})).status,409);
+
+    const fresh = await preview(f,[anchor.id]);
+    assert.deepEqual(fresh.blocking,[]);
+    assert.deepEqual(new Map(fresh.changes.map((change:ScheduleChange)=>[change.id,[change.toStart,change.toEnd]])),new Map([
+      [start.id,[tue,tue]], [finish.id,[thu,fri]], [handoff.id,[fri,fri]], [lead.id,[tue,tue]], [mixed.id,[sat,next]],
+    ]));
+    const applied = await f.request('/schedule/auto-apply','POST',{previewId:fresh.previewId});
+    assert.equal(applied.status,200);
+    assert.deepEqual(applied.data.warnings,[]);
+    assert.equal((await getIssue(f,finish.id)).endDate,fri);
+    assert.equal((await getIssue(f,fixedGood.id)).version,fixedGood.version);
+    assert.equal((await f.request('/schedule/undo','POST',{undoId:applied.data.undoId})).status,200);
+    assert.equal((await getIssue(f,finish.id)).endDate,tue);
+
+    const missingEnd = await makeIssue(f,'착수일만 있는 선행',tue,null);
+    const sf = await makeIssue(f,'선행 착수 다음 근무일에 완료',mon,mon);
+    await dep(f, missingEnd, sf,1,'SF');
+    const startOnly = await preview(f,[sf.id]);
+    assert.deepEqual(startOnly.blocking,[]);
+    assert.equal(startOnly.changes[0].toEnd,thu);
+  } finally { await f.close(); f.remove(); }
+});
+
+test('schema21 backs up non-FS links and rejects older headers even when a link is only in trash', async () => {
+  const f = await fixture();
+  try {
+    const a = await makeIssue(f,'복원할 연결 선행','2026-11-23','2026-11-26');
+    const b = await makeIssue(f,'복원할 연결 후행','2026-11-23','2026-11-24');
+    const link = await dep(f,a,b,-1,'FF');
+    const backup = (await f.request('/export')).data;
+    assert.equal(backup.schemaVersion,21);
+    assert.equal((await f.request('/import','POST',{data:{...backup,schemaVersion:20}})).status,400);
+    assert.equal((await f.request(`/dependencies/${link.id}`,'PATCH',{expectedVersion:link.version??1,lagDays:-2})).status,200);
+    assert.equal((await f.request('/import','POST',{data:backup})).status,200);
+    let current = (await f.request('/workspace')).data.dependencies.find((value:Dependency)=>value.id===link.id) as Dependency;
+    assert.equal(current.type,'FF'); assert.equal(current.lagDays,-1);
+    assert.ok(current.version!>(link.version??1)+1);
+    const beforeTrash = current.version!;
+    const item = await getIssue(f,b.id);
+    const removed = await f.request(`/issues/${b.id}`,'DELETE',{expectedVersion:item.version});
+    assert.equal(removed.status,200);
+    const archived = (await f.request('/export')).data;
+    assert.ok(!archived.dependencies.some((value:Dependency)=>value.id===link.id));
+    assert.equal((await f.request('/import','POST',{data:{...archived,schemaVersion:20}})).status,400);
+    assert.equal((await f.request('/import','POST',{data:archived})).status,200);
+    assert.equal((await f.request(`/trash/${removed.data.trashEntryId}/restore`,'POST',{})).status,200);
+    current = (await f.request('/workspace')).data.dependencies.find((value:Dependency)=>value.id===link.id) as Dependency;
+    assert.equal(current.type,'FF'); assert.equal(current.lagDays,-1); assert.ok(current.version!>beforeTrash);
+    assert.equal((await f.request(`/dependencies/${link.id}`,'PATCH',{expectedVersion:beforeTrash,type:'SS'})).status,409);
+  } finally { await f.close(); f.remove(); }
 });
 
 test('guards reject changed untouched anchors, calendar, dependencies, workflow, expiry and import reset',async()=>{

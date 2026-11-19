@@ -63,7 +63,7 @@ test('native schema7 restores macro JSON and CRDT state with missing targets; in
     const target=await make(f,'사라질 원문'),source=await make(f,'포함 기록',body(reference('documentInclude',target.id,'보관할 제목'),details));
     const enabled=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration/enable`,'POST',{expectedVersion:source.version})).data;
     await f.call(`/documents/${target.id}?expectedVersion=1`,'DELETE');
-    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,20);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,COLLABORATION_SCHEMA);
+    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,21);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,COLLABORATION_SCHEMA);
     const current=await snapshot(f),bad=structuredClone(backup);bad.documents.find(document=>document.id===source.id)!.content=body(reference('documentInclude',source.id,'순환'));
     assert.equal((await f.call('/import','POST',{data:bad})).status,422);assert.deepEqual(await snapshot(f),current);
     const downgraded={...backup,schemaVersion:6};assert.equal((await f.call('/import','POST',{data:downgraded})).status,400);assert.deepEqual(await snapshot(f),current);
@@ -136,7 +136,7 @@ test('native backup protects document issue lists in history and trash and resto
     assert.equal(changed.status, 200);
     const before = await snapshot(f);
     const live = (await f.call<Backup>('/export')).data;
-    assert.equal(live.schemaVersion, 20);
+    assert.equal(live.schemaVersion, 21);
     assert.equal((await f.call('/import', 'POST', {data:{...live,schemaVersion:19}})).status, 400);
     assert.deepEqual(await snapshot(f), before);
 

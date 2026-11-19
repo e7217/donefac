@@ -2,6 +2,7 @@ import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomaticSchedulePreview,Dependency,Issue,ProjectWorkflow,ScheduleChange } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
+import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isTerminalStatus } from '../shared/workflow-helpers.js';
 import { CalendarService } from './calendars.js';
 import { Store } from './store.js';
@@ -16,7 +17,10 @@ export const AUTO_PREVIEW_TTL_MS=30*60*1000,AUTO_RESULT_RETENTION_MS=7*24*60*60*
 interface Proposal{id:string;projectId:string;actorId:string;createdAt:string;expiresAt:string;issueVersions:[string,number][];calendarVersion:number;workflowVersion:number;issueSchemaVersion?:number;dependencyHash:string;preview:AutomaticSchedulePreview;used:boolean;appliedAt?:string;result?:AutomaticScheduleResult}
 function date(value:unknown,label:string):string|null{if(value===null)return null;if(!isCalendarDate(value))fail(`${label}은(는) YYYY-MM-DD 형식이어야 합니다.`);return value;}
 const readset=(issues:Issue[]):[string,number][]=>issues.map(issue=>[issue.id,issue.version] as [string,number]).sort((a,b)=>a[0].localeCompare(b[0]));
-function dependencyHash(dependencies:Dependency[]){return createHash('sha256').update(JSON.stringify(dependencies.map(d=>[d.id,d.predecessorId,d.successorId,d.type,d.lagDays]).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))))).digest('hex');}
+function dependencyHash(dependencies: Dependency[]) {
+  const fields = dependencies.map(dependencyGuardFields).sort((a, b) => a[0].localeCompare(b[0]));
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
+}
 
 /** Persisted, actor-bound proposals. Apply uses one transaction including the root undo/audit hook. */
 export class AutomaticScheduleService{
@@ -51,16 +55,33 @@ export class AutomaticScheduleService{
     for(const id of order){
       const issue=byId.get(id)!;const terminal=isTerminalStatus({workflows},issue.projectId,issue.status),seed=seeds.get(id),basis=terminal?{startDate:issue.startDate,endDate:issue.endDate}:seed||{startDate:issue.startDate,endDate:issue.endDate};effective.set(id,basis);
       if(terminal&&seed&&(seed.startDate!==issue.startDate||seed.endDate!==issue.endDate))block(issue,'완료·취소 업무는 고정 일정입니다. 초기 일정 변경을 적용할 수 없습니다.');
-      let requiredStart:string|null=null;
+      const required: { startDate: string | null; endDate: string | null } = { startDate: null, endDate: null };
       for(const dependency of predecessors.get(id)||[]){
         const predecessor=byId.get(dependency.predecessorId);if(!predecessor){block(issue,'프로젝트 밖의 선행 업무를 확인해 주세요.');continue;}
-        if(dependency.type!=='FS'||!Number.isSafeInteger(dependency.lagDays)||dependency.lagDays<0){block(issue,`${predecessor.key} 연결에 지원하지 않는 종류 또는 음수 지연일이 있습니다.`);continue;}
+        if(!isDependencyType(dependency.type)||!isDependencyLag(dependency.lagDays)){block(issue,`${predecessor.key} 연결의 종류와 간격을 확인해 주세요.`);continue;}
         if(blocked.has(predecessor.id)){block(issue,`${predecessor.key}의 일정이 막혀 후속 일정을 계산할 수 없습니다.`);continue;}
-        const end=(effective.get(predecessor.id)||predecessor).endDate;if(!end){block(issue,`${predecessor.key}의 종료일이 없어 선후행 조건을 계산할 수 없습니다.`);continue;}
-        try{const bound=math.shift(end,dependency.lagDays+1);if(!requiredStart||bound>requiredStart)requiredStart=bound;}catch(error){if(!(error instanceof CalendarError))throw error;block(issue,`${predecessor.key}: ${error.message}`);}
+        try {
+          const bound = dependencyBound(dependency, effective.get(predecessor.id) || predecessor, math);
+          if (!bound) {
+            const label = SCHEDULE_DATE_LABELS[DEPENDENCY_ENDPOINTS[dependency.type].predecessor];
+            block(issue, `${predecessor.key}의 ${label}이 없어 선후행 조건을 계산할 수 없습니다.`);
+            continue;
+          }
+          const prior = required[bound.endpoint];
+          if (!prior || bound.date > prior) required[bound.endpoint] = bound.date;
+        } catch (error) {
+          if (!(error instanceof CalendarError)) throw error;
+          block(issue, `${predecessor.key} · ${error.message}`);
+        }
       }
       if(terminal){
-        if(requiredStart&&(!basis.startDate||basis.startDate<requiredStart))block(issue,`고정 시작일 ${basis.startDate||'미정'}과 선후행 조건 ${requiredStart}이 충돌합니다.`);
+        for (const endpoint of ['startDate', 'endDate'] as const) {
+          const bound = required[endpoint];
+          const actual = basis[endpoint];
+          if (bound && (!actual || actual < bound)) {
+            block(issue, `고정 ${SCHEDULE_DATE_LABELS[endpoint]} ${actual || '미정'}과 선후행 조건 ${bound}이 충돌합니다.`);
+          }
+        }
         if(!basis.startDate||!basis.endDate)warnings.push(`${issue.key}: 완료·취소 업무의 미정 일정은 변경하지 않습니다.`);
         continue;
       }
@@ -71,8 +92,12 @@ export class AutomaticScheduleService{
       else{try{duration=math.count(start!,end!);}catch(error){if(!(error instanceof CalendarError))throw error;block(issue,error.message);continue;}if(duration<1){block(issue,'기존 일정에 작업일이 없어 기간을 임의로 만들지 않았습니다.');continue;}if(duration>3650){block(issue,'기존 작업 기간이 3650 작업일을 초과합니다. 범위를 나누어 계획해 주세요.');continue;}}
       try{
         const originalStart=start,originalEnd=end;start=math.onOrAfter(start!);if(start!==originalStart)warnings.push(`${issue.key}: 비작업 시작일 ${originalStart}을 다음 작업일 ${start}로 조정합니다.`);
-        if(requiredStart&&requiredStart>start)start=requiredStart;
+        if(required.startDate&&required.startDate>start)start=math.onOrAfter(required.startDate);
         if(end===null||start!==originalStart){end=math.shift(start,duration-1);if(originalEnd&&end<originalEnd)end=originalEnd;}
+        if (required.endDate && end < required.endDate) {
+          end = math.onOrAfter(required.endDate);
+          start = math.shift(end, 1 - duration);
+        }
         effective.set(id,{startDate:start,endDate:end});
         if(start!==issue.startDate||end!==issue.endDate)changes.push({id:issue.id,key:issue.key,title:issue.title,version:issue.version,fromStart:issue.startDate,fromEnd:issue.endDate,toStart:start,toEnd:end});
       }catch(error){if(!(error instanceof CalendarError))throw error;block(issue,error.message);}

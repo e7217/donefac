@@ -1,4 +1,5 @@
-import type { Issue } from '../../shared/types';
+import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
+import type { Dependency, Issue } from '../../shared/types';
 
 export const DAY_MS = 86_400_000;
 export function dayNumber(date: string) { return Math.floor(Date.parse(`${date}T00:00:00Z`) / DAY_MS); }
@@ -16,3 +17,8 @@ export function scheduleRange(issues: Issue[]) {
   return { start, end, days: end - start + 1 };
 }
 export function errorMessage(error: unknown) { return error instanceof Error ? error.message : '요청을 처리하지 못했습니다.'; }
+
+export function dependencyLabel(dependency: Pick<Dependency, 'type' | 'lagDays'>) {
+  const { type = 'FS', lagDays } = dependency;
+  return `${DEPENDENCY_LABELS[type]} (${type}) · ${lagDays > 0 ? '+' : ''}${lagDays}근무일`;
+}

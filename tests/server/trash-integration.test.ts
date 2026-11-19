@@ -232,7 +232,9 @@ test('issue trash hides canonical data and restores attachments, worklogs, and d
   await restore(f, documentEntry);
   await restore(f, beforeEntry);
   const complete = await workspace(f);
-  assert.deepEqual(complete.dependencies.find(value => value.id === dependency.id), dependency);
+  const restoredDependency = complete.dependencies.find(value => value.id === dependency.id);
+  assert.ok(restoredDependency && (restoredDependency.version ?? 1) > (dependency.version ?? 1));
+  assert.deepEqual(restoredDependency, { ...dependency, version:restoredDependency.version });
   assert.deepEqual(complete.resourceLinks.find(value => value.id === link.id), link);
   await restore(f, entry, 404);
   assert.equal((await trash(f)).total, 0);
@@ -375,7 +377,7 @@ test('native schema 17 retains invisible archived bytes, rejects damage, and can
   const fileIds = [original.id, latest.currentVersionId].sort();
   assert.deepEqual(readdirSync(path).sort(), fileIds);
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 20);
+  assert.equal(backup.schemaVersion, 21);
   assert.equal(backup.trashEntries?.length, 1);
   assert.ok(!backup.documents.some(value => value.id === doc.id));
   assert.ok(!backup.attachments.some(value => value.id === original.id));

@@ -365,7 +365,8 @@ export interface DocumentPublicationList {
   pendingAssigned: number;
   items: DocumentPublicationListItem[];
 }
-export interface Dependency { id: string; predecessorId: string; successorId: string; type: 'FS'; lagDays: number }
+export type DependencyType = 'FS' | 'SS' | 'FF' | 'SF';
+export interface Dependency { id: string; predecessorId: string; successorId: string; type: DependencyType; lagDays: number; version?: number }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string }
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }

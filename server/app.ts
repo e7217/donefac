@@ -42,6 +42,7 @@ import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
 import { documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
+import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
@@ -64,6 +65,15 @@ const isDate = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{
 const date = (v: unknown, label: string) => v === null || v === '' || v === undefined ? null : isDate(v) ? v : fail(`${label}: YYYY-MM-DD 형식의 날짜가 필요합니다.`);
 function dateRange(start: string | null, end: string | null) { if (start && end && start > end) fail('종료일은 시작일보다 빠를 수 없습니다.'); }
 function checkVersion(current: {version: number}, value: unknown) { if (!Number.isInteger(value)) fail('expectedVersion이 필요합니다.'); if (current.version !== value) fail('다른 작업자가 변경했습니다. 새로고침 후 다시 시도해 주세요.',409,{currentVersion:current.version}); }
+function validateDependencyVersion(dependency: Dependency): void {
+  if(dependency.version!==undefined&&(!Number.isSafeInteger(dependency.version)||dependency.version<1))fail('업무 연결 버전을 확인해 주세요.');
+}
+function nextDependencyVersion(dependency: Dependency, previousVersion = 0): number {
+  const version=Math.max(dependency.version??1,previousVersion)+1;
+  if(!Number.isSafeInteger(version))fail('업무 연결의 버전 범위를 초과했습니다.',409);
+  return version;
+}
+const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
@@ -80,6 +90,13 @@ function shiftDate(value: string, days: number, working: boolean): string {
 export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean} = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
+  const dependencyVersionFloor=()=>{
+    const value=store.setting(dependencyVersionKey);
+    return typeof value==='number'&&Number.isSafeInteger(value)&&value>0?value:1;
+  };
+  const trackDependencyVersion=(version: number)=>{
+    if(version>dependencyVersionFloor())store.setSetting(dependencyVersionKey,version);
+  };
   const files = new AttachmentFiles(dataDir);
   files.recover(store.setting('attachmentImportGeneration'));
   if (options.seed !== false) seed(store);
@@ -171,20 +188,37 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return d;
   };
   const revision = (d: DocPage, authorId: string, summary: string) => store.put('revisions',{id:uid(),documentId:d.id,version:d.version,title:d.title,content:d.content,plainText:d.plainText,authorId,createdAt:now(),summary});
-  const validateDependency = (d: any, current: any[] = store.all('dependencies')) => {
+  const validateDependency = (d: Dependency, current: Dependency[] = store.all<Dependency>('dependencies')) => {
     if(d.predecessorId===d.successorId)fail('자기 자신에게 의존할 수 없습니다.');
     const a=get<Issue>('issues',d.predecessorId),b=get<Issue>('issues',d.successorId);
     if(a.projectId!==b.projectId)fail('의존성은 같은 프로젝트 안에서 연결해 주세요.');
-    if(d.type!=='FS'||!Number.isInteger(d.lagDays)||Math.abs(d.lagDays)>3650)fail('FS 의존성과 정수 지연일이 필요합니다.');
-    const edges=current.filter(x=>x.id!==d.id);
-    if(edges.some(x=>x.predecessorId===d.predecessorId&&x.successorId===d.successorId))fail('이미 연결된 의존성입니다.',409);
-    const todo=[d.successorId],seen=new Set();
-    while(todo.length){const id=todo.pop();if(id===d.predecessorId)fail('의존성에 순환 관계가 생깁니다.');if(seen.has(id))continue;seen.add(id);edges.filter(x=>x.predecessorId===id).forEach(x=>todo.push(x.successorId));}
+    if(!isDependencyType(d.type)||!isDependencyLag(d.lagDays))fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
+    validateDependencyVersion(d);
+    const successors=new Map<string,string[]>();
+    for(const edge of current){
+      if(edge.id===d.id)continue;
+      if(edge.predecessorId===d.predecessorId&&edge.successorId===d.successorId)fail('이미 연결된 의존성입니다.',409);
+      const next=successors.get(edge.predecessorId);
+      if(next)next.push(edge.successorId);else successors.set(edge.predecessorId,[edge.successorId]);
+    }
+    const todo=[d.successorId],seen=new Set<string>();
+    while(todo.length){
+      const id=todo.pop()!;
+      if(id===d.predecessorId)fail('의존성에 순환 관계가 생깁니다.');
+      if(seen.has(id))continue;
+      seen.add(id);
+      for(const successor of successors.get(id)??[])todo.push(successor);
+    }
   };
   const scheduleWarnings = (issues: Issue[], dependencies=store.all<Dependency>('dependencies')) => {
     const map=new Map(issues.map(i=>[i.id,i])); const warnings:string[]=[];const mathCache=new Map<string,ReturnType<typeof createCalendarMath>>();
     const mathFor=(projectId:string)=>{let math=mathCache.get(projectId);if(!math){math=createCalendarMath(calendars.get(projectId));mathCache.set(projectId,math);}return math;};
-    for(const dep of dependencies){const a=map.get(dep.predecessorId),b=map.get(dep.successorId);if(a?.endDate&&b?.startDate){try{if(b.startDate<mathFor(a.projectId).shift(a.endDate,dep.lagDays+1))warnings.push(`${a.key} → ${b.key}: 선행 업무 종료 후 ${dep.lagDays}근무일 간격 조건과 일정이 맞지 않습니다. 수동 일정은 자동 이동하지 않습니다.`);}catch{warnings.push(`${a.key} → ${b.key}: 달력 계산 범위를 확인해 주세요. 수동 일정은 자동 이동하지 않습니다.`);}}}
+    for(const dep of dependencies){
+      const prior=map.get(dep.predecessorId),next=map.get(dep.successorId);
+      if(!prior||!next)continue;
+      const warning=dependencyScheduleWarning(dep,prior,next,mathFor(prior.projectId));
+      if(warning)warnings.push(warning);
+    }
     return warnings;
   };
   /** Caller owns the transaction, shared by manual edits and guarded proposals. */
@@ -487,7 +521,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         revision(doc,actorId,'휴지통에서 복원');
       }
       const warnings=trash.restoreLinks(entry,{dependency(value){
-        try{validateDependency(value);}
+        try{validateDependency(value);trackDependencyVersion(value.version??1);}
         catch(error){if(error instanceof ApiError&&error.status<500)return error.message;throw error;}
       }});
       if(entry.resourceType==='issue'){
@@ -619,8 +653,47 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
-  app.post('/api/dependencies',(req,res)=>{const d={id:uid(),predecessorId:req.body.predecessorId,successorId:req.body.successorId,type:'FS',lagDays:req.body.lagDays??0};store.transaction(()=>{validateDependency(d);store.put('dependencies',d);activity(req,'issue',d.successorId,'선행 업무 연결',get<Issue>('issues',d.predecessorId).key);});res.status(201).json(d);});
-  app.delete('/api/dependencies/:id',(req,res)=>{const d=get('dependencies',req.params.id);store.transaction(()=>{store.remove('dependencies',d.id);activity(req,'issue',d.successorId,'선행 업무 연결 해제');});res.json({ok:true});});
+  app.post('/api/dependencies',(req,res)=>{
+    const input=req.body??{};
+    const dependency:Dependency={id:uid(),predecessorId:input.predecessorId,successorId:input.successorId,
+      type:input.type===undefined?'FS':input.type,lagDays:input.lagDays??0,version:1};
+    store.transaction(()=>{
+      validateDependency(dependency);
+      store.put('dependencies',dependency);
+      activity(req,'issue',dependency.successorId,'선행 업무 연결',get<Issue>('issues',dependency.predecessorId).key);
+    });
+    res.status(201).json(dependency);
+  });
+  app.patch('/api/dependencies/:id',(req,res)=>{
+    const input=req.body;
+    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['expectedVersion','type','lagDays','actorId'].includes(key)))fail('업무 연결 유형과 간격을 확인해 주세요.');
+    const result=store.transaction(()=>{
+      const prior=get<Dependency>('dependencies',req.params.id);
+      checkVersion({version:prior.version??1},input.expectedVersion);
+      const type=Object.hasOwn(input,'type')?input.type:prior.type;
+      const lagDays=Object.hasOwn(input,'lagDays')?input.lagDays:prior.lagDays;
+      if(!isDependencyType(type)||!isDependencyLag(lagDays))fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
+      if(type===prior.type&&lagDays===prior.lagDays)return {...prior,version:prior.version??1};
+      // Editing relationship details leaves the existing endpoints and graph intact.
+      const version=nextDependencyVersion(prior);
+      const next:Dependency={...prior,type,lagDays,version};
+      store.put('dependencies',next);
+      trackDependencyVersion(version);
+      activity(req,'issue',next.successorId,'선후행 일정 변경',`${prior.type} ${prior.lagDays}근무일 → ${next.type} ${next.lagDays}근무일`);
+      return next;
+    });
+    res.json(result);
+  });
+  app.delete('/api/dependencies/:id',(req,res)=>{
+    store.transaction(()=>{
+      const dependency=get<Dependency>('dependencies',req.params.id);
+      const expected=req.body?.expectedVersion===undefined?req.query.expectedVersion:req.body.expectedVersion;
+      if(expected!==undefined)checkVersion({version:dependency.version??1},typeof expected==='string'&&/^\d+$/.test(expected)?Number(expected):expected);
+      store.remove('dependencies',dependency.id);
+      activity(req,'issue',dependency.successorId,'선행 업무 연결 해제');
+    });
+    res.json({ok:true});
+  });
   app.post('/api/schedule/preview',(req,res)=>{
     const {issueIds,days,workingDays=false}=req.body;
     if(!Array.isArray(issueIds)||!issueIds.length||issueIds.length>1000||!issueIds.every(x=>typeof x==='string')||!Number.isInteger(days)||Math.abs(days)>3650||typeof workingDays!=='boolean')fail('대상 티켓과 이동 일수를 확인해 주세요.');
@@ -719,6 +792,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
     if(data.schemaVersion<17&&((Array.isArray(data.trashEntries)&&data.trashEntries.length)||importedReportLedger.events.some(event=>event.kind==='restored')))fail('휴지통과 복원 이력이 있는 백업은 schemaVersion 17이 필요합니다.');
     const importedTrash=trash.validateImport(data.schemaVersion>=17?data.trashEntries:[],data);
+    const importedDependencies=data.dependencies as Dependency[];
+    const archivedDependencies=importedTrash.flatMap(entry=>entry.dependencies);
+    if(data.schemaVersion<21&&(importedDependencies.some(value=>value.type!=='FS')||archivedDependencies.some(value=>value.type!=='FS'))){
+      fail('SS·FF·SF 업무 연결에는 schemaVersion 21 백업이 필요합니다.');
+    }
+    for(const dependency of importedDependencies)validateDependencyVersion(dependency);
     const archivedIssues=importedTrash.flatMap(entry=>entry.resourceType==='issue'?[entry.resource]:[]);
     const effortIssues=[...(data.issues as Issue[]),...archivedIssues];
     if(data.schemaVersion<18){
@@ -775,9 +854,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
       const previousSequences=new Map((store.db.prepare('SELECT project_id,next_number FROM issue_sequences').all() as {project_id:string;next_number:number}[]).map(row=>[row.project_id,row.next_number]));
+      // Remember prior versions even if their links were deleted before this import.
+      let previousDependencyVersion=dependencyVersionFloor();
+      for(const dependency of store.all<Dependency>('dependencies'))previousDependencyVersion=Math.max(previousDependencyVersion,dependency.version??1);
       for(const entry of trash.all()){
         const versions=entry.resourceType==='issue'?previousIssues:previousDocuments;
         versions.set(entry.resourceId,Math.max(versions.get(entry.resourceId)||0,entry.resource.version));
+        for(const dependency of entry.dependencies)previousDependencyVersion=Math.max(previousDependencyVersion,dependency.version??1);
       }
       for(const entry of importedTrash){
         const versions=entry.resourceType==='issue'?previousIssues:previousDocuments;
@@ -803,7 +886,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
       const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
       for(const d of data.documents){validateDocument(d,undefined,{allowMissing:true,skipReferences:true});if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
-      for(const d of data.dependencies){validateDependency(d,data.dependencies);store.put('dependencies',d);}
+      let importedDependencyVersion=previousDependencyVersion;
+      for(const dependency of [...importedDependencies,...archivedDependencies]){
+        dependency.version=nextDependencyVersion(dependency,previousDependencyVersion);
+        importedDependencyVersion=Math.max(importedDependencyVersion,dependency.version);
+      }
+      trackDependencyVersion(importedDependencyVersion);
+      for(const dependency of importedDependencies){validateDependency(dependency,importedDependencies);store.put('dependencies',dependency);}
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
       for(const c of data.comments){if(!['issue','document'].includes(c.resourceType))fail('잘못된 댓글 대상입니다.');get(c.resourceType==='issue'?'issues':'documents',c.resourceId);get('users',c.authorId);text(c.body,'댓글',20000);store.put('comments',c);}
       for(const r of importedRevisions){get('documents',r.documentId);get('users',r.authorId);if(!Number.isInteger(r.version)||r.version<1)fail('문서 이력을 확인해 주세요.');store.put('revisions',r);}

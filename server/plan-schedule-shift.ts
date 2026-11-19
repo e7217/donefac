@@ -3,6 +3,7 @@ import type { Express, Request } from 'express';
 import { calendarDate, calendarDay, CalendarError, createCalendarMath } from '../shared/calendar.js';
 import { planningFields } from '../shared/planning-helpers.js';
 import type { Dependency, Issue, PlanningItem, PlanScheduleDates, PlanScheduleShiftPreview, PlanScheduleShiftResult, WorkCalendar } from '../shared/types.js';
+import { dependencyGuardFields } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import type { Store } from './store.js';
 
@@ -80,7 +81,7 @@ export class PlanScheduleShiftService {
       plan: [plan.id, plan.projectId, plan.kind, plan.version],
       members: state.members.map(issue => [issue.id, issue.version]),
       endpoints: state.issues.filter(issue => endpoints.has(issue.id)).sort(compareId).map(issue => [issue.id, issue.version]),
-      links: links.map(link => [link.id, link.predecessorId, link.successorId, link.type, link.lagDays]),
+      links: links.map(dependencyGuardFields),
       versions,
     })).digest('hex');
   }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import type { Dependency, Issue, SchedulePasteApplyResult, SchedulePastePreview } from '../shared/types.js';
+import { dependencyGuardFields } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { parseSchedulePaste } from './schedule-paste-parser.js';
 import type { Store } from './store.js';
@@ -71,7 +72,7 @@ export class SchedulePasteService {
     const related = new Set([...targetIds, ...links.flatMap(link => [link.predecessorId, link.successorId])]);
     const issueVersions = issues.filter(issue => related.has(issue.id)).sort((a, b) => a.id.localeCompare(b.id))
       .map(issue => [issue.id, issue.version]);
-    const linkVersions = links.map(link => [link.id, link.predecessorId, link.successorId, link.type, link.lagDays]);
+    const linkVersions = links.map(dependencyGuardFields);
     return createHash('sha256').update(JSON.stringify({issueVersions, linkVersions, versions})).digest('hex');
   }
 

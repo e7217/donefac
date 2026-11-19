@@ -7,6 +7,7 @@ import type {
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { CollaborationExport } from './collaboration.js';
 import { normalizeDocumentContent } from './document-content.js';
+import { isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import type { Store } from './store.js';
 
 type ArchiveRows = {
@@ -204,11 +205,17 @@ export class TrashService {
     for (const value of archive.dependencies) resolve('dependencies', value,
       targets(endpoint('issue', value.predecessorId), endpoint('issue', value.successorId)), '선후행 일정', () => {
         const existing = this.store.db.prepare('SELECT json FROM dependencies WHERE predecessor_id=? AND successor_id=?').get(value.predecessorId, value.successorId) as {json: string} | undefined;
-        if (existing) return (JSON.parse(existing.json) as Dependency).lagDays === value.lagDays ? undefined : '선후행 일정에 현재 설정된 지연일을 유지했습니다.';
+        if (existing) {
+          const current=JSON.parse(existing.json) as Dependency;
+          return current.type===value.type&&current.lagDays===value.lagDays ? undefined : '선후행 일정에 현재 설정된 유형과 간격을 유지했습니다.';
+        }
         if (this.store.get('dependencies', value.id)) return '선후행 일정 ID가 충돌하여 기존 연결을 유지했습니다.';
-        const error = guards.dependency(value);
+        const version=(value.version??1)+1;
+        if(!Number.isSafeInteger(version))return '선후행 일정의 버전 범위를 초과했습니다.';
+        const restored={...value,version};
+        const error = guards.dependency(restored);
         if (error) return `선후행 일정을 복원하지 않았습니다. ${error}`;
-        this.store.put('dependencies', value);
+        this.store.put('dependencies', restored);
       });
     for (const value of archive.resourceLinks) resolve('resourceLinks', value,
       targets(endpoint('issue', value.issueId), endpoint('document', value.documentId)), '업무·문서 연결', () => {
@@ -277,8 +284,8 @@ export class TrashService {
         checkFile(row) && validString(row.attachmentId) && roots.has(row.attachmentId));
       const idInPair = (a: unknown, b: unknown) => validString(a) && validString(b) && a !== b && [a,b].includes(entry.resourceId as string);
       const dependencies = collect<Dependency>(entry.dependencies, reserved.dependencies, '선후행 일정', row =>
-        resourceType === 'issue' && idInPair(row.predecessorId, row.successorId) && row.type === 'FS' &&
-        typeof row.lagDays === 'number' && Number.isInteger(row.lagDays) && Math.abs(row.lagDays) <= 3650);
+        resourceType === 'issue' && idInPair(row.predecessorId, row.successorId) && isDependencyType(row.type) && isDependencyLag(row.lagDays) &&
+        (row.version===undefined||typeof row.version==='number'&&Number.isSafeInteger(row.version)&&row.version>0));
       const resourceLinks = collect<ResourceLink>(entry.resourceLinks, reserved.resourceLinks, '업무·문서 연결', row =>
         validString(row.issueId) && validString(row.documentId) && row[resourceType === 'issue' ? 'issueId' : 'documentId'] === entry.resourceId && validString(row.kind));
       const issueRelations = collect<IssueRelation>(entry.issueRelations, reserved.issueRelations, '업무 관계', row =>
