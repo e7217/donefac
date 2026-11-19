@@ -226,7 +226,7 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 제목은 공백을 제외해 1~200자다. 서버가 집계하고 저장한 값을 읽기 전용으로 제공하며 주간 문서는 계속 편집할 수 있다. 문서의 업무 참조는 최대 30개이고 전체 행은 보관본에서 확인한다. 경로는 신뢰하는 로컬 브라우저 범위에서 제공한다.
 
-자체 백업 schema10은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
+자체 백업 schema10 이상은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
 
 
 ## 스프레드시트 일정 붙여넣기
@@ -236,3 +236,20 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 응답의 `changes`는 업무별 현재·제안 일정, `warnings`는 변경 관련 선후행 경고, `errors`는 적용을 막는 줄 번호별 진단이다. `unchanged`는 값이 바뀌지 않는 행 수다. 오류 없이 변경이 있는 경우에만 `previewId`와 `expiresAt`을 발급한다.
 
 `POST /api/schedule/paste-apply`에 `{previewId}`를 보낸다. 미리보기 작업자와 정책·달력·선후행·업무 버전을 검사해 30분 이내의 계획을 적용한다. 같은 ID의 적용을 7일 안에 재요청하면 같은 `{undoId,updated,warnings}`를 반환한다. 날짜·이력·되돌리기 기록·적용 응답을 같은 트랜잭션으로 저장한다. 되돌리기는 기존 `POST /api/schedule/undo`를 사용한다. 미리보기와 영수증은 자체 백업 범위 밖에 있으며 복원 시 초기화한다.
+
+
+## 티켓과 프로젝트 작업 시간
+
+브라우저의 `/api`와 키로 호출하는 `/api/v1`에서 같은 작업 시간 경로를 사용한다. API 키는 설정된 프로젝트 범위와 소유자를 사용한다. 조회는 읽기 키로 가능하며 추가·수정·삭제에는 쓰기 키가 필요하다.
+
+| 경로 | 동작 |
+| --- | --- |
+| `GET /issues/:id/worklogs?offset=0` | 작업일 내림차순으로 최대 50개와 전체 분·건수 조회 |
+| `POST /issues/:id/worklogs` | `{requestId, workDate, minutes, note}`로 기록하고 생성 결과 반환 |
+| `PATCH /issues/:id/worklogs/:entryId` | 작성자가 `{expectedVersion, workDate, minutes, note}`로 수정 |
+| `DELETE /issues/:id/worklogs/:entryId` | 작성자가 JSON 본문의 `expectedVersion`으로 삭제 |
+| `GET /projects/:id/worklog-report` | `startDate`·`endDate`(포함, 1~92일) 및 선택 `authorId`로 날짜·작성자·업무별 분·건수 집계 |
+
+`workDate`는 선택한 날짜의 YYYY-MM-DD 값이다. 시간은 기록당 1~1,440분의 정수이며 메모는 선택 항목으로 2,000자까지다. 소요 포인트와 별개다. 생성 시 호출자가 소문자 UUID `requestId`를 생성하고, 응답을 받지 못하면 같은 ID와 같은 데이터로 다시 요청한다. 생성은 201을 반환하며 서버가 보관한 현재 기록을 재응답한다. 다른 데이터나 삭제된 ID를 재사용하면 409다. 수정과 삭제는 기록의 버전을 검사한다. 기록 변경은 업무 자체의 버전을 올리지 않는다.
+
+티켓이 삭제되어도 이전에 입력한 시간은 해당 프로젝트의 집계에 남는다. 이 경우 보고서에는 기록에 남아 있는 키와 제목을 표시한다. 시간을 개별 삭제하면 합계에서 제외하고 저장된 메모를 지운다. 자체 백업 schema11은 기존 업무의 시간과 삭제된 티켓의 시간, 삭제 요청을 식별할 ID를 함께 보존한다. schema1~10 복원에서는 빈 작업 시간 목록으로 시작한다.

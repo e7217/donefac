@@ -164,7 +164,19 @@ export class ApiKeyService {
     if (Number(result.changes) !== 1) unauthorized();
   }
   private authorize(key: ApiKeyRecord, path: string, request: Request, response: Response, next: NextFunction) {
+    const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     if (request.method === 'GET') {
+      if (worklogs && !worklogs[2]) {
+        this.query(request, ['offset']);
+        this.resource(key, 'issues', this.decode(worklogs[1]));
+        this.used(key); return next();
+      }
+      const worklogReport = /^\/api\/projects\/([^/]+)\/worklog-report$/.exec(path);
+      if (worklogReport) {
+        this.query(request, ['startDate', 'endDate', 'authorId']);
+        this.allowedProject(key, this.decode(worklogReport[1]));
+        this.used(key); return next();
+      }
       if (path === '/api/users') {
         this.query(request, []); this.used(key);
         response.json(this.store.all<User>('users').map(({ id, name, color }) => ({ id, name, color }))); return;
@@ -218,6 +230,9 @@ export class ApiKeyService {
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
       } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+    } else if (worklogs && (!worklogs[2] && request.method === 'POST' || worklogs[2] && ['PATCH','DELETE'].includes(request.method))) {
+      this.query(request, []);
+      this.resource(key, 'issues', this.decode(worklogs[1]));
     } else if (request.method === 'POST' && path === '/api/comments') {
       this.query(request, []);
       if (!['issue', 'document'].includes(request.body.resourceType)) fail(400, '댓글 대상을 확인해 주세요.');

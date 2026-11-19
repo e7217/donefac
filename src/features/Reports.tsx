@@ -16,6 +16,7 @@ import { projectIssueTypes } from '../../shared/issue-schema';
 import { isCalendarDate } from '../../shared/calendar';
 import { api } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { WorklogReport } from './WorklogReport';
 import './reports.css';
 
 type Props = FeatureProps & { snapshotId?: string | null };
@@ -108,7 +109,7 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [view, setView] = useState<'live' | 'saved'>(props.snapshotId ? 'saved' : 'live'),
+  const [view, setView] = useState<'live' | 'saved' | 'worklogs'>(props.snapshotId ? 'saved' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
   const [creating, setCreating] = useState(false),
@@ -325,6 +326,12 @@ function ProjectReports(props: Props) {
       snapshotOffset,
       Math.max(0, Math.floor((visibleSnapshots.length - 1) / 25) * 25),
     );
+  function showView(next: typeof view) {
+    if (next === view) return;
+    if ((view === 'worklogs' || next === 'worklogs') &&
+        !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
+    setView(next);
+  }
   return (
     <div className="reports-feature">
       <header className="reports-page-heading">
@@ -343,7 +350,7 @@ function ProjectReports(props: Props) {
           aria-controls="report-live-panel"
           aria-selected={view === 'live'}
           disabled={creating}
-          onClick={() => setView('live')}
+          onClick={() => showView('live')}
         >
           현재 조회
         </button>
@@ -353,9 +360,19 @@ function ProjectReports(props: Props) {
           aria-controls="report-saved-panel"
           aria-selected={view === 'saved'}
           disabled={creating}
-          onClick={() => setView('saved')}
+          onClick={() => showView('saved')}
         >
           저장한 보고서 <span>{snapshots.length}</span>
+        </button>
+        <button
+          role="tab"
+          id="report-worklogs-tab"
+          aria-controls="report-worklogs-panel"
+          aria-selected={view === 'worklogs'}
+          disabled={creating}
+          onClick={() => showView('worklogs')}
+        >
+          작업 시간
         </button>
       </div>
       {view === 'live' ? (
@@ -507,6 +524,10 @@ function ProjectReports(props: Props) {
               </button>
             </fieldset>
           </form>
+        </section>
+      ) : view === 'worklogs' ? (
+        <section role="tabpanel" id="report-worklogs-panel" aria-labelledby="report-worklogs-tab">
+          <WorklogReport {...props} />
         </section>
       ) : (
         <section role="tabpanel" id="report-saved-panel" aria-labelledby="report-saved-tab">

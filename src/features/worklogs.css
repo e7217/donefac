@@ -1,0 +1,222 @@
+.issue-worklogs {
+  margin-top: 1.5rem;
+  border-top: 1px solid #d7e4dd;
+  padding-top: 1.2rem;
+  color: #264338;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.issue-worklogs .btn,
+.issue-worklogs .field,
+.issue-worklogs label {
+  font-size: 0.875rem;
+}
+
+.issue-worklogs .btn {
+  min-height: 36px;
+}
+
+.issue-worklogs .field {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  min-width: 0;
+}
+
+.issue-worklogs-heading,
+.issue-worklog-form-heading,
+.issue-worklog-row-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.issue-worklogs-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.issue-worklogs-heading p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.issue-worklogs-heading p strong {
+  font-size: 1rem;
+  color: #176e5e;
+}
+
+.issue-worklogs-heading p span,
+.issue-worklog-form-heading > span {
+  color: #526e61;
+  font-size: 0.8125rem;
+}
+
+.issue-worklog-form {
+  padding: 1rem;
+  background: #f7fbf8;
+  border: 1px solid #d6e5dc;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.issue-worklog-form h4 {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+}
+
+.issue-worklog-form fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.issue-worklog-form label {
+  display: block;
+}
+
+.issue-worklog-inputs {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.5fr) repeat(2, minmax(70px, 0.7fr));
+  gap: 0.7rem;
+}
+
+.issue-worklog-form textarea {
+  resize: vertical;
+  min-height: 85px;
+  line-height: 1.55;
+}
+
+.issue-worklog-help,
+.issue-worklog-author {
+  margin: 0.65rem 0;
+  color: #516c60;
+  font-size: 0.8125rem;
+}
+
+.issue-worklog-error,
+.issue-worklog-warning {
+  padding: 0.75rem 0.85rem;
+  border-radius: 6px;
+  margin: 0.8rem 0;
+  font-size: 0.875rem;
+}
+
+.issue-worklog-error {
+  color: #923b40;
+  border: 1px solid #e7c2c5;
+  background: #fff3f3;
+}
+
+.issue-worklog-warning {
+  color: #7d5f2b;
+  border: 1px solid #e4d3ac;
+  background: #fff9eb;
+}
+
+.issue-worklog-actions,
+.issue-worklog-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.issue-worklog-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.issue-worklog-list > li {
+  padding: 1rem 0;
+  border-bottom: 1px solid #dfe9e2;
+}
+
+.issue-worklog-list > li.is-editing {
+  background: #eef7f1;
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.issue-worklog-row-heading > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.issue-worklog-row-heading strong {
+  font-size: 1rem;
+}
+
+.issue-worklog-row-heading time {
+  font-size: 0.875rem;
+  color: #526d60;
+}
+
+.issue-worklog-row-author,
+.issue-worklog-list small {
+  display: block;
+  color: #536f60;
+  font-size: 0.8125rem;
+  margin-top: 0.4rem;
+}
+
+.issue-worklog-list p {
+  margin: 0.7rem 0;
+  font-size: 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.issue-worklog-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+  font-size: 0.8125rem;
+}
+
+.issue-worklog-pagination > span {
+  margin-right: auto;
+}
+
+.issue-worklog-empty {
+  color: #526e60;
+  padding: 1rem 0;
+  font-size: 1rem;
+}
+
+.issue-worklogs button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.issue-worklogs button:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 3px;
+}
+
+@media (max-width: 550px) {
+  .issue-worklogs-heading,
+  .issue-worklog-row-heading {
+    flex-wrap: wrap;
+  }
+
+  .issue-worklog-inputs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .issue-worklog-inputs > label:first-child {
+    grid-column: 1 / -1;
+  }
+}

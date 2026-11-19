@@ -26,6 +26,7 @@ import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
+import { WorklogService, WorklogError } from './worklogs.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency } from '../shared/types.js';
@@ -62,6 +63,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
   reportLedger.start();
   const reports=new ReportingService(store,reportLedger);
+  const worklogs=new WorklogService(store);
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
@@ -201,6 +203,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       activity(req, 'source-import', value.sourceImport.id, '원본 이관 적용', `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
     },
   });
+  worklogs.registerRoutes(app,{actor,activity});
   reports.registerRoutes(app,{
     actor,
     createDocument(req,snapshot,content,issueIds) {
@@ -355,7 +358,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const attachmentVersions=sourcePreservation.allVersions();
     const binaries=[...new Map([...attachments,...attachmentVersions].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:10,reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:11,worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -363,7 +366,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8,9,10].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~10)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8,9,10,11].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~11)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
@@ -383,6 +386,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
     const importedReportSnapshots=data.schemaVersion>=10?reports.validateRestore(data.reportSnapshots,data.exportedAt,data.projects,data.users):[];
+    if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
+    const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(data.worklogs,data.projects,data.issues,data.users,data.exportedAt):[];
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?data.attachmentVersions:[], relations:data.schemaVersion>=9?data.issueRelations:[],
@@ -402,6 +407,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousIssues=new Map(store.all<Issue>('issues').map(i=>[i.id,i.version]));
       const previousDocuments=new Map(store.all<DocPage>('documents').map(d=>[d.id,d.version]));
       const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
+      const previousWorklogs=worklogs.clearForRestore();
       outbound.resetForImport();gitlab.resetForImport();migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
@@ -430,6 +436,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       sourcePreservation.replaceImported(importedSources,previousImports);
       reportLedger.replaceRestored(importedReportLedger,restoreAt);
       reports.replaceRestored(importedReportSnapshots);
+      worklogs.replaceRestored(importedWorklogs,previousWorklogs);
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
     }));}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
     collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
@@ -439,7 +446,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

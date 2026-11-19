@@ -206,6 +206,32 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export interface WorklogEntry {
+  id: string;
+  issueId: string;
+  projectId: string;
+  issueKey: string;
+  issueTitle: string;
+  authorId: string;
+  workDate: string;
+  minutes: number;
+  note: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface IssueWorklogPage { entries: WorklogEntry[]; totalMinutes: number; totalEntries: number }
+export interface ProjectWorklogReport {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  authorId: string | null;
+  minutes: number;
+  entryCount: number;
+  byAuthor: { authorId: string; minutes: number; entries: number }[];
+  byIssue: { issueId: string; key: string; title: string; deleted: boolean; minutes: number; entries: number }[];
+  days: { date: string; minutes: number; entries: number }[];
+}
 export interface RichContent { type: string; content?: RichContent[]; text?: string; attrs?: Record<string, unknown>; marks?: {type: string; attrs?: Record<string, unknown>}[] }
 export interface ContentReference { type: 'issue' | 'document'; id: string; kind: 'reference' | 'include'; label: string }
 export interface DocPage {
