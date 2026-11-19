@@ -5,7 +5,7 @@ import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc } from 'y-prosemirror';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { CollaborationSession } from '../../shared/collaboration';
-import type { DocPage,WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage,RichContent,WorkspaceSnapshot } from '../../shared/types';
 
 interface UpgradeFixture{requests:APIRequestContext;document:DocPage;session:CollaborationSession;actors:string[];titlePrefix:string;serverText:string}
 const test=base.extend<{upgrade:UpgradeFixture}>({
@@ -20,7 +20,7 @@ const test=base.extend<{upgrade:UpgradeFixture}>({
   },{timeout:30000}],
 });
 
-function legacyUpdate(text:string){const doc=prosemirrorJSONToYDoc(createEditorSchema(),{type:'doc',content:[{type:'paragraph',content:[{type:'text',text}]}]},'default');try{return Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64');}finally{doc.destroy();}}
+function legacyUpdate(text:string,blocks:RichContent[]=[]){const doc=prosemirrorJSONToYDoc(createEditorSchema(),{type:'doc',content:[{type:'paragraph',content:[{type:'text',text}]},...blocks]},'default');try{return Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64');}finally{doc.destroy();}}
 function cache(epoch:string,update:string,updatedAt='2099-01-01T00:00:00.000Z',schemaVersion=1){return JSON.stringify({epoch,schemaVersion,update,pending:true,updatedAt});}
 const cacheKey=(actor:string,id:string,epoch:string,version=1)=>`teamspace:collaboration-pending:${actor}:${id}:${epoch}:${version}`;
 async function open(page:Page,f:UpgradeFixture,entries:Record<string,string>){await page.addInitScript(({actor,entries})=>{localStorage.setItem('teamspace.actor',actor);for(const[key,value]of Object.entries(entries))localStorage.setItem(key,value);},{actor:f.actors[0],entries});await page.goto(`/#/${f.document.projectId}/documents/${f.document.id}`);await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(f.document.title);await expect(page.locator('.docs-collaboration-recovery')).toBeVisible();}
@@ -44,4 +44,45 @@ test('유효하지 않은 이전 형식 보관 데이터는 적용하지 않고 
   await open(page,f,entries);await expect(page.getByRole('button',{name:'사본으로 보관',exact:true})).toBeDisabled();await expect(page.locator('.docs-live-prose')).toHaveCount(0);expect((await canonical(f)).plainText).toBe(f.serverText);expect(await stored(page)).toEqual(entries);
   const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'복구 데이터 내려받기',exact:true}).click();const exported=await recoveryDownload(await downloading);expect(exported.caches).toEqual([{key:selected,value:entries[selected]}]);expect(exported.content).toBeNull();const empty=new Y.Doc();try{Y.applyUpdate(empty,Buffer.from(exported.update,'base64'));expect(empty.getXmlFragment('default').length).toBe(0);}finally{empty.destroy();}
   page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'최신 문서 열기',exact:true}).click();expect(await stored(page)).toEqual(entries);expect((await canonical(f)).plainText).toBe(f.serverText);
+});
+
+test('공동 편집 형식 2의 오프라인 편집을 참조 블록과 함께 보존한다',async({page,upgrade:f})=>{
+  const text='형식 2에서 오프라인으로 작성한 문장';
+  const reference:RichContent={type:'documentReference',attrs:{documentId:f.document.id,label:f.document.title}};
+  const oldEpoch=randomUUID();
+  const selected=cacheKey(f.actors[0],f.document.id,oldEpoch,2);
+  const entries={[selected]:cache(oldEpoch,legacyUpdate(text,[reference]),'2099-01-01T00:00:00.000Z',2)};
+  let updateFrames=0;
+  page.on('websocket',socket=>socket.on('framesent',frame=>{try{if(JSON.parse(String(frame.payload)).type==='update')updateFrames++;}catch{/* Other frames do not persist document updates. */}}));
+  await open(page,f,entries);
+  await expect(page.locator('.docs-live-prose')).toContainText(text);
+  await expect(page.locator('.docs-live-prose')).toHaveAttribute('contenteditable','false');
+  await expect(page.locator('.docs-live-prose')).toContainText(f.document.title);
+  expect(await stored(page)).toEqual(entries);
+
+  const copying=page.waitForResponse(response=>response.url().endsWith('/api/documents')&&response.request().method()==='POST');
+  await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();
+  const copied=await(await copying).json() as DocPage;
+  expect(copied.content.content).toContainEqual(reference);
+  expect(copied.plainText).toContain(text);
+  await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(copied.title);
+  expect(await stored(page)).toEqual({});
+  expect((await canonical(f)).plainText).toBe(f.serverText);
+  expect(updateFrames).toBe(0);
+});
+
+test('형식 2에서 지원하지 않는 새 업무 목록 보관본은 원본 바이트를 내려받을 수 있다',async({page,upgrade:f})=>{
+  const futureBlock:RichContent={type:'issueList',attrs:{projectId:f.document.projectId,savedViewId:null,label:'업무 목록'}};
+  const selected=cacheKey(f.actors[0],f.document.id,f.session.epoch!,2);
+  const entries={[selected]:cache(f.session.epoch!,legacyUpdate('형식 2로 표기된 원본',[futureBlock]),'2099-01-01T00:00:00.000Z',2)};
+  await open(page,f,entries);
+  await expect(page.getByRole('button',{name:'사본으로 보관',exact:true})).toBeDisabled();
+  await expect(page.locator('.docs-live-prose')).toHaveCount(0);
+  const downloading=page.waitForEvent('download');
+  await page.getByRole('button',{name:'복구 데이터 내려받기',exact:true}).click();
+  const exported=await recoveryDownload(await downloading);
+  expect(exported.caches).toEqual([{key:selected,value:entries[selected]}]);
+  expect(exported.content).toBeNull();
+  expect(await stored(page)).toEqual(entries);
+  expect((await canonical(f)).plainText).toBe(f.serverText);
 });

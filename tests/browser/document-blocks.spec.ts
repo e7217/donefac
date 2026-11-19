@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test';
-import type { Attachment, DocPage, DocRevision, Issue, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { Attachment, DocPage, DocRevision, Issue, RichContent, SavedView, WorkspaceSnapshot } from '../../shared/types';
 import { contentReferences } from '../../shared/document-nodes';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
@@ -42,6 +42,15 @@ const test = base.extend<{ blocks: Fixture }>({
 const snapshot = async (fixture: Fixture) => await (await fixture.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
 const currentDoc = async (fixture: Fixture, id = fixture.source.id) => (await snapshot(fixture)).documents.find(page => page.id === id)!;
 async function open(page: Page, fixture: Fixture, id = fixture.source.id) { await page.goto(`/#/${fixture.source.projectId}/documents/${id}`); await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toBeVisible(); }
+
+async function insertIssueList(page: Page, projectId: string, viewId = '') {
+  await page.getByRole('button', {name:'업무 목록 삽입',exact:true}).click();
+  const dialog = page.getByRole('dialog', {name:'업무 목록 삽입',exact:true});
+  await dialog.getByLabel('업무 목록 프로젝트', {exact:true}).selectOption(projectId);
+  await dialog.getByLabel('업무 목록 공유 보기', {exact:true}).selectOption(viewId);
+  await dialog.getByRole('button', {name:'업무 목록 삽입',exact:true}).click();
+  await expect(dialog).toHaveCount(0);
+}
 async function choose(page: Page, kind: '업무 참조' | '문서 참조' | '문서 포함', title: string) { await page.getByRole('button', { name: `${kind} 삽입`, exact: true }).click(); const chooser = page.getByRole('dialog', { name: `${kind} 삽입`, exact: true }); await chooser.getByLabel('참조할 항목 검색', { exact: true }).fill(title); await chooser.locator('.doc-reference-results button').filter({ hasText: title }).click(); await expect(chooser).toHaveCount(0); }
 
 test('참조와 포함을 삽입해 실제 서식을 표시하고 이름·상태 갱신 및 연결·내보내기를 보존한다', async ({ page, blocks: f }) => {
@@ -78,6 +87,73 @@ test('본문 참조의 탐색 취소는 초안을 보존하고 삭제된 대상�
   expect((await f.requests.delete(`/api/documents/${f.target.id}?expectedVersion=${f.target.version}`)).status()).toBe(200); expect((await f.requests.delete(`/api/issues/${f.issue.id}?expectedVersion=${f.issue.version}`)).status()).toBe(200); await page.reload(); await expect(page.locator('.doc-include-notice')).toContainText('포함 문서를 찾을 수 없습니다'); await expect(page.getByRole('button', { name: `찾을 수 없는 문서 ${f.target.title}`, exact: true })).toBeDisabled(); await expect(page.getByRole('button', { name: `찾을 수 없는 업무 ${f.issue.key} ${f.issue.title}`, exact: true })).toBeDisabled();
 });
 
+test('360px 문서에서 공유 보기 업무 목록을 삽입하고 현재 상태와 사라진 보기를 확인한다', async ({ page, blocks: f }) => {
+  const projectId = f.source.projectId!;
+  const otherResponse = await f.requests.post('/api/issues', {data:{projectId,title:`${f.prefix} 다른 조건의 업무`}});
+  expect(otherResponse.status()).toBe(201);
+  const other = await otherResponse.json() as Issue;
+  const viewResponse = await f.requests.post('/api/views', {data:{
+    projectId,name:`${f.prefix} 한 업무만 표시`,layout:'list',filters:{query:f.issue.title,status:'all',assigneeId:'all',type:'all'},
+  }});
+  expect(viewResponse.status()).toBe(201);
+  const view = await viewResponse.json() as SavedView;
+  try {
+    await page.setViewportSize({width:360,height:820});
+    await open(page, f);
+    await insertIssueList(page, projectId, view.id);
+    const list = page.getByRole('region', {name:'업무 목록',exact:true});
+    const initial = list.getByRole('button', {name:`목록 업무 열기 ${f.issue.key} ${f.issue.title}`,exact:true});
+    await expect(initial).toBeVisible();
+    await expect(list).not.toContainText(other.title);
+
+    const title = page.getByRole('textbox', {name:'문서 제목',exact:true});
+    const editedTitle = `${f.source.title} 목록과 함께 저장`;
+    await title.fill(editedTitle);
+    page.once('dialog', dialog => dialog.dismiss());
+    await initial.click();
+    await expect(title).toHaveValue(editedTitle);
+    await page.locator('.docs-save-button').click();
+    await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+    const saved = await currentDoc(f);
+    expect(saved.content.content?.find(node => node.type === 'issueList')?.attrs).toMatchObject({projectId,savedViewId:view.id});
+    expect(saved.plainText).not.toContain(f.issue.title);
+    await page.getByRole('button', {name:'문서 내보내기',exact:true}).click();
+    const downloadEvent = page.waitForEvent('download');
+    await page.getByRole('button', {name:'문서 JSON 내보내기',exact:true}).click();
+    const downloaded = await (await downloadEvent).path();
+    const exported = JSON.parse(readFileSync(downloaded!, 'utf8')) as {schemaVersion:number;document:DocPage};
+    expect(exported.schemaVersion).toBe(3);
+    expect(exported.document.content).toEqual(saved.content);
+
+    const latestTitle = `${f.issue.title} 상태 갱신`;
+    const changed = await f.requests.patch(`/api/issues/${f.issue.id}`, {data:{expectedVersion:f.issue.version,title:latestTitle,status:'in_progress',assigneeId:f.workspace.users[1].id}});
+    expect(changed.status(), await changed.text()).toBe(200);
+    await page.getByRole('button', {name:'참조 새로고침',exact:true}).click();
+    const latest = list.getByRole('button', {name:`목록 업무 열기 ${f.issue.key} ${latestTitle}`,exact:true});
+    await expect(latest).toContainText('진행 중');
+    await expect(latest).toContainText(f.workspace.users[1].name);
+    expect((await currentDoc(f)).version).toBe(saved.version);
+    await latest.click();
+    await expect(page.getByRole('dialog', {name:latestTitle,exact:true})).toBeVisible();
+    await open(page, f);
+
+    expect((await f.requests.delete(`/api/views/${view.id}?expectedVersion=${view.version}`)).status()).toBe(200);
+    await page.getByRole('button', {name:'참조 새로고침',exact:true}).click();
+    await expect(list).toContainText('공유 보기를 찾을 수 없습니다.');
+    await expect(list).toContainText(view.name);
+    await expect(list.getByRole('button', {name:/목록 업무 열기/})).toHaveCount(0);
+    await list.getByRole('button', {name:'업무 목록 설정',exact:true}).click();
+    const settings = page.getByRole('dialog', {name:'업무 목록 설정',exact:true});
+    const apply = settings.getByRole('button', {name:'업무 목록 적용',exact:true});
+    await expect(apply).toBeDisabled();
+    await settings.getByLabel('업무 목록 공유 보기', {exact:true}).selectOption('');
+    await apply.click();
+    await expect(list).toContainText(other.title);
+  } finally {
+    await f.requests.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+  }
+});
+
 test('포함 렌더러는 순환·깊이·전체 표시 한도를 명시하며 유효하지 않은 포함을 선택할 수 없다', async ({ page, blocks: f }) => {
   const nestingErrors: string[] = []; page.on('console', message => { if (message.type() === 'error' && /In HTML|cannot be a descendant|cannot be a child|cannot contain/.test(message.text())) nestingErrors.push(message.text()); });
   let next = f.target; const chain: DocPage[] = [];
@@ -99,6 +175,11 @@ test('두 공동 편집자가 새 블록을 동기화하고 접기 표시를 로
     await open(page, f); await open(peer, f); await expect(page.locator('.docs-collaboration-presence')).toContainText('2명 접속');
     await Promise.all([choose(page, '업무 참조', f.issue.title), choose(peer, '문서 포함', f.target.title)]);
     for (const client of [page, peer]) { await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(1); await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-included-content')).toHaveCount(1); await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); }
+    await insertIssueList(page, f.source.projectId!);
+    const list = peer.locator('.docs-live-prose [data-teamspace-node="issueList"]');
+    await expect(list.getByRole('button', {name:`목록 업무 열기 ${f.issue.key} ${f.issue.title}`,exact:true})).toBeVisible();
+    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    expect((await currentDoc(f)).content.content?.find(node => node.type === 'issueList')?.attrs).toMatchObject({projectId:f.source.projectId,savedViewId:null});
     await page.getByRole('button', { name: '접기 블록 삽입', exact: true }).click(); await expect(peer.locator('.docs-live-prose details.doc-details-block')).toHaveCount(1); await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); const before = await currentDoc(f), beforeFrames = sent;
     await page.locator('.docs-live-prose details.doc-details-block > summary').click(); await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))); expect(sent).toBe(beforeFrames); expect((await currentDoc(f)).version).toBe(before.version); await expect(peer.locator('.docs-live-prose details.doc-details-block')).toHaveAttribute('open', '');
     const revisionResponse = page.waitForResponse(response => response.url().endsWith(`/api/documents/${f.source.id}/checkpoint`) && response.request().method() === 'POST'); await page.getByRole('button', { name: '버전 기록', exact: true }).click(); const revision = await (await revisionResponse).json() as DocRevision;

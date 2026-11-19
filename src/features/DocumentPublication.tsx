@@ -36,6 +36,14 @@ const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 
 /** Includes are stored references, not snapshots of their mutable target bodies. */
 function snapshotContent(node: RichContent): RichContent {
+  if (node.type === 'issueList') {
+    const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
+    const projectId = typeof node.attrs?.projectId === 'string' ? node.attrs.projectId : '';
+    return {
+      type: 'paragraph',
+      content: [{ type: 'text', text: `업무 목록 · ${label || projectId || '이름 없음'} · 이 저장본에는 목록 조건이 보관됩니다.` }],
+    };
+  }
   if (node.type === 'documentInclude') {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
     const id = typeof node.attrs?.documentId === 'string' ? node.attrs.documentId : '';

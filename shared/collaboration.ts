@@ -1,9 +1,12 @@
 import type { DocPage } from './types';
 
 /** Persistent schema/version and transport contract shared by local clients and server. */
-export const COLLABORATION_SCHEMA = 2;
+export const COLLABORATION_SCHEMA = 3;
 export const COLLABORATION_CURSOR_PROTOCOL = 1;
 export const MAX_COLLABORATION_CURSOR_BYTES = 256;
+export function supportsCollaborationSchema(version: unknown): version is 1 | 2 | typeof COLLABORATION_SCHEMA {
+  return version === 1 || version === 2 || version === COLLABORATION_SCHEMA;
+}
 export interface CollaborationPeer { id: string; actorId: string; name: string; color: string }
 /** Ephemeral Yjs relative positions, encoded as canonical base64. */
 export interface CollaborationCursorSelection { anchor: string; head: string }

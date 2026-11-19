@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, attachmentId, safeFilename, sniffMime, hash } from './attachments.js';
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
 import { Store } from './store.js';
-import { seed, plain } from './seed.js';
+import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
 import { CollaborationService, CollaborationError } from './collaboration.js';
@@ -14,7 +14,7 @@ import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
-import { DocumentContentService, DocumentContentError, normalizeDocumentContent, hasVersionTwoNodes } from './document-content.js';
+import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueLists } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { AutomationService, AutomationError } from './automation.js';
@@ -39,11 +39,12 @@ import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
+import { documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { PRIORITY, type Issue, type DocPage, type RichContent, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -62,7 +63,13 @@ const isDate = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{
 const date = (v: unknown, label: string) => v === null || v === '' || v === undefined ? null : isDate(v) ? v : fail(`${label}: YYYY-MM-DD 형식의 날짜가 필요합니다.`);
 function dateRange(start: string | null, end: string | null) { if (start && end && start > end) fail('종료일은 시작일보다 빠를 수 없습니다.'); }
 function checkVersion(current: {version: number}, value: unknown) { if (!Number.isInteger(value)) fail('expectedVersion이 필요합니다.'); if (current.version !== value) fail('다른 작업자가 변경했습니다. 새로고침 후 다시 시도해 주세요.',409,{currentVersion:current.version}); }
-function rich(value: unknown): RichContent { return normalizeDocumentContent(value).content; }
+function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
+  const normalized = normalizeDocumentContent(value);
+  const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 2 && backupVersion < 7) fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');
+  if (version === 3 && backupVersion < 20) fail('업무 목록 블록은 schemaVersion 20 백업이 필요합니다.');
+  return normalized;
+}
 function shiftDate(value: string, days: number, working: boolean): string {
   const d = new Date(`${value}T00:00:00Z`), sign = Math.sign(days); let remain = Math.abs(days);
   while (remain) { d.setUTCDate(d.getUTCDate()+sign); if (!working || ![0,6].includes(d.getUTCDay())) remain--; }
@@ -410,6 +417,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
       const fields=['projectId','parentId','title','content','icon','status'];
       let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);
+      if(bodyChanged&&req.body.contentSchemaVersion!==3&&documentContentSchemaVersion(old.content)===3&&documentContentSchemaVersion(d.content)<3){
+        fail('업무 목록이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.',409,{currentVersion:old.version,contentSchemaVersion:3});
+      }
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
       store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
       revision(d,actor(req),nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);return d;
@@ -674,11 +684,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
-    if(data.schemaVersion<7)for(const document of [...data.documents,...data.revisions]){const content=rich(document.content);if(hasVersionTwoNodes(content))fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');}
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
-    data.documents=data.documents.map((document:DocPage)=>({...document,...documentContent.normalize(document.content)}));
-    const firstDocument=data.documents[0] as DocPage|undefined;documentContent.validate(firstDocument?.id||uid(),firstDocument?.content||{type:'doc',content:[{type:'paragraph'}]},undefined,{allowMissing:true,documents:data.documents,issues:data.issues});
+    const importDocument = <T extends DocPage | DocRevision>(document: T): T => ({ ...document, ...normalizeBackupDocumentContent(document.content, data.schemaVersion) });
+    const importedDocuments = (data.documents as DocPage[]).map(importDocument);
+    const importedRevisions = (data.revisions as DocRevision[]).map(importDocument);
+    data.documents=importedDocuments;
+    data.revisions=importedRevisions;
     const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents);
     const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
@@ -687,6 +699,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       'fieldFilter' in value.filters&&value.filters.fieldFilter!=null
     ))fail('사용자 정의 필드 조건을 포함한 보기는 schemaVersion 13이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas);
+    const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
+    const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
+    const issueListTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
+    const firstDocument = importedDocuments[0];
+    documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
+      { allowMissing: true, documents: importedDocuments, issues: data.issues, issueListTargets });
+    validateDocumentIssueLists([...importedDocuments.slice(1), ...importedRevisions].map(value => value.content), issueListTargets, { allowMissing: true });
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
@@ -720,8 +739,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     for(const entry of importedTrash){
       entry.attachmentVersions=entry.attachmentVersions.map(version=>versionById.get(version.id)!);
       if(entry.resourceType==='document'){
-        Object.assign(entry.resource,documentContent.normalize(entry.resource.content));
-        for(const archivedRevision of entry.revisions)Object.assign(archivedRevision,documentContent.normalize(archivedRevision.content));
+        entry.resource=importDocument(entry.resource);
+        entry.revisions=entry.revisions.map(importDocument);
+        validateDocumentIssueLists([entry.resource, ...entry.revisions].map(value => value.content), issueListTargets, { allowMissing: true });
         if(entry.collaboration)collaboration.validateImport([entry.collaboration],[entry.resource]);
         if(entry.publication)[entry.publication]=documentPublication.validateRestore([entry.publication],[entry.resource],data.users,entry.revisions,data.exportedAt);
       }
@@ -784,7 +804,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const d of data.dependencies){validateDependency(d,data.dependencies);store.put('dependencies',d);}
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
       for(const c of data.comments){if(!['issue','document'].includes(c.resourceType))fail('잘못된 댓글 대상입니다.');get(c.resourceType==='issue'?'issues':'documents',c.resourceId);get('users',c.authorId);text(c.body,'댓글',20000);store.put('comments',c);}
-      for(const r of data.revisions){get('documents',r.documentId);get('users',r.authorId);rich(r.content);if(!Number.isInteger(r.version)||r.version<1)fail('문서 이력을 확인해 주세요.');store.put('revisions',{...r,plainText:plain(r.content)});}
+      for(const r of importedRevisions){get('documents',r.documentId);get('users',r.authorId);if(!Number.isInteger(r.version)||r.version<1)fail('문서 이력을 확인해 주세요.');store.put('revisions',r);}
       for(const d of data.documents)if(!data.revisions.some((r:any)=>r.documentId===d.id&&r.version===d.version))revision(d,d.authorId,'백업 가져오기');
       documentPublication.replaceRestored(importedPublications);
       for(const a of data.activities){get('users',a.actorId);store.put('activities',a);}

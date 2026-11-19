@@ -8,13 +8,14 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../../server/app.js';
 import { contentMarkdown,contentText } from '../../src/features/document-utils.js';
 import { contentReferences } from '../../shared/document-nodes.js';
-import type { ApiKeyCreated,DocPage,DocRevision,RichContent,WorkspaceSnapshot } from '../../shared/types.js';
-import type { CollaborationSession } from '../../shared/collaboration.js';
+import type { ApiKeyCreated,DocPage,DocRevision,RichContent,SavedView,WorkspaceSnapshot } from '../../shared/types.js';
+import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
 
 type Backup=WorkspaceSnapshot&{schemaVersion:number;collabStates:{documentId:string;schemaVersion:number;state:string}[]};
 const p=(text:string):RichContent=>({type:'paragraph',content:[{type:'text',text}]});
 const body=(...content:RichContent[]):RichContent=>({type:'doc',content});
 const reference=(type:'issueReference'|'documentReference'|'documentInclude',id:string,label:string):RichContent=>({type,attrs:{[type==='issueReference'?'issueId':'documentId']:id,label}});
+const issueList = (projectId: string, savedViewId: string | null, label: string): RichContent => ({type:'issueList',attrs:{projectId,savedViewId,label}});
 const details:RichContent={type:'details',content:[{type:'detailsSummary',content:[{type:'text',text:'검토 <기준>',marks:[{type:'bold'}]}]},{type:'detailsContent',content:[p('접혀 있어도 보존할 결정')]}]};
 async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document-integration-'));const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;return{
   async call<T=Record<string,unknown>>(path:string,method='GET',data?:unknown,token?:string){const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{'X-Actor-Id':'user-min'})},...(data===undefined?{}:{body:JSON.stringify(data)})});return{status:response.status,data:await response.json() as T};},
@@ -36,7 +37,7 @@ test('manual writes, cycles and live historical restore preserve reference IDs a
     const before=await snapshot(f);assert.equal((await f.call(`/documents/${source.id}/restore`,'POST',{revisionId:original.id,expectedVersion:live.document.version})).status,422);assert.deepEqual(await snapshot(f),before);
     assert.equal((await f.call(`/documents/${target.id}?expectedVersion=2`,'DELETE')).status,200);
     const restored=await f.call<DocPage>(`/documents/${source.id}/restore`,'POST',{revisionId:original.id,expectedVersion:live.document.version});assert.equal(restored.status,200,JSON.stringify(restored.data));assert.deepEqual(restored.data.content,content);
-    const session=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration`)).data;assert.notEqual(session.epoch,live.epoch);assert.equal(session.schemaVersion,2);assert.equal(session.document.plainText,restored.data.plainText);
+    const session=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration`)).data;assert.notEqual(session.epoch,live.epoch);assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);assert.equal(session.document.plainText,restored.data.plainText);
     assert.equal((await f.call('/documents','POST',{projectId:'project-neo',title:'새 누락 참조',content})).status,422);
     const saved=(await f.call<DocRevision[]>(`/documents/${source.id}/revisions`)).data;assert.ok(saved.some(revision=>revision.version===restored.data.version&&revision.summary.includes('복구')));
   }finally{await f.close();}
@@ -62,7 +63,7 @@ test('native schema7 restores macro JSON and CRDT state with missing targets; in
     const target=await make(f,'사라질 원문'),source=await make(f,'포함 기록',body(reference('documentInclude',target.id,'보관할 제목'),details));
     const enabled=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration/enable`,'POST',{expectedVersion:source.version})).data;
     await f.call(`/documents/${target.id}?expectedVersion=1`,'DELETE');
-    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,19);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,2);
+    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,20);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,COLLABORATION_SCHEMA);
     const current=await snapshot(f),bad=structuredClone(backup);bad.documents.find(document=>document.id===source.id)!.content=body(reference('documentInclude',source.id,'순환'));
     assert.equal((await f.call('/import','POST',{data:bad})).status,422);assert.deepEqual(await snapshot(f),current);
     const downgraded={...backup,schemaVersion:6};assert.equal((await f.call('/import','POST',{data:downgraded})).status,400);assert.deepEqual(await snapshot(f),current);
@@ -75,4 +76,83 @@ test('document Markdown preserves reference destinations and folded content with
   const content=body(reference('issueReference','ticket/a?b','업무 [검토]'),reference('documentReference','doc/a','원문'),reference('documentInclude','included','실시간 원문'),details);
   const markdown=contentMarkdown(content);assert.ok(markdown.includes('#/all/issues?issue=ticket%2Fa%3Fb'));assert.ok(markdown.includes('#/all/documents/doc%2Fa'));assert.ok(markdown.includes('문서 포함:'));assert.ok(markdown.includes('<details>'));assert.ok(markdown.includes('<summary><strong>검토 &lt;기준&gt;</strong></summary>'));assert.ok(markdown.includes('접혀 있어도 보존할 결정'));assert.equal(contentReferences(content).length,3);assert.ok(contentText(content).includes('included'));
   assert.equal(contentText(body(p('마지막 공백  '))),'마지막 공백  ');assert.equal(contentText(body(p('원문'),{type:'paragraph'})),'원문\n');
+});
+
+test('document issue lists retain stable project and view identifiers and enforce automation project scope', async () => {
+  const f = await fixture();
+  try {
+    const createView = async (projectId: string) => {
+      const result = await f.call<SavedView>('/views', 'POST', {
+        projectId, name:'합성 저장 보기', layout:'list', filters:{query:'계획',status:'all',assigneeId:'all',type:'all'},
+      });
+      assert.equal(result.status, 201, JSON.stringify(result.data));
+      return result.data;
+    };
+    const own = await createView('project-neo');
+    const foreign = await createView('project-team');
+    const key = (await f.call<ApiKeyCreated>('/api-keys', 'POST', {
+      name:'업무 목록 범위 검증',access:'write',projectIds:[own.projectId],expiresAt:null,
+    })).data;
+    const definition = issueList(own.projectId, own.id, '저장한 목록 이름');
+    const valid = await f.call<DocPage>('/v1/documents', 'POST', {
+      projectId:own.projectId,title:'업무 목록 자동화 문서',content:body(definition),
+    }, key.token);
+    assert.equal(valid.status, 201, JSON.stringify(valid.data));
+    assert.deepEqual(valid.data.content, body(definition));
+    assert.match(valid.data.plainText, /저장한 목록 이름/);
+    assert.match(contentMarkdown(valid.data.content), /저장한 목록 이름/);
+    assert.deepEqual(contentReferences(valid.data.content), []);
+
+    const before = await snapshot(f);
+    for (const invalid of [issueList(own.projectId, foreign.id, '다른 프로젝트 보기'), issueList(own.projectId, 'missing-view', '없는 보기'), issueList('missing-project', null, '없는 프로젝트')]) {
+      assert.equal((await f.call('/documents', 'POST', {projectId:own.projectId,title:'잘못된 업무 목록',content:body(invalid)})).status, 422);
+    }
+    for (const scoped of [issueList(foreign.projectId, foreign.id, '다른 프로젝트'), issueList(foreign.projectId, null, '다른 프로젝트 전체')]) {
+      assert.equal((await f.call('/v1/documents', 'POST', {projectId:own.projectId,title:'범위 밖 업무 목록',content:body(scoped)}, key.token)).status, 403);
+    }
+    assert.deepEqual(await snapshot(f), before);
+    assert.equal((await f.call(`/views/${own.id}?expectedVersion=${own.version}`, 'DELETE')).status, 200);
+    const changed = await f.call<DocPage>(`/v1/documents/${valid.data.id}`, 'PATCH', {
+      expectedVersion:valid.data.version, content:body(p('문서 설명 추가'), definition),
+    }, key.token);
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    assert.deepEqual(changed.data.content.content?.at(-1), definition);
+    assert.equal((await f.call('/documents', 'POST', {projectId:own.projectId,title:'새로 추가한 삭제된 보기',content:body(definition)})).status, 422);
+    assert.equal((await f.call(`/v1/documents/${valid.data.id}`, 'PATCH', {
+      expectedVersion:changed.data.version,content:body(p('이전 편집기가 목록을 누락한 본문')),
+    }, key.token)).status, 409);
+    const metadata = await f.call<DocPage>(`/documents/${valid.data.id}`, 'PATCH', {expectedVersion:changed.data.version,title:'속성만 수정'});
+    assert.equal(metadata.status, 200);
+    assert.deepEqual(metadata.data.content, changed.data.content);
+  } finally { await f.close(); }
+});
+
+test('native backup protects document issue lists in history and trash and restores their definitions', async () => {
+  const f = await fixture();
+  try {
+    const definition = issueList('project-neo', null, '버전에 고정한 목록');
+    const source = await make(f, '목록이 남은 역사', body(p('목록 설명'), definition));
+    const changed = await f.call<DocPage>(`/documents/${source.id}`, 'PATCH', {expectedVersion:source.version,contentSchemaVersion:3,content:body(p('최근 본문'))});
+    assert.equal(changed.status, 200);
+    const before = await snapshot(f);
+    const live = (await f.call<Backup>('/export')).data;
+    assert.equal(live.schemaVersion, 20);
+    assert.equal((await f.call('/import', 'POST', {data:{...live,schemaVersion:19}})).status, 400);
+    assert.deepEqual(await snapshot(f), before);
+
+    const removed = await f.call<{trashEntryId:string}>(`/documents/${source.id}?expectedVersion=${changed.data.version}`, 'DELETE');
+    assert.equal(removed.status, 200);
+    const archived = (await f.call<Backup>('/export')).data;
+    assert.equal((await f.call('/import', 'POST', {data:{...archived,schemaVersion:19}})).status, 400);
+    assert.equal((await f.call('/import', 'POST', {data:archived})).status, 200);
+    assert.equal((await f.call(`/trash/${removed.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    const current = (await snapshot(f)).documents.find(value => value.id === source.id)!;
+    assert.equal(current.plainText, '최근 본문');
+    const revisions = (await f.call<DocRevision[]>(`/documents/${current.id}/revisions`)).data;
+    const revision = revisions.find(value => value.content.content?.some(node => node.type === 'issueList'));
+    assert.ok(revision);
+    const restored = await f.call<DocPage>(`/documents/${current.id}/restore`, 'POST', {revisionId:revision.id,expectedVersion:current.version});
+    assert.equal(restored.status, 200, JSON.stringify(restored.data));
+    assert.deepEqual(restored.data.content, source.content);
+  } finally { await f.close(); }
 });

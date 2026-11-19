@@ -222,7 +222,7 @@ test('native workload backup preserves live and archived effort and rejects inva
   const removal = await f.call<{trashEntryId:string}>(`/issues/${archived.id}`, 'DELETE', { expectedVersion:archived.version });
   const archivePath = `/trash/${removal.trashEntryId}/restore`;
   const backup = await f.export();
-  assert.equal(backup.schemaVersion, 19);
+  assert.equal(backup.schemaVersion, 20);
   assert.equal(backup.issues.find(value => value.id === live.id)?.plannedEffortMinutes, 0);
   assert.equal(backup.trashEntries.find(value => value.id === removal.trashEntryId)?.resource.plannedEffortMinutes, 321);
   assert.deepEqual(backup.workloadCapacities?.find(value => value.projectId === f.project.id), saved);
@@ -346,7 +346,7 @@ test('workspace availability survives restart and restore, and old backups retai
   assert.deepEqual(await f.call(path), saved);
 
   const backup = await f.export();
-  assert.equal(backup.schemaVersion, 19);
+  assert.equal(backup.schemaVersion, 20);
   assert.deepEqual(backup.teamWorkloadCapacity, saved);
   const changed = await f.call<TeamWorkloadCapacity>(path, 'PATCH', {expectedVersion:saved.version,defaultDailyMinutes:75});
   const malformed = structuredClone(backup);

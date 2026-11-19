@@ -3,7 +3,7 @@ import type { Express, NextFunction, Request, Response } from 'express';
 import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
-import { contentReferences } from '../shared/document-nodes.js';
+import { contentReferences, documentIssueLists } from '../shared/document-nodes.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -140,6 +140,7 @@ export class ApiKeyService {
         if (!this.store.get(table, reference.id) && historical.has(`${reference.type}:${reference.kind}:${reference.id}`)) continue;
         this.resource(key, table, reference.id);
       }
+      for (const { projectId } of documentIssueLists(content)) this.allowedProject(key, projectId);
     }
   }
 

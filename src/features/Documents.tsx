@@ -6,13 +6,14 @@ import Placeholder from '@tiptap/extension-placeholder';
 import {
   ArrowDownToLine, Bold, Check, CheckCheck, ChevronDown, ChevronRight,
   Code2, FileCheck2, FilePlus2, FileText, History, ImageIcon, Italic, Link2, List,
-  ListChecks, ListOrdered, Loader2, MessageSquare, PanelRightClose,
+  ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
-import { contentReferences, documentPlainText } from '../../shared/document-nodes';
+import { contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
+import { IssueListChooser, type IssueListSelection, type OpenIssueList } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
@@ -92,6 +93,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
   const [referenceSelection, setReferenceSelection] = useState<ReferenceSelection | null>(null);
+  const [issueListSelection, setIssueListSelection] = useState<IssueListSelection | null>(null);
+  const closeIssueList = useCallback(() => setIssueListSelection(null), []);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [slashTop, setSlashTop] = useState(40);
   const [issueSearch, setIssueSearch] = useState('');
@@ -195,6 +198,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     onSelectionUpdate: () => { forceToolbar(value => value + 1); setSlashQuery(null); },
   });
   const editor = liveMode ? liveEditor : manualEditor;
+  const openIssueList = useCallback<OpenIssueList>((instance, target) => {
+    const current = draftRef.current;
+    if (!current || instance !== editor || instance.isDestroyed || !instance.isEditable) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const context = { editor: instance, documentId: current.id, opener };
+    setIssueListSelection(target ? { ...context, kind: 'edit', target } : { ...context, kind: 'insert', bookmark: instance.state.selection.getBookmark() });
+    setSlashQuery(null); setInsertKind(null); setReferenceSelection(null);
+  }, [editor]);
   const receiveDisabledSession = useCallback((current: CollaborationSession) => {
     const previous = draftRef.current;
     if (!previous || previous.id !== current.document.id) return;
@@ -265,6 +276,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setConflict(next.dirty && next.expectedVersion !== selectedPage.version);
     setShowLatest(false);
     setReferenceSelection(null);
+    setIssueListSelection(null);
     setSlashQuery(null);
     setInsertKind(null);
   }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument]); // Deliberately preserve the local buffer on snapshot refresh.
@@ -317,7 +329,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       }
       const result = await api<DocPage>(`/documents/${captured.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': capturedActor }, body: JSON.stringify({
         expectedVersion: captured.expectedVersion, title: captured.title.trim() || '제목 없는 문서',
-        ...(!collaborative ? { content: captured.content, plainText: captured.plainText } : {}),
+        ...(!collaborative ? { content: captured.content, plainText: captured.plainText, contentSchemaVersion: 3 } : {}),
         status: status || captured.status, parentId: captured.parentId,
       }) });
       const current = draftRef.current;
@@ -363,7 +375,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         event.preventDefault();
         if (!publicationOpen) void saveDraft();
       }
-      if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setExportOpen(false); }
+      if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setIssueListSelection(null); setExportOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -476,7 +488,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         const next = draftFromPage(result); draftRef.current = next; setDraft(next); rememberDraft(next, capturedActor);
         if (sessionRef.current?.enabled) setLiveReload(value => value + 1);
         else manualEditor?.commands.setContent(next.content, { emitUpdate: false });
-        setReferenceSelection(null); setConflict(false);
+        setReferenceSelection(null); setIssueListSelection(null); setConflict(false);
       }
       await refresh(); notify('이전 내용을 새 버전으로 복구했습니다.', 'success');
     } catch (error) {
@@ -587,7 +599,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function refreshReferences() {
     if (referencesRefreshing) return; setReferencesRefreshing(true);
-    try { await refresh(); notify('참조한 항목과 포함 원본을 새로 불러왔습니다. 작성 중인 내용은 유지됩니다.', 'success'); }
+    try { await refresh(); notify('참조, 포함 원본과 업무 목록을 새로 불러왔습니다. 작성 중인 내용은 유지됩니다.', 'success'); }
     catch (cause) { notify(cause instanceof Error ? cause.message : '참조를 새로 불러오지 못했습니다.', 'error'); }
     finally { setReferencesRefreshing(false); }
   }
@@ -595,7 +607,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   function openReference(kind: ReferenceKind) {
     if (!editor?.isEditable || !draftRef.current) return;
     setReferenceSelection({ kind, editor, bookmark: editor.state.selection.getBookmark(), documentId: draftRef.current.id });
-    setSlashQuery(null); setInsertKind(null);
+    setSlashQuery(null); setInsertKind(null); setIssueListSelection(null);
   }
 
   const slashCommands = [
@@ -607,6 +619,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '코드 블록', search: 'code 코드', action: () => editor?.chain().focus().toggleCodeBlock().run() },
     { label: '표', search: 'table 표', action: () => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
     { label: '업무 참조', search: 'issue ticket 업무 참조', action: () => openReference('issueReference') },
+    { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', action: () => { if (editor) openIssueList(editor); } },
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '접기 블록', search: 'details expand collapse 접기 펼치기', action: () => insertDetails(editor) },
@@ -648,13 +661,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     });
 
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
+  const issueListDialog = !bodyReadOnly && issueListSelection?.editor === editor && issueListSelection.documentId === draft?.id ? issueListSelection : null;
   const canRequestPublication = Boolean(draft && !draft.dirty && !saving && !bodyReadOnly &&
     (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
   const button = (label: string, icon: React.ReactNode, onClick: () => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
-  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}><section className="documents-feature">
+  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueList={bodyReadOnly ? undefined : openIssueList}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueListDialog)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         <div className="docs-tree-content">
@@ -675,7 +689,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
-              <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: 2, document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
+              <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
               <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
             </div>
@@ -710,6 +724,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('이미지 URL 삽입', <ImageIcon size={15} />, () => { setInsertKind('image'); setInsertUrl(''); })}
                 <button type="button" className="docs-format-btn" aria-label="참조 새로고침" title="참조 새로고침" disabled={referencesRefreshing} onMouseDown={event => event.preventDefault()} onClick={() => void refreshReferences()}>{referencesRefreshing ? <Loader2 className="docs-spin" size={15} /> : <RefreshCw size={15} />}</button>
                 {button('업무 참조 삽입', <Link2 size={15} />, () => openReference('issueReference'))}
+                {button('업무 목록 삽입', <ListFilter size={15} />, () => { if (editor) openIssueList(editor); })}
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('접기 블록 삽입', <ChevronDown size={15} />, () => insertDetails(editor))}
@@ -747,6 +762,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} onClose={closePublication} notify={notify} refreshDocument={refresh} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
+    {issueListDialog && <IssueListChooser selection={issueListDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueList} />}
     {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !creating) setNewOpen(false); }}><form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}><div className="docs-modal-header"><div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div><button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={() => setNewOpen(false)}><X size={19} /></button></div><label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?" value={newTitle} onChange={event => setNewTitle(event.target.value)} required maxLength={240} /></label><div className="docs-template-grid">{DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id} onClick={() => { setNewTemplate(template.id); if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle)) setNewTitle(template.id === 'blank' ? '' : template.name); }}><span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}</button>)}</div><div className="docs-location-fields"><label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent)} value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}><option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="docs-modal-label">상위 문서<select className="field" value={newParent} onChange={event => setNewParent(event.target.value)}><option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label></div><div className="docs-modal-footer"><button className="btn btn-ghost" type="button" disabled={creating} onClick={() => setNewOpen(false)}>취소</button><button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating}>{creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />} 문서 만들기</button></div></form></div>}
   </section></DocumentBlocksProvider>;
 }

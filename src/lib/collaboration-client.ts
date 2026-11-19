@@ -3,11 +3,13 @@ import { yDocToProsemirrorJSON } from 'y-prosemirror';
 import {
   COLLABORATION_CURSOR_PROTOCOL,
   COLLABORATION_SCHEMA,
+  supportsCollaborationSchema,
   type CollaborationCursorSelection,
   type CollaborationPeer,
   type CollaborationServerMessage,
   type CollaborationSession,
 } from '../../shared/collaboration';
+import { documentNodeSchemaVersion } from '../../shared/document-nodes';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
 
@@ -29,11 +31,9 @@ const CURSOR_INTERVAL = 80;
 const CURSOR_HEARTBEAT = 10_000;
 const sameSelection = (a: CollaborationCursorSelection | null, b: CollaborationCursorSelection | null) =>
   a === b || (a !== null && b !== null && a.anchor === b.anchor && a.head === b.head);
-const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
-
 /** A known old cache is rendered only after validation in a disposable document.
  * Its original bytes remain untouched until an explicit discard or saved copy. */
-function validateLegacyPending(update: string): Uint8Array {
+function validateLegacyPending(update: string, schemaVersion: 1 | 2): Uint8Array {
   if (typeof update !== 'string' || !update.length || update.length > Math.ceil(MAX_CACHE_STATE / 3) * 4) throw new Error('편집 보관 데이터 크기가 올바르지 않습니다.');
   const bytes = decodeBytes(update);
   if (bytes.length > MAX_CACHE_STATE || encodeBytes(bytes) !== update) throw new Error('편집 보관 데이터 형식이 올바르지 않습니다.');
@@ -60,8 +60,15 @@ function validateLegacyPending(update: string): Uint8Array {
     const check = (value: unknown, depth: number) => {
       if (++count > 30000 || depth > 60) throw new Error('문서 중첩 한도를 초과했습니다.');
       const node = object(value);
-      if (typeof node.type !== 'string' || versionTwoNodes.has(node.type) || !schema.nodes[node.type]) throw new Error('이전 문서 형식에 없는 블록입니다.');
+      if (typeof node.type !== 'string' || documentNodeSchemaVersion(node.type) > schemaVersion || !schema.nodes[node.type]) throw new Error('이전 문서 형식에 없는 블록입니다.');
       const attrs = attributes(node.attrs, schema.nodes[node.type].spec.attrs);
+      if (node.type === 'issueReference' || node.type === 'documentReference' || node.type === 'documentInclude') {
+        const id = attrs[node.type === 'issueReference' ? 'issueId' : 'documentId'];
+        if (typeof id !== 'string' || !id.trim() || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)
+          || (attrs.label !== undefined && (typeof attrs.label !== 'string' || attrs.label.length > 300))) {
+          throw new Error('보관한 참조 블록의 대상 또는 이름이 올바르지 않습니다.');
+        }
+      }
       if (node.marks !== undefined && !Array.isArray(node.marks)) throw new Error('문서 서식이 올바르지 않습니다.');
       for (const value of Array.isArray(node.marks) ? node.marks : []) {
         const mark = object(value);
@@ -178,9 +185,9 @@ export class CollaborationClient {
       }
       if (!candidate) return;
       this.selectedCacheKey = candidateKey;
-      if (candidate.schemaVersion === 1 && COLLABORATION_SCHEMA === 2) {
+      if (supportsCollaborationSchema(candidate.schemaVersion) && candidate.schemaVersion !== COLLABORATION_SCHEMA) {
         if (typeof candidate.epoch !== 'string' || candidate.epoch.length > 200 || candidate.pending !== true) throw new Error('이전 편집 보관 정보가 올바르지 않습니다.');
-        const update = validateLegacyPending(candidate.update);
+        const update = validateLegacyPending(candidate.update, candidate.schemaVersion);
         Y.applyUpdate(this.doc, update, CACHE);
         this.legacyRecovery = true;
         this.localSequence = 1;

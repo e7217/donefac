@@ -19,7 +19,7 @@ export interface DocumentHistoryProps {
   saving?: boolean;
 }
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', documentReference: '문서 참조', documentInclude: '문서 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
+const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', documentReference: '문서 참조', documentInclude: '문서 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
 const PAGE_SIZE = 60;
 
 export function DocumentHistory({ revisions, loading, error, current, users, onRestore, restoreDisabled, onSaveCopy, saving = false }: DocumentHistoryProps) {
@@ -116,6 +116,11 @@ function metadataSummary(unit: DocumentDiffUnit): { lines: SummaryLine[]; additi
   if (unit.nodeType === 'heading') attribute('level', '제목 단계');
   if (unit.nodeType === 'image') { attribute('src', '이미지 주소', true); attribute('alt', '대체 텍스트', true); attribute('title', '이미지 설명'); attribute('width', '너비'); attribute('height', '높이'); }
   if (['issueReference', 'documentReference', 'documentInclude'].includes(unit.nodeType)) { attribute(unit.nodeType === 'issueReference' ? 'issueId' : 'documentId', '참조 대상 ID', true); attribute('label', '저장된 이름', true); }
+  if (unit.nodeType === 'issueList') {
+    attribute('projectId', '프로젝트 ID', true);
+    attribute('savedViewId', '공유 보기 ID', true, value => value ?? '프로젝트 전체');
+    attribute('label', '저장된 이름', true);
+  }
   if (unit.nodeType === 'tableCell' || unit.nodeType === 'tableHeader') { attribute('colspan', '가로 병합', true, value => `${value ?? 1}칸`); attribute('rowspan', '세로 병합', true, value => `${value ?? 1}칸`); attribute('colwidth', '열 너비'); }
   if (unit.nodeType === 'orderedList') attribute('start', '시작 번호');
   if (unit.nodeType === 'taskItem') attribute('checked', '완료 여부', true, value => value === true ? '완료' : '미완료');

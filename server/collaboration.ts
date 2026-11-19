@@ -6,13 +6,14 @@ import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror';
 import { createEditorSchema } from '../shared/editor-schema.js';
 import {
-  COLLABORATION_CURSOR_PROTOCOL, COLLABORATION_SCHEMA, MAX_COLLABORATION_CURSOR_BYTES, type CollaborationClientMessage,
+  COLLABORATION_CURSOR_PROTOCOL, COLLABORATION_SCHEMA, MAX_COLLABORATION_CURSOR_BYTES, supportsCollaborationSchema, type CollaborationClientMessage,
   type CollaborationCursor, type CollaborationCursorSelection, type CollaborationPeer,
   type CollaborationServerMessage, type CollaborationSession,
 } from '../shared/collaboration.js';
+import { documentContentSchemaVersion } from '../shared/document-nodes.js';
 import type { DocPage, DocRevision, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
-import { DocumentContentService,DocumentContentError,normalizeDocumentContent,hasVersionTwoNodes } from './document-content.js';
+import { DocumentContentService,DocumentContentError,normalizeDocumentContent } from './document-content.js';
 
 export const MAX_COLLABORATION_UPDATE=1024*1024;
 const MAX_STATE=16*1024*1024;
@@ -49,6 +50,11 @@ function cursorPosition(value: unknown): value is string {
 }
 function contentOperation<T>(operation:()=>T):T{try{return operation();}catch(error){if(error instanceof DocumentContentError)invalid(error.message,error.status,error.code);throw error;}}
 function normalizeContent(value:unknown):{content:RichContent;plainText:string}{return contentOperation(()=>normalizeDocumentContent(value));}
+function validateStateSchema(content: RichContent, version: number) {
+  if (version < COLLABORATION_SCHEMA && version < documentContentSchemaVersion(content)) {
+    invalid('이전 공동 편집 스키마에 지원하지 않는 문서 블록이 포함되어 있습니다.', 422, 'SCHEMA_MISMATCH');
+  }
+}
 function inspect(doc:Y.Doc) {
   for(const name of doc.share.keys())if(name!=='default')invalid('지원하지 않는 공동 편집 루트입니다.',422,'INVALID_SCHEMA');
   const root=doc.getXmlFragment('default');
@@ -87,12 +93,23 @@ export class CollaborationService {
       const states=(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>this.state(row.document_id)!);
       const candidates=new Map<string,DocPage>();
       for(const state of states){
-        if(state.schemaVersion!==1&&state.schemaVersion!==COLLABORATION_SCHEMA)invalid('지원하지 않는 영속 공동 편집 스키마입니다.',409,'SCHEMA_MISMATCH');
-        const doc=decodeState(state.state);try{const normalized=inspect(doc);if(state.schemaVersion===1&&hasVersionTwoNodes(normalized.content))invalid('이전 공동 편집 스키마에는 새 문서 블록을 저장할 수 없습니다.',422,'SCHEMA_MISMATCH');candidates.set(state.documentId,{...this.document(state.documentId),...normalized});}finally{doc.destroy();}
+        if (!supportsCollaborationSchema(state.schemaVersion)) invalid('지원하지 않는 영속 공동 편집 스키마입니다.',409,'SCHEMA_MISMATCH');
+        const doc = decodeState(state.state);
+        try {
+          const normalized = inspect(doc);
+          validateStateSchema(normalized.content, state.schemaVersion);
+          candidates.set(state.documentId, {...this.document(state.documentId), ...normalized});
+        } finally { doc.destroy(); }
       }
       const documents=this.store.all<DocPage>('documents').map(document=>candidates.get(document.id)||document);
       for(const document of candidates.values())contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents}));
-      for(const state of states)if(state.schemaVersion===1){const document=candidates.get(state.documentId)!;this.write({...state,epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA});this.store.put('documents',{...document,version:document.version+1,updatedAt:iso()});this.store.db.prepare('DELETE FROM collaboration_requests WHERE document_id=?').run(document.id);}
+      for (const state of states) {
+        if (state.schemaVersion === COLLABORATION_SCHEMA) continue;
+        const document = candidates.get(state.documentId)!;
+        this.write({...state, epoch:randomUUID(), schemaVersion:COLLABORATION_SCHEMA});
+        this.store.put('documents', {...document, version:document.version+1, updatedAt:iso()});
+        this.store.db.prepare('DELETE FROM collaboration_requests WHERE document_id=?').run(document.id);
+      }
     });
   }
   private fromContent(document:DocPage):{state:State;document:DocPage}{
@@ -215,11 +232,25 @@ export class CollaborationService {
     const normalizedDocuments=documents.map(document=>({...document,...normalizeContent(document.content)}));
     const documentsById=new Map(normalizedDocuments.map(document=>[document.id,document]));
     if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[]}));}
-    const seen=new Set();return value.map(item=>{
-      if(!item||typeof item.documentId!=='string'||seen.has(item.documentId)||![1,COLLABORATION_SCHEMA].includes(item.schemaVersion)||typeof item.epoch!=='string'||!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(item.epoch))invalid('공동 편집 상태의 식별자·스키마가 올바르지 않습니다.');
-      seen.add(item.documentId);const document=documentsById.get(item.documentId);if(!document)invalid('공동 편집 상태에 해당하는 문서가 없습니다.');
-      const bytes=base64(item.state,MAX_STATE),ydoc=decodeState(bytes);
-      try{const normalized=inspect(ydoc);if(item.schemaVersion===1&&hasVersionTwoNodes(normalized.content))invalid('이전 공동 편집 스키마에는 새 문서 블록이 포함될 수 없습니다.',422,'SCHEMA_MISMATCH');if(JSON.stringify(normalized.content)!==JSON.stringify(document.content))invalid('공동 편집 상태와 문서 JSON 내용이 일치하지 않습니다.',422,'SNAPSHOT_MISMATCH');return{documentId:item.documentId,epoch:randomUUID(),schemaVersion:COLLABORATION_SCHEMA,state:bytes};}finally{ydoc.destroy();}
+    const seen = new Set<string>();
+    return value.map(item => {
+      if (!item || typeof item.documentId !== 'string' || seen.has(item.documentId) || !supportsCollaborationSchema(item.schemaVersion)
+        || typeof item.epoch !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(item.epoch)) {
+        invalid('공동 편집 상태의 식별자·스키마가 올바르지 않습니다.');
+      }
+      seen.add(item.documentId);
+      const document = documentsById.get(item.documentId);
+      if (!document) invalid('공동 편집 상태에 해당하는 문서가 없습니다.');
+      const bytes = base64(item.state, MAX_STATE);
+      const ydoc = decodeState(bytes);
+      try {
+        const normalized = inspect(ydoc);
+        validateStateSchema(normalized.content, item.schemaVersion);
+        if (JSON.stringify(normalized.content) !== JSON.stringify(document.content)) {
+          invalid('공동 편집 상태와 문서 JSON 내용이 일치하지 않습니다.', 422, 'SNAPSHOT_MISMATCH');
+        }
+        return {documentId:item.documentId, epoch:randomUUID(), schemaVersion:COLLABORATION_SCHEMA, state:bytes};
+      } finally { ydoc.destroy(); }
     });
   }
   replaceImported(states:State[]){this.store.db.exec('DELETE FROM collaboration_requests;DELETE FROM collaboration_documents;');for(const state of states){this.write(state);this.store.put('documents',this.deriveSnapshot(this.document(state.documentId)));}}
@@ -233,7 +264,7 @@ export class CollaborationService {
     if(message?.type==='cursor'){this.handleCursor(peer,message);return;}
     const state=this.state(peer.documentId);if(!state)invalid('공동 편집이 활성화되지 않았습니다.',409,'NOT_ENABLED');
     if(message?.type==='hello'){
-      if(message.schemaVersion!==COLLABORATION_SCHEMA||state.schemaVersion!==COLLABORATION_SCHEMA)invalid('공동 편집 스키마 버전이 다릅니다.',409,'SCHEMA_MISMATCH');
+      if(message.schemaVersion!==COLLABORATION_SCHEMA||state.schemaVersion!==COLLABORATION_SCHEMA)invalid('공동 편집 형식이 바뀌었습니다. 브라우저를 새로고침해 주세요.',409,'SCHEMA_MISMATCH');
       if(message.epoch!==null&&message.epoch!==state.epoch){this.send(peer,{type:'reset',epoch:state.epoch,document:this.document(peer.documentId),reason:'문서가 복구되거나 교체되었습니다. 이전 편집을 새 문서에 보관해 주세요.'});peer.socket.close(4409,'epoch_changed');return;}
       const doc=decodeState(state.state);
       try {
