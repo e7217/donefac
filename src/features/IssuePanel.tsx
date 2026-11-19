@@ -8,6 +8,7 @@ import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared
 import { IssueTypeIcon } from './Issues';
 import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
+import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
@@ -18,7 +19,7 @@ import { errorMessage } from './schedule-utils';
 import './issues.css';
 
 function editableIssue(issue: Issue, labels: string) {
-  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
+  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
 export function IssuePanel(props: FeatureProps & { issueId: string; onClose: () => void }) {
@@ -178,6 +179,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
           <label className="issue-form-label">종료일<input aria-label="종료일" type="date" className="field" value={draft.endDate || ''} onChange={e => update('endDate', e.target.value || null)} /></label>
           <label className="issue-form-label">목표 마감일<input aria-label="목표 마감일" type="date" className="field" value={draft.dueDate || ''} onChange={e => update('dueDate', e.target.value || null)} /></label>
           <label className="issue-form-label">예상 소요 (포인트)<input aria-label="예상 소요 (포인트)" className="field" type="number" min="0" step="0.5" placeholder="미정" value={draft.estimate ?? ''} onChange={e => update('estimate', e.target.value === '' ? null : Number(e.target.value))} /></label>
+          <label className="issue-form-label">계획 작업 시간 (분)<input aria-label="계획 작업 시간 (분)" className="field" type="number" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} placeholder="미정" value={draft.plannedEffortMinutes ?? ''} onChange={e => update('plannedEffortMinutes', e.target.value === '' ? null : Number(e.target.value))} /></label>
           <label className="issue-form-label issue-grid-wide">상위 업무<select aria-label="상위 업무" className="field" value={draft.parentId || ''} onChange={e => update('parentId', e.target.value || null)}><option value="">없음</option>{data.issues.filter(i => i.projectId === draft.projectId && i.id !== issueId).map(i => <option key={i.id} value={i.id}>{i.key} · {i.title}</option>)}</select></label>
           <label className="issue-form-label">사이클<PlanningSelect data={data} projectId={draft.projectId} kind="cycle" value={draft.cycleId ?? null} legacyLabel={draft.cycle} onChange={id => updatePlanning('cycle', id)} /></label>
           <label className="issue-form-label">모듈<PlanningSelect data={data} projectId={draft.projectId} kind="module" value={draft.moduleId ?? null} legacyLabel={draft.module} onChange={id => updatePlanning('module', id)} /></label>

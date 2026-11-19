@@ -20,6 +20,7 @@ curl --fail-with-body \
 | `GET /projects` | 키 범위의 프로젝트 목록 |
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
+| `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
@@ -36,12 +37,19 @@ curl --fail-with-body \
 | `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
 | `POST /attachments` · `POST /attachments/:id/versions` | 첨부 생성 또는 새 버전 업로드 |
+| `PATCH /projects/:id/workload-capacity` | 프로젝트·팀원·날짜별 가용 시간 변경 |
 
 표의 경로 앞에는 `/api/v1`이 붙는다. 읽기 키는 조회만 허용하며 쓰기 키는 조회와 표의 변경 요청을 허용한다. 프로젝트 범위는 조회·원래 대상·이동 대상·상위 항목·계획 참조에 적용한다. 공통 문서는 전체 프로젝트 키로 접근한다.
 
 백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
 
 업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
+
+## 담당자 작업량
+
+업무 생성·수정의 `plannedEffortMinutes`에는 0~1,000,000 정수 분 또는 `null`을 보낸다. 포인트 필드 `estimate`와 별도이다. `GET /projects/:id/workload?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`로 최대 180일을 양끝 날짜 포함으로 조회한다. 응답의 `rows`에는 팀원별 일자와 `scheduledMinutes`, `availableMinutes`, 업무별 `allocations`가 있다. `incomplete`에는 배분에 필요한 정보가 부족한 업무와 이유를 반환한다.
+
+`GET /projects/:id/workload-capacity`의 `version`을 `expectedVersion`으로 보내고 `defaultDailyMinutes`, `members` 또는 `exceptions`를 지정해 변경한다. `members`는 `{userId,dailyMinutes}`, `exceptions`는 `{userId,date,availableMinutes}` 배열이다. 배열을 보낼 때 해당 목록을 교체하며 빈 배열로 초기화할 수 있다. 가용 시간 허용 범위는 0~1,440분이다. 이전 버전으로 저장하면 `409`를 반환한다.
 
 ## 첨부와 버전
 

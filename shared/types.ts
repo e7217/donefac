@@ -186,6 +186,40 @@ export interface ApiKeyRecord {
 export interface ApiKeyCreated { key: ApiKeyRecord; token: string }
 export interface CalendarException { date: string; isWorking: boolean; label: string }
 export interface WorkCalendar { id: string; projectId: string; name: string; workingWeekdays: number[]; exceptions: CalendarException[]; version: number; updatedAt: string }
+export interface ProjectWorkloadCapacity {
+  id: string;
+  projectId: string;
+  version: number;
+  updatedAt: string;
+  defaultDailyMinutes: number;
+  members: { userId: string; dailyMinutes: number }[];
+  exceptions: { userId: string; date: string; availableMinutes: number }[];
+}
+export type WorkloadIncompleteReason = 'unassigned' | 'missing-dates' | 'missing-effort' | 'no-working-days';
+export interface ProjectWorkloadDay { date: string; working: boolean }
+export interface ProjectWorkloadCell {
+  date: string;
+  scheduledMinutes: number;
+  availableMinutes: number;
+  allocations: { issueId: string; minutes: number }[];
+}
+export interface ProjectWorkloadRow {
+  userId: string;
+  scheduledMinutes: number;
+  availableMinutes: number;
+  overloadedDays: number;
+  days: ProjectWorkloadCell[];
+}
+export interface ProjectWorkloadResult {
+  startDate: string;
+  endDate: string;
+  days: ProjectWorkloadDay[];
+  rows: ProjectWorkloadRow[];
+  incomplete: { issueId: string; reasons: WorkloadIncompleteReason[] }[];
+  totalScheduledMinutes: number;
+  totalAvailableMinutes: number;
+  overloadedCells: number;
+}
 export interface Milestone { id: string; projectId: string; title: string; description: string; date: string; status: 'open' | 'reached'; ownerId: string | null; issueIds: string[]; version: number; createdAt: string; updatedAt: string }
 export interface BaselineIssue { issueId: string; key: string; title: string; startDate: string | null; endDate: string | null; sourceVersion: number }
 export interface BaselineMilestone { milestoneId: string; title: string; date: string; status: 'open' | 'reached'; sourceVersion: number }
@@ -202,6 +236,7 @@ export interface Issue {
   collaboratorIds: string[]; parentId: string | null; labels: string[];
   startDate: string | null; endDate: string | null; dueDate: string | null;
   estimate: number | null; cycle: string | null; module: string | null; release: string | null;
+  plannedEffortMinutes?: number | null;
   cycleId?: string | null; moduleId?: string | null; releaseId?: string | null;
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
@@ -424,6 +459,7 @@ export interface WorkspaceSnapshot {
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
   planningItems?: PlanningItem[];
   calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
+  workloadCapacities?: ProjectWorkloadCapacity[];
   issueSchemas?: ProjectIssueSchema[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }

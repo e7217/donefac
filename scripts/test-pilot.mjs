@@ -113,8 +113,14 @@ try {
   await browser(pilot.url);
   const workspace = await (await call(pilot.url, '/workspace')).json();
   const projectId = workspace.projects[0].id;
+  const assigneeId = workspace.users[0].id;
+  const workloadDate = '2026-11-23';
+  const workloadPath = `/projects/${projectId}/workload?startDate=${workloadDate}&endDate=${workloadDate}`;
+  const capacityPath = `/projects/${projectId}/workload-capacity`;
+  const initialCapacity = await (await call(pilot.url,capacityPath)).json();
+  await call(pilot.url,capacityPath,{method:'PATCH',body:{expectedVersion:initialCapacity.version,members:[{userId:assigneeId,dailyMinutes:240}]}});
   const issue = await (await call(pilot.url, '/issues', {
-    method:'POST', status:201, body:{projectId,title:'파일럿 백업 복원 업무'},
+    method:'POST', status:201, body:{projectId,title:'파일럿 백업 복원 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,estimate:2,plannedEffortMinutes:300},
   })).json();
   const document = await (await call(pilot.url,'/documents',{
     method:'POST',status:201,body:{projectId,title:'파일럿 백업 복원 문서',content:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'고정할 원본 문서'}]}]}},
@@ -193,6 +199,15 @@ try {
     headers:{Authorization:`Bearer ${key.token}`},
   })).json();
   assert.equal(restoredIssue.title,issue.title);
+  assert.equal(restoredIssue.estimate,2);
+  assert.equal(restoredIssue.plannedEffortMinutes,300);
+  const restoredWorkload = await (await call(copy.url,`/v1${workloadPath}`,{
+    headers:{Authorization:`Bearer ${key.token}`},
+  })).json();
+  const restoredLoadRow = restoredWorkload.rows.find(row=>row.userId===assigneeId);
+  assert.equal(restoredLoadRow?.scheduledMinutes,300);
+  assert.equal(restoredLoadRow?.availableMinutes,240);
+  assert.equal(restoredLoadRow?.overloadedDays,1);
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();
   assert.equal(restoredCollaboration.enabled,true);
   assert.equal(restoredCollaboration.document.plainText,collaboration.document.plainText);

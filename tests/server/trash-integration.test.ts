@@ -375,7 +375,7 @@ test('native schema 17 retains invisible archived bytes, rejects damage, and can
   const fileIds = [original.id, latest.currentVersionId].sort();
   assert.deepEqual(readdirSync(path).sort(), fileIds);
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 17);
+  assert.equal(backup.schemaVersion, 18);
   assert.equal(backup.trashEntries?.length, 1);
   assert.ok(!backup.documents.some(value => value.id === doc.id));
   assert.ok(!backup.attachments.some(value => value.id === original.id));
