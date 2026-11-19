@@ -1,9 +1,12 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
-import type { AutomaticSchedulePreview,Dependency,Issue,ProjectWorkflow,ScheduleChange } from '../shared/types.js';
+import type { AutomaticSchedulePreview,Dependency,Issue,ProjectWorkflow,ProjectWorkloadCapacity,ScheduleChange,WorkloadLevelPreview } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isTerminalStatus } from '../shared/workflow-helpers.js';
+import { validateWorkloadRange } from '../shared/project-workload.js';
+import { levelProjectWorkload, MAX_WORKLOAD_LEVEL_CELLS, MAX_WORKLOAD_LEVEL_CHANGES,
+  MAX_WORKLOAD_LEVEL_DEPENDENCIES, MAX_WORKLOAD_LEVEL_ISSUES } from '../shared/workload-leveling.js';
 import { CalendarService } from './calendars.js';
 import { Store } from './store.js';
 
@@ -13,8 +16,13 @@ export interface AutomaticScheduleMutation{id:string;expectedVersion:number;star
 interface AutomaticScheduleInput{projectId:string;issueIds?:string[];anchorDate?:string|null;defaultDuration?:number|null;seedChanges?:AutomaticScheduleMutation[]}
 export interface AutomaticScheduleResult{undoId:string;updated:Issue[];warnings?:string[]}
 type Hooks={actor:(request:Request)=>string;commitChanges:(request:Request,changes:AutomaticScheduleMutation[])=>AutomaticScheduleResult};
+type WorkloadHooks = {
+  capacity(projectId: string): ProjectWorkloadCapacity;
+  workflow(projectId: string): ProjectWorkflow;
+  validateChange(issue: Issue, change: AutomaticScheduleMutation): string | null;
+};
 export const AUTO_PREVIEW_TTL_MS=30*60*1000,AUTO_RESULT_RETENTION_MS=7*24*60*60*1000;
-interface Proposal{id:string;projectId:string;actorId:string;createdAt:string;expiresAt:string;issueVersions:[string,number][];calendarVersion:number;workflowVersion:number;issueSchemaVersion?:number;dependencyHash:string;preview:AutomaticSchedulePreview;used:boolean;appliedAt?:string;result?:AutomaticScheduleResult}
+interface Proposal{id:string;projectId:string;actorId:string;createdAt:string;expiresAt:string;issueVersions:[string,number][];calendarVersion:number;workflowVersion:number;issueSchemaVersion?:number;capacityVersion?:number;dependencyHash:string;preview:AutomaticSchedulePreview;used:boolean;appliedAt?:string;result?:AutomaticScheduleResult}
 function date(value:unknown,label:string):string|null{if(value===null)return null;if(!isCalendarDate(value))fail(`${label}은(는) YYYY-MM-DD 형식이어야 합니다.`);return value;}
 const readset=(issues:Issue[]):[string,number][]=>issues.map(issue=>[issue.id,issue.version] as [string,number]).sort((a,b)=>a[0].localeCompare(b[0]));
 function dependencyHash(dependencies: Dependency[]) {
@@ -22,11 +30,27 @@ function dependencyHash(dependencies: Dependency[]) {
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 }
 
+function uniqueIds(value: unknown, label: string, max: number): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > max || new Set(value).size !== value.length ||
+    value.some(id => typeof id !== 'string' || !id || id.length > 200)) {
+    fail(`${label}은 중복 없이 1~${max.toLocaleString('ko-KR')}개를 선택해 주세요.`);
+  }
+  return value;
+}
+
+const toMutation = (change: ScheduleChange): AutomaticScheduleMutation => ({
+  id: change.id, expectedVersion: change.version, startDate: change.toStart, endDate: change.toEnd,
+});
+
 /** Persisted, actor-bound proposals. Apply uses one transaction including the root undo/audit hook. */
 export class AutomaticScheduleService{
   constructor(private readonly store:Store,private readonly calendars:CalendarService){store.db.exec('CREATE TABLE IF NOT EXISTS automatic_schedule_previews(id TEXT PRIMARY KEY,json TEXT NOT NULL)');this.prune();}
   private prune(){const timestamp=new Date().toISOString(),cutoff=new Date(Date.now()-AUTO_RESULT_RETENTION_MS).toISOString();this.store.db.prepare("DELETE FROM automatic_schedule_previews WHERE (json_extract(json,'$.used')=0 AND json_extract(json,'$.expiresAt')<=?) OR (json_extract(json,'$.used')=1 AND COALESCE(json_extract(json,'$.appliedAt'),json_extract(json,'$.createdAt'))<=?)").run(timestamp,cutoff);}
-  private issues(projectId:string){return this.store.all<Issue>('issues').filter(issue=>issue.projectId===projectId);}
+  private issues(projectId: string) {
+    const rows = this.store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as { json: string }[];
+    return rows.map(({ json }) => JSON.parse(json) as Issue);
+  }
   private issueSchemaVersion(projectId:string){const exists=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_schemas'").get();return exists?this.store.get<{version:number}>('issue_schemas',projectId)?.version||1:1;}
   private dependencies(issues:Issue[]){const ids=new Set(issues.map(issue=>issue.id));return this.store.all<Dependency>('dependencies').filter(dependency=>ids.has(dependency.predecessorId)||ids.has(dependency.successorId));}
   preview(value:unknown,actorId:string):AutomaticSchedulePreview{return this.store.transaction(()=>this.buildPreview(value,actorId));}
@@ -108,20 +132,86 @@ export class AutomaticScheduleService{
     const preview:AutomaticSchedulePreview={previewId,changes,warnings:[...new Set(warnings)],blocking:[...new Set(blocking)],calendarVersions:{[projectId]:calendar.version},expiresAt};
     const proposal:Proposal={id:previewId,projectId,actorId,createdAt,expiresAt,issueVersions:readset(issues),calendarVersion:calendar.version,workflowVersion:workflows.find(workflow=>workflow.projectId===projectId)?.version||1,issueSchemaVersion:this.issueSchemaVersion(projectId),dependencyHash:dependencyHash(dependencies),preview,used:false};this.store.put('automatic_schedule_previews',proposal);return preview;
   }
-  apply(request:Request,previewId:unknown,hooks:Hooks):AutomaticScheduleResult{
-    const actorId=hooks.actor(request);if(typeof previewId!=='string'||!previewId)fail('미리보기 ID가 필요합니다.');
-    return this.store.transaction(()=>{const proposal=this.store.get<Proposal>('automatic_schedule_previews',previewId);if(!proposal)fail('미리보기가 없거나 만료·복원으로 초기화되었습니다.',404);if(proposal.actorId!==actorId)fail('다른 작업자의 미리보기를 적용할 수 없습니다.',409);if(proposal.used&&proposal.result)return proposal.result;
+  private buildWorkloadPreview(value: unknown, actorId: string, hooks: WorkloadHooks): WorkloadLevelPreview {
+    return this.store.transaction(() => {
+      this.prune();
+      if (!value || typeof value !== 'object' || Array.isArray(value)) fail('과부하 일정 조정 조건을 확인해 주세요.');
+      const input = value as Record<string, unknown>;
+      if (Object.keys(input).some(key => !['projectId', 'startDate', 'endDate', 'userIds', 'issueIds'].includes(key))) {
+        fail('과부하 일정 조정 조건을 확인해 주세요.');
+      }
+      const { projectId } = input;
+      if (typeof projectId !== 'string' || !this.store.get('projects', projectId)) fail('프로젝트를 찾을 수 없습니다.', 404);
+      const { startDate, endDate, span } = validateWorkloadRange(input.startDate, input.endDate);
+      const userIds = uniqueIds(input.userIds, '담당자', 200);
+      if (userIds?.some(id => !this.store.get('users', id))) fail('담당자가 팀에 없습니다.', 404);
+      const issueIds = uniqueIds(input.issueIds, '업무', MAX_WORKLOAD_LEVEL_CHANGES);
+      const issues = this.issues(projectId);
+      if (issues.length > MAX_WORKLOAD_LEVEL_ISSUES) fail('프로젝트 업무 10,000개 이하에서 조정할 수 있습니다.', 422);
+      const byId = new Map(issues.map(issue => [issue.id, issue]));
+      if (issueIds?.some(id => !byId.has(id))) fail('선택한 업무가 프로젝트에 없습니다.', 404);
+      const assigned = [...new Set(issues.flatMap(issue => issue.assigneeId ? [issue.assigneeId] : []))];
+      const selectedUsers = userIds ?? assigned;
+      if (selectedUsers.length * span > MAX_WORKLOAD_LEVEL_CELLS) fail('담당자별 날짜가 너무 많습니다. 조회 기간이나 담당자를 줄여 주세요.', 422);
+      const dependencies = this.dependencies(issues);
+      if (dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) fail('프로젝트 업무 연결 50,000개 이하에서 조정할 수 있습니다.', 422);
+      const calendar = this.calendars.get(projectId), capacity = hooks.capacity(projectId), workflow = hooks.workflow(projectId);
+      const plan = levelProjectWorkload({ startDate, endDate, calendar, capacity, workflow, issues, dependencies, userIds: selectedUsers, issueIds });
+      const blocking: string[] = [];
+      for (const change of plan.changes) {
+        const message = hooks.validateChange(byId.get(change.id)!, toMutation(change));
+        if (message) blocking.push(`${change.key}: ${message}`);
+      }
+      const createdAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + AUTO_PREVIEW_TTL_MS).toISOString();
+      const previewId = randomUUID();
+      const preview: WorkloadLevelPreview = {
+        ...plan, previewId, expiresAt, blocking, calendarVersions: { [projectId]: calendar.version },
+        warnings: plan.reason === 'search-limit' ? ['계산 한도 안에서 확인한 일정만 제안했습니다.'] : [],
+      };
+      const proposal: Proposal = {
+        id: previewId, projectId, actorId, createdAt, expiresAt, preview, used: false,
+        issueVersions: readset(issues), calendarVersion: calendar.version, workflowVersion: workflow.version,
+        issueSchemaVersion: this.issueSchemaVersion(projectId), dependencyHash: dependencyHash(dependencies), capacityVersion: capacity.version,
+      };
+      this.store.put('automatic_schedule_previews', proposal);
+      return preview;
+    });
+  }
+
+  private proposal(previewId: unknown, actorId: string, workload: boolean): Proposal {
+    if (typeof previewId !== 'string' || !previewId) fail('미리보기 ID가 필요합니다.');
+    const proposal = this.store.get<Proposal>('automatic_schedule_previews', previewId);
+    if (!proposal || (proposal.capacityVersion !== undefined) !== workload) fail('미리보기가 없거나 만료·복원으로 초기화되었습니다.', 404);
+    if (proposal.actorId !== actorId) fail(workload ? '다른 작업자의 미리보기를 확인하거나 적용할 수 없습니다.' : '다른 작업자의 미리보기를 적용할 수 없습니다.', 409);
+    return proposal;
+  }
+
+  apply(request:Request,previewId:unknown,hooks:Hooks,workload?:WorkloadHooks):AutomaticScheduleResult{
+    const actorId=hooks.actor(request);
+    return this.store.transaction(()=>{const proposal=this.proposal(previewId,actorId,!!workload);if(proposal.used&&proposal.result)return proposal.result;
       if(!Number.isFinite(Date.parse(proposal.expiresAt))||Date.parse(proposal.expiresAt)<=Date.now())fail('미리보기가 만료되었습니다. 다시 계산해 주세요.',409);
-      if(proposal.preview.blocking.length)fail('자동 일정을 적용하기 전에 막힌 항목을 해결해 주세요.',422,{blocking:proposal.preview.blocking});
+      if(proposal.preview.blocking.length)fail(workload?'과부하 일정을 조정하기 전에 막힌 항목을 해결해 주세요.':'자동 일정을 적용하기 전에 막힌 항목을 해결해 주세요.',422,{blocking:proposal.preview.blocking});
       const issues=this.issues(proposal.projectId);if(JSON.stringify(readset(issues))!==JSON.stringify(proposal.issueVersions))fail('업무 또는 고정 선행 일정이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(this.calendars.get(proposal.projectId).version!==proposal.calendarVersion)fail('작업 달력이 변경되었습니다. 다시 미리 확인해 주세요.',409);
+      if(workload&&workload.capacity(proposal.projectId).version!==proposal.capacityVersion)fail('담당자 가용 시간이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       const workflowTable=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'").get();const workflowVersion=workflowTable?this.store.get<ProjectWorkflow>('workflows',proposal.projectId)?.version||1:1;if(workflowVersion!==proposal.workflowVersion)fail('업무 상태·필수 속성 규칙이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(this.issueSchemaVersion(proposal.projectId)!==(proposal.issueSchemaVersion||1))fail('업무 유형·사용자 정의 필드가 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(dependencyHash(this.dependencies(issues))!==proposal.dependencyHash)fail('업무 의존성이 변경되었습니다. 다시 미리 확인해 주세요.',409);
       if(!proposal.preview.changes.length)fail('적용할 일정 변경이 없습니다.');
-      const mutations=proposal.preview.changes.map(change=>({id:change.id,expectedVersion:change.version,startDate:change.toStart,endDate:change.toEnd}));const result=hooks.commitChanges(request,mutations);
+      const result=hooks.commitChanges(request,proposal.preview.changes.map(toMutation));
       this.store.put('automatic_schedule_previews',{...proposal,used:true,appliedAt:new Date().toISOString(),result});return result;
     });
   }
-  registerRoutes(app:Express,hooks:Hooks){app.post('/api/schedule/auto-preview',(req,res)=>res.json(this.preview(req.body,hooks.actor(req))));app.post('/api/schedule/auto-apply',(req,res)=>res.json(this.apply(req,req.body.previewId,hooks)));}
+  registerRoutes(app: Express, hooks: Hooks, workload: WorkloadHooks) {
+    app.post('/api/schedule/auto-preview', (req, res) => res.json(this.preview(req.body, hooks.actor(req))));
+    app.post('/api/schedule/auto-apply', (req, res) => res.json(this.apply(req, req.body.previewId, hooks)));
+    app.post('/api/schedule/workload-preview', (req, res) => res.json(this.buildWorkloadPreview(req.body, hooks.actor(req), workload)));
+    app.post('/api/schedule/workload-apply', (req, res) => res.json(this.apply(req, req.body.previewId, hooks, workload)));
+    app.get('/api/schedule/workload-result/:previewId', (req, res) => {
+      const proposal = this.proposal(req.params.previewId, hooks.actor(req), true);
+      if (!proposal.used && Date.parse(proposal.expiresAt) <= Date.now()) fail('미리보기가 만료되었습니다. 다시 계산해 주세요.', 409);
+      res.set('Cache-Control', 'no-store').json(proposal.result ?? { applied: false });
+    });
+  }
 }

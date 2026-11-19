@@ -1,0 +1,71 @@
+.workload-level-dialog {
+  width: min(660px, calc(100% - 20px));
+  max-height: min(88dvh, 810px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 18px 70px #142a2240;
+}
+
+.workload-level-dialog::backdrop { background: #20342f55; }
+.workload-level-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+
+.workload-level-dialog > header,
+.workload-level-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px clamp(12px, 3.5vw, 22px);
+}
+
+.workload-level-dialog > header { justify-content: space-between; border-bottom: 1px solid var(--line); }
+.workload-level-dialog > footer { justify-content: flex-end; flex-wrap: wrap; border-top: 1px solid var(--line); }
+.workload-level-dialog > footer span { margin-right: auto; color: #52675c; font-size: 11px; }
+
+.workload-level-dialog h2 { display: flex; align-items: center; gap: 6px; font-size: 19px; }
+.workload-level-dialog h2 svg { color: var(--accent); }
+.workload-level-dialog p { margin: 4px 0 0; color: #52675c; font-size: 12px; overflow-wrap: anywhere; }
+.workload-level-body { padding: 12px clamp(12px, 3.5vw, 22px); overflow: auto; overscroll-behavior: contain; }
+.workload-level-form-row { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.workload-level-form-row label { display: flex; flex: 1 1 160px; flex-direction: column; gap: 4px; font-size: 12px; }
+.workload-level-form-row select { min-width: 0; }
+.workload-level-selected { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12px; }
+.workload-level-selected small { color: #52675c; }
+
+.workload-level-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.workload-level-section h3 { margin: 0 0 5px; font-size: 13px; }
+.workload-level-section h3 small { margin-left: 5px; color: #52675c; font-size: 11px; font-weight: 400; }
+.workload-level-summary { margin: 0; padding: 7px 10px; border-radius: 7px; background: var(--accent-soft); }
+.workload-level-summary > div { display: flex; justify-content: space-between; gap: 4px 10px; flex-wrap: wrap; padding: 2px 0; }
+.workload-level-summary dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 650; }
+
+.workload-level-changes { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: left; font-size: 12px; }
+.workload-level-changes th,
+.workload-level-changes td { padding: 6px; vertical-align: top; border-bottom: 1px solid var(--line); }
+.workload-level-changes thead th { background: var(--canvas); color: #52675c; }
+.workload-level-changes thead th:first-child { width: 43%; }
+.workload-level-changes tbody th { overflow-wrap: anywhere; font-weight: 500; }
+.workload-level-changes tbody th small { display: block; color: var(--accent); }
+.workload-level-changes tbody td { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.workload-level-changes tbody td:last-child { color: var(--accent-hover); font-weight: 600; }
+
+.workload-level-remaining ul { padding: 0; margin: 0; list-style: none; }
+.workload-level-remaining li { display: flex; gap: 2px 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--line); }
+.workload-level-remaining li > span { color: #8d351f; }
+.workload-level-remaining li > small { flex-basis: 100%; overflow-wrap: anywhere; color: #52675c; }
+.workload-level-messages details { margin-top: 4px; font-size: 12px; }
+.workload-level-messages summary { cursor: pointer; color: #80412e; }
+.workload-level-messages ul { margin: 4px 0; padding-inline-start: 18px; overflow-wrap: anywhere; }
+
+.workload-level-dialog .workload-level-info,
+.workload-level-dialog .workload-level-error { margin-top: 10px; padding: 7px 9px; border-radius: 5px; background: var(--canvas); }
+.workload-level-dialog .workload-level-error { background: #fff1ea; color: #8d351f; }
+
+@media (max-width: 400px) {
+  .workload-level-dialog > footer span { flex-basis: 100%; }
+  .workload-level-changes { font-size: 11px; }
+  .workload-level-changes th,
+  .workload-level-changes td { padding-inline: 4px; }
+}

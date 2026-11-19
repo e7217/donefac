@@ -1,7 +1,7 @@
 'use client';
 
 import { useId, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, BarChart3, SlidersHorizontal, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, BarChart3, CalendarClock, SlidersHorizontal, X } from 'lucide-react';
 import type { FeatureProps, Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, SchedulePreview, User, WorkloadIncompleteReason } from '../../shared/types';
 import { calendarDate, calendarDay, defaultWorkCalendar, isCalendarDate } from '../../shared/calendar';
 import { calculateProjectWorkload, defaultWorkloadCapacity } from '../../shared/project-workload';
@@ -9,6 +9,8 @@ import { projectWorkflow } from '../../shared/workflow-helpers';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import { errorMessage } from './schedule-utils';
 import { WorkloadCapacityEditor } from './WorkloadCapacityEditor';
+import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
+import { WorkloadLevelDialog } from './WorkloadLevelDialog';
 import './project-workload.css';
 
 const PAGE_DAYS = 14;
@@ -23,7 +25,13 @@ export const WORKLOAD_INCOMPLETE_REASONS: Record<WorkloadIncompleteReason, strin
 type WorkloadRange = { startDate: string; endDate: string };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
 export type WorkloadSelection = { userId: string; date: string };
-type WorkloadProps = FeatureProps & WorkloadRange & { onDraftChange?: TrackDraft };
+type WorkloadProps = FeatureProps & WorkloadRange & {
+  onDraftChange?: TrackDraft;
+  onBeforeLevel?: () => boolean;
+  scheduleBusy?: boolean;
+  onScheduleApplied?: (result: ScheduleApplyResult) => Promise<void> | void;
+  levelIssueIds?: string[];
+};
 type SummaryProps = Pick<FeatureProps, 'data' | 'projectId'> & WorkloadRange & { preview: SchedulePreview };
 
 function useWorkloadInput(data: FeatureProps['data'], projectId: string, startDate: string, endDate: string) {
@@ -46,14 +54,17 @@ export function ProjectWorkload(props: WorkloadProps) {
   return <WorkloadPanel key={`${props.projectId}:${props.actorId}`} {...props} />;
 }
 
-function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, openIssue, onDraftChange }: WorkloadProps) {
+function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, notify, openIssue,
+  onDraftChange, onBeforeLevel, scheduleBusy, onScheduleApplied, levelIssueIds }: WorkloadProps) {
   const input = useWorkloadInput(data, projectId, startDate, endDate);
   const [localCapacity, setLocalCapacity] = useState<ProjectWorkloadCapacity | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [levelOpen, setLevelOpen] = useState(false);
   const [pageStart, setPageStart] = useState<string | null>(null);
   const [selected, setSelected] = useState<WorkloadSelection | null>(null);
   const [missingPage, setMissingPage] = useState(0);
   const settingsButton = useRef<HTMLButtonElement>(null);
+  const levelButton = useRef<HTMLButtonElement>(null);
   const capacity = localCapacity && localCapacity.version > input.capacity.version ? localCapacity : input.capacity;
   const result = useMemo(() => {
     try { return { workload: calculateProjectWorkload({ ...input, capacity }), error: '' }; }
@@ -78,14 +89,30 @@ function WorkloadPanel({ data, projectId, startDate, endDate, refresh, notify, o
     setEditorOpen(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
   }
+  function closeLevel() {
+    setLevelOpen(false);
+    requestAnimationFrame(() => (levelButton.current ?? settingsButton.current)?.focus());
+  }
 
   return <section className="project-workload card" aria-label="담당자별 업무량">
     <header className="workload-heading">
       <div><h2><BarChart3 size={17} />담당자별 업무량</h2><p>프로젝트의 완료·취소 전 업무에 입력한 계획 시간을 근무일에 나누어 표시합니다.</p></div>
-      <button ref={settingsButton} className="btn" type="button" onClick={() => setEditorOpen(true)} disabled={editorOpen} aria-expanded={editorOpen}>
-        <SlidersHorizontal size={15} />가용 시간 설정
-      </button>
+      <div className="workload-heading-actions">
+        {Boolean(workload?.overloadedCells) && onScheduleApplied && <button ref={levelButton} className="btn" type="button"
+          aria-haspopup="dialog" disabled={!actorId || editorOpen || scheduleBusy || levelOpen}
+          onClick={() => { if (!onBeforeLevel || onBeforeLevel()) setLevelOpen(true); }}>
+          <CalendarClock size={15} aria-hidden="true" />과부하 일정 조정
+        </button>}
+        <button ref={settingsButton} className="btn" type="button" onClick={() => setEditorOpen(true)} disabled={editorOpen} aria-expanded={editorOpen}>
+          <SlidersHorizontal size={15} aria-hidden="true" />가용 시간 설정
+        </button>
+      </div>
     </header>
+    {levelOpen && onScheduleApplied && <WorkloadLevelDialog projectId={projectId} actorId={actorId} startDate={startDate} endDate={endDate}
+      projectName={data.projects.find(project => project.id === projectId)?.name ?? projectId}
+      availableUserIds={workload?.rows.filter(row => row.overloadedDays > 0).map(row => row.userId) ?? []}
+      selectedIssueIds={levelIssueIds} users={usersById} issues={issuesById}
+      onDraftChange={onDraftChange} onClose={closeLevel} onApplied={onScheduleApplied} />}
     {editorOpen && <WorkloadCapacityEditor route={`/projects/${encodeURIComponent(projectId)}/workload-capacity`} users={data.users} current={capacity} defaultDate={days[0]?.date ?? startDate}
       onSnapshot={setLocalCapacity} onClose={closeEditor} onDraftChange={onDraftChange} refresh={refresh} notify={notify} />}
     {result.error && <p className="workload-error" role="alert">{result.error}</p>}

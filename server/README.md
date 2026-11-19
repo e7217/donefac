@@ -32,6 +32,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `POST /api/schedule/preview`, `POST /api/schedule/apply`, `POST /api/schedule/undo`
 - `POST /api/schedule/paste-preview`, `POST /api/schedule/paste-apply`
 - `GET|PATCH /api/projects/:id/calendar`, `POST /api/schedule/auto-preview`, `POST /api/schedule/auto-apply`
+- `POST /api/schedule/workload-preview` accepts `{projectId,startDate,endDate,userIds?,issueIds?}`. Selected issues limit which scheduled work can move. All work assigned to the selected members still counts against capacity. `POST /api/schedule/workload-apply` accepts `{previewId}`. `GET /api/schedule/workload-result/:previewId` returns the stored apply receipt or `{applied:false}`. These routes use the browser API. Proposals are scoped to the active actor, expire after 30 minutes, and use the standard schedule undo receipt.
 - `GET|POST /api/milestones`, `GET|PATCH|DELETE /api/milestones/:id`
 - `GET|POST /api/baselines`, `GET|DELETE /api/baselines/:id`
 - `GET /api/projects/:id/report`, `GET|POST /api/projects/:id/report-snapshots`, `GET /api/projects/:id/report-snapshots/:snapshotId`

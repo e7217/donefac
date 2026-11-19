@@ -557,6 +557,16 @@ export interface WorkspaceSnapshot {
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
 export interface AutomaticSchedulePreview extends SchedulePreview { previewId: string; blocking: string[]; expiresAt: string }
+export interface WorkloadLevelSummary { overloadedCells: number; excessMinutes: number; completionDate: string | null }
+export interface WorkloadLevelConflict { userId: string; date: string; excessMinutes: number; issueIds: string[] }
+export interface WorkloadLevelPlan {
+  changes: ScheduleChange[];
+  before: WorkloadLevelSummary;
+  after: WorkloadLevelSummary;
+  remaining: WorkloadLevelConflict[];
+  reason?: 'search-limit';
+}
+export type WorkloadLevelPreview = AutomaticSchedulePreview & WorkloadLevelPlan;
 export interface ScheduleAnalysisTask {
   issueId: string;
   key: string;
