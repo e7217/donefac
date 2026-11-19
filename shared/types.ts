@@ -531,6 +531,34 @@ export interface WorkspaceSnapshot {
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
 export interface AutomaticSchedulePreview extends SchedulePreview { previewId: string; blocking: string[]; expiresAt: string }
+export interface ScheduleAnalysisTask {
+  issueId: string;
+  key: string;
+  title: string;
+  earlyStart: string;
+  earlyFinish: string;
+  latestStart: string;
+  latestFinish: string;
+  slackDays: number;
+  critical: boolean;
+}
+export interface ScheduleAnalysisExclusion {
+  issueId: string;
+  key: string;
+  title: string;
+  reason: string;
+}
+export interface ProjectScheduleAnalysis {
+  projectId: string;
+  projectedFinish: string | null;
+  tasks: ScheduleAnalysisTask[];
+  criticalDependencyIds: string[];
+  excluded: ScheduleAnalysisExclusion[];
+  completedCount: number;
+  cancelledCount: number;
+  warnings: string[];
+  partial: boolean;
+}
 export interface SchedulePasteDiagnostic { line: number | null; key?: string; message: string }
 export interface SchedulePastePreview {
   projectId: string;

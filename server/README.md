@@ -55,6 +55,10 @@ The server persists a 30-minute actor-bound proposal containing all project issu
 
 Milestones use CAS, owner/date/status and same-project ticket links. Ticket deletion removes current milestone links and increments their versions in the same transaction. Baseline capture requires exact `expectedIssueVersions`, `expectedMilestoneVersions` maps and `expectedCalendarVersion`, then atomically captures every project ticket/milestone and the calendar. Captured values are immutable; only deletion with CAS is supported. Missing historical ticket/milestone IDs remain valid snapshots, while live IDs from another project are rejected. Baseline comparison is between planned dates in calendar days, not actual completion timestamps.
 
+## Schedule slack analysis
+
+`GET /api/projects/:id/schedule-analysis` uses the same calculation as the Gantt. It projects the earliest feasible finish from saved active schedules, task durations, dependency types, signed offsets and the project work calendar. Working backward from that finish gives each task's latest dates and slack in working days. An incomplete connected set reports exclusions while other sets remain available as a partial result. The route also accepts project-scoped API keys through `/api/v1`.
+
 ## Project workflows and saved views
 
 Each project starts with six states and all directed transitions allowed. A workflow may rename, reorder, recolor, add, or remove unused states; it must retain a valid initial state. State categories determine completion and overview totals independently of the state ID. Allowed edges may restrict project issue types and require built-in or `custom:fieldId` fields. Additional rules apply required fields by type and destination state. Existing issues are preserved when stricter rules are introduced; their next edit must satisfy the rules. Schedule changes use the same validation.

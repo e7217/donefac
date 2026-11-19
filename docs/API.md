@@ -21,6 +21,7 @@ curl --fail-with-body \
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
 | `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
+| `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
@@ -51,6 +52,12 @@ curl --fail-with-body \
 브라우저의 `POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
 
 `PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?}`를 보내 연결 유형과 간격을 바꾼다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
+
+## 일정 여유 분석
+
+`GET /projects/:id/schedule-analysis`는 프로젝트의 저장된 업무·근무 달력·선후행 연결을 읽는다. `projectedFinish`는 계산 가능한 진행 업무의 예상 완료일이며, `tasks`는 업무별 가장 이른 시작·종료, 가장 늦은 시작·종료, `slackDays`와 `critical`을 포함한다. `criticalDependencyIds`는 여유 0일 업무 사이에서 완료일에 영향을 주는 연결이다.
+
+`excluded`에는 제외된 이유가 담기며, 분석 범위가 일부이면 `partial`이 `true`다. 계산할 수 있는 진행 업무가 없으면 `projectedFinish`는 `null`이다. 완료·취소 업무는 각각 `completedCount`와 `cancelledCount`에 표시한다. 요청당 프로젝트 업무 10,000개와 연결 50,000개까지 조회한다. 날짜를 바꾸려면 별도 일정 변경 API를 사용한다. [일정·간트 사용법](SCHEDULING.md)
 
 ## 담당자 작업량
 

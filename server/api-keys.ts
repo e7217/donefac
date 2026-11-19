@@ -226,8 +226,8 @@ export class ApiKeyService {
     }
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot)?$/.exec(path);
-    const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order)$/.exec(path);
-    if (projectResource && (request.method === 'GET' || request.method === 'PATCH' && projectResource[2] !== 'workload')) {
+    const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis)$/.exec(path);
+    if (projectResource && (request.method === 'GET' || (request.method === 'PATCH' && ['workload-capacity','issue-order'].includes(projectResource[2])))) {
       if (request.method === 'PATCH' && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
       this.query(request, projectResource[2] === 'workload' ? ['startDate','endDate'] : []);
       this.allowedProject(key, this.decode(projectResource[1]));

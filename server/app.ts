@@ -44,6 +44,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../sh
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
@@ -350,6 +351,29 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.set('Cache-Control','no-store').json(result);
   });
   registerTeamWorkloadRoutes(app,{store,capacity:teamCapacity,calendars,workflows,actor,activity});
+  app.get('/api/projects/:projectId/schedule-analysis', (req, res) => {
+    if (Object.keys(req.query).length) return fail('일정 여유 분석 조회 조건을 확인해 주세요.');
+    const projectId = String(req.params.projectId);
+    const calendar = calendars.get(projectId);
+    const workflow = workflows.get(projectId);
+    const issues = store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid LIMIT ?')
+      .all(projectId, MAX_SCHEDULE_ANALYSIS_TASKS + 1) as { json: string }[];
+    if (issues.length > MAX_SCHEDULE_ANALYSIS_TASKS) throw new ScheduleAnalysisError(422, `프로젝트 업무 ${MAX_SCHEDULE_ANALYSIS_TASKS.toLocaleString('ko-KR')}개까지 분석할 수 있습니다.`);
+    const dependencies = store.db.prepare(`
+      SELECT dependency.json FROM dependencies AS dependency
+      JOIN issues AS predecessor ON predecessor.id=dependency.predecessor_id
+      JOIN issues AS successor ON successor.id=dependency.successor_id
+      WHERE ? IN (predecessor.project_id, successor.project_id)
+      ORDER BY dependency.rowid LIMIT ?
+    `).all(projectId, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES + 1) as { json: string }[];
+    if (dependencies.length > MAX_SCHEDULE_ANALYSIS_DEPENDENCIES) throw new ScheduleAnalysisError(422, `업무 연결 ${MAX_SCHEDULE_ANALYSIS_DEPENDENCIES.toLocaleString('ko-KR')}개까지 분석할 수 있습니다.`);
+    const analysis = analyzeProjectSchedule({
+      projectId, calendar, workflow,
+      issues: issues.map(({ json }) => JSON.parse(json) as Issue),
+      dependencies: dependencies.map(({ json }) => JSON.parse(json) as Dependency),
+    });
+    res.set('Cache-Control', 'no-store').json(analysis);
+  });
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges});
   schedulePaste.registerRoutes(app,{
     actor,
@@ -961,7 +985,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
