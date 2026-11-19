@@ -51,10 +51,11 @@ async function deadline(completion, milliseconds, message) {
 
 async function start(dataDir, demo = false) {
   interruption.signal.throwIfAborted();
+  const env = {...process.env, TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: demo ? '1' : '0', TEAMSPACE_PILOT_OUTBOUND: '0'};
+  delete env.TEAMSPACE_PILOT_ORIGIN;
+  delete env.TEAMSPACE_PILOT_ACCESS_FILE;
   const child = spawn('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
-    cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env: {
-      ...process.env, TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: demo ? '1' : '0', TEAMSPACE_PILOT_OUTBOUND: '0',
-    },
+    cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env,
   });
   const exit = once(child, 'exit');
   pilots.add({ child, exit });

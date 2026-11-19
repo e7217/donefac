@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import type { Server as HttpServer, IncomingMessage } from 'node:http';
+import { STATUS_CODES, type Server as HttpServer, type IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as Y from 'yjs';
@@ -16,6 +16,7 @@ import { Store } from './store.js';
 import { DocumentContentService,DocumentContentError,normalizeDocumentContent,type IssueBlockTargets } from './document-content.js';
 
 export const MAX_COLLABORATION_UPDATE=1024*1024;
+export type CollaborationUpgradeGuard = (request: IncomingMessage, socket: Duplex) => {status: 401 | 403 | 421} | null;
 const MAX_STATE=16*1024*1024;
 const CURSOR_UPDATE_INTERVAL_MS=50;
 const CURSOR_IDLE_MS=30_000;
@@ -307,12 +308,18 @@ export class CollaborationService {
       if(changed)for(const other of this.ready(peer.documentId))if(other!==peer)this.send(other,{type:'update',epoch:state.epoch,update:message.update,document});
     }finally{candidate.destroy();}
   }
-  attachWebSocket(server:HttpServer){
+  attachWebSocket(server:HttpServer,authorize?:CollaborationUpgradeGuard){
     if(this.servers.has(server))return;
     const wss=new WebSocketServer({noServer:true,maxPayload:2*MAX_COLLABORATION_UPDATE});
     const upgrade=(req:IncomingMessage,socket:Duplex,head:Buffer)=>{
       let url:URL;try{url=new URL(req.url||'','http://localhost');}catch{socket.destroy();return;}
       if(url.pathname!=='/api/collaboration'){socket.end('HTTP/1.1 404 Not Found\r\n\r\n');return;}
+      const rejected=authorize?.(req,socket);
+      if(rejected){
+        const {status}=rejected;
+        socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        return;
+      }
       const documentId=url.searchParams.get('documentId')||'',actorId=url.searchParams.get('actorId')||'';
       if(!this.store.get('users',actorId)||!this.store.get('documents',documentId)||!this.state(documentId)){socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');return;}
       wss.handleUpgrade(req,socket,head,ws=>{

@@ -7,7 +7,7 @@ import { Store } from './store.js';
 import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
-import { CollaborationService, CollaborationError } from './collaboration.js';
+import { CollaborationService, CollaborationError, type CollaborationUpgradeGuard } from './collaboration.js';
 import { PlanningService, PlanningError } from './planning.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
@@ -1018,5 +1018,5 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server)=>collaboration.attachWebSocket(server),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();reportLedger.close();store.db.close();}};
+  return {app,attachWebSocket:(server:import('node:http').Server,authorize?:CollaborationUpgradeGuard)=>collaboration.attachWebSocket(server,authorize),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();reportLedger.close();store.db.close();}};
 }

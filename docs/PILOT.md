@@ -18,6 +18,24 @@ TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" npm run start:pilot
 - 포트는 `TEAMSPACE_PILOT_PORT`로 바꾼다. 포트 `0`을 지정하면 운영체제가 고른 루프백 포트를 시작 로그에서 확인할 수 있다.
 - 격리 복원 테스트는 `TEAMSPACE_PILOT_OUTBOUND=0`으로 시작한다. 이 값은 보관된 외부 웹훅의 자동 전송을 일시 중지한다.
 
+## 팀 접속 주소
+
+기존 HTTPS 리버스 프록시에서 팀 주소의 루트 경로를 같은 호스트의 `http://127.0.0.1:5190`으로 연결한다. 원래 `Host`와 `Origin`을 전달하고 `/api/collaboration`에서 WebSocket 업그레이드를 지원한다. 첨부와 원본 패키지를 올릴 경우 프록시에서 최대 64MiB 요청 본문을 받도록 설정한다. [Nginx WebSocket 프록시 문서](https://nginx.org/en/docs/http/websocket.html)
+
+접속 키를 처음 만들 때는 데이터 디렉터리와 Git 저장소 밖에 별도 파일을 생성한다. `teamspace.example.internal`은 사용할 팀 주소로 바꾼다.
+
+```bash
+mkdir -p "$HOME/teamspace-pilot"
+(umask 077; set -o noclobber; openssl rand -hex 32 > "$HOME/teamspace-pilot/team-access.key")
+TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" \
+TEAMSPACE_PILOT_ORIGIN=https://teamspace.example.internal \
+TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run start:pilot
+```
+
+팀원은 브라우저에서 HTTPS 주소를 열고 공용 키를 입력한 뒤 앱에서 작업자를 선택한다. 기존 업무나 문서 링크로 들어오면 접속 뒤 같은 위치를 연다. 브라우저 세션은 12시간 유지되며, 파일럿을 재시작하면 다시 접속한다. 편집 화면을 열어 둔 상태에서 접속이 만료되면 사이드바의 **팀 접속**을 새 탭에서 열고 키를 다시 입력할 수 있다. **접속 종료**는 해당 브라우저의 세션과 공동 편집 연결을 종료한다. `/api/v1`은 개인 API 키를 사용하고 GitLab 웹훅은 별도 수신 자격 증명을 사용한다.
+
+`npm run test:pilot:access`는 OpenSSL과 Chromium을 사용해 임시 루프백 HTTPS 프록시에서 접속, 공동 편집, 연동 경로를 검증한다.
+
 ## 전체 데이터 백업
 
 파일럿을 종료한 뒤 같은 데이터 경로에 대해 백업을 실행한다. 파일럿이 실행 중이거나 백업·복원이 같은 잠금을 쓰는 경우 명령은 종료 코드 `75`로 실패한다. 개발 서버와 파일럿의 데이터 디렉터리는 따로 사용한다.

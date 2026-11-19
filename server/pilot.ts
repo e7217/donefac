@@ -1,10 +1,11 @@
 import express from 'express';
-import { fstatSync, statSync } from 'node:fs';
+import { fstatSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import { createPilotAccess } from './pilot-access.js';
 
 const { TEAMSPACE_DATA_DIR: dataDir, TEAMSPACE_PILOT_LOCKED_DIR: lockedDir, TEAMSPACE_PILOT_LOCK_FD: lockDescriptor } = process.env;
 if (!dataDir || dataDir !== lockedDir || !lockDescriptor || !/^\d+$/.test(lockDescriptor)) {
@@ -26,6 +27,8 @@ try {
   throw new Error('Build the pilot browser bundle with npm run build:pilot before starting Teamspace.');
 }
 
+const access = createPilotAccess();
+const teamIndex = access ? readFileSync(index, 'utf8').replace('</head>', '<meta name="teamspace-pilot-access" content="enabled"></head>') : null;
 const api = createApp({
   dataDir,
   seed: process.env.TEAMSPACE_PILOT_DEMO === '1',
@@ -33,7 +36,11 @@ const api = createApp({
 });
 const web = express();
 web.disable('x-powered-by');
-web.get('/', (_request, response) => response.sendFile(index, { headers: { 'Cache-Control': 'no-cache' } }));
+if (access) web.use(access.middleware);
+web.get('/', (_request, response) => {
+  if (teamIndex !== null) response.type('html').send(teamIndex);
+  else response.sendFile(index, { headers: { 'Cache-Control': 'no-cache' } });
+});
 web.get('/teamspace.svg', (_request, response) => response.sendFile(join(webDirectory, 'teamspace.svg')));
 web.use('/assets', express.static(assetDirectory, { index: false, redirect: false, immutable: true, maxAge: '1y' }));
 web.use('/assets', (_request, response) => response.sendStatus(404));
@@ -46,11 +53,11 @@ server.on('upgrade', (_request, socket) => {
   upgraded.add(socket);
   socket.once('close', () => upgraded.delete(socket));
 });
-api.attachWebSocket(server);
+api.attachWebSocket(server, access?.authorizeUpgrade);
 
 let stopping = false;
 function finish(exitCode: number) {
-  try { api.close(); }
+  try { access?.close(); api.close(); }
   catch (error) { console.error(error); exitCode = 1; }
   process.exit(exitCode);
 }
