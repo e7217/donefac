@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { crc32 } from 'node:zlib';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -19,6 +19,12 @@ function zip(entries: [string, Buffer][]) {
 async function upload(request: APIRequestContext, filename: string, content: Buffer, instanceKey: string) { const response = await request.post(`/api/legacy-import/packages?${new URLSearchParams({ filename, instanceKey })}`, { headers: { 'Content-Type': 'application/octet-stream' }, data: content }); expect(response.status(), await response.text()).toBe(201); return await response.json() as LegacyPackageSummary; }
 async function open(page: Page, request: APIRequestContext) { const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot; await page.goto(`/#/${workspace.projects[0].id}/settings`); const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true }); await expect(settings).toBeVisible(); return { settings, workspace }; }
 async function selectPackage(settings: Locator, filename: string) { await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check(); await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click(); await expect(settings.getByLabel('이관 원본 시간대', { exact: true })).toBeVisible(); }
+async function openReconciliation(settings: Locator) {
+  await settings.getByRole('button', { name:'이관 결과 대조',exact:true }).click();
+  const panel = settings.getByRole('region', { name:'이관 결과 대조',exact:true });
+  await expect(panel).toBeVisible();
+  return panel;
+}
 async function preview(page: Page, settings: Locator) { const response = page.waitForResponse(value => value.url().endsWith('/api/migrations/preview') && value.request().method() === 'POST'); await settings.getByRole('button', { name: '적용 전 미리보기 만들기', exact: true }).click(); const result = await response; expect(result.ok(), await result.text()).toBe(true); return await result.json() as MigrationPreview; }
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
@@ -58,7 +64,28 @@ test('Jira 매핑·진단 검토 후 실제 이관하고 409·408·대기 중 �
     const archives = await (await request.get(`/api/source-imports/${result.import.id}/records?kind=issue&limit=50`)).json() as SourceRecordPage;
     expect(archives.records).toHaveLength(1); expect(archives.records[0].record.sourceId).toBe('100');
     const origins = await (await request.get(`/api/resource-origins?resourceType=issue&resourceId=${issue.id}&limit=50`)).json() as SourceRecordPage; expect(origins.records.some(value => value.record.kind === 'issue')).toBe(true);
-    await page.goto(`/#/${issue.projectId}/issues?issue=${issue.id}`); await page.getByRole('dialog').getByRole('button', { name: '원본 기록', exact: true }).click(); const originPanel = page.getByRole('region', { name: '원본 이관 기록', exact: true }); await expect(originPanel).toContainText('old-author');
+    const audit = await openReconciliation(settings);
+    await audit.getByLabel('대조 상태', {exact:true}).selectOption('linked');
+    await audit.getByLabel('대조 원본 종류', {exact:true}).selectOption('issue');
+    const search = audit.getByLabel('대조 검색', {exact:true});
+    const runSearch = audit.getByRole('button', {name:'대조 검색 실행',exact:true});
+    await search.fill(`${originalKey}-999`);
+    await runSearch.click();
+    await expect(audit).toContainText('조건에 맞는 원본이 없습니다.');
+    await search.fill(`${originalKey}-1`);
+    await runSearch.click();
+    const row = audit.getByRole('list', {name:'이관 결과 대조 목록',exact:true}).getByRole('listitem');
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText(title);
+    await expect(row).toContainText(`${originalKey}-1`);
+    await expect(row).toContainText('연결됨');
+    const original = row.getByRole('button', {name:'보존 원본 열기',exact:true});
+    await original.click();
+    await expect(row.getByLabel('보존한 원본 본문', {exact:true})).toContainText('원래 설명');
+    await row.getByRole('button', {name:'원본 이관 기록 상세 닫기',exact:true}).click();
+    await expect(original).toBeFocused();
+    await row.getByRole('button', {name:/현재 업무 열기/}).click();
+    await page.getByRole('dialog').getByRole('button', { name: '원본 기록', exact: true }).click(); const originPanel = page.getByRole('region', { name: '원본 이관 기록', exact: true }); await expect(originPanel).toContainText('old-author');
     await originPanel.getByLabel('원본 이관 기록 종류', { exact: true }).selectOption('issue'); await originPanel.getByLabel('보존한 원본 기록 목록', { exact: true }).getByRole('button').first().click();
     await expect(originPanel.getByLabel('보존한 원본 본문', { exact: true })).toContainText('원래 설명');
   } finally { release(); await page.unroute(`**/api/migrations/previews/${ready.id}/apply`); await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
@@ -82,7 +109,38 @@ test('Confluence 문서·이력을 적용하고 원본 작성자와 긴 storage 
     await records.getByLabel('원본 이관 기록 종류', { exact: true }).selectOption('revision'); await expect(records.getByLabel('보존한 원본 기록 목록', { exact: true })).toContainText('과거 제목');
     await settings.screenshot({ path: 'docs/screenshots/migration-apply.png' });
     const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot, document = snapshot.documents.find(value => value.title === title)!;
-    await page.goto(`/#/${document.projectId}/documents/${document.id}`); await page.getByRole('button', { name: '파일 첨부', exact: true }).click();
+    await page.setViewportSize({width:360,height:820});
+    const audit = await openReconciliation(settings);
+    await audit.getByLabel('대조 원본 종류', {exact:true}).selectOption('attachment');
+    const auditRows = audit.getByRole('list', {name:'이관 결과 대조 목록',exact:true}).getByRole('listitem');
+    await expect(auditRows).toHaveCount(2);
+    const contentHashes = new Set<string>();
+    for (const row of await auditRows.all()) {
+      await expect(row).toContainText(attachmentName);
+      await expect(row).toContainText('연결됨');
+      const checked = page.waitForResponse(value => new URL(value.url()).pathname.endsWith('/check-file'));
+      await row.getByRole('button', {name:/첨부 파일 확인/}).click();
+      const response = await checked;
+      expect(response.ok(), await response.text()).toBe(true);
+      const proof = await response.json() as SourceReconciliationFileCheck;
+      expect(proof.status).toBe('verified');
+      contentHashes.add(proof.sha256!);
+      await expect(row).toContainText('SHA-256 일치');
+    }
+    expect(contentHashes).toEqual(new Set([bytes1,bytes2].map(bytes => createHash('sha256').update(bytes).digest('hex'))));
+    await audit.getByLabel('대조 원본 종류', {exact:true}).selectOption('page');
+    await expect(auditRows).toHaveCount(1);
+    const legacyDraft = page.getByRole('region', { name:'기존 도구 원본 분석',exact:true }).getByLabel('원본 인스턴스 식별값', {exact:true});
+    await legacyDraft.fill('대조 화면에서 이동을 취소한 초안');
+    const openDocument = auditRows.getByRole('button', {name:/현재 문서 열기/});
+    page.once('dialog', dialog => dialog.dismiss());
+    await openDocument.click();
+    await expect(legacyDraft).toHaveValue('대조 화면에서 이동을 취소한 초안');
+    page.once('dialog', dialog => dialog.accept());
+    await openDocument.click();
+    await expect(page.getByRole('textbox', {name:'문서 제목',exact:true})).toHaveValue(document.title);
+    await page.setViewportSize({width:1440,height:1000});
+    await page.getByRole('button', { name: '파일 첨부', exact: true }).click();
     const attachmentPanel = page.getByRole('region', { name: '첨부파일', exact: true }); let versionRequests = 0; page.on('request', value => { if (value.url().endsWith('/versions')) versionRequests++; });
     await attachmentPanel.getByRole('button', { name: `${attachmentName} 버전`, exact: true }).click(); const versions = attachmentPanel.getByRole('region', { name: `${attachmentName} 보존 버전`, exact: true }); await expect(versions.getByRole('link', { name: /다운로드/ })).toHaveCount(2);
     for (const [label, bytes] of [['1', bytes1], ['2', bytes2]] as const) { const event = page.waitForEvent('download'); await versions.getByRole('link', { name: `${attachmentName} 버전 ${label} 다운로드`, exact: true }).click(); const file = await event, path = await file.path(); expect(await readFile(path!)).toEqual(bytes); }

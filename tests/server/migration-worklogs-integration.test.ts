@@ -16,6 +16,7 @@ import type {
   MigrationPreview,
   ProjectWorklogReport,
   SourceImport,
+  SourceReconciliationPage,
   SourceRecordArchive,
   SourceRecordPage,
   WorklogEntry,
@@ -286,6 +287,24 @@ test('real REST staging blocks restricted worklogs, preserves archive-only reaso
       origins.data.records.map((value) => value.record.sourceId).sort(),
       ['worklog:exact-91', 'worklog:relative-start', 'worklog:unmapped'].sort(),
     );
+    const reconciliationPath = `/source-imports/${plan.id}/reconciliation`;
+    const reconciled = await f.call<SourceReconciliationPage>(`${reconciliationPath}?kind=history`);
+    assert.equal(reconciled.status, 200, JSON.stringify(reconciled.data));
+    assert.deepEqual(Object.fromEntries(reconciled.data.rows.map(row => [row.sourceId, row.status])), {
+      'worklog:exact-91': 'linked',
+      'worklog:relative-start': 'archive-only',
+      'worklog:restricted': 'excluded',
+      'worklog:unmapped': 'archive-only',
+    });
+    const matchedWorklog = reconciled.data.rows.find(row => row.sourceRecordId === original.id);
+    assert.equal(matchedWorklog?.target?.type, 'worklog');
+    assert.equal(matchedWorklog.target.id, entry.id);
+    assert.equal(matchedWorklog.target.owner?.id, issue.id);
+    const issueBySourceKey = await f.call<SourceReconciliationPage>(`${reconciliationPath}?kind=issue&q=OLD-1`);
+    assert.equal(issueBySourceKey.status, 200);
+    assert.equal(issueBySourceKey.data.total, 1);
+    assert.equal(issueBySourceKey.data.rows[0].sourceKey, 'OLD-1');
+    assert.equal(issueBySourceKey.data.rows[0].target?.id, issue.id);
 
     const patch = {
       expectedVersion: entry.version,
@@ -350,6 +369,22 @@ test('real REST staging blocks restricted worklogs, preserves archive-only reaso
         .status,
       409,
     );
+
+    const refreshed = await f.call<WorkspaceSnapshot>('/workspace');
+    const refreshedIssue = refreshed.data.issues.find(item => item.id === issue.id)!;
+    const trashed = await f.call<{ trashEntryId: string }>(`/issues/${issue.id}`, 'DELETE', { expectedVersion: refreshedIssue.version });
+    assert.equal(trashed.status, 200);
+    const withoutOwner = await f.call<SourceReconciliationPage>(`${reconciliationPath}?kind=history&status=linked`);
+    assert.equal(withoutOwner.status, 200);
+    assert.equal(withoutOwner.data.total, 1);
+    assert.equal(withoutOwner.data.rows[0].target?.id, entry.id);
+    assert.equal(withoutOwner.data.rows[0].target?.owner, null);
+    assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
+
+    assert.equal((await f.call(path, 'DELETE', { expectedVersion: restoredEntry.version }, 'user-seo')).status, 200);
+    const deletedWorklog = await f.call<SourceReconciliationPage>(`${reconciliationPath}?kind=history&status=missing`);
+    assert.equal(deletedWorklog.status, 200);
+    assert.deepEqual(deletedWorklog.data.rows.map(row => [row.sourceRecordId, row.target?.type, row.target?.id]), [[original.id, 'worklog', entry.id]]);
   } finally {
     await f.close();
   }

@@ -240,6 +240,14 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.
 
+### 적용 후 대조
+
+브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.
+
+`linked`는 현재 대상, `trashed`는 휴지통에 해당 대상이 보관된 상태, `missing`은 저장한 연결에 해당하는 현재나 휴지통의 대상이 없는 상태다. `archive-only`는 직접 연결 없이 보존한 원본이고, `excluded`는 적용할 때 명시적으로 제외한 원본이다. 원본 사용자·속성 등의 매핑 자료와 직접 연결 ID가 없는 관계 자료도 원본 보관으로 표시한다.
+
+`GET /api/source-imports/:id/records/:recordId/check-file`은 지정한 원본 첨부 버전의 저장 바이트를 기록된 파일 크기와 SHA-256으로 검사한다. `verified`, `missing`, `corrupt`, `unbound` 상태와 연결된 파일의 식별 정보를 반환한다. 휴지통에 보관한 파일 버전도 검사할 수 있다.
+
 
 ## 프로젝트 보고서와 주간 문서
 

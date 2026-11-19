@@ -24,6 +24,7 @@ import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
+import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
@@ -232,6 +233,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
   sourcePreservation.registerRoutes(app);
+  registerSourceReconciliationRoutes(app, { store, files, preservation: sourcePreservation, trash });
   migrations.registerRoutes(app, {
     actor,
     persistCanonical(value, req) {

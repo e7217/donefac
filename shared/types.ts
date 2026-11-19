@@ -170,6 +170,27 @@ export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:st
 export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
 export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};
 export interface SourceRecordPage { records:SourceRecordSummary[];total:number;offset:number;limit:number }
+export type SourceReconciliationStatus = 'linked' | 'trashed' | 'missing' | 'archive-only' | 'excluded';
+export interface SourceReconciliationOwner {
+  type: 'issue' | 'document'; id: string; label: string; projectId: string | null;
+}
+export interface SourceReconciliationTarget {
+  type: NonNullable<SourceRecordArchive['targetType']> | 'worklog'; id: string;
+  label: string; projectId: string | null; owner: SourceReconciliationOwner | null;
+}
+export interface SourceReconciliationRow {
+  sourceRecordId: string; kind: LegacyRecordKind; sourceId: string; sourceKey: string | null;
+  title: string; product: LegacySource['product']; sourceInstance: string;
+  status: SourceReconciliationStatus; target: SourceReconciliationTarget | null;
+}
+export interface SourceReconciliationPage {
+  importId: string; receiptVersion: number; counts: Record<SourceReconciliationStatus, number>;
+  rows: SourceReconciliationRow[]; total: number; offset: number; limit: number;
+}
+export interface SourceReconciliationFileCheck {
+  sourceRecordId: string; status: 'verified' | 'missing' | 'corrupt' | 'unbound';
+  fileId: string | null; size: number | null; sha256: string | null;
+}
 export interface Project { id: string; key: string; name: string; description: string; color: string; createdAt: string }
 export type PlanningKind = 'cycle' | 'module' | 'release';
 export type PlanningStatus = 'planned' | 'active' | 'completed' | 'archived';

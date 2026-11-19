@@ -9,6 +9,9 @@ export class SourcePreservationError extends Error { constructor(public status: 
 export interface SourcePreservationData { imports: SourceImport[]; records: SourceRecordArchive[]; versions: AttachmentVersion[]; relations: IssueRelation[] }
 export interface SourcePreservationContext { users: User[]; projects: Project[]; issues: Issue[]; documents: DocPage[]; comments: Comment[]; revisions: DocRevision[]; attachments: Attachment[] }
 const kinds: LegacyRecordKind[] = ['identity', 'project', 'issue', 'page', 'comment', 'revision', 'history', 'attachment', 'relation', 'field', 'option', 'workflow'];
+export function isLegacyRecordKind(value: unknown): value is LegacyRecordKind {
+  return typeof value === 'string' && kinds.includes(value as LegacyRecordKind);
+}
 function fail(status: number, message: string): never { throw new SourcePreservationError(status, message); }
 function object(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(400, `${label}은 JSON 객체여야 합니다.`); return value as Record<string, unknown>; }
 function list(value: unknown, label: string, max = 1000000): unknown[] { if (!Array.isArray(value) || value.length > max) fail(400, `${label} 목록을 확인해 주세요.`); return value; }
@@ -217,7 +220,7 @@ export class SourcePreservationService {
   private page(where: string, params: (string | number)[], query: Record<string, unknown>): SourceRecordPage {
     const integer = (name: string, fallback: number, max: number) => { const value = query[name]; if (value === undefined) return fallback; if (typeof value !== 'string' || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > max || name === 'limit' && Number(value) < 1) fail(400, '원본 기록 페이지 범위를 확인해 주세요.'); return Number(value); };
     const offset = integer('offset', 0, 1000000), limit = integer('limit', 50, 100);
-    if (query.kind !== undefined) { if (typeof query.kind !== 'string' || !kinds.includes(query.kind as LegacyRecordKind)) fail(400, '원본 객체 종류를 확인해 주세요.'); where += ' AND r.kind=?'; params.push(query.kind); }
+    if (query.kind !== undefined) { if (!isLegacyRecordKind(query.kind)) fail(400, '원본 객체 종류를 확인해 주세요.'); where += ' AND r.kind=?'; params.push(query.kind); }
     const total = Number((this.store.db.prepare(`SELECT COUNT(*) AS total FROM source_records r WHERE ${where}`).get(...params) as { total: number }).total);
     const rows = this.store.db.prepare(`SELECT json_remove(r.json,'$.record.text','$.record.metadata','$.record.references') AS summary,
       substr(json_extract(r.json,'$.record.text'),1,600) AS preview,length(CAST(json_extract(r.json,'$.record.text') AS BLOB)) AS bytes,json_array_length(json_extract(r.json,'$.record.references')) AS refs,

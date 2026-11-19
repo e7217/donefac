@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { crc32, deflateRawSync } from 'node:zlib';
-import type { Attachment, AttachmentHead, AttachmentVersion, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -33,11 +33,21 @@ function zip(entries: { path: string; bytes: Buffer }[]): Buffer {
   }
   const central = Buffer.concat(directory), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...pieces, central, end]);
 }
-function confluence() {
+function confluence(withAuditFixtures = false) {
   const first = Buffer.from('첫 버전\r\n\x00바이너리'), latest = Buffer.from('두 번째 버전😀\r\n원본');
   const prop = (name: string, text: string) => `<property name="${name}">${text}</property>`, ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`, object = (type: string, id: string, text: string) => `<object class="${type}"><id name="id">${id}</id>${text}</object>`;
-  const xml = `<hibernate-generic>${object('Space', '42', prop('key', 'SYN') + prop('name', 'Synthetic archive'))}${object('Page', '100', prop('title', 'Synthetic versioned page') + prop('version', '1') + ref('space', 'Space', '42') + prop('creationDate', '2020-01-01T00:00:00Z') + prop('lastModificationDate', '2020-01-02T00:00:00Z'))}${object('BodyContent', '300', '<property name="body"><![CDATA[<p>보존한 문서 본문</p>]]></property>' + ref('content', 'Page', '100'))}${object('Attachment', '700', prop('title', 'report.bin') + prop('version', '2') + ref('containerContent', 'Page', '100') + '<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection>' + prop('creationDate', '2020-01-02T00:00:00Z'))}${object('Attachment', '701', prop('title', 'report.bin') + prop('version', '1') + ref('containerContent', 'Page', '100') + ref('originalVersion', 'Attachment', '700') + prop('creationDate', '2020-01-01T00:00:00Z'))}</hibernate-generic>`;
-  return { first, latest, bytes: zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }, { path: 'attachments/100/700/1', bytes: first }, { path: 'attachments/100/700/2', bytes: latest }]) };
+  const historical = withAuditFixtures ? '<collection name="historicalVersions"><element class="Page"><id name="id">101</id></element></collection>' : '';
+  const extra = withAuditFixtures ? [
+    object('Page', '101', prop('title', 'Synthetic historical page') + prop('version', '1') + prop('contentStatus', 'historical') + ref('originalVersion', 'Page', '100') + ref('space', 'Space', '42')),
+    object('BodyContent', '301', '<property name="body"><![CDATA[<p>보존한 이전 본문</p>]]></property>' + ref('content', 'Page', '101')),
+    object('Comment', '400', ref('containerContent', 'Page', '100') + prop('creationDate', '2020-01-03T00:00:00Z')),
+    object('BodyContent', '401', '<property name="body"><![CDATA[<p>보존한 원본 댓글</p>]]></property>' + ref('content', 'Comment', '400')),
+    ...['702', '703'].map(id => object('Attachment', id, prop('title', id === '702' ? 'removed-before-trash.txt' : 'source-metadata-only.txt') + prop('version', '1') + ref('containerContent', 'Page', '100') + prop('creationDate', '2020-01-02T00:00:00Z'))),
+  ].join('') : '';
+  const xml = `<hibernate-generic>${object('Space', '42', prop('key', 'SYN') + prop('name', 'Synthetic archive'))}${object('Page', '100', prop('title', 'Synthetic versioned page') + prop('version', withAuditFixtures ? '2' : '1') + ref('space', 'Space', '42') + prop('creationDate', '2020-01-01T00:00:00Z') + prop('lastModificationDate', '2020-01-02T00:00:00Z') + historical)}${object('BodyContent', '300', '<property name="body"><![CDATA[<p>보존한 문서 본문</p>]]></property>' + ref('content', 'Page', '100'))}${object('Attachment', '700', prop('title', 'report.bin') + prop('version', '2') + ref('containerContent', 'Page', '100') + '<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection>' + prop('creationDate', '2020-01-02T00:00:00Z'))}${object('Attachment', '701', prop('title', 'report.bin') + prop('version', '1') + ref('containerContent', 'Page', '100') + ref('originalVersion', 'Attachment', '700') + prop('creationDate', '2020-01-01T00:00:00Z'))}${extra}</hibernate-generic>`;
+  const entries = [{ path: 'entities.xml', bytes: Buffer.from(xml) }, { path: 'attachments/100/700/1', bytes: first }, { path: 'attachments/100/700/2', bytes: latest }];
+  if (withAuditFixtures) entries.push({ path: 'attachments/100/702/1', bytes: Buffer.from('삭제 전 독립 첨부') });
+  return { first, latest, bytes: zip(entries) };
 }
 
 test('actual HTTP worker merges source containers into a new project, enforces review/actor/server IDs, rejects conflicts and suppresses outbound import events', async () => {
@@ -113,6 +123,131 @@ test('actual ZIP attachment versions survive native9 exact downloads and migrati
     assert.equal(localBytesAgain.status, 200);
     assert.deepEqual(Buffer.from(await localBytesAgain.arrayBuffer()), localBytes);
     await exactDownloads();
+  } finally { await f.close(); }
+});
+
+test('reconciliation follows the exact migrated attachment versions and child records through trash, native restore, and permanent deletion', async () => {
+  const f = await fixture(), binary = confluence(true);
+  try {
+    const pkg = await f.upload(binary.bytes, 'reconciliation.zip', 'confluence');
+    const plan = await f.preview(await f.configuration(pkg));
+    assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+    const applied = await f.apply(plan);
+    assert.equal(applied.status, 201, JSON.stringify(applied.data));
+    const receipt = applied.data.import;
+    const auditPath = `/source-imports/${receipt.id}/reconciliation`;
+    async function audit(query = '') {
+      const result = await f.call<SourceReconciliationPage>(auditPath + query);
+      assert.equal(result.status, 200, JSON.stringify(result.data));
+      assert.equal(result.data.importId, receipt.id);
+      return result.data;
+    }
+    const initial = await audit();
+    assert.equal(initial.receiptVersion, receipt.version);
+    assert.equal(initial.total, receipt.counts.sourceRecords);
+    assert.equal(initial.total, Object.values(initial.counts).reduce((sum, count) => sum + count, 0));
+    assert.doesNotMatch(JSON.stringify(initial), /보존한 문서 본문|보존한 원본 댓글/);
+
+    const document = initial.rows.find(row => row.kind === 'page');
+    const related = initial.rows.filter(row => row.kind === 'revision' || row.kind === 'comment');
+    const versionRows = initial.rows.filter(row => row.kind === 'attachment');
+    const older = versionRows.find(row => row.sourceId === '701');
+    const newer = versionRows.find(row => row.sourceId === '700');
+    const removed = versionRows.find(row => row.sourceId === '702');
+    const archiveOnly = versionRows.find(row => row.sourceId === '703');
+    assert.ok(document?.target && older?.target && newer?.target && removed?.target && archiveOnly);
+    const documentId = document.target.id;
+    const archivedTogether = [document, older, newer, ...related];
+    assert.deepEqual(related.map(row => row.kind).sort(), ['comment', 'revision']);
+    assert.ok(archivedTogether.every(row => row.status === 'linked'));
+    assert.ok([older, newer, removed, ...related].every(row => row.target?.owner?.id === documentId));
+    assert.equal(archiveOnly.status, 'archive-only');
+    assert.equal(archiveOnly.target, null);
+
+    const checkFilePath = (sourceRecordId: string) => `/source-imports/${receipt.id}/records/${sourceRecordId}/check-file`;
+    async function checkFile(sourceRecordId: string) {
+      const checked = await f.call<SourceReconciliationFileCheck>(checkFilePath(sourceRecordId));
+      assert.equal(checked.status, 200, JSON.stringify(checked.data));
+      assert.equal(checked.data.sourceRecordId, sourceRecordId);
+      return checked.data;
+    }
+    assert.equal((await f.call(checkFilePath(document.sourceRecordId))).status, 400);
+    assert.equal((await checkFile(archiveOnly.sourceRecordId)).status, 'unbound');
+    const expectedOlder = { sourceRecordId: older.sourceRecordId, status: 'verified', fileId: older.target.id, size: binary.first.length, sha256: hash(binary.first) };
+    assert.deepEqual(await checkFile(older.sourceRecordId), expectedOlder);
+    assert.equal((await checkFile(newer.sourceRecordId)).sha256, hash(binary.latest));
+
+    const olderPath = join(f.dir, 'uploads', older.target.id);
+    const corrupted = Buffer.from(binary.first);
+    corrupted[0] ^= 1;
+    try {
+      writeFileSync(olderPath, corrupted);
+      assert.deepEqual(await checkFile(older.sourceRecordId), { ...expectedOlder, status: 'corrupt' });
+      rmSync(olderPath);
+      assert.deepEqual(await checkFile(older.sourceRecordId), { ...expectedOlder, status: 'missing' });
+      assert.equal((await checkFile(newer.sourceRecordId)).status, 'verified');
+      assert.equal((await audit()).rows.find(row => row.sourceRecordId === older.sourceRecordId)?.status, 'linked');
+    } finally { writeFileSync(olderPath, binary.first); }
+
+    const allMatches = await audit('?kind=attachment&status=linked&q=report.bin');
+    assert.equal(allMatches.total, 2);
+    for (const offset of [0, 1]) {
+      const page = await audit(`?kind=attachment&status=linked&q=report.bin&limit=1&offset=${offset}`);
+      assert.equal(page.total, 2);
+      assert.equal(page.offset, offset);
+      assert.equal(page.limit, 1);
+      assert.deepEqual(page.counts, initial.counts);
+      assert.deepEqual(page.rows, [allMatches.rows[offset]]);
+    }
+    for (const invalid of ['?limit=0', '?limit=101', '?status=unknown', '?offset=1&offset=2', '?unexpected=true']) {
+      assert.equal((await f.call(auditPath + invalid)).status, 400, invalid);
+    }
+    assert.equal((await f.call(`/source-imports/${randomUUID()}/reconciliation`)).status, 404);
+    assert.equal((await f.call(checkFilePath(randomUUID()))).status, 404);
+
+    const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: 'Synthetic project read key', access: 'read', projectIds: receipt.projectIds, expiresAt: null });
+    assert.equal(key.status, 201, JSON.stringify(key.data));
+    for (const path of [auditPath, checkFilePath(older.sourceRecordId)]) {
+      const response = await fetch(`${f.base}/v1${path}`, { headers: { Authorization: `Bearer ${key.data.token}` } });
+      assert.equal(response.status, 403, path);
+      await response.body?.cancel();
+    }
+
+    const canonical = await f.call<WorkspaceSnapshot>('/workspace');
+    const currentDoc = canonical.data.documents.find(value => value.id === documentId)!;
+    const moved = await f.call<DocPage>(`/documents/${documentId}`, 'PATCH', { projectId: 'project-neo', expectedVersion: currentDoc.version });
+    assert.equal(moved.status, 200, JSON.stringify(moved.data));
+    const movedAudit = await audit();
+    assert.equal(movedAudit.rows.find(row => row.sourceRecordId === document.sourceRecordId)?.target?.projectId, moved.data.projectId);
+    assert.equal(movedAudit.rows.find(row => row.sourceRecordId === older.sourceRecordId)?.target?.owner?.projectId, moved.data.projectId);
+
+    assert.equal((await f.call(`/attachments/${removed.target.id}`, 'DELETE')).status, 200);
+    const trashed = await f.call<{ trashEntryId: string }>(`/documents/${documentId}`, 'DELETE');
+    assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
+    const trashAudit = await audit('?status=trashed');
+    assert.deepEqual(new Set(trashAudit.rows.map(row => row.sourceRecordId)), new Set(archivedTogether.map(row => row.sourceRecordId)));
+    const missingChild = await audit('?status=missing');
+    assert.deepEqual(missingChild.rows.map(row => row.sourceRecordId), [removed.sourceRecordId]);
+    assert.deepEqual(await checkFile(older.sourceRecordId), expectedOlder);
+
+    const backup = await f.call('/export');
+    assert.equal(backup.status, 200);
+    assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+    const sameArchived = await audit('?status=trashed');
+    assert.equal(sameArchived.receiptVersion, receipt.version + 1);
+    assert.deepEqual(sameArchived.rows, trashAudit.rows);
+    assert.deepEqual(await checkFile(older.sourceRecordId), expectedOlder);
+
+    assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
+    assert.equal((await audit('?status=trashed')).total, 0);
+    const restored = await audit();
+    assert.ok(archivedTogether.every(original => restored.rows.find(row => row.sourceRecordId === original.sourceRecordId)?.status === 'linked'));
+    const trashedAgain = await f.call<{ trashEntryId: string }>(`/documents/${documentId}`, 'DELETE');
+    assert.equal(trashedAgain.status, 200);
+    assert.equal((await f.call(`/trash/${trashedAgain.data.trashEntryId}`, 'DELETE')).status, 200);
+    assert.deepEqual(new Set((await audit('?status=missing')).rows.map(row => row.sourceRecordId)), new Set([...archivedTogether, removed].map(row => row.sourceRecordId)));
+    assert.equal((await checkFile(older.sourceRecordId)).status, 'missing');
+    assert.equal((await checkFile(archiveOnly.sourceRecordId)).status, 'unbound');
   } finally { await f.close(); }
 });
 
