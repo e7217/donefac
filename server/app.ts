@@ -36,6 +36,7 @@ import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
+import { NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
@@ -109,7 +110,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const documentContent=new DocumentContentService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
-  const documentPublication=new DocumentPublicationService(store,notifications);
+  const subscriptions=new NotificationSubscriptionsService(store);
+  const documentPublication=new DocumentPublicationService(store,notifications,documentId=>subscriptions.recipients('document',documentId));
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
   const issueOrders = new IssueOrderService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
@@ -146,6 +148,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
   const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string|null)[], createdAt: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt});
+  const notifyDocumentUpdate = (document: DocPage, actorId: string, createdAt: string) =>
+    notifications.notify({kind:'document-updated',actorId,recipientIds:subscriptions.recipients('document',document.id),projectId:document.projectId,targetId:document.id,targetLabel:document.title,createdAt});
+  const stopIssueWatch = store.onChange(({before,after,context})=>{
+    const old=before as Issue | undefined, issue=after as Issue | undefined;
+    if(!old || !issue || old.status===issue.status || !context.actorId ||
+      (context.origin!=='user' && context.origin!=='automation') || !store.get('users',context.actorId)) return;
+    notifyIssue(issue,context.actorId,'issue-status-changed',subscriptions.recipients('issue',issue.id),issue.updatedAt);
+  },['issues']);
   app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
   const attachmentRows=(type:string,id:string)=>{
     const rows=store.db.prepare('SELECT json FROM attachments WHERE resource_type=? AND resource_id=? ORDER BY rowid').all(type,id) as {json:string}[];
@@ -416,6 +426,23 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       (before!==undefined&&(typeof before!=='string'||!before))) return fail('알림 조회 조건을 확인해 주세요.');
     res.set('Cache-Control','no-store').json(notifications.list(notificationRecipient(req),filter,before));
   });
+  function subscriptionTarget(req: Request) {
+    const {targetType,targetId}=req.params;
+    if ((targetType!=='issue'&&targetType!=='document') || typeof targetId!=='string' || Object.keys(req.query).length) {
+      return fail('구독 대상을 확인해 주세요.');
+    }
+    get(targetType==='issue'?'issues':'documents',targetId);
+    return {targetType,targetId} as const;
+  }
+  app.get('/api/notifications/subscriptions/:targetType/:targetId',(req,res)=>{
+    const userId=notificationRecipient(req), {targetType,targetId}=subscriptionTarget(req);
+    res.set('Cache-Control','no-store').json({subscribed:subscriptions.isSubscribed(userId,targetType,targetId)});
+  });
+  app.put('/api/notifications/subscriptions/:targetType/:targetId',(req,res)=>{
+    const userId=notificationRecipient(req), {targetType,targetId}=subscriptionTarget(req);
+    if (Object.keys(req.body).length!==1 || typeof req.body.subscribed!=='boolean') return fail('구독 여부를 확인해 주세요.');
+    res.set('Cache-Control','no-store').json(subscriptions.setSubscribed(userId,targetType,targetId,req.body.subscribed));
+  });
   app.patch('/api/notifications/read-all',(req,res)=>{
     const recipientId=notificationRecipient(req), throughId=text(req.body.throughId,'알림 ID',200);
     if (!notifications.markAllRead(recipientId,throughId)) return fail('알림을 찾을 수 없습니다.',404);
@@ -531,7 +558,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       }
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
       store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
-      revision(d,actor(req),nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);return d;
+      const actorId=actor(req);
+      revision(d,actorId,nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);
+      if (d.title!==old.title || d.status!==old.status || d.projectId!==old.projectId || d.parentId!==old.parentId ||
+        d.icon!==old.icon || (bodyChanged && JSON.stringify(d.content)!==JSON.stringify(old.content))) notifyDocumentUpdate(d,actorId,d.updatedAt);
+      return d;
     });
     if(bodyChanged)collaboration.reset(updated.id,'문서 본문이 교체되었습니다.');else collaboration.notifyMetadata(updated.id);
     res.json(updated);
@@ -613,6 +644,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const cleanup=store.transaction(()=>{
       const entry=trash.get(String(req.params.id));
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
+      subscriptions.removeTarget(entry.resourceType,entry.resourceId);
       trash.remove(entry.id);
       activity(req,entry.resourceType,entry.resourceId,'휴지통에서 영구 삭제',entry.title);
       return archivedFiles(entry);
@@ -642,12 +674,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.json(documentPublication.transition(req.params.id,actor(req),req.body,content=>apiKeys.authorizeDocumentBody(req,content)));
   });
   app.post('/api/documents/:id/restore',(req,res)=>{
-    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d=validateDocument({...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});store.put('documents',d);d=collaboration.replaceBody(d,{allowMissing:true});revision(d,actor(req),`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);return d;});
+    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d=validateDocument({...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});store.put('documents',d);d=collaboration.replaceBody(d,{allowMissing:true});const actorId=actor(req);revision(d,actorId,`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);if(d.title!==old.title||JSON.stringify(d.content)!==JSON.stringify(old.content))notifyDocumentUpdate(d,actorId,d.updatedAt);return d;});
     collaboration.reset(updated.id,'문서 이력에서 복구되었습니다.');res.json(updated);
   });
   app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
   app.post('/api/documents/:id/collaboration/enable',(req,res)=>res.json(collaboration.enable(String(req.params.id),req.body.expectedVersion,actor(req))));
-  app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary)));
+  app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary,
+    (document,revision)=>notifyDocumentUpdate(document,revision.authorId,revision.createdAt))));
   app.get('/api/comments',(req,res)=>{const type=req.query.resourceType,id=req.query.resourceId;if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('댓글 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);res.json(store.all<any>('comments').filter(c=>c.resourceType===type&&c.resourceId===id));});
   app.post('/api/comments',(req,res)=>{
     const {resourceType,resourceId}=req.body;
@@ -656,10 +689,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     store.transaction(()=>{
       if(resourceType==='issue'){
         const issue=get<Issue>('issues',resourceId);
-        notifyIssue(issue,c.authorId,'issue-comment',[issue.assigneeId,...issue.collaboratorIds],c.createdAt);
+        notifyIssue(issue,c.authorId,'issue-comment',[issue.assigneeId,...issue.collaboratorIds,...subscriptions.recipients('issue',resourceId)],c.createdAt);
       }else{
         const doc=get<DocPage>('documents',resourceId);
-        notifications.notify({kind:'document-comment',actorId:c.authorId,recipientIds:[doc.authorId],projectId:doc.projectId,targetId:doc.id,targetLabel:doc.title,createdAt:c.createdAt});
+        notifications.notify({kind:'document-comment',actorId:c.authorId,recipientIds:[doc.authorId,...subscriptions.recipients('document',resourceId)],projectId:doc.projectId,targetId:doc.id,targetLabel:doc.title,createdAt:c.createdAt});
       }
       store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));
     });res.status(201).json(c);
@@ -825,7 +858,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -919,6 +952,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       data.documentPublications,data.documents,data.users,data.revisions,data.exportedAt,
     ):[];
     if(data.schemaVersion<15&&Array.isArray(data.teamNotifications)&&data.teamNotifications.length)fail('팀 알림을 포함한 백업은 schemaVersion 15가 필요합니다.');
+    if(data.schemaVersion<25&&((data.notificationSubscriptions!==undefined&&
+      (!Array.isArray(data.notificationSubscriptions)||data.notificationSubscriptions.length))||
+      (Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row: {kind?: unknown} | null)=>row?.kind==='issue-status-changed'||row?.kind==='document-updated')))){
+      fail('구독 또는 구독 알림을 포함한 백업은 schemaVersion 25가 필요합니다.');
+    }
+    const subscriptionRefs={
+      users:new Set((data.users as User[]).map(user=>user.id)),
+      issueIds:new Set((data.issues as Issue[]).map(issue=>issue.id)),
+      documentIds:new Set(importedDocuments.map(document=>document.id)),
+    };
+    for(const entry of importedTrash) (entry.resourceType==='issue'?subscriptionRefs.issueIds:subscriptionRefs.documentIds).add(entry.resourceId);
     const binaries=[...new Map<string,Attachment>([...(data.attachments as Attachment[]),...archiveAttachments,...importedSources.versions].map(file=>[file.id,file])).values()];
     const archivedAttachmentIds=new Set(archiveAttachments.map(file=>file.id));
     const liveSources={...importedSources,versions:importedSources.versions.filter(version=>!archivedAttachmentIds.has(version.attachmentId))};
@@ -958,7 +1002,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
-      notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],new Set((data.users as User[]).map(user=>user.id)));
+      notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
+      subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs);
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       automation.replaceImported(importedAutomation,previousAutomation);
@@ -1012,11 +1057,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server,authorize?:CollaborationUpgradeGuard)=>collaboration.attachWebSocket(server,authorize),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();reportLedger.close();store.db.close();}};
+  return {app,attachWebSocket:(server:import('node:http').Server,authorize?:CollaborationUpgradeGuard)=>collaboration.attachWebSocket(server,authorize),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();reportLedger.close();stopIssueWatch();store.db.close();}};
 }

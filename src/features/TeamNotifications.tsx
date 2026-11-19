@@ -15,7 +15,9 @@ interface TeamNotificationsProps {
 const EVENT_LABELS: Record<TeamNotificationKind, string> = {
   'issue-assigned': '업무 배정',
   'issue-comment': '업무 댓글',
+  'issue-status-changed': '업무 상태 변경',
   'document-comment': '문서 댓글',
+  'document-updated': '문서 변경',
   'document-review-requested': '검토 요청',
   'document-changes-requested': '수정 요청',
   'document-published': '문서 발행',

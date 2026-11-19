@@ -207,7 +207,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     if (!active()) return false;
     const snapshot = dataRef.current;
-    if (notification.kind === 'issue-assigned' || notification.kind === 'issue-comment') {
+    if (notification.kind.startsWith('issue-')) {
       const issue = snapshot?.issues.find(value => value.id === notification.targetId);
       if (issue) return requestRoute({ projectId:issue.projectId, view:'issues', documentId:null, issueId:issue.id });
     } else {

@@ -183,7 +183,7 @@ test('native schema 24 retains live and trashed GitLab branches and rejects malf
   assert.deepEqual(afterBranchDeletion.gitlabLinks.find(link => link.issueId === archived.id), deleted);
   const entry = await archive(f, 'issue', restoredIssue);
   const backup = await f.call<GitlabBackup>('/export');
-  assert.equal(backup.schemaVersion, 24);
+  assert.equal(backup.schemaVersion, 25);
   const liveLink = backup.gitlabLinks.find(link => link.issueId === live.id && link.kind === 'branch')!;
   const archiveRow = backup.trashEntries.find(row => row.id === entry.id)!;
   const archivedLink = archiveRow.gitlabLinks.find(link => link.issueId === archived.id && link.kind === 'branch')!;
@@ -483,7 +483,7 @@ test('native schema 17 retains invisible archived bytes, rejects damage, and can
   const fileIds = [original.id, latest.currentVersionId].sort();
   assert.deepEqual(readdirSync(path).sort(), fileIds);
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 24);
+  assert.equal(backup.schemaVersion, 25);
   assert.equal(backup.trashEntries?.length, 1);
   assert.ok(!backup.documents.some(value => value.id === doc.id));
   assert.ok(!backup.attachments.some(value => value.id === original.id));

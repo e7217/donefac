@@ -330,7 +330,7 @@ test('native14 preserves publication snapshots, rejects invalid/older references
     const backupResponse = await f.call<Backup>('/export');
     assert.equal(backupResponse.status, 200);
     const backup = backupResponse.data;
-    assert.equal(backup.schemaVersion, 24);
+    assert.equal(backup.schemaVersion, 25);
     assert.deepEqual(backup.documentPublications, [{ documentId: state.documentId, version: state.version, review: state.review, published: state.published }]);
     assert.deepEqual(backup.revisions.find(value => value.id === reviewSnapshot.id), reviewSnapshot);
     assert.deepEqual(backup.revisions.find(value => value.id === publishedSnapshot.id), publishedSnapshot);

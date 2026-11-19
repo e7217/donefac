@@ -1,0 +1,33 @@
+.notification-subscription-button {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.notification-subscription-button.is-subscribed {
+  color: #167467;
+  background: #edf6f3;
+}
+
+.issue-panel-header .issue-panel-breadcrumb {
+  min-width: 0;
+}
+
+.issue-panel-header .issue-panel-breadcrumb > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue-panel-header .issue-panel-breadcrumb > :not(span) {
+  flex-shrink: 0;
+}
+
+.issue-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}

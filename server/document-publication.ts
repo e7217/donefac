@@ -32,7 +32,8 @@ type RevisionSummary = Pick<DocRevision, 'id' | 'version' | 'title'>;
 /** Publication owns pointers to immutable revisions. It never rewrites the
  * working document, the collaboration room, or the document's status field. */
 export class DocumentPublicationService {
-  constructor(private readonly store: Store, private readonly notifications: NotificationsService) {
+  constructor(private readonly store: Store, private readonly notifications: NotificationsService,
+    private readonly subscribers: (documentId: string) => string[] = () => []) {
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS document_publications(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS revisions_document ON revisions(document_id);
@@ -142,7 +143,7 @@ export class DocumentPublicationService {
           next.published = { revisionId: review.revisionId, publishedById: actorId, publishedAt: at, note: publicationNote, requestedById: review.requestedById, reviewerId: review.reviewerId, requestedAt: review.requestedAt };
           next.review = null;
           this.audit(documentId, actorId, '문서 발행', `${revision.title} · 검토한 저장본 v${revision.version}${publicationNote ? ` · ${publicationNote}` : ''}`, at);
-          notification = {kind:'document-published',recipientIds:[review.requestedById],targetLabel:revision.title};
+          notification = {kind:'document-published',recipientIds:[review.requestedById,...this.subscribers(documentId)],targetLabel:revision.title};
         } else {
           const feedback = note(body.note, true).trim();
           next.review = { ...review, changesRequested: { byId: actorId, at, note: feedback } };

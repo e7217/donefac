@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, Issue, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationRule, Issue, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -44,7 +44,7 @@ test('preview and webhook honor the same required-field workflow without creatin
 
 test('native8 exports definitions only and restores disabled rules with operational outbox reset',async()=>{
   const f=await fixture();try{
-    await configure(f);const destination=await endpoint(f);const saved=await rule(f);assert.equal((await hook(f)).status,200);const backup=(await f.call('/export')).data;assert.equal(backup.schemaVersion,24);assert.equal(backup.automationRules[0].id,saved.id);
+    await configure(f);const destination=await endpoint(f);const saved=await rule(f);assert.equal((await hook(f)).status,200);const backup=(await f.call('/export')).data;assert.equal(backup.schemaVersion,25);assert.equal(backup.automationRules[0].id,saved.id);
     const serialized=JSON.stringify(backup);for(const privateValue of [destination.secret,destination.endpoint.url,'integration-secret','webhook_endpoints','webhook_deliveries'])assert.ok(!serialized.includes(privateValue));
     assert.equal((await f.call('/import','POST',{data:backup})).status,200);const restored=(await f.call<AutomationRule[]>('/automation-rules')).data[0];assert.equal(restored.enabled,false);assert.equal(restored.enabledAt,null);assert.ok(restored.version>saved.version);assert.equal((await f.call('/automation-runs')).data.length,0);assert.equal((await f.call('/webhook-endpoints')).data.length,0);assert.equal((await f.call('/webhook-deliveries')).data.length,0);assert.equal(f.observer.db.prepare('SELECT COUNT(*) AS total FROM webhook_events').get()!.total,0);
     assert.equal((await f.call('/integrations/gitlab')).data.webhookSecretConfigured,true);
@@ -82,9 +82,14 @@ test('Store change listeners join implicit writes and preserve separate async mu
 test('automation audit failure rolls back link, inbox, cursor, issue and outgoing delivery together',async()=>{
   const f=await fixture();try{
     await configure(f);await endpoint(f);await rule(f);const before=f.observer.get<Issue>('issues','issue-1')!,body=payload(),id=randomUUID();
+    const watcher={'X-Actor-Id':'user-jun'};
+    assert.equal((await f.call('/notifications/subscriptions/issue/issue-1','PUT',{subscribed:true},watcher)).status,200);
     f.observer.db.exec("CREATE TRIGGER reject_automation_audit BEFORE INSERT ON activities WHEN json_extract(NEW.json,'$.action')='GitLab 자동화 상태 변경' BEGIN SELECT RAISE(ABORT,'synthetic automation audit rejection'); END;");
-    assert.equal((await hook(f,body,id)).status,500);assert.deepEqual(f.observer.get('issues','issue-1'),before);for(const table of ['webhook_inbox','gitlab_object_cursors','gitlab_links','automation_runs','webhook_events','webhook_deliveries'])assert.equal(f.observer.db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()!.total,0,table);
+    assert.equal((await hook(f,body,id)).status,500);assert.deepEqual(f.observer.get('issues','issue-1'),before);for(const table of ['webhook_inbox','gitlab_object_cursors','gitlab_links','automation_runs','webhook_events','webhook_deliveries','team_notifications'])assert.equal(f.observer.db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()!.total,0,table);
     f.observer.db.exec('DROP TRIGGER reject_automation_audit');assert.equal((await hook(f,body,id)).status,200);assert.equal(f.observer.get<Issue>('issues','issue-1')!.status,'done');assert.equal((await f.call('/webhook-deliveries')).data.length,1);
+    const notifications=await f.call<TeamNotificationPage>('/notifications','GET',undefined,watcher);
+    assert.equal(notifications.status,200);
+    assert.deepEqual(notifications.data.items.map(item=>[item.kind,item.actorId,item.targetId]),[['issue-status-changed','user-seo','issue-1']]);
   }finally{await f.close();}
 });
 

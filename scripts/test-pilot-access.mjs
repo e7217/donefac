@@ -268,6 +268,8 @@ async function verifyBrowser(origin) {
     await expectSoon(colleague).toHaveURL(`${origin}/${fragment}`);
     await expectSoon(colleague.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
     await expectSoon(colleague.locator('.docs-collaboration-presence')).toContainText('2명 접속');
+    await colleague.getByRole('button', { name: '문서 구독', exact: true }).click();
+    await expectSoon(colleague.getByRole('button', { name: '문서 구독 해제', exact: true })).toBeEnabled();
     const [colleagueCookie] = await colleagueSession.cookies(origin);
     assert.ok(colleagueCookie && colleagueCookie.value !== cookie.value, 'Separate browser contexts must have separate sessions.');
     protectedValues.push(colleagueCookie.value);
@@ -281,6 +283,11 @@ async function verifyBrowser(origin) {
       const response = await call(session.request, 'GET', '/api/documents/doc-overview/collaboration', 200);
       return (await response.json()).document.plainText;
     }).toContain(edit.trim());
+    await page.getByRole('button', { name: '버전 기록', exact: true }).click();
+    await expectSoon.poll(async () => {
+      const inbox = await call(colleagueSession.request, 'GET', '/api/notifications', 200, { headers: { 'X-Actor-Id': 'user-seo' } });
+      return (await inbox.json()).items.map(item => item.kind);
+    }).toEqual(['document-updated']);
     assert.equal(new URL(socket.url()).origin, socketUrl.origin);
     await rejectSocket(socketUrl, { Origin: origin }, 401);
     await rejectSocket(socketUrl, { Origin: wrongOrigin, Cookie: sessionCookie }, 403);

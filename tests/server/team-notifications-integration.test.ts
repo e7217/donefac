@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   ApiKeyCreated, Comment, DocPage, DocumentPublicationView, Issue, LegacyPackageSummary, MigrationOptions,
-  MigrationPreview, TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
+  MigrationPreview, NotificationSubscription, NotificationSubscriptionState, NotificationSubscriptionTarget,
+  TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const editor = 'user-min';
@@ -16,7 +18,8 @@ const collaborator = 'user-jun';
 const other = 'user-yun';
 const privateComment = '내용이 알림에 포함되면 안 되는 댓글';
 const privateNote = '내용이 알림에 포함되면 안 되는 검토 메모';
-type Backup = WorkspaceSnapshot & { schemaVersion: number; teamNotifications: TeamNotification[] };
+type Backup = WorkspaceSnapshot & { schemaVersion: number; teamNotifications: TeamNotification[]; notificationSubscriptions: NotificationSubscription[] };
+const subscriptionPath = (targetType: NotificationSubscriptionTarget, targetId: string) => `/notifications/subscriptions/${targetType}/${targetId}`;
 
 async function open(dataDir: string) {
   const app = createApp({ dataDir, outboundWorker: false });
@@ -70,6 +73,11 @@ async function expectStatus<T>(request: Promise<{ status: number; data: T }>, st
 
 async function inbox(f: Fixture, actorId: string, query = '') {
   return expectStatus(f.call<TeamNotificationPage>('/notifications' + query, 'GET', undefined, actorId));
+}
+
+async function checkSubscription(f: Fixture, path: string, actorId: string, subscribed?: boolean) {
+  return expectStatus(f.call<NotificationSubscriptionState>(path, subscribed === undefined ? 'GET' : 'PUT',
+    subscribed === undefined ? undefined : { subscribed }, actorId));
 }
 
 async function issue(f: Fixture, assigneeId: string, title: string, collaboratorIds: string[] = []) {
@@ -133,6 +141,12 @@ test('public writes notify under the API key owner while recipient inbox access 
   const disabled = await fetch(f.base + '/v1/notifications', { headers });
   assert.equal(disabled.status, 403);
   await disabled.text();
+  const watchPath = f.base + '/v1' + subscriptionPath('issue', created.id);
+  for (const method of ['GET', 'PUT']) {
+    const response = await fetch(watchPath, { method, headers, body: method === 'PUT' ? '{"subscribed":true}' : undefined });
+    assert.equal(response.status, 403);
+    await response.text();
+  }
 });
 
 test('document comment and review transitions notify the original author, designated reviewer, or requester as appropriate', async t => {
@@ -153,7 +167,11 @@ test('document comment and review transitions notify the original author, design
   const feedback = await expectStatus(transition(requested, 'request_changes', reviewer));
   await expectStatus(transition(requested, 'request_changes', reviewer), 409);
   const requestedAgain = await expectStatus(transition(feedback, 'request', collaborator, request));
+  const watchPath = subscriptionPath('document', document.id);
+  await checkSubscription(f, watchPath, collaborator, true);
+  await checkSubscription(f, watchPath, other, true);
   const published = await expectStatus(transition(requestedAgain, 'publish', reviewer));
+  await checkSubscription(f, watchPath, collaborator, false);
   const edited = await expectStatus(f.call<DocPage>(`/documents/${document.id}`, 'PATCH', {
     title: '철회하려는 새 초안', expectedVersion: document.version,
   }));
@@ -174,8 +192,80 @@ test('document comment and review transitions notify the original author, design
     { ...requestedEvent, kind: 'document-review-withdrawn', targetLabel: edited.title },
     { ...requestedEvent, targetLabel: edited.title }, requestedEvent, requestedEvent,
   ]);
-  assert.equal((await inbox(f, other)).unreadCount, 0);
+  assert.deepEqual((await inbox(f, other)).items.map(event), [
+    { ...details, recipientId: other, actorId: editor, kind: 'document-updated', targetLabel: edited.title },
+    { ...details, recipientId: other, actorId: reviewer, kind: 'document-published' },
+  ]);
   assert.equal(JSON.stringify([authorInbox, requesterInbox, reviewerInbox]).includes(privateNote), false);
+});
+
+test('individual ticket subscriptions are idempotent and deliver committed comments and status changes', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, reviewer, '구독하는 업무');
+  const path = subscriptionPath('issue', ticket.id);
+  await expectStatus(f.call(path, 'GET', undefined, null), 400);
+  await expectStatus(f.call(path + '?userId=user-min', 'GET', undefined, reviewer), 400);
+  await expectStatus(f.call(path, 'PUT', { subscribed: true, userId: other }, reviewer), 400);
+  assert.deepEqual(await checkSubscription(f, path, other), { subscribed: false });
+  assert.deepEqual(await checkSubscription(f, path, reviewer, true), { subscribed: true });
+  assert.deepEqual(await checkSubscription(f, path, reviewer, true), { subscribed: true });
+  assert.deepEqual(await checkSubscription(f, path, other), { subscribed: false });
+  await checkSubscription(f, path, other, true);
+  await comment(f, 'issue', ticket.id, editor);
+
+  const patch = (expectedVersion: number, status: string, actorId: string | null, extra: object = {}) =>
+    f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', { expectedVersion, status, ...extra }, actorId);
+  const changed = await expectStatus(patch(ticket.version, 'in_progress', editor));
+  await expectStatus(patch(ticket.version, 'todo', editor), 409);
+  await expectStatus(patch(changed.version, 'todo', null, { actorId: 'missing-team-member' }), 400);
+  const unchanged = await expectStatus(patch(changed.version, 'in_progress', editor));
+  assert.deepEqual((await inbox(f, reviewer)).items.map(item => item.kind), ['issue-status-changed', 'issue-comment', 'issue-assigned']);
+  assert.deepEqual((await inbox(f, other)).items.map(item => item.kind), ['issue-status-changed', 'issue-comment']);
+  assert.ok((await inbox(f, other)).items.every(item => item.targetId === ticket.id && item.actorId === editor));
+  await checkSubscription(f, path, other, false);
+  await expectStatus(patch(unchanged.version, 'todo', reviewer));
+  assert.equal((await inbox(f, other)).unreadCount, 2);
+  assert.equal((await inbox(f, reviewer)).unreadCount, 3);
+});
+
+test('subscriptions survive restart, trash and version 25 backup; invalid replacements roll back', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, editor, '휴지통 구독 업무');
+  const document = await expectStatus(f.call<DocPage>('/documents', 'POST', { title: '복원할 구독 문서' }), 201);
+  const issuePath = subscriptionPath('issue', ticket.id), documentPath = subscriptionPath('document', document.id);
+  await checkSubscription(f, issuePath, other, true);
+  await checkSubscription(f, documentPath, reviewer, true);
+  const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
+  await expectStatus(f.call(issuePath, 'GET', undefined, other), 404);
+  const backup = await expectStatus(f.call<Backup>('/export'));
+  assert.equal(backup.schemaVersion, 25);
+  assert.deepEqual(backup.notificationSubscriptions, [
+    { userId: reviewer, targetType: 'document', targetId: document.id },
+    { userId: other, targetType: 'issue', targetId: ticket.id },
+  ]);
+  await f.restart();
+  assert.deepEqual(await checkSubscription(f, documentPath, reviewer), { subscribed: true });
+  await checkSubscription(f, documentPath, other, true);
+  const duplicates = [...backup.notificationSubscriptions, backup.notificationSubscriptions[0]];
+  for (const invalid of [undefined, duplicates, [{ ...backup.notificationSubscriptions[0], targetId: 'missing-document' }]]) {
+    await expectStatus(f.call('/import', 'POST', { data: { ...backup, notificationSubscriptions: invalid } }), 400);
+    assert.deepEqual(await checkSubscription(f, documentPath, other), { subscribed: true });
+  }
+  await expectStatus(f.call('/import', 'POST', { data: { ...backup, schemaVersion: 24 } }), 400);
+  await expectStatus(f.call('/import', 'POST', { data: backup }));
+  assert.deepEqual(await checkSubscription(f, documentPath, other), { subscribed: false });
+  await expectStatus(f.call(`/trash/${archived.trashEntryId}/restore`, 'POST'));
+  assert.deepEqual(await checkSubscription(f, issuePath, other), { subscribed: true });
+  assert.equal((await inbox(f, other)).unreadCount, 0);
+  const deletedAgain = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
+  await expectStatus(f.call(`/trash/${deletedAgain.trashEntryId}`, 'DELETE'));
+  const afterPurge = await expectStatus(f.call<Backup>('/export'));
+  assert.deepEqual(afterPurge.notificationSubscriptions, backup.notificationSubscriptions.slice(0, 1));
+
+  const old: Partial<Backup> = { ...afterPurge, schemaVersion: 24 };
+  delete old.notificationSubscriptions;
+  await expectStatus(f.call('/import', 'POST', { data: old }));
+  assert.deepEqual(await checkSubscription(f, documentPath, reviewer), { subscribed: false });
 });
 
 test('recipient-scoped pagination and read actions keep newer notifications unread', async t => {
@@ -229,7 +319,7 @@ test('notification history and read state survive restart and schema 15 restore,
   const saved = await inbox(f, reviewer);
   assert.ok(saved.items[0].readAt);
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 24);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.teamNotifications, saved.items);
   await f.restart();
   assert.deepEqual(await inbox(f, reviewer), saved);

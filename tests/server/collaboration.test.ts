@@ -1,5 +1,6 @@
 import test from 'node:test';
 import { COLLABORATION_SCHEMA } from '../../shared/collaboration.js';
+import type { TeamNotificationPage } from '../../shared/types.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ import { MAX_COLLABORATION_UPDATE } from '../../server/collaboration.js';
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-collab-'))){
   const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');service.attachWebSocket(server);await once(server,'listening');
   const base=`http://127.0.0.1:${(server.address() as any).port}`;let closed=false;
-  const request=async(path:string,method='GET',body?:unknown)=>{const response=await fetch(base+'/api'+path,{method,headers:{'Content-Type':'application/json','X-Actor-Id':'user-min'},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json() as any};};
+  const request=async(path:string,method='GET',body?:unknown,actorId='user-min')=>{const response=await fetch(base+'/api'+path,{method,headers:{'Content-Type':'application/json','X-Actor-Id':actorId},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,data:await response.json() as any};};
   return{dir,base,request,close:async()=>{if(closed)return;closed=true;service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));},remove:()=>rmSync(dir,{recursive:true,force:true})};
 }
 class Peer {
@@ -59,6 +60,15 @@ test('two clients merge concurrent text without duplicate initialization; ACK co
   const f=await fixture();let reopened:Awaited<ReturnType<typeof fixture>>|undefined;const peers:Peer[]=[];
   try{
     const session=await make(f),id=session.document.id,epoch=session.epoch;
+    const watcher='user-seo';
+    const subscribed=await f.request(`/notifications/subscriptions/document/${id}`,'PUT',{subscribed:true},watcher);
+    assert.equal(subscribed.status,200);
+    assert.deepEqual(subscribed.data,{subscribed:true});
+    async function watchNotifications(){
+      const result=await f.request('/notifications','GET',undefined,watcher);
+      assert.equal(result.status,200);
+      return (result.data as TeamNotificationPage).items.filter(item=>item.targetId===id);
+    }
     const again=await f.request(`/documents/${id}/collaboration/enable`,'POST',{expectedVersion:1});assert.equal(again.data.epoch,epoch);assert.equal(again.data.document.version,session.document.version);
     const a=await connected(f,id,'user-min',epoch),b=await connected(f,id,'user-seo',epoch);peers.push(a.p,b.p);
     assert.equal(a.welcome.peers.length,1);assert.equal(b.welcome.peers.length,2);assert.equal(text(a.p).toString(),'원본');assert.equal(text(b.p).toString(),'원본');
@@ -69,8 +79,14 @@ test('two clients merge concurrent text without duplicate initialization; ACK co
     const duplicate=await sendUpdate(a.p,epoch,ua,requestA);assert.equal(duplicate.document.version,version);const repeated=await sendUpdate(a.p,epoch,ua);assert.equal(repeated.document.version,version);
     const disk=new DatabaseSync(join(f.dir,'teamspace.sqlite'),{readOnly:true});const row=disk.prepare('SELECT json FROM documents WHERE id=?').get(id) as {json:string};assert.equal(JSON.parse(row.json).version,version);const state=disk.prepare('SELECT state FROM collaboration_documents WHERE document_id=?').get(id) as {state:Uint8Array};const durable=new Y.Doc();Y.applyUpdate(durable,state.state);assert.deepEqual(yDocToProsemirrorJSON(durable,'default'),snapshot.content);durable.destroy();disk.close();
     const before=(await f.request(`/documents/${id}/revisions`)).data;assert.equal(before.length,1);
+    assert.deepEqual(await watchNotifications(),[]);
     const checkpoint=await f.request(`/documents/${id}/checkpoint`,'POST',{summary:'검토 가능한 이력'});assert.equal(checkpoint.status,200);assert.equal(checkpoint.data.version,version);assert.deepEqual(checkpoint.data.content,snapshot.content);
+    const notified=await watchNotifications();
+    assert.deepEqual(notified.map(({kind,actorId,recipientId})=>({kind,actorId,recipientId})),[
+      {kind:'document-updated',actorId:'user-min',recipientId:watcher},
+    ]);
     assert.equal((await f.request(`/documents/${id}/checkpoint`,'POST',{})).data.id,checkpoint.data.id);
+    assert.deepEqual(await watchNotifications(),notified);
     const metadata=await f.request(`/documents/${id}`,'PATCH',{expectedVersion:version,title:'함께 편집한 문서'});assert.equal(metadata.status,200);assert.equal((await f.request(`/documents/${id}/collaboration`)).data.epoch,epoch);const metaBroadcast=await a.p.next('update');assert.equal(metaBroadcast.document.title,'함께 편집한 문서');assert.deepEqual(Buffer.from(metaBroadcast.update,'base64'),Buffer.from([0,0]));
     const localState=Y.encodeStateAsUpdate(a.p.doc);await f.close();reopened=await fixture(f.dir);const restart=await connected(reopened,id,'user-jun',epoch,{state:localState});peers.push(restart.p);assert.equal(restart.welcome.document.title,'함께 편집한 문서');assert.equal(restart.welcome.document.version,version+1);assert.deepEqual(content(restart.p),snapshot.content);assert.equal(text(restart.p).toString(),text(a.p).toString());
     const history=(await reopened.request(`/documents/${id}/revisions`)).data;assert.deepEqual(history.find((r:any)=>r.id===checkpoint.data.id).content,checkpoint.data.content);
@@ -156,7 +172,7 @@ test('restore and native import rotate epochs and reject old offline edits; reje
     const stale=await peer(f,id,'user-min',s.epoch);peers.push(stale);assert.equal((await stale.next('reset')).epoch,reset.epoch);assert.equal(await stale.closed,4409);
     const fresh=await connected(f,id,'user-seo',reset.epoch);peers.push(fresh.p);assert.equal(text(fresh.p).toString(),'원본');
     fresh.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.from(offline).toString('base64')});assert.equal((await fresh.p.next('reset')).epoch,reset.epoch);assert.equal(await fresh.p.closed,4409);
-    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,24);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
+    const live=await connected(f,id,'user-jun',reset.epoch);peers.push(live.p);const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,25);assert.ok(exported.collabStates.some((state:any)=>state.documentId===id));assert.ok(Array.isArray(exported.workflows));assert.ok(Array.isArray(exported.savedViews));
     const mismatch=structuredClone(exported);mismatch.documents.find((d:any)=>d.id===id).content={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'불일치 내용'}]}]};const rejected=await f.request('/import','POST',{data:mismatch});assert.equal(rejected.status,422);assert.equal((await f.request(`/documents/${id}/collaboration`)).data.epoch,reset.epoch);live.p.send({type:'ping'});assert.equal((await live.p.next('pong')).type,'pong');
     const imported=await f.request('/import','POST',{data:exported});assert.equal(imported.status,200);const importedReset=await live.p.next('reset');assert.notEqual(importedReset.epoch,reset.epoch);assert.equal(await live.p.closed,4409);const latest=(await f.request(`/documents/${id}/collaboration`)).data;assert.equal(latest.epoch,importedReset.epoch);assert.equal(latest.document.plainText,'원본');assert.ok(latest.document.version>restored.data.version);
     const old=await peer(f,id,'user-min',reset.epoch);peers.push(old);assert.equal((await old.next('reset')).epoch,latest.epoch);assert.equal(await old.closed,4409);

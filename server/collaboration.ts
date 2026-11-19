@@ -135,7 +135,7 @@ export class CollaborationService {
       return this.session(documentId);
     });
   }
-  checkpoint(documentId:string,actorId:string,expectedVersion?:unknown,summary?:unknown):DocRevision {
+  checkpoint(documentId:string,actorId:string,expectedVersion?:unknown,summary?:unknown,onStored?:(document:DocPage,revision:DocRevision)=>void):DocRevision {
     return this.store.transaction(()=>{
       const document=this.document(documentId);if(!this.state(documentId))invalid('공동 편집이 활성화되지 않았습니다.',409,'NOT_ENABLED');
       if(expectedVersion!==undefined&&expectedVersion!==document.version)invalid('문서가 변경되었습니다. 최신 버전을 확인해 주세요.',409,'VERSION_CONFLICT');
@@ -143,7 +143,9 @@ export class CollaborationService {
       const prior=this.store.all<DocRevision>('revisions').find(r=>r.documentId===document.id&&r.version===document.version&&r.title===document.title&&JSON.stringify(r.content)===JSON.stringify(document.content));
       if(prior)return prior;
       const revision:DocRevision={id:randomUUID(),documentId,version:document.version,title:document.title,content:document.content,plainText:document.plainText,authorId:actorId,createdAt:iso(),summary:(summary as string)?.trim()||'공동 편집 체크포인트'};
-      this.store.put('revisions',revision);this.store.put('activities',{id:randomUUID(),resourceType:'document',resourceId:documentId,actorId,action:'문서 이력 저장',detail:`버전 ${document.version}`,createdAt:iso()});return revision;
+      this.store.put('revisions',revision);this.store.put('activities',{id:randomUUID(),resourceType:'document',resourceId:documentId,actorId,action:'문서 이력 저장',detail:`버전 ${document.version}`,createdAt:iso()});
+      onStored?.(document,revision);
+      return revision;
     });
   }
   /** Caller owns the surrounding REST transaction; notifications occur only after commit. */

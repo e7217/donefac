@@ -411,7 +411,7 @@ export interface TrashRestoreResult {
 }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const TEAM_NOTIFICATION_KINDS = [
-  'issue-assigned', 'issue-comment', 'document-comment', 'document-review-requested',
+  'issue-assigned', 'issue-comment', 'issue-status-changed', 'document-comment', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn',
 ] as const;
 export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];
@@ -432,6 +432,13 @@ export interface TeamNotificationPage {
   nextCursor: string | null;
   unreadCount: number;
 }
+export type NotificationSubscriptionTarget = 'issue' | 'document';
+export interface NotificationSubscription {
+  userId: string;
+  targetType: NotificationSubscriptionTarget;
+  targetId: string;
+}
+export interface NotificationSubscriptionState { subscribed: boolean }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
 export interface GitlabSyncPreviewCounts {
