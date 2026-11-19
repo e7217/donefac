@@ -271,6 +271,28 @@ export interface DocumentPublicationView extends DocumentPublicationState {
   reviewRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
   publishedRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
 }
+export type DocumentPublicationListTab = 'assigned' | 'requested' | 'published';
+export type DocumentPublicationScope = 'workspace' | 'project' | 'common';
+export type DocumentPublicationTarget = { kind: 'review' | 'published'; revisionId: string };
+export interface DocumentPublicationListItem {
+  documentId: string;
+  projectId: string | null;
+  documentVersion: number;
+  revision: Pick<DocRevision, 'id' | 'version' | 'title'>;
+  status: 'pending' | 'changes_requested' | 'published';
+  requestedById: string;
+  reviewerId: string;
+  actionAt: string;
+}
+export interface DocumentPublicationList {
+  tab: DocumentPublicationListTab;
+  scope: DocumentPublicationScope;
+  projectId: string | null;
+  offset: number;
+  total: number;
+  pendingAssigned: number;
+  items: DocumentPublicationListItem[];
+}
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: 'FS'; lagDays: number }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string }
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }

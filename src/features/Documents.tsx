@@ -16,7 +16,7 @@ import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, i
 import { SourceOrigins } from './SourceOrigins';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
-import type { Comment, DocPage, DocRevision, FeatureProps, RichContent } from '../../shared/types';
+import type { Comment, DocPage, DocRevision, DocumentPublicationTarget, FeatureProps, RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
@@ -25,7 +25,12 @@ import type { CollaborationSession } from '../../shared/collaboration';
 import { hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
 import './documents.css';
 
-type Props = FeatureProps & { selectedDocumentId: string | null; onSelectDocument: (id: string) => void };
+type Props = FeatureProps & {
+  selectedDocumentId: string | null;
+  onSelectDocument: (id: string) => void;
+  publicationLink?: DocumentPublicationTarget | null;
+  onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
+};
 type Draft = {
   id: string; title: string; content: RichContent; plainText: string;
   status: DocPage['status']; parentId: string | null; expectedVersion: number;
@@ -44,7 +49,7 @@ const draftFromPage = (page: DocPage): Draft => ({
 });
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, publicationLink, onClosePublicationLink }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const actorRef = useRef(actorId);
@@ -59,8 +64,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const publicationOpener = useRef<HTMLButtonElement>(null);
   const closePublication = useCallback(() => {
     setPublicationDocumentId(null);
+    if (selectedDocumentId && publicationLink) onClosePublicationLink?.(selectedDocumentId,publicationLink);
     requestAnimationFrame(() => publicationOpener.current?.focus());
-  }, []);
+  }, [onClosePublicationLink,publicationLink,selectedDocumentId]);
   const [storageProblem, setStorageProblem] = useState(false);
   const [search, setSearch] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -105,7 +111,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const archivedLiveRecoveryRef = useRef(false);
 
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
-  const publicationOpen = Boolean(selectedPage && selectedPage.id === publicationDocumentId);
+  const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
@@ -733,9 +739,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </> : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
-    {publicationOpen && selectedPage && draft && <DocumentPublication key={`${selectedPage.id}:${actorId}`} data={data}
+    {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
-      onClose={closePublication} notify={notify} refreshDocument={refresh} />}
+      initialSnapshot={publicationLink} onClose={closePublication} notify={notify} refreshDocument={refresh} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !creating) setNewOpen(false); }}><form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}><div className="docs-modal-header"><div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div><button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={() => setNewOpen(false)}><X size={19} /></button></div><label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?" value={newTitle} onChange={event => setNewTitle(event.target.value)} required maxLength={240} /></label><div className="docs-template-grid">{DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id} onClick={() => { setNewTemplate(template.id); if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle)) setNewTitle(template.id === 'blank' ? '' : template.name); }}><span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}</button>)}</div><div className="docs-location-fields"><label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent)} value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}><option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="docs-modal-label">상위 문서<select className="field" value={newParent} onChange={event => setNewParent(event.target.value)}><option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label></div><div className="docs-modal-footer"><button className="btn btn-ghost" type="button" disabled={creating} onClick={() => setNewOpen(false)}>취소</button><button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating}>{creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />} 문서 만들기</button></div></form></div>}
   </section></DocumentBlocksProvider>;

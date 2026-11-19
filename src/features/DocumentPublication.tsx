@@ -6,6 +6,7 @@ import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-r
 import type {
   DocPage,
   DocRevision,
+  DocumentPublicationTarget,
   DocumentPublicationView,
   FeatureProps,
   RichContent,
@@ -24,10 +25,11 @@ export interface DocumentPublicationProps {
   onClose: () => void;
   notify: FeatureProps['notify'];
   refreshDocument?: () => Promise<void>;
+  initialSnapshot?: DocumentPublicationTarget | null;
 }
 
 type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
-type SnapshotKind = 'review' | 'published';
+type SnapshotKind = DocumentPublicationTarget['kind'];
 const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : '문서 검토 상태를 처리하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
@@ -51,7 +53,8 @@ function snapshotContent(node: RichContent): RichContent {
 }
 
 export function DocumentPublication(props: DocumentPublicationProps) {
-  return <PublicationDialog key={`${props.document.id}:${props.actorId}`} {...props} />;
+  const target = props.initialSnapshot;
+  return <PublicationDialog key={`${props.document.id}:${props.actorId}:${target?.kind ?? ''}:${target?.revisionId ?? ''}`} {...props} />;
 }
 
 function PublicationDialog({
@@ -62,6 +65,7 @@ function PublicationDialog({
   onClose,
   notify,
   refreshDocument,
+  initialSnapshot,
 }: DocumentPublicationProps) {
   const titleId = useId();
   const [view, setView] = useState<DocumentPublicationView | null>(null);
@@ -87,6 +91,7 @@ function PublicationDialog({
   const dirty = useRef(false);
   const summaryRequest = useRef<AbortController | null>(null);
   const snapshotRequest = useRef<AbortController | null>(null);
+  const initialSnapshotAttempted = useRef(false);
   const transitionRequest = useRef<AbortController | null>(null);
   const refreshDocumentRef = useRef(refreshDocument);
   const users = data.users.filter((user) => user.id !== actorId);
@@ -234,16 +239,7 @@ function PublicationDialog({
     return () => window.removeEventListener('keydown', keyboard, true);
   }, [close]);
 
-  async function loadSnapshot(kind: SnapshotKind) {
-    if (!view || pending.current) return;
-    const revisionId = kind === 'review' ? view.review?.revisionId : view.published?.revisionId;
-    if (!revisionId) return;
-    const cached = kind === 'review' ? reviewSnapshot : publishedSnapshot;
-    if (cached?.id === revisionId && snapshotGenerations[kind] === view.workspaceGeneration) {
-      setSnapshotKind(kind);
-      setSnapshotError('');
-      return;
-    }
+  const fetchSnapshot = useCallback(async ({kind,revisionId}:DocumentPublicationTarget, generation:string|null) => {
     snapshotRequest.current?.abort();
     const controller = new AbortController();
     snapshotRequest.current = controller;
@@ -262,7 +258,7 @@ function PublicationDialog({
         throw new Error('요청한 저장본과 응답이 일치하지 않습니다. 최신 상태를 확인해 주세요.');
       if (kind === 'review') setReviewSnapshot(result);
       else setPublishedSnapshot(result);
-      setSnapshotGenerations((previous) => ({ ...previous, [kind]: view.workspaceGeneration }));
+      setSnapshotGenerations((previous) => ({ ...previous, [kind]: generation }));
       setSnapshotKind(kind);
     } catch (cause) {
       if (!active.current || controller.signal.aborted) return;
@@ -272,7 +268,34 @@ function PublicationDialog({
     } finally {
       if (active.current && !controller.signal.aborted) setSnapshotLoading(null);
     }
+  }, [actorId,page.id]);
+
+  function loadSnapshot(kind: SnapshotKind) {
+    if (!view || pending.current) return;
+    const revisionId = kind === 'review' ? view.review?.revisionId : view.published?.revisionId;
+    if (!revisionId) return;
+    const cached = kind === 'review' ? reviewSnapshot : publishedSnapshot;
+    if (cached?.id === revisionId && snapshotGenerations[kind] === view.workspaceGeneration) {
+      setSnapshotKind(kind);
+      setSnapshotError('');
+      return;
+    }
+    void fetchSnapshot({kind,revisionId},view.workspaceGeneration);
   }
+
+  useEffect(() => {
+    if (!initialSnapshot || !view || loading || initialSnapshotAttempted.current) return;
+    const timer = setTimeout(() => {
+      initialSnapshotAttempted.current = true;
+      const current = initialSnapshot.kind === 'review' ? view.review : view.published;
+      if (current?.revisionId !== initialSnapshot.revisionId) {
+        setSnapshotError('링크가 가리킨 저장본이 현재 상태에서 변경되었습니다. 필요한 경우 현재 저장본을 선택해 주세요.');
+        return;
+      }
+      void fetchSnapshot(initialSnapshot,view.workspaceGeneration);
+    },0);
+    return () => clearTimeout(timer);
+  }, [initialSnapshot,view,loading,fetchSnapshot]);
 
   const requestOutdated = Boolean(view && view.documentVersion > page.version);
   const reviewLoaded = Boolean(
@@ -326,6 +349,7 @@ function PublicationDialog({
       setView(result);
       setNeedsReload(false);
       resetNotes();
+      window.dispatchEvent(new Event('teamspace:publication-changed'));
       notify(
         action === 'request'
           ? '저장된 문서의 검토를 요청했습니다.'

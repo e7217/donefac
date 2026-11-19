@@ -1,8 +1,8 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Users, X } from 'lucide-react';
-import type { FeatureProps, WorkspaceSnapshot } from '../shared/types';
+import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Users, X } from 'lucide-react';
+import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, WorkspaceSnapshot } from '../shared/types';
 import { STATUS, type StatusCategory } from '../shared/types';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -21,8 +21,9 @@ const Development = lazy(() => import('./features/Development').then(module => (
 const Planning = lazy(() => import('./features/Planning').then(module => ({default: module.Planning})));
 const Reports = lazy(() => import('./features/Reports').then(module => ({default: module.Reports})));
 const Documents = lazy(() => import('./features/Documents').then(module => ({default: module.Documents})));
+const DocumentPublicationLibrary = lazy(() => import('./features/DocumentPublicationLibrary').then(module => ({default: module.DocumentPublicationLibrary})));
 
-type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'development' | 'settings' | 'mywork';
+type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
@@ -30,15 +31,25 @@ const navigation = [
   { id: 'planning', label: '사이클 · 모듈 · 릴리스', icon: FolderPlus },
   { id: 'reports', label: '보고서', icon: BarChart3 },
   { id: 'documents', label: '문서', icon: BookOpen },
+  { id: 'publication', label: '검토함 · 발행본', icon: Inbox },
   { id: 'development', label: '개발 · GitLab', icon: GitBranch },
 ] as const;
 
-type WorkspaceRoute = { projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null };
-const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','development','settings','mywork'];
+type WorkspaceRoute = {
+  projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
+  publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
+};
+const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork'];
 function routeHash(route: WorkspaceRoute) {
-  const detail = route.view === 'documents' ? route.documentId : route.view === 'reports' ? route.reportId :
+  const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? route.reportId :
     (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
-  return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${route.issueId ? '?issue=' + encodeURIComponent(route.issueId) : ''}`;
+  const query = new URLSearchParams();
+  if (route.issueId) query.set('issue', route.issueId);
+  if (route.view === 'documents' && route.documentId && route.publication) {
+    query.set('publication', route.publication.kind);
+    query.set('revision', route.publication.revisionId);
+  }
+  return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
 }
 function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRoute {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
@@ -52,13 +63,18 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     const document = snapshot.documents.find(d => d.id === parts[2]);
     if (document) { documentId = document.id; projectId = document.projectId || projectId; }
   }
-  const requestedIssue = new URLSearchParams(query).get('issue');
+  const parameters = new URLSearchParams(query);
+  const requestedIssue = parameters.get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) { issueId = issue.id; projectId = issue.projectId; if (view === 'documents' || view === 'settings') { view = 'issues'; documentId = null; } }
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
   const planningId = (view === 'planning' || view === 'gantt') && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
-  return { projectId, view, documentId, issueId, reportId, planningId };
+  const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
+  const kind = parameters.get('publication'), revisionId = parameters.get('revision');
+  const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
+    revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
+  return { projectId, view, documentId, issueId, reportId, planningId, publicationTab, publication };
 }
 
 export default function Workspace() {
@@ -72,11 +88,14 @@ export default function Workspace() {
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
+  const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
+  const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const acceptedRouteRef = useRef<WorkspaceRoute | null>(null);
+  const publicationOpenRequest = useRef(0);
   const routeIndexRef = useRef(0);
   const rollbackHashRef = useRef<string | null>(null);
 
@@ -117,6 +136,8 @@ export default function Workspace() {
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setPublicationTab(route.publicationTab ?? 'assigned');
+    setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -162,7 +183,7 @@ export default function Workspace() {
     const sameProject = issue.projectId === projectId;
     if (requestRoute({
       projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
-      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, issueId:id,
+      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, publicationTab, issueId:id,
     })) setSearchOpen(false);
   };
   const openPlanIn = (nextView: 'planning' | 'gantt', id: string) =>
@@ -172,6 +193,32 @@ export default function Workspace() {
     if (!document) return;
     if (requestRoute({projectId:document.projectId || projectId, view:'documents',documentId:id,issueId:null})) setSearchOpen(false);
   };
+  const openPublication = async (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string) => {
+    const request = ++publicationOpenRequest.current;
+    const from = location.hash;
+    let document = dataRef.current?.documents.find(value => value.id === id);
+    if (!document) {
+      try { await refresh(); }
+      catch (cause) {
+        if (request === publicationOpenRequest.current && from === location.hash) notify((cause as Error).message,'error');
+        return;
+      }
+      if (request !== publicationOpenRequest.current || from !== location.hash) return;
+      document = dataRef.current?.documents.find(value => value.id === id);
+    }
+    if (!document) {
+      notify('문서가 변경되었거나 삭제되었습니다. 목록을 새로 불러와 주세요.', 'error');
+      return;
+    }
+    requestRoute({projectId:document.projectId || projectId,view:'documents',documentId:id,publication:{kind,revisionId},issueId:null});
+  };
+  const closePublicationLink = useCallback((id: string, target: DocumentPublicationTarget) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view === 'documents' && current.documentId === id && current.publication?.kind === target.kind &&
+      current.publication.revisionId === target.revisionId) {
+      writeRoute({...current, publication:null},routeIndexRef.current,'replace');
+    }
+  }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
   const selectDocument = (id: string) => {
     if (!dataRef.current) return;
@@ -201,7 +248,7 @@ export default function Workspace() {
       <div className="sidebar-footer"><button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={17}/><span>워크스페이스 설정</span></button><div className="local-status"><span/>로컬 개발 환경 <span className="version-label">v0.1</span></div></div>
     </aside>
     <div className="workspace-content">
-      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions"><button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button><div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {if(!window.dispatchEvent(new Event('teamspace:navigate',{cancelable:true})))return;setActorId(e.target.value); setActor(e.target.value); localStorage.setItem('teamspace.actor', e.target.value);}}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div></div></header>
+      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions"><PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/><button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button><div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {if(!window.dispatchEvent(new Event('teamspace:navigate',{cancelable:true})))return;publicationOpenRequest.current++;setActorId(e.target.value); setActor(e.target.value); localStorage.setItem('teamspace.actor', e.target.value);}}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div></div></header>
       <main className={`main-content view-${view}`}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'mywork' && <MyWork {...props}/>}
@@ -209,17 +256,57 @@ export default function Workspace() {
         {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} onOpenPlanning={id => openPlanIn('planning',id)}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
-        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument}/></Suspense>}
+        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink}/></Suspense>}
+        {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} initialTab={publicationTab} onOpenPublication={openPublication}
+          onTabChange={tab => requestRoute({projectId,view:'publication',documentId:null,issueId:null,publicationTab:tab})}/></Suspense>}
         {view === 'development' && <Development {...props}/>}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}
         {!project && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,issueId:null})}/>}
+    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,publicationTab,issueId:null})}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
   </div>;
+}
+
+function PublicationInboxButton({actorId,onClick}:{actorId:string;onClick:()=>void}) {
+  const [summary,setSummary] = useState<{actorId:string;count:number} | null>(null);
+  useEffect(() => {
+    if (!actorId) return;
+    let request: AbortController | undefined;
+    const load = () => {
+      if (document.visibilityState !== 'visible') return;
+      request?.abort();
+      const controller = new AbortController();
+      request = controller;
+      void api<{pendingAssigned:number}>('/document-publications/count', {
+        headers:{'X-Actor-Id':actorId},signal:controller.signal,
+      }).then(value => {
+        if (!controller.signal.aborted) setSummary({actorId,count:value.pendingAssigned});
+      }).catch(() => {
+        if (!controller.signal.aborted) setSummary(null);
+      });
+    };
+    load();
+    const timer = setInterval(load,30_000);
+    window.addEventListener('focus',load);
+    window.addEventListener('teamspace:publication-changed',load);
+    document.addEventListener('visibilitychange',load);
+    return () => {
+      request?.abort();
+      clearInterval(timer);
+      window.removeEventListener('focus',load);
+      window.removeEventListener('teamspace:publication-changed',load);
+      document.removeEventListener('visibilitychange',load);
+    };
+  }, [actorId]);
+  const count = actorId === summary?.actorId ? summary.count : null;
+  return <button type="button" className="icon-btn publication-inbox-button" aria-label="검토함·발행본"
+    aria-description={count === null ? undefined : `배정된 검토 ${count}개`} title="검토함·발행본" onClick={onClick}>
+    <Inbox size={18} />{count !== null && count > 0 && <span className="publication-inbox-badge" aria-hidden="true">{count > 99 ? '99+' : count}</span>}
+  </button>;
 }
 
 function Overview(props: FeatureProps & {navigate: (view: View) => void}) {

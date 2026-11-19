@@ -30,6 +30,7 @@ import { WorklogService, WorklogError } from './worklogs.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
+import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { issueSearchText } from '../shared/issue-schema.js';
@@ -297,6 +298,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   app.delete('/api/documents/:id',(req,res)=>{const cleanup:Attachment[]=[];store.transaction(()=>{const d=get<DocPage>('documents',req.params.id);const v=req.body?.expectedVersion??req.query.expectedVersion;if(v!==undefined)checkVersion(d,Number(v));if(store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동하거나 삭제해 주세요.',409);store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run('document',d.id);cleanup.push(...deleteAttachmentRows('document',d.id));store.remove('documents',d.id);activity(req,'document',d.id,'문서 삭제',d.title);});collaboration.reset(String(req.params.id),'문서가 삭제되었습니다.');cleanupAttachments(cleanup);res.json({ok:true});});
   app.get('/api/documents/:id/revisions',(req,res)=>{get('documents',req.params.id);res.json(store.all<any>('revisions').filter(r=>r.documentId===req.params.id).sort((a,b)=>b.version-a.version));});
+  app.get('/api/document-publications/count',(req,res)=>{
+    if(Object.keys(req.query).length)return fail('검토 수에 조회 조건을 지정할 수 없습니다.');
+    res.set('Cache-Control','no-store').json({pendingAssigned:countDocumentAssignedReviews(store,actor(req))});
+  });
+  app.get('/api/document-publications',(req,res)=>{
+    res.set('Cache-Control','no-store').json(listDocumentPublications(store,actor(req),req.query));
+  });
   app.get('/api/documents/:id/publication',(req,res)=>{
     res.json(documentPublication.get(req.params.id));
   });
