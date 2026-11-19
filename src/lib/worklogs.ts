@@ -1,8 +1,14 @@
 export function formatWorklogMinutes(minutes: number): string {
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  if (!hours) return `${rest}분`;
-  return `${hours.toLocaleString('ko-KR')}시간${rest ? ` ${rest}분` : ''}`;
+  const seconds = Math.round(minutes * 60);
+  const hours = Math.floor(seconds / 3600);
+  const remainingMinutes = Math.floor(seconds / 60) % 60;
+  const remainingSeconds = seconds % 60;
+  const parts = [
+    hours ? `${hours.toLocaleString('ko-KR')}시간` : '',
+    remainingMinutes ? `${remainingMinutes}분` : '',
+    remainingSeconds ? `${remainingSeconds}초` : '',
+  ];
+  return parts.filter(Boolean).join(' ') || '0분';
 }
 
 export function newWorklogRequestId(): string {

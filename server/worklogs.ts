@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Express, Request } from 'express';
-import type { Issue, IssueWorklogPage, Project, ProjectWorklogReport, User, WorklogEntry } from '../shared/types.js';
+import type { Issue, IssueWorklogPage, Project, ProjectWorklogReport, SourceRecordArchive, User, WorklogEntry } from '../shared/types.js';
 import { calendarDay, isCalendarDate } from '../shared/calendar.js';
+import { isRestrictedJiraWorklog } from './migration-worklog.js';
 import type { Store } from './store.js';
 
 export class WorklogError extends Error {
@@ -21,19 +22,56 @@ const pageSize = 50;
 const maxNoteLength = 2000;
 const maxVersion = Number.MAX_SAFE_INTEGER - 1;
 const minuteLimit = 1440;
+const secondLimit = 2147483647;
+// The JSON second value is authoritative for migrated rows. Old manual rows
+// contain whole minutes, so conversion before SUM avoids fractional accumulation.
+const secondsSql = "CAST(COALESCE(json_extract(json,'$.durationSeconds'),ROUND(minutes*60)) AS INTEGER)";
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 function fail(status: number, message: string): never { throw new WorklogError(status, message); }
 
-function fields(value: Record<string, unknown>): Fields {
+function datedNote(value: Record<string, unknown>): Pick<Fields, 'workDate' | 'note'> {
   if (!isCalendarDate(value.workDate)) fail(400, '작업 날짜를 YYYY-MM-DD 형식으로 입력해 주세요.');
+  const note = value.note === undefined ? '' : value.note;
+  if (typeof note !== 'string' || note.length > maxNoteLength) fail(400, '작업 메모는 2,000자 이하여야 합니다.');
+  return {workDate:value.workDate,note:note.trim()};
+}
+
+function fields(value: Record<string, unknown>): Fields {
+  const base = datedNote(value);
   if (typeof value.minutes !== 'number' || !Number.isInteger(value.minutes) || value.minutes < 1 || value.minutes > minuteLimit) {
     fail(400, '작업 시간은 1~1,440분 사이의 정수여야 합니다.');
   }
-  const note = value.note === undefined ? '' : value.note;
-  if (typeof note !== 'string' || note.length > maxNoteLength) fail(400, '작업 메모는 2,000자 이하여야 합니다.');
-  return {workDate:value.workDate,minutes:value.minutes,note:note.trim()};
+  return {...base,minutes:value.minutes};
+}
+
+function sourceFields(value: Record<string, unknown>, durationSeconds: number): Fields {
+  if (!Number.isSafeInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > secondLimit || value.minutes !== durationSeconds / 60) {
+    fail(400, '이관 작업 시간의 초 단위 값과 분 환산 값이 일치하지 않습니다.');
+  }
+  return {...datedNote(value),minutes:durationSeconds / 60};
+}
+
+function sourceBinding(value: Pick<WorklogEntry, 'sourceRecordId' | 'durationSeconds' | 'issueId' | 'projectId'>, sources: Map<string, SourceRecordArchive>): string {
+  if (typeof value.sourceRecordId !== 'string' || !uuid.test(value.sourceRecordId)) fail(400, '이관 작업 시간의 원본 기록 ID를 확인해 주세요.');
+  const source = sources.get(value.sourceRecordId);
+  if (!source || source.source?.product !== 'jira' || source.record?.kind !== 'history' || source.record.metadata?.kind !== 'worklog' || source.ownerType !== 'issue' || source.ownerId !== value.issueId || source.targetProjectId !== value.projectId) {
+    fail(400, '이관 작업 시간의 Jira 원본과 업무·프로젝트 연결이 일치하지 않습니다.');
+  }
+  if (isRestrictedJiraWorklog(source.record)) fail(400, '열람이 제한된 Jira 작업 시간은 현재 시간 기록으로 이관할 수 없습니다.');
+  return JSON.stringify([source.source.instanceKey, source.record.sourceId]);
+}
+
+function sourceMap(records: SourceRecordArchive[]): Map<string, SourceRecordArchive> {
+  if (!Array.isArray(records)) fail(400, '이관 작업 시간의 원본 기록 목록이 필요합니다.');
+  const result = new Map<string, SourceRecordArchive>();
+  for (const record of records) {
+    if (!record || typeof record !== 'object' || typeof record.id !== 'string') fail(400, '이관 작업 시간의 원본 기록 객체를 확인해 주세요.');
+    if (result.has(record.id)) fail(400, '작업 시간의 원본 기록 ID가 중복되었습니다.');
+    result.set(record.id, record);
+  }
+  return result;
 }
 
 function canonicalTime(value: unknown): value is string {
@@ -41,8 +79,8 @@ function canonicalTime(value: unknown): value is string {
     new Date(value).toISOString() === value;
 }
 
-function entry({ id, issueId, projectId, issueKey, issueTitle, authorId, workDate, minutes, note, version, createdAt, updatedAt }: WorklogRecord): WorklogEntry {
-  return { id, issueId, projectId, issueKey, issueTitle, authorId, workDate, minutes, note, version, createdAt, updatedAt };
+function entry({ id, issueId, projectId, issueKey, issueTitle, authorId, workDate, minutes, note, version, createdAt, updatedAt, sourceRecordId, durationSeconds }: WorklogRecord): WorklogEntry {
+  return { id, issueId, projectId, issueKey, issueTitle, authorId, workDate, minutes, note, version, createdAt, updatedAt, ...(sourceRecordId === undefined ? {} : {sourceRecordId,durationSeconds}) };
 }
 
 export class WorklogService {
@@ -56,6 +94,7 @@ export class WorklogService {
       );
       CREATE INDEX IF NOT EXISTS worklogs_issue_page ON worklogs(issue_id,work_date DESC,created_at DESC,id DESC) WHERE deleted_at IS NULL;
       CREATE INDEX IF NOT EXISTS worklogs_project_date ON worklogs(project_id,work_date,author_id) WHERE deleted_at IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS worklogs_source_record ON worklogs(json_extract(json,'$.sourceRecordId')) WHERE json_extract(json,'$.sourceRecordId') IS NOT NULL;
     `);
   }
 
@@ -63,17 +102,50 @@ export class WorklogService {
     return this.store.get<Issue>('issues', id) ?? fail(404, '업무를 찾을 수 없습니다.');
   }
 
-  private write(value: WorklogRecord) {
+  private write(value: WorklogRecord, insertOnly = false) {
     this.store.db.prepare(`
       INSERT INTO worklogs(id,issue_id,project_id,author_id,work_date,created_at,minutes,deleted_at,json)
       VALUES(?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET work_date=excluded.work_date,minutes=excluded.minutes,
-        deleted_at=excluded.deleted_at,json=excluded.json
+      ${insertOnly ? '' : `ON CONFLICT(id) DO UPDATE SET work_date=excluded.work_date,minutes=excluded.minutes,
+        deleted_at=excluded.deleted_at,json=excluded.json`}
     `).run(value.id, value.issueId, value.projectId, value.authorId, value.workDate, value.createdAt,
       value.minutes, value.deletedAt, JSON.stringify(value));
   }
 
   all(): WorklogRecord[] { return this.store.all<WorklogRecord>('worklogs'); }
+
+  /** Caller owns the canonical/source-archive transaction. Never replay a source
+   * worklog into an existing row, including an entry already deleted by a user. */
+  persistMigrated(entries: WorklogEntry[], sourceRecords: SourceRecordArchive[]): void {
+    if (!Array.isArray(entries)) fail(400, '이관 작업 시간 목록이 필요합니다.');
+    if (!entries.length) return;
+    const candidates = entries.map(value => {
+      if (!value || value.version !== 1 || !Object.hasOwn(value, 'sourceRecordId') || !Object.hasOwn(value, 'durationSeconds')) {
+        fail(400, '새 이관 작업 시간에는 원본·초 단위 값과 초기 버전이 필요합니다.');
+      }
+      const fingerprint = createHash('sha256').update(JSON.stringify(['jira-worklog-import', value.id, value.sourceRecordId, value.issueId, value.authorId, value.workDate, value.durationSeconds])).digest('hex');
+      return {...value,createHash:fingerprint,deletedAt:null};
+    });
+    const validated = this.validateRestore(candidates, this.store.all<Project>('projects'), this.store.all<Issue>('issues'), this.store.all<User>('users'), new Date().toISOString(), sourceRecords);
+    const existingIdentities = new Set<string>();
+    if (this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='source_records'").get()) {
+      const sources = this.store.db.prepare(`
+        SELECT s.source_instance AS instanceKey,s.source_id AS sourceId FROM worklogs w
+        JOIN source_records s ON s.id=json_extract(w.json,'$.sourceRecordId') WHERE s.product='jira'
+      `).all() as {instanceKey: string; sourceId: string}[];
+      for (const source of sources) existingIdentities.add(JSON.stringify([source.instanceKey, source.sourceId]));
+    }
+    const incomingSources = sourceMap(sourceRecords);
+    for (const value of validated) {
+      const issue = this.store.get<Issue>('issues', value.issueId);
+      if (!issue || issue.key !== value.issueKey || issue.title !== value.issueTitle) fail(400, '이관 작업 시간의 현재 업무와 저장할 키·제목이 일치하지 않습니다.');
+      if (this.store.get('worklogs', value.id) || this.store.db.prepare("SELECT id FROM worklogs WHERE json_extract(json,'$.sourceRecordId')=?").get(value.sourceRecordId!)) {
+        fail(409, '이미 저장한 작업 시간 ID 또는 이관 원본입니다.');
+      }
+      if (existingIdentities.has(sourceBinding(value, incomingSources))) fail(409, '같은 Jira 인스턴스의 작업 시간 원본이 이미 저장되어 있습니다.');
+    }
+    for (const value of validated) this.write(value, true);
+  }
 
   private list(issueId: string, offset: unknown): IssueWorklogPage {
     this.issue(issueId);
@@ -81,14 +153,14 @@ export class WorklogService {
       fail(400, '작업 시간 목록의 시작 위치를 확인해 주세요.');
     }
     const totals = this.store.db.prepare(`
-      SELECT COUNT(*) AS totalEntries,COALESCE(SUM(minutes),0) AS totalMinutes FROM worklogs
+      SELECT COUNT(*) AS totalEntries,COALESCE(SUM(${secondsSql}),0) AS totalSeconds FROM worklogs
       WHERE issue_id=? AND deleted_at IS NULL
-    `).get(issueId) as {totalMinutes: number; totalEntries: number};
+    `).get(issueId) as {totalSeconds: number; totalEntries: number};
     const rows = this.store.db.prepare(`
       SELECT json FROM worklogs WHERE issue_id=? AND deleted_at IS NULL
       ORDER BY work_date DESC,created_at DESC,id DESC LIMIT ? OFFSET ?
     `).all(issueId, pageSize, Number(offset ?? 0)) as {json: string}[];
-    return {...totals,entries:rows.map(row => entry(JSON.parse(row.json)))};
+    return {totalMinutes:totals.totalSeconds/60,totalEntries:totals.totalEntries,entries:rows.map(row => entry(JSON.parse(row.json)))};
   }
 
   private create(request: Request, issueId: string, hooks: Hooks): WorklogEntry {
@@ -128,15 +200,17 @@ export class WorklogService {
 
   private edit(request: Request, issueId: string, id: string, hooks: Hooks): WorklogEntry {
     const actorId = hooks.actor(request);
-    const input = fields(request.body);
     return this.store.transaction(() => {
       const old = this.requireOwner(issueId, id, actorId, request.body.expectedVersion);
       if (old.deletedAt !== null) fail(404, '삭제된 작업 시간 기록입니다.');
       if (old.version !== request.body.expectedVersion || old.version >= maxVersion) {
         fail(409, '작업 시간 기록이 변경되었습니다. 최신 기록을 확인해 주세요.');
       }
+      const preserveSeconds = old.durationSeconds !== undefined && request.body.minutes === undefined;
+      const body = old.sourceRecordId === undefined ? request.body : {...old,...request.body};
+      const input = preserveSeconds ? sourceFields({...body,minutes:old.minutes}, old.durationSeconds!) : fields(body);
       if (old.workDate === input.workDate && old.minutes === input.minutes && old.note === input.note) return entry(old);
-      const updated = {...old,...input,version:old.version+1,updatedAt:new Date().toISOString()};
+      const updated = {...old,...input,...(old.sourceRecordId === undefined ? {} : {durationSeconds:preserveSeconds ? old.durationSeconds : input.minutes*60}),version:old.version+1,updatedAt:new Date().toISOString()};
       this.write(updated);
       hooks.activity(request,'issue',issueId,'작업 시간 수정',`${old.workDate} ${old.minutes}분 → ${updated.workDate} ${updated.minutes}분`);
       return entry(updated);
@@ -173,30 +247,32 @@ export class WorklogService {
     }
     const condition = `project_id=? AND work_date BETWEEN ? AND ? AND deleted_at IS NULL${authorId === null ? '' : ' AND author_id=?'}`;
     const params = authorId === null ? [projectId,startDate,endDate] : [projectId,startDate,endDate,authorId];
-    const metric = 'SUM(minutes) AS minutes, COUNT(*) AS entries';
-    const days = this.store.db.prepare(`
+    const metric = `SUM(${secondsSql}) AS seconds, COUNT(*) AS entries`;
+    const dayRows = this.store.db.prepare(`
       SELECT work_date AS date,${metric} FROM worklogs WHERE ${condition} GROUP BY work_date
-    `).all(...params) as ProjectWorklogReport['days'];
-    const byAuthor = this.store.db.prepare(`
+    `).all(...params) as {date: string; seconds: number; entries: number}[];
+    const days = dayRows.map(({seconds,...row}) => ({...row,minutes:seconds/60}));
+    const authorRows = this.store.db.prepare(`
       SELECT author_id AS authorId,${metric} FROM worklogs WHERE ${condition}
-      GROUP BY author_id ORDER BY minutes DESC,author_id
-    `).all(...params) as ProjectWorklogReport['byAuthor'];
+      GROUP BY author_id ORDER BY seconds DESC,author_id
+    `).all(...params) as {authorId: string; seconds: number; entries: number}[];
+    const byAuthor = authorRows.map(({seconds,...row}) => ({...row,minutes:seconds/60}));
     const totalsByIssue = this.store.db.prepare(`
       WITH grouped AS (
         SELECT issue_id AS issueId, json,
-          SUM(minutes) OVER (PARTITION BY issue_id) AS minutes,
+          SUM(${secondsSql}) OVER (PARTITION BY issue_id) AS seconds,
           COUNT(*) OVER (PARTITION BY issue_id) AS entries,
           ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY work_date DESC,created_at DESC,id DESC) AS position
         FROM worklogs WHERE ${condition}
       )
-      SELECT g.issueId,g.minutes,g.entries,
+      SELECT g.issueId,g.seconds,g.entries,
         COALESCE(json_extract(i.json,'$.key'),json_extract(g.json,'$.issueKey')) AS key,
         COALESCE(json_extract(i.json,'$.title'),json_extract(g.json,'$.issueTitle')) AS title,
         i.id IS NULL AS deleted
       FROM grouped g LEFT JOIN issues i ON i.id=g.issueId WHERE g.position=1
-      ORDER BY g.minutes DESC,g.issueId
-    `).all(...params) as (Omit<ProjectWorklogReport['byIssue'][number], 'deleted'> & {deleted: number})[];
-    const byIssue = totalsByIssue.map(row => ({...row,deleted:Boolean(row.deleted)}));
+      ORDER BY g.seconds DESC,g.issueId
+    `).all(...params) as (Omit<ProjectWorklogReport['byIssue'][number], 'deleted' | 'minutes'> & {deleted: number; seconds: number})[];
+    const byIssue = totalsByIssue.map(({seconds,...row}) => ({...row,minutes:seconds/60,deleted:Boolean(row.deleted)}));
     const observed = new Map(days.map(day => [day.date,day]));
     const counts = Array.from({length:end-start+1},(_,index) => {
       const date = new Date((start+index)*86_400_000).toISOString().slice(0,10);
@@ -204,21 +280,21 @@ export class WorklogService {
     });
     return {
       projectId,startDate,endDate,authorId,
-      minutes:days.reduce((total,day) => total+day.minutes,0),
+      minutes:dayRows.reduce((total,day) => total+day.seconds,0)/60,
       entryCount:days.reduce((total,day) => total+day.entries,0),
       byAuthor,byIssue,days:counts,
     };
   }
 
-  validateRestore(raw: unknown, projects: Project[], issues: Issue[], users: User[], exportedAt: string): WorklogRecord[] {
+  validateRestore(raw: unknown, projects: Project[], issues: Issue[], users: User[], exportedAt: string, sourceRecords: SourceRecordArchive[] = []): WorklogRecord[] {
     if (!Array.isArray(raw)) fail(400,'백업의 작업 시간 기록 목록이 필요합니다.');
     const projectIds = new Set(projects.map(project => project.id));
     const userIds = new Set(users.map(user => user.id));
     const issueProjects = new Map(issues.map(issue => [issue.id,issue.projectId]));
-    const ids = new Set<string>();
+    const ids = new Set<string>(), sourceIds = new Set<string>(), sourceIdentities = new Set<string>(), sources = sourceMap(sourceRecords);
     return raw.map(value => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400,'작업 시간 기록을 확인해 주세요.');
-      const {id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt} = value as WorklogRecord;
+      const {id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,sourceRecordId,durationSeconds} = value as WorklogRecord;
       const exists = typeof issueId === 'string' && issueProjects.has(issueId);
       if (typeof id !== 'string' || !uuid.test(id) || ids.has(id) || typeof issueId !== 'string' || !issueId ||
           !projectIds.has(projectId) || !userIds.has(authorId) || exists && issueProjects.get(issueId) !== projectId ||
@@ -231,8 +307,18 @@ export class WorklogService {
           typeof value.note !== 'string' || deletedAt !== null && value.note !== '') {
         fail(400,'백업의 작업 시간 기록에 잘못된 ID·작성자·업무·버전·시각이 있습니다.');
       }
+      const hasSource = Object.hasOwn(value, 'sourceRecordId'), hasSeconds = Object.hasOwn(value, 'durationSeconds');
+      if (hasSource !== hasSeconds) fail(400, '이관 작업 시간의 원본 ID와 초 단위 값은 함께 있어야 합니다.');
+      let input: Fields;
+      if (hasSource) {
+        const identity = sourceBinding({sourceRecordId,durationSeconds,issueId,projectId}, sources);
+        if (sourceIds.has(sourceRecordId!) || sourceIdentities.has(identity)) fail(400, '같은 Jira 원본 작업 시간이 중복되었습니다.');
+        sourceIds.add(sourceRecordId!);
+        sourceIdentities.add(identity);
+        input = sourceFields(value, durationSeconds!);
+      } else input = fields(value);
       ids.add(id);
-      return {...fields(value),id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt};
+      return {...input,id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,...(hasSource ? {sourceRecordId,durationSeconds} : {})};
     });
   }
 

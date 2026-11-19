@@ -220,6 +220,10 @@ export class MigrationService {
       const { preview } = prepared;
       if (preview.version !== expectedVersion) fail(409, '미리보기 버전이 다릅니다.');
       if (!preview.canApply) fail(409, '미리보기의 적용을 막는 항목을 먼저 해결해 주세요.');
+      if (!Array.isArray(prepared.worklogs) &&
+          prepared.sourceRecords.some(source => source.source.product==='jira' && source.record.metadata.kind==='worklog')) {
+        fail(409, '작업 시간이 포함된 원본의 미리보기를 다시 만들어 주세요.');
+      }
       const acknowledgements: unknown = request.body.acknowledgements;
       if (!Array.isArray(acknowledgements) || acknowledgements.some(code => typeof code !== 'string') ||
           !unique(acknowledgements) || acknowledgements.length !== preview.requiredAcknowledgements.length ||

@@ -178,7 +178,7 @@ function ProjectWorklogReportView({ data, projectId, actorId, openIssue }: Featu
           {changedSinceDisplay && <span className="worklog-report-old-result">이전 조건의 결과</span>}
         </div>
         <div className="worklog-report-stats">
-          <article className="card"><span>기록된 시간</span><strong>{formatWorklogMinutes(report.minutes)}</strong><small>총 {report.minutes.toLocaleString('ko-KR')}분</small></article>
+          <article className="card"><span>기록된 시간</span><strong>{formatWorklogMinutes(report.minutes)}</strong></article>
           <article className="card"><span>작업 기록</span><strong>{report.entryCount.toLocaleString('ko-KR')}<small>건</small></strong><small>선택한 기간의 기록</small></article>
           <article className="card"><span>작성자</span><strong>{report.byAuthor.length.toLocaleString('ko-KR')}<small>명</small></strong><small>시간을 기록한 작성자</small></article>
           <article className="card"><span>업무</span><strong>{report.byIssue.length.toLocaleString('ko-KR')}<small>개</small></strong><small>시간이 기록된 업무</small></article>

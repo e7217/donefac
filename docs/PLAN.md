@@ -44,6 +44,13 @@ GitLab 상태 자동화는 명시적으로 활성화한 규칙과 현재 워크�
 
 근거: [Jira 검색 내보내기](https://confluence.atlassian.com/jirasoftware/working-with-search-results-1528533257.html), [관리자 XML 백업과 첨부 범위](https://confluence.atlassian.com/adminjiraserver/backing-up-data-938847673.html), [Jira Importers JSON](https://confluence.atlassian.com/adminjiraserver100/importing-data-from-json-1442845835.html), [Confluence XML 객체/이력 구조](https://confluence.atlassian.com/confkb/use-space-site-xml-export-entities-xml-to-find-confluence-objects-1283686755.html), [Confluence 저장 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html).
 
+
+## Jira 작업 시간 이관
+
+Jira 관리자 XML의 작업 기록과 REST·Importers JSON의 개별 작업 시간에서 이관할 업무, 작성자, 작업일, 초 단위 길이를 확인한다. 날짜는 기록에 명시된 현지 날짜를 유지한다. 팀원으로 명시적으로 매핑한 작성자의 기록을 업무의 작업 시간과 프로젝트 보고서에 함께 반영한다. 제한된 기록은 제외하기 전까지 적용을 차단한다. 매핑되지 않은 작성자나 기준이 불명확한 날짜·시간 단위는 원본에 보관하고 확인 항목에 표시한다. 부분 REST 페이지는 진단에 남긴다. [Jira Data Center 작업 기록 API](https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue/), [Jira JSON 작업 시간 예시](https://confluence.atlassian.com/servicedeskcloud/importing-data-from-json-1097176631.html#ImportingdatafromJSON-Worklogs).
+
+적용 건수와 원본에만 보관한 건수를 미리보기와 영수증에 남긴다. 작업 시간과 보관 원본은 다른 업무 데이터와 같은 트랜잭션에 저장하며 원본 ID로 연결한다. 자체 백업은 원본과 정확한 초 단위를 함께 복원한다. 기존에 적용한 이관 영수증과 부분 데이터의 운영 리허설은 따로 검토한다.
+
 ## 보고서와 주간 문서 연결
 
 프로젝트 개요는 현재 상태를 집계한다. 기간 보고서와 흐름 차트에는 업무 생성·삭제와 상태 전이를 구조화한 변경 기록이 필요하다. 업무 작업과 같은 트랜잭션에 이전·이후 상태, 당시 분류, 발생 시각, 출처를 기록한다. 수집 시작 전이나 원본 이력의 누락 구간은 보고서에 표시한다.

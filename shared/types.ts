@@ -219,6 +219,8 @@ export interface WorklogEntry {
   version: number;
   createdAt: string;
   updatedAt: string;
+  sourceRecordId?: string;
+  durationSeconds?: number;
 }
 export interface IssueWorklogPage { entries: WorklogEntry[]; totalMinutes: number; totalEntries: number }
 export interface ProjectWorklogReport {

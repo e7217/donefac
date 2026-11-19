@@ -188,6 +188,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if (firstDocument) documentContent.validate(firstDocument.id, firstDocument.content);
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {checkFields:false,allowArchivedSchema:true}));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
+      worklogs.persistMigrated(value.worklogs??[],value.sourceRecords);
       for (const comment of value.comments) store.put('comments', comment);
       for (const revision of value.revisions) store.put('revisions', revision);
       for (const attachment of value.attachments) store.put('attachments', attachment);
@@ -358,7 +359,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const attachmentVersions=sourcePreservation.allVersions();
     const binaries=[...new Map([...attachments,...attachmentVersions].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:11,worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:12,worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -366,7 +367,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.type('application/json').send(serialized);
   });
   app.post('/api/import',(req,res)=>{
-    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8,9,10,11].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~11)이 필요합니다.');
+    const data=req.body.data;if(!data||![1,2,3,4,5,6,7,8,9,10,11,12].includes(data.schemaVersion))fail('지원하는 Teamspace 내보내기 파일(schemaVersion 1~12)이 필요합니다.');
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
@@ -387,11 +388,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
     const importedReportSnapshots=data.schemaVersion>=10?reports.validateRestore(data.reportSnapshots,data.exportedAt,data.projects,data.users):[];
     if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
-    const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(data.worklogs,data.projects,data.issues,data.users,data.exportedAt):[];
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?data.attachmentVersions:[], relations:data.schemaVersion>=9?data.issueRelations:[],
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:data.comments,revisions:data.revisions,attachments:data.attachments});
+    const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(
+      data.worklogs,data.projects,data.issues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],
+    ):[];
     const binaries=[...new Map<string,Attachment>([...(data.attachments as Attachment[]),...importedSources.versions].map(file=>[file.id,file])).values()];
     let staged:string;try{staged=files.stageImport(binaries,data.attachmentContents);}catch(error){fail((error as Error).message);}
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;

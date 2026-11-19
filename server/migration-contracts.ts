@@ -1,4 +1,4 @@
-import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User } from '../shared/types.js';
+import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
 export interface MigrationPlanningInput {
@@ -10,7 +10,7 @@ export interface MigrationFileCopy { fileId:string;packageId:string;path:string;
 export interface PreparedMigration {
   preview:MigrationPreview;sourceImport:SourceImport;sourceRecords:SourceRecordArchive[];
   projects:Project[];workflows:ProjectWorkflow[];issueSchemas:ProjectIssueSchema[];
-  issues:Issue[];documents:DocPage[];comments:Comment[];revisions:DocRevision[];
+  issues:Issue[];documents:DocPage[];comments:Comment[];revisions:DocRevision[];worklogs:WorklogEntry[];
   attachments:Attachment[];attachmentVersions:AttachmentVersion[];fileCopies:MigrationFileCopy[];
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
 }

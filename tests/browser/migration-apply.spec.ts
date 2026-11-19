@@ -103,3 +103,71 @@ test('매핑과 다른 설정이 함께 수정되면 한 탐색 거절이 모든
     const acceptAll = (dialog: import('@playwright/test').Dialog) => void dialog.accept(); page.on('dialog', acceptAll); await actor.selectOption(target); page.off('dialog', acceptAll); await expect(actor).toHaveValue(target); await expect(settings.getByLabel('이관 매핑', { exact: true })).toHaveCount(0); await expect(legacy).toHaveValue('');
   } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
 });
+
+test('Jira 작업 시간을 검토해 이관하고 티켓과 기간 보고서에서 초 단위로 확인한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const unique = suffix(), key = `TM${unique}`, filename = `worklog-${unique}.json`;
+  const workDate = '2020-02-03', title = `이관 작업 시간 ${unique}`;
+  const originalAuthor = { name: `worker-${unique}`, displayName: `원본 작업자 ${unique}` };
+  const data = {
+    issues: [{
+      id:'1901', key:`${key}-1`, fields:{
+        project:{id:'101',key,name:`원본 시간 프로젝트 ${unique}`},summary:title,
+        issuetype:{id:'1',name:'Task'},status:{id:'1',name:'Open'},
+        created:'2020-01-02T03:00:00Z',updated:'2020-02-03T18:00:00Z',
+        worklog:{startAt:0,total:1,worklogs:[{
+          id:'200',author:originalAuthor,started:`${workDate}T00:15:00.000+0900`,
+          timeSpentSeconds:91,comment:'원래 작업 메모',
+        }]},
+      },
+      changelog:{startAt:0,total:0,histories:[]},
+    }],
+  };
+  const pkg = await upload(request, filename, Buffer.from(JSON.stringify(data)), `worklog-browser-${unique}`);
+  try {
+    const {settings} = await open(page, request);
+    await selectPackage(settings, filename);
+    const currentActor = await page.getByLabel('작업자 선택', {exact:true}).inputValue();
+    await settings.getByText('사용자 매핑', {exact:true}).click();
+    await settings.getByLabel(`사용자 매핑 ${originalAuthor.displayName}`, {exact:true}).selectOption(currentActor);
+    const checked = await preview(page, settings);
+    expect(checked.canApply, JSON.stringify(checked.notices)).toBe(true);
+    expect(checked.counts.worklogs).toBe(1);
+    const review = settings.getByRole('region', {name:'이관 적용 미리보기',exact:true});
+    await expect(review).toContainText('적용할 작업 시간 1');
+    await acknowledge(settings, checked);
+    const response = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${checked.id}/apply`));
+    page.once('dialog', dialog => void dialog.accept());
+    await settings.getByRole('button', {name:'검토한 이관 실제 적용',exact:true}).click();
+    const applied = await response;
+    expect(applied.ok(), await applied.text()).toBe(true);
+    await expect(settings.getByLabel('이관 영수증 상세', {exact:true})).toBeVisible();
+    const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const issue = workspace.issues.find(row => row.title === title)!;
+    expect(issue).toBeTruthy();
+
+    await page.goto(`/#/${issue.projectId}/issues?issue=${issue.id}`);
+    const drawer = page.getByRole('dialog', {name:title,exact:true});
+    await drawer.getByRole('button', {name:'작업 시간',exact:true}).click();
+    const worklogs = drawer.getByRole('region', {name:'업무 작업 기록'});
+    await expect(worklogs.getByLabel('업무 총 작업 시간')).toHaveText('1분 31초');
+    await expect(worklogs.getByLabel('작업 기록 목록')).toContainText('Jira 이관');
+    await expect(worklogs.getByLabel('작업 기록 목록')).toContainText(workDate);
+    await worklogs.getByRole('button', {name:`${workDate} 작업 기록 수정`,exact:true}).click();
+    await expect(worklogs).toContainText('이관 작업 시간은 1분 31초입니다');
+    await worklogs.getByLabel('작업 기록 내용', {exact:true}).fill('이관 후 추가 메모');
+    await worklogs.getByRole('button', {name:'기록 수정 저장',exact:true}).click();
+    await expect(worklogs.getByLabel('작업 기록 목록')).toContainText('이관 후 추가 메모');
+    await expect(worklogs.getByLabel('업무 총 작업 시간')).toHaveText('1분 31초');
+
+    await drawer.getByRole('button', {name:'업무 상세 닫기'}).click();
+    await page.getByRole('button', {name:'보고서',exact:true}).click();
+    await page.getByRole('tab', {name:'작업 시간',exact:true}).click();
+    await page.getByLabel('작업 시간 시작일', {exact:true}).fill(workDate);
+    await page.getByLabel('작업 시간 종료일', {exact:true}).fill(workDate);
+    await page.getByRole('button', {name:'작업 시간 조회',exact:true}).click();
+    await expect(page.getByRole('region', {name:'업무별 작업 시간'})).toContainText('1분 31초');
+  } finally {
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});

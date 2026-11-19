@@ -23,18 +23,22 @@ type Payload = { workDate: string; minutes: number; note: string };
 type Attempt = { requestId: string; payload: Payload };
 const PAGE_SIZE = 50;
 const freshDraft = (): Draft => ({ workDate: todayDate(), hours: '', minutes: '', note: '' });
-const entryDraft = (entry: WorklogEntry): Draft => ({
-  workDate: entry.workDate,
-  hours: String(Math.floor(entry.minutes / 60)),
-  minutes: String(entry.minutes % 60),
-  note: entry.note,
-});
+function entryDraft(entry: WorklogEntry): Draft {
+  const editableMinutes = Number.isInteger(entry.minutes) && entry.minutes <= 1440;
+  return {
+    workDate:entry.workDate,
+    hours:editableMinutes ? String(Math.floor(entry.minutes / 60)) : '',
+    minutes:editableMinutes ? String(entry.minutes % 60) : '',
+    note:entry.note,
+  };
+}
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '작업 기록 요청을 완료하지 못했습니다.';
 const sameDraft = (left: Draft, right: Draft) => JSON.stringify(left) === JSON.stringify(right);
-function validate(draft: Draft): string {
+function validate(draft: Draft, keepImportedDuration: boolean): string {
   if (!isCalendarDate(draft.workDate)) return '작업한 날짜를 선택하세요.';
   if (draft.note.length > 2000) return '작업 내용은 2,000자 이하여야 합니다. 입력은 그대로 유지됩니다.';
+  if (keepImportedDuration) return '';
   if (![draft.hours, draft.minutes].every((value) => !value.trim() || /^\d+$/.test(value.trim())))
     return '시간과 분은 소수점 없는 정수로 입력하세요.';
   const hours = Number(draft.hours || 0),
@@ -77,6 +81,9 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
   const mutationRequest = useRef<AbortController | null>(null);
   const draftCallback = useRef(onDraftChange);
   const dirty = !sameDraft(draft, baseline) || Boolean(uncertain);
+  const keepImportedDuration = Boolean(
+    editing?.sourceRecordId && draft.hours === baseline.hours && draft.minutes === baseline.minutes,
+  );
   useEffect(() => {
     draftCallback.current = onDraftChange;
   }, [onDraftChange]);
@@ -211,7 +218,7 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
     if (busyRef.current || (conflict && editing)) return;
     if (editing && !dirtyRef.current) return;
     if (!recovery) {
-      const validation = validate(draft);
+      const validation = validate(draft, keepImportedDuration);
       if (validation) {
         setError(validation);
         return;
@@ -238,7 +245,10 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
           signal: controller.signal,
           body: JSON.stringify(
             editing
-              ? { expectedVersion: editing.version, ...payload }
+              ? {
+                  expectedVersion:editing.version,workDate:payload.workDate,note:payload.note,
+                  ...(keepImportedDuration ? {} : {minutes:payload.minutes}),
+                }
               : { requestId: currentAttempt!.requestId, ...currentAttempt!.payload },
           ),
         },
@@ -248,7 +258,8 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
         !saved ||
         typeof saved.id !== 'string' ||
         !Number.isInteger(saved.version) ||
-        !Number.isInteger(saved.minutes)
+        !Number.isFinite(saved.minutes) ||
+        saved.minutes <= 0
       )
         throw new Error('저장 응답 형식을 확인하지 못했습니다.');
       setUncertain(null);
@@ -332,7 +343,7 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
     }
   }
 
-  const payloadMinutes = validate(draft)
+  const payloadMinutes = validate(draft, keepImportedDuration)
     ? null
     : Number(draft.hours || 0) * 60 + Number(draft.minutes || 0);
   return (
@@ -409,8 +420,9 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
             </label>
           </div>
           <p className="issue-worklog-help">
-            한 기록은 1분~24시간입니다.{' '}
-            {payloadMinutes !== null && `입력한 시간: ${formatWorklogMinutes(payloadMinutes)}`}
+            {keepImportedDuration && editing
+              ? `이관 작업 시간은 ${formatWorklogMinutes(editing.minutes)}입니다. 새 시간과 분을 입력해 변경할 수 있습니다.`
+              : <>입력 가능한 시간은 1분~24시간입니다. {payloadMinutes !== null && `입력한 시간 ${formatWorklogMinutes(payloadMinutes)}`}</>}
           </p>
           <label>
             작업 내용
@@ -525,6 +537,7 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
                 </div>
                 <span className="issue-worklog-row-author">
                   {users.find((user) => user.id === entry.authorId)?.name || entry.authorId}
+                  {entry.sourceRecordId && ' · Jira 이관'}
                 </span>
                 {entry.note && <p>{entry.note}</p>}
                 <small>
