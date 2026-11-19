@@ -9,8 +9,8 @@ import {
   isIssueSummaryGroupBy, type DocumentIssueList as IssueListAttrs, type IssueSummaryGroupBy,
 } from '../../shared/document-nodes';
 import { projectIssueSchema } from '../../shared/issue-schema';
-import { createIssueViewMatcher } from '../../shared/issue-view';
-import type { Issue, WorkspaceSnapshot } from '../../shared/types';
+import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
+import type { WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 
 type IssueBlockType = 'issueList' | 'issueSummary';
@@ -59,17 +59,11 @@ export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_L
   const label = !unavailable && project ? `${project.name} · ${savedView?.name ?? '전체 업무'}` : attrs.label || '업무 목록';
   const listId = useId();
   const { issues, count } = useMemo(() => {
-    const issues: Issue[] = [];
-    let count = 0;
-    if (!unavailable) {
-      const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, attrs.projectId)) : null;
-      for (const issue of data.issues) {
-        if (issue.projectId !== attrs.projectId || match && !match(issue)) continue;
-        if (issues.length < limit) issues.push(issue);
-        count++;
-      }
-    }
-    return { issues, count };
+    if (unavailable) return { issues: [], count: 0 };
+    const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, attrs.projectId)) : null;
+    const matching = data.issues.filter(issue => issue.projectId === attrs.projectId && (!match || match(issue)));
+    const order = data.issueOrders?.find(candidate => candidate.projectId === attrs.projectId);
+    return { issues: orderProjectIssues(matching, order).slice(0, limit), count: matching.length };
   }, [unavailable, savedView, data, attrs.projectId, limit]);
   const people = useMemo(() => new Map(data.users.map(person => [person.id, person.name])), [data.users]);
 

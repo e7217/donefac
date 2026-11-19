@@ -17,6 +17,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks } from './document-content.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
+import { IssueOrderError, IssueOrderService } from './issue-order.js';
 import { AutomationService, AutomationError } from './automation.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
@@ -108,6 +109,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const notifications=new NotificationsService(store);
   const documentPublication=new DocumentPublicationService(store,notifications);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
+  const issueOrders = new IssueOrderService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
   reportLedger.start();
   const reports=new ReportingService(store,reportLedger);
@@ -154,12 +156,18 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);
   };
   const cleanupAttachments=(rows:Attachment[])=>{for(const id of new Set(rows.map(row=>row.id)))try{files.remove(id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',id);}};
-  const snapshot = (): WorkspaceSnapshot => ({
-    ...Object.fromEntries(Object.entries(tables).map(([key,table])=>[key,store.all(table)])),
-    workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
-    workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
-    baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
-  }) as unknown as WorkspaceSnapshot;
+  const snapshot = (): WorkspaceSnapshot => {
+    const rows = store.db.prepare('SELECT json FROM issues ORDER BY rowid').all() as { json: string }[];
+    const issues = rows.map(row => JSON.parse(row.json) as Issue);
+    const data = Object.fromEntries(Object.entries(tables).map(([key, table]) => [key, table === 'issues' ? issues : store.all(table)]));
+    return {
+      ...data,
+      workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
+      workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
+      baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
+      issueOrders: issueOrders.snapshot(data.projects, issues),
+    } as unknown as WorkspaceSnapshot;
+  };
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
@@ -396,6 +404,28 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
+  const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => {
+    if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
+    const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
+    const issue=validateIssue({...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()},old);
+    issue.completedAt=done(issue)?(old.completedAt||now()):null;
+    store.put('issues',issue);activity(req,'issue',issue.id,'티켓 변경',`${issue.key}: ${fields.join(', ')}`);
+    if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actor(req),'issue-assigned',[issue.assigneeId],issue.updatedAt);
+    return issue;
+  };
+  app.get('/api/projects/:id/issue-order',(req,res)=>{
+    res.set('Cache-Control','no-store').json(issueOrders.get(req.params.id));
+  });
+  app.patch('/api/projects/:id/issue-order',(req,res)=>{
+    const result = issueOrders.move(req.params.id, req.body, {
+      changeStatus: (issue,status) => updateIssue(req, issue, {status}),
+      recordMove: (issue,anchor,position) => {
+        const location = anchor ? `${anchor.key} ${position === 'before' ? '앞으로' : '뒤로'}` : position === 'before' ? '맨 처음으로' : '맨 끝으로';
+        activity(req, 'issue', issue.id, '업무 순서 변경', `${issue.key} · ${location} 이동`);
+      },
+    });
+    res.json(result);
+  });
   app.post('/api/issues/query',(req,res)=>{
     const {projectId}=req.body;
     if(typeof projectId!=='string'||!projectId||projectId.length>200)fail('필터를 적용할 프로젝트가 필요합니다.');
@@ -425,13 +455,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);
-      if(req.body.projectId&&req.body.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
-      const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in req.body);
-      const i=validateIssue({...old,...Object.fromEntries(fields.map(k=>[k,req.body[k]])),...planning.resolveIssueFields(req.body,old.projectId,old),version:old.version+1,updatedAt:now()},old);
-      i.completedAt=done(i)?(old.completedAt||now()):null;
-      store.put('issues',i);activity(req,'issue',i.id,'티켓 변경',`${i.key}: ${fields.join(', ')}`);
-      if(i.assigneeId&&i.assigneeId!==old.assigneeId)notifyIssue(i,actor(req),'issue-assigned',[i.assigneeId],i.updatedAt);
-      return i;
+      return updateIssue(req,old,req.body);
     });res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{
@@ -771,6 +795,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
+    const importedIssueOrders = data.schemaVersion >= 23 ? issueOrders.validateImport(data.issueOrders, data.projects, data.issues) : [];
     const importDocument = <T extends DocPage | DocRevision>(document: T): T => ({ ...document, ...normalizeBackupDocumentContent(document.content, data.schemaVersion) });
     const importedDocuments = (data.documents as DocPage[]).map(importDocument);
     const importedRevisions = (data.revisions as DocRevision[]).map(importDocument);
@@ -895,6 +920,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const d of data.documents)store.put('documents',d);
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
       const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
+      issueOrders.replaceImported(importedIssueOrders);
       for(const d of data.documents){validateDocument(d,undefined,{allowMissing:true,skipReferences:true});if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       let importedDependencyVersion=previousDependencyVersion;
       for(const dependency of [...importedDependencies,...archivedDependencies]){
@@ -935,7 +961,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
+    if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});

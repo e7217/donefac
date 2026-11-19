@@ -4,7 +4,7 @@ import { useId, useMemo, useState } from 'react';
 import { ArrowUpRight, ChartBar, ChevronRight, SlidersHorizontal, X } from 'lucide-react';
 import { DOCUMENT_ISSUE_LIST_LIMIT, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, type DocumentIssueSummary } from '../../shared/document-nodes';
 import { projectIssueSchema } from '../../shared/issue-schema';
-import { createIssueViewMatcher } from '../../shared/issue-view';
+import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { PRIORITY, type Issue, type Priority, type SavedView, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses } from '../../shared/workflow-helpers';
 import { issueListAttrs, keepDocumentSelection } from './DocumentIssueList';
@@ -34,10 +34,10 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
   );
   const orderedIds = new Map([...definitions.keys()].map((id, index) => [id, index]));
   const groups = new Map<string, Group>();
-  let total = 0;
+  const matching = data.issues.filter(issue => issue.projectId === projectId && (!match || match(issue)));
+  const order = data.issueOrders?.find(candidate => candidate.projectId === projectId);
 
-  for (const issue of data.issues) {
-    if (issue.projectId !== projectId || (match && !match(issue))) continue;
+  for (const issue of orderProjectIssues(matching, order)) {
     const id = groupBy === 'status' ? issue.status : groupBy === 'assignee' ? (issue.assigneeId ?? '') : issue.priority;
     let group = groups.get(id);
     if (!group) {
@@ -47,7 +47,6 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
       groups.set(id, group);
     }
     group.issues.push(issue);
-    total++;
   }
 
   const ordered = [...groups.values()].sort((a, b) => {
@@ -58,7 +57,7 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
     const order = (orderedIds.get(a.id) ?? unknownGroupOrder) - (orderedIds.get(b.id) ?? unknownGroupOrder);
     return order || a.label.localeCompare(b.label, 'ko');
   });
-  return { groups: ordered, total };
+  return { groups: ordered, total: matching.length };
 }
 
 function PageControls({ page, setPage, pageSize, total, label }: { page: number; setPage: (page: number) => void; pageSize: number; total: number; label: string }) {

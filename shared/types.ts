@@ -508,6 +508,16 @@ export interface IssueFieldBreakdownPage {
   issues: IssueFieldBreakdownIssue[];
 }
 export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
+export interface ProjectIssueOrder { projectId: string; issueIds: string[]; version: string }
+export interface IssueOrderMove {
+  issueId: string;
+  expectedVersion: string;
+  expectedIssueVersion: number;
+  anchorId: string | null;
+  position: 'before' | 'after';
+  status?: IssueStatus;
+}
+export interface IssueOrderMoveResult { order: ProjectIssueOrder; issue: Issue }
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
@@ -516,6 +526,7 @@ export interface WorkspaceSnapshot {
   workloadCapacities?: ProjectWorkloadCapacity[];
   teamWorkloadCapacity?: TeamWorkloadCapacity;
   issueSchemas?: ProjectIssueSchema[];
+  issueOrders?: ProjectIssueOrder[];
 }
 export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }

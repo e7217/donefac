@@ -1,4 +1,4 @@
-import type { Issue, ProjectIssueSchema, SavedViewState, WorkspaceSnapshot } from './types.js';
+import type { Issue, ProjectIssueOrder, ProjectIssueSchema, SavedViewState, WorkspaceSnapshot } from './types.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
 
@@ -17,4 +17,19 @@ export function createIssueViewMatcher(
     (type === 'all' || issue.type === type) &&
     matchFields(issue) &&
     (!search || issueSearchText(data, issue).toLowerCase().includes(search));
+}
+
+/** Use the project's ranks for a filtered subset and keep unranked rows in source order. */
+export function orderProjectIssues(issues: Issue[], order: ProjectIssueOrder | undefined): Issue[] {
+  if (!order?.issueIds.length || issues.length < 2) return issues;
+  const remaining = new Map(issues.map(issue => [issue.id, issue]));
+  const ranked: Issue[] = [];
+  for (const id of order.issueIds) {
+    const issue = remaining.get(id);
+    if (!issue) continue;
+    ranked.push(issue);
+    remaining.delete(id);
+  }
+  for (const issue of remaining.values()) ranked.push(issue);
+  return ranked;
 }

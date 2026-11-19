@@ -20,6 +20,7 @@ curl --fail-with-body \
 | `GET /projects` | 키 범위의 프로젝트 목록 |
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
+| `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
@@ -126,6 +127,16 @@ curl --fail-with-body \
 `issueList` 블록은 `{"type":"issueList","attrs":{"projectId":"프로젝트 ID","savedViewId":null,"label":"표시 이름"}}` 형식이다. `issueSummary`는 같은 속성에 `groupBy`를 추가하며 `status`, `assignee`, `priority`를 사용한다. 기본값은 `status`다. `savedViewId`가 `null`이면 프로젝트 전체 업무를 사용한다. 공유 보기의 프로젝트는 블록의 프로젝트와 일치해야 한다. 프로젝트 범위 API 키는 두 블록이 참조하는 프로젝트에 쓸 권한이 필요하며, `issueSummary`가 참조하는 프로젝트는 본문 조회와 검토·발행에도 허용 범위에 있어야 한다. 문서마다 두 종류를 합쳐 최대 30개를 저장한다.
 
 업무 현황이 있는 기존 문서의 본문을 변경하는 PATCH는 `contentSchemaVersion: 4`를 보낸다. 업무 목록만 있는 문서에서 마지막 목록을 제거할 때는 버전 `3` 또는 `4`를 보낸다. 문서 JSON 내보내기는 업무 현황이 있으면 형식 4, 업무 목록만 있으면 형식 3을 사용한다. 자체 백업 형식 22는 업무 현황의 범위와 그룹 기준을 보존한다.
+
+## 프로젝트 업무 순서
+
+브라우저 경로 `GET /api/projects/:id/issue-order`는 `{projectId, issueIds, version}`을 반환한다. `issueIds`에는 프로젝트의 현재 업무가 저장 순서대로 들어 있다. `version`은 비교용 문자열이다. 같은 순서가 `/api/workspace`의 `issueOrders`에도 포함된다.
+
+`PATCH /api/projects/:id/issue-order`는 이동할 `issueId`, 조회한 순서의 `expectedVersion`, 업무의 `expectedIssueVersion`, 같은 프로젝트의 `anchorId`, `position`에 `before` 또는 `after`를 받는다. `anchorId`가 `null`이면 프로젝트 순서의 맨 앞 또는 끝을 선택한다. 선택적으로 `status`에 대상 상태 ID를 넣으면 보드에서처럼 전이와 순서를 함께 검증한다. 상태를 지정하면 기준 업무도 대상 상태에 있어야 한다. 성공 응답은 `{order, issue}`다. 순서·대상 업무·열의 상태나 구성 변경으로 조회 버전이 오래되면 409를 반환한다. 새 순서를 읽은 뒤 다시 이동한다.
+
+자체 백업 형식 23은 프로젝트별 활성 업무의 전체 순서를 보존한다. 복원한 데이터를 새로 조회해 최신 순서 버전을 사용한다.
+
+자동화 클라이언트는 프로젝트 범위의 키로 `/api/v1/projects/:id/issue-order`에 같은 요청을 보낸다. 이동에는 쓰기 키가 필요하다.
 
 ## 사용자 정의 필드
 

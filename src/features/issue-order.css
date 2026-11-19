@@ -1,0 +1,84 @@
+.issue-order-toggle {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.issue-order-toggle[aria-pressed='true'] {
+  background: #e8f4ed;
+  border-color: #bddacb;
+  color: #245d49;
+}
+
+.issue-order-controls {
+  display: flex;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.issue-order-controls .btn {
+  justify-content: center;
+  width: 34px;
+  min-height: 32px;
+  padding: 4px;
+  color: #396953;
+  border-color: #e1eee7;
+}
+
+.issue-order-controls .btn[aria-disabled='true'] {
+  background: transparent;
+  color: #9baba3;
+  cursor: default;
+}
+
+.issue-order-controls .btn:focus-visible,
+.issue-order-toggle:focus-visible {
+  outline: 2px solid #2c7d65;
+  outline-offset: 2px;
+}
+
+.issue-order-feedback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  border: 1px solid #deece4;
+  border-radius: 6px;
+  color: #356a55;
+  background: #f4faf6;
+  font-size: 12px;
+}
+
+.issue-order-feedback p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.issue-order-feedback .is-error {
+  color: #934434;
+}
+
+.issue-board-card-row:has(.issue-order-controls) .issue-board-card {
+  margin-bottom: 0;
+}
+
+.issue-board-card-row .issue-order-controls {
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.issue-board-card[data-order-drop='before'] {
+  box-shadow: inset 0 3px #2c7d65;
+}
+
+.issue-board-card[data-order-drop='after'] {
+  box-shadow: inset 0 -3px #2c7d65;
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  .issue-order-controls .btn {
+    width: 44px;
+    min-height: 44px;
+  }
+}
