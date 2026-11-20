@@ -10,6 +10,7 @@ import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, depend
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { ApiError, patch, post, remove } from '../lib/api';
+import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { issueSearchText, projectIssueSchema, requiredFieldLabels } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
@@ -41,7 +42,7 @@ import './gantt.css';
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
-type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
+type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingCreationResult?: boolean) => void;
 type GanttProps = FeatureProps & {
   initialPlanningId?: string | null;
   onOpenPlanning?: (id: string) => void;
@@ -76,6 +77,7 @@ const ANALYSIS_PANEL_ID = 'gantt-schedule-analysis';
 const FINDINGS_PANEL_ID = 'gantt-dependency-findings';
 const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const RANGE_PICK_DRAFT = 'date-range-pick';
+const CREATE_ISSUE_DRAFT = 'create';
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
@@ -170,13 +172,14 @@ function ProjectGantt(props: GanttProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const handledFocusRequest = useRef<string | null>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
+  const createTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const datePreviewFocusTarget = useRef<HTMLButtonElement | null>(null);
   const previewDialog = useRef<HTMLElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
-  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean }>());
+  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingCreationResult: boolean }>());
   useEffect(() => { previewRef.current = preview; }, [preview]);
   useLayoutEffect(() => {
     if (preview && datePreviewFocusTarget.current) previewDialog.current?.focus();
@@ -188,7 +191,10 @@ function ProjectGantt(props: GanttProps) {
     if (opener.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
     else scrollRef.current?.focus({ preventScroll: true });
   }, [busy, linkEditor]);
-  const trackDraft = useCallback((id: string, dirty: boolean, pending = false) => { if (dirty || pending) draftsRef.current.set(id, { dirty, pending }); else draftsRef.current.delete(id); }, []);
+  const trackDraft = useCallback<TrackDraft>((id, dirty, pending = false, awaitingCreationResult = false) => {
+    if (dirty || pending || awaitingCreationResult) draftsRef.current.set(id, { dirty, pending, awaitingCreationResult });
+    else draftsRef.current.delete(id);
+  }, []);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   function markBusy(value: boolean) { busyRef.current = value; setBusy(value); }
   useEffect(() => {
@@ -196,7 +202,11 @@ function ProjectGantt(props: GanttProps) {
       if (event.defaultPrevented) return;
       if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
-        if (!window.confirm('저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?')) event.preventDefault();
+        const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingCreationResult;
+        const confirmation = awaitingCreationResult
+          ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
+          : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
+        if (!window.confirm(confirmation)) event.preventDefault();
         else {
           const discardPaste = draftsRef.current.has('schedule-paste');
           const discardPlanShift = draftsRef.current.has('plan-schedule-shift');
@@ -208,6 +218,7 @@ function ProjectGantt(props: GanttProps) {
             if (discardPaste) setPasteOpen(false);
             if (discardPlanShift) setPlanShift(null);
             setDraftEpoch(value => value + 1);
+            if (awaitingCreationResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
           });
         }
       }
@@ -215,8 +226,15 @@ function ProjectGantt(props: GanttProps) {
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
     return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
-  }, [notify]);
+  }, [notify, refresh]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
+  function finishCreating() {
+    setCreateOpen(false);
+    requestAnimationFrame(() => createTrigger.current?.focus({ preventScroll: true }));
+  }
+  function closeCreateForm() {
+    if (canLeave()) finishCreating();
+  }
   function toggleWorkload(view: 'project' | 'team') {
     const activeDraft = workloadView === 'team' ? TEAM_CAPACITY_DRAFT : PROJECT_CAPACITY_DRAFT;
     if (workloadView && (draftsRef.current.has(activeDraft) || draftsRef.current.has('workload-level')) && !canLeave()) return;
@@ -691,7 +709,7 @@ function ProjectGantt(props: GanttProps) {
         if (reservationsOpen && draftsRef.current.has(TIME_RESERVATIONS_DRAFT) && !canLeave()) return;
         setReservationsOpen(!reservationsOpen);
       }}><CalendarClock size={15} aria-hidden="true" />시간 배정</button>
-      <button className="btn" disabled={busy || !hasProject} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || sharedViewUnavailable || Boolean(planningScope && !automaticScheduleIssues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
+      <button className="btn" disabled={busy || !hasProject} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || sharedViewUnavailable || Boolean(planningScope && !automaticScheduleIssues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button><button ref={createTrigger} className="btn btn-primary" disabled={createOpen} onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
     {reservationsOpen && hasProject && <TimeReservations key={draftEpoch} projectId={projectId} issues={projectIssues}
       initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users}
       notify={notify} openIssue={openIssue} onDraftChange={trackReservationDraft} onChanged={refresh} />}
@@ -758,8 +776,9 @@ function ProjectGantt(props: GanttProps) {
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateAnalysisDate} />}
     {shiftOpen && <form className="gantt-shift-form" onSubmit={e => { e.preventDefault(); void requestPreview(selectedIssues.map(i => i.id), days, workingDays); }}><span><strong>{selectedIssues.length}개</strong> 업무를</span><input className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650" value={days} onChange={e => setDays(Number(e.target.value))} required /><span>일 이동</span><label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label><small>음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용</small><button className="btn btn-primary" type="submit" disabled={busy}>변경 미리보기</button><button className="issue-icon-button" type="button" onClick={() => setShiftOpen(false)} aria-label="일정 이동 닫기"><X size={16} /></button></form>}
-    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setCreateOpen(false); }} onCreated={async issue => {
-      await refresh(); setCreateOpen(false);
+    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} actorId={props.actorId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={closeCreateForm} onCreated={async issue => {
+      await refresh();
+      finishCreating();
       if (sharedViewUnavailable || matchSharedView && !matchSharedView(issue)) {
         notify(`${issue.key} 업무를 간트에 추가했습니다. 새 업무는 현재 공유 보기의 범위 밖에 있습니다.`);
       } else {
@@ -1063,7 +1082,10 @@ function PlanningTimelineRow({ item, selected, stats, range, dayWidth, showDate,
   </div>;
 }
 
-function InlineIssueForm({ data, projectId, projects, users, sharedViewActive, initialPlan, onClose, onCreated, onDraftChange }: { data:FeatureProps['data']; projectId: string; projects: Project[]; users: User[]; sharedViewActive: boolean; initialPlan?: PlanningItem; onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft }) {
+function InlineIssueForm({ data, projectId, actorId, projects, users, sharedViewActive, initialPlan, onClose, onCreated, onDraftChange }: Pick<FeatureProps, 'data' | 'projectId' | 'actorId'> & {
+  projects: Project[]; users: User[]; sharedViewActive: boolean; initialPlan?: PlanningItem;
+  onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft;
+}) {
   const [title, setTitle] = useState('');
   const [type, setType] = useState(() => initialIssueType(data, projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || ''));
   const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
@@ -1075,34 +1097,100 @@ function InlineIssueForm({ data, projectId, projects, users, sharedViewActive, i
   const [endDate, setEndDate] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const [touched, setTouched] = useState(false);
-  useEffect(() => { onDraftChange('create', touched, saving); return () => onDraftChange('create', false); }, [onDraftChange, touched, saving]);
+  const [recovery, setRecovery] = useState<'check' | 'refresh' | 'stopped' | null>(null);
+  const attempt = useRef<IssueCreationAttempt | null>(null);
+  const pending = useRef(false);
+  const submitButton = useRef<HTMLButtonElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => () => onDraftChange(CREATE_ISSUE_DRAFT, false), [onDraftChange]);
+  useEffect(() => {
+    if (saving || !recovery) return;
+    (recovery === 'stopped' ? cancelButton : submitButton).current?.focus();
+  }, [recovery, saving]);
   const customFields = valuesByProject[selectedProject] || {};
   const initialStatus = projectWorkflow(data,selectedProject).initialStatusId;
   const required = requiredFieldsFor(data,selectedProject,type,initialStatus);
   const extraFields = required.filter(field => !field.startsWith('custom:') && !['title','assigneeId','startDate','endDate','cycle','module','release'].includes(field));
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setError(''); const form = new FormData(event.currentTarget as HTMLFormElement);
-    if (startDate && endDate && startDate > endDate) { setError('종료일은 시작일보다 빠를 수 없습니다. 입력한 날짜를 확인하세요.'); return; }
-    if (!title.trim()) { setError('업무 제목을 입력하세요.'); return; }
-    setSaving(true);
-    try { const issue = await post<Issue>('/issues', { projectId: selectedProject, title: title.trim(), type, status: initialStatus, assigneeId: assigneeId || null, startDate: startDate || null, endDate: endDate || null, description:form.get('description') || '',collaboratorIds:form.getAll('collaboratorIds'),dueDate:form.get('dueDate')||null,estimate:form.get('estimate') ? Number(form.get('estimate')) : null,plannedEffortMinutes:form.get('plannedEffortMinutes') ? Number(form.get('plannedEffortMinutes')) : null,labels:String(form.get('labels')||'').split(',').map(value=>value.trim()).filter(Boolean),parentId:form.get('parentId')||null,cycleId:form.get('cycleId')||null,moduleId:form.get('moduleId')||null,releaseId:form.get('releaseId')||null, customFields }); await onCreated(issue); }
-    catch (err) { setError(errorMessage(err)); } finally { setSaving(false); }
+  const noteChange = () => { if (!pending.current && !recovery) onDraftChange(CREATE_ISSUE_DRAFT, true); };
+  function creationInput(form: FormData) {
+    return {
+      projectId: selectedProject, title: title.trim(), type, status: initialStatus, assigneeId: assigneeId || null,
+      startDate: startDate || null, endDate: endDate || null, description: form.get('description') || '',
+      collaboratorIds: form.getAll('collaboratorIds'), dueDate: form.get('dueDate') || null,
+      estimate: form.get('estimate') ? Number(form.get('estimate')) : null,
+      plannedEffortMinutes: form.get('plannedEffortMinutes') ? Number(form.get('plannedEffortMinutes')) : null,
+      labels: String(form.get('labels') || '').split(',').map(value => value.trim()).filter(Boolean),
+      parentId: form.get('parentId') || null, cycleId: form.get('cycleId') || null, moduleId: form.get('moduleId') || null,
+      releaseId: form.get('releaseId') || null, customFields,
+    };
   }
-  return <form className="gantt-inline-create" aria-label="간트에서 업무 만들기" onSubmit={submit} onChange={() => setTouched(true)}>
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending.current || !selectedProject || recovery === 'stopped') return;
+    const previousAttempt = attempt.current;
+    if (!previousAttempt && startDate && endDate && startDate > endDate) {
+      setError('종료일은 시작일보다 빠를 수 없습니다. 입력한 날짜를 확인하세요.');
+      return;
+    }
+    if (!previousAttempt && !title.trim()) { setError('업무 제목을 입력하세요.'); return; }
+    pending.current = true;
+    setSaving(true);
+    setError('');
+    onDraftChange(CREATE_ISSUE_DRAFT, true, true, Boolean(previousAttempt));
+    let confirmed: Issue | undefined;
+    let completed = false;
+    try {
+      const request = previousAttempt ?? createIssueAttempt(actorId, creationInput(new FormData(event.currentTarget)));
+      attempt.current = request;
+      confirmed = await requestIssueCreation(request, selectedProject);
+      await onCreated(confirmed);
+      completed = true;
+      attempt.current = null;
+    } catch (cause) {
+      if (confirmed) {
+        setRecovery('refresh');
+        setError(`${confirmed.key} 업무를 추가했습니다. 간트 목록을 다시 불러와 확인해 주세요.`);
+      } else if (!attempt.current || isDefiniteIssueCreationFailure(cause, Boolean(previousAttempt))) {
+        if (previousAttempt) {
+          setRecovery('stopped');
+          setError(`${errorMessage(cause)} 간트 목록에서 결과를 확인해 주세요.`);
+        } else {
+          attempt.current = null;
+          setError(errorMessage(cause));
+        }
+      } else {
+        setRecovery('check');
+        setError('업무 추가 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.');
+      }
+    } finally {
+      pending.current = false;
+      setSaving(false);
+      onDraftChange(CREATE_ISSUE_DRAFT, !completed, false, Boolean(attempt.current));
+    }
+  }
+  return <form className="gantt-inline-create" aria-label="간트에서 업무 만들기" onSubmit={submit} onChange={noteChange} aria-busy={saving}>
     <div className="gantt-inline-create-heading"><div><strong><Plus size={15} /> 간트에 업무 추가</strong><span>{sharedViewActive ? '공유 보기 조건에 맞는 업무가 이 간트에 표시됩니다.' : '날짜는 나중에 정해도 괜찮아요. 저장하면 같은 간트에 표시됩니다.'}</span></div><button className="issue-icon-button" type="button" onClick={onClose} disabled={saving} aria-label="간트 업무 추가 닫기"><X size={17} /></button></div>
-    <div className="gantt-create-fields"><label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} disabled={saving} /></label><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} disabled={saving} ariaLabel="추가할 업무 유형" /></label><label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)} disabled={saving}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} disabled={saving} /></label><label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} disabled={saving} /></label>{(!projectId || projectId === 'all') && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} disabled={saving} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}</div>
-    <div className="issue-form-grid">
-      <label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} disabled={saving} /></label>
-      {PLANNING_KINDS.map(kind => <label key={kind} className="issue-form-label">{PLAN_LABELS[kind]}
-      <PlanningSelect data={data} projectId={selectedProject} kind={kind} ariaLabel={`추가할 업무 ${PLAN_LABELS[kind]}`} disabled={saving}
-        value={plansByProject[selectedProject]?.[kind] ?? null} onChange={id => setPlansByProject(previous => ({ ...previous, [selectedProject]:{ ...previous[selectedProject], [kind]:id } }))} />
-    </label>)}</div>
-    <CustomFields data={data} projectId={selectedProject} issueType={type} status={initialStatus} values={customFields} onChange={next => { setTouched(true); setValuesByProject(previous => ({ ...previous, [selectedProject]: next })); }} disabled={saving} requiredFields={required} labelPrefix="추가할 업무 " />
-    {required.length > 0 && <p className="issue-section-empty">기본 상태의 필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}
-    {extraFields.length > 0 && <div className="issue-form-grid">{extraFields.map(field=><label key={field} className="issue-form-label">{REQUIRED_FIELD_LABELS[field]}{field === 'description' ? <textarea className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} disabled={saving} rows={3}/> : field === 'parentId' ? <select className="field" name={field} aria-label="추가할 업무 상위 업무" disabled={saving}><option value="">없음</option>{data.issues.filter(issue=>issue.projectId===selectedProject).map(issue=><option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select> : field === 'collaboratorIds' ? <select className="field" name={field} aria-label="추가할 업무 참여자" multiple disabled={saving}>{users.map(user=><option key={user.id} value={user.id}>{user.name}</option>)}</select> : <input className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} disabled={saving} type={field === 'dueDate'?'date':field==='estimate'?'number':'text'} min={field==='estimate'?0:undefined} step={field==='estimate'?'0.5':undefined} placeholder={field==='labels'?'쉼표로 구분':undefined}/>}</label>)}</div>}
+    <fieldset disabled={saving || recovery !== null} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+      <div className="gantt-create-fields"><label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} /></label><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} ariaLabel="추가할 업무 유형" /></label><label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></label><label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></label>{(!projectId || projectId === 'all') && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}</div>
+      <div className="issue-form-grid">
+        <label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} /></label>
+        {PLANNING_KINDS.map(kind => <label key={kind} className="issue-form-label">{PLAN_LABELS[kind]}
+        <PlanningSelect data={data} projectId={selectedProject} kind={kind} ariaLabel={`추가할 업무 ${PLAN_LABELS[kind]}`}
+          value={plansByProject[selectedProject]?.[kind] ?? null} onChange={id => setPlansByProject(previous => ({ ...previous, [selectedProject]:{ ...previous[selectedProject], [kind]:id } }))} />
+      </label>)}</div>
+      <CustomFields data={data} projectId={selectedProject} issueType={type} status={initialStatus} values={customFields} onChange={next => { noteChange(); setValuesByProject(previous => ({ ...previous, [selectedProject]: next })); }} requiredFields={required} labelPrefix="추가할 업무 " />
+      {required.length > 0 && <p className="issue-section-empty">기본 상태의 필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}
+      {extraFields.length > 0 && <div className="issue-form-grid">{extraFields.map(field=><label key={field} className="issue-form-label">{REQUIRED_FIELD_LABELS[field]}{field === 'description' ? <textarea className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} rows={3}/> : field === 'parentId' ? <select className="field" name={field} aria-label="추가할 업무 상위 업무"><option value="">없음</option>{data.issues.filter(issue=>issue.projectId===selectedProject).map(issue=><option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select> : field === 'collaboratorIds' ? <select className="field" name={field} aria-label="추가할 업무 참여자" multiple>{users.map(user=><option key={user.id} value={user.id}>{user.name}</option>)}</select> : <input className="field" name={field} aria-label={`추가할 업무 ${REQUIRED_FIELD_LABELS[field]}`} type={field === 'dueDate'?'date':field==='estimate'?'number':'text'} min={field==='estimate'?0:undefined} step={field==='estimate'?'0.5':undefined} placeholder={field==='labels'?'쉼표로 구분':undefined}/>}</label>)}</div>}
+    </fieldset>
     {error && <div className="issue-form-error" role="alert">{error}</div>}
-    <div className="gantt-inline-create-footer"><small>시작일·종료일은 선택 사항입니다.</small><button className="btn btn-ghost" type="button" onClick={onClose} disabled={saving}>취소</button><button className="btn btn-primary" type="submit" disabled={saving || !selectedProject}><Plus size={14} />{saving ? '추가 중…' : '간트에 추가'}</button></div>
+    <div className="gantt-inline-create-footer">
+      {!recovery && <small>시작일·종료일은 선택 사항입니다.</small>}
+      <button ref={cancelButton} className="btn btn-ghost" type="button" onClick={onClose} disabled={saving}>취소</button>
+      {recovery !== 'stopped' && <button ref={submitButton} className="btn btn-primary" type="submit" disabled={saving || !selectedProject}>
+        {!recovery && <Plus size={14} />}{saving ? recovery ? '확인 중…' : '추가 중…' : recovery === 'refresh' ? '간트 목록 다시 불러오기' : recovery === 'check' ? '업무 추가 결과 다시 확인' : '간트에 추가'}
+      </button>}
+    </div>
   </form>;
 }
 

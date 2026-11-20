@@ -20,6 +20,7 @@ import { registerDocumentIncludeRevisionRoutes } from './document-include-revisi
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
+import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
@@ -144,6 +145,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const documentFollowUp=new DocumentFollowUpService(store);
   const documentSelectionComments=new DocumentSelectionCommentService(store);
   const issueChildren = new IssueChildService(store);
+  const issueCreation = new IssueCreationService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -974,8 +976,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return i;
   };
   app.post('/api/issues',(req,res)=>{
-    const issue=store.transaction(()=>createIssueInTransaction(req,req.body));
-    res.status(201).json(issue);
+    const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,req.body));
+    res.status(result.duplicate?200:201).json(result.issue);
   });
   app.post('/api/issues/:id/children', (req, res) => {
     const result = issueChildren.create({ parentId: String(req.params.id), actorId: actor(req), body: req.body }, {
@@ -1772,6 +1774,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentFollowUp.clearForImport();
       documentSelectionComments.clearForImport();
       issueChildren.clearForImport();
+      issueCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
       migrations.resetForNativeImport();
@@ -1852,7 +1855,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof IssueChildCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});

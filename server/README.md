@@ -13,7 +13,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `GET /api/health`, `GET /api/workspace`
 - `GET /api/atlassian-links?targetType=issue|document&targetId=...`, `POST /api/atlassian-links`, `DELETE /api/atlassian-links/:id`, and `GET /api/atlassian-links/:id/preview` handle Teamspace links to Jira and Confluence. POST accepts `{targetType,targetId,product,url}`. Preview retrieves `{title,status,locator,updatedAt}` from the configured instance via GET. The browser API supports these routes. [Configuration](../docs/PILOT.md#jiraconfluence-원본-조회)
 - `POST /api/projects`, `POST /api/users`, `PATCH /api/users/:id`
-- `POST /api/issues`, `PATCH /api/issues/:id`, `DELETE /api/issues/:id`
+- `POST /api/issues`, `PATCH /api/issues/:id`, `DELETE /api/issues/:id`. Creation accepts an optional UUID v4 `requestId`. A successful replay by the same actor with the same input returns the current issue and HTTP 200.
 - `GET|POST /api/issues/:id/worklogs`, `PATCH|DELETE /api/issues/:id/worklogs/:entryId`, `GET /api/projects/:id/worklog-report`
 - `POST /api/documents`, `PATCH /api/documents/:id`, `DELETE /api/documents/:id`
 - `GET /api/documents/:id/revisions`, `POST /api/documents/:id/restore`

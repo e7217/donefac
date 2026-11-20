@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
 import { PRIORITY, type CustomFieldValue, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueStatus, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
 import { requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
-import { api, ApiError, post } from '../lib/api';
+import { api, ApiError } from '../lib/api';
+import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CustomFields, initialIssueType, IssueTypeSelect } from './CustomFields';
@@ -20,7 +21,6 @@ type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | '
   initialStatus?: IssueStatus;
   onClose: () => void;
 } & ({ sourceDocument?: FollowUpSource; parentIssue?: never } | { sourceDocument?: never; parentIssue: ParentIssue });
-type CreationAttempt = { actorId: string; body: string };
 type ParentReview = { state: 'available'; issue: ParentIssue } | { state: 'missing' | 'moved' | 'failed' };
 
 export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, onClose, refresh, notify, openIssue }: Props) {
@@ -42,11 +42,12 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [recovering, setRecovering] = useState(false);
   const [replayRejected, setReplayRejected] = useState(false);
   const [versionConflict, setVersionConflict] = useState(false);
-  const attempt = useRef<CreationAttempt | null>(null);
+  const attempt = useRef<IssueCreationAttempt | null>(null);
   const dirtyRef = useRef(false);
   const pendingRef = useRef(false);
   const dialog = useRef<HTMLElement>(null);
   const titleInput = useRef<HTMLInputElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const submitButton = useRef<HTMLButtonElement>(null);
   const values = valuesByProject[selectedProject] || {};
   const states = projectStatuses(data, selectedProject);
@@ -62,7 +63,14 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const parentUnavailable = reviewedParent && (!currentParent || currentParent.projectId !== reviewedParent.projectId);
   const needsParentReview = Boolean(parentReview || parentUnavailable);
   const linkedError = error || (parentUnavailable ? '현재 프로젝트에서 상위 업무를 찾을 수 없습니다.' : '');
-  const confirmationLocation = childMode ? '상위 업무의 하위 목록' : '문서의 연결 목록';
+  const confirmationLocation = childMode ? '상위 업무의 하위 목록' : sourceDocument ? '문서의 연결 목록' : '업무 목록';
+  const fieldsLocked = busy || recovering || (!linkedCreation && replayRejected);
+  const refreshAfterClose = useCallback(() => {
+    void refresh().catch(() => notify(childMode
+      ? '하위 업무 목록을 불러오지 못했습니다. 상위 업무를 다시 열어 확인해 주세요.'
+      : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
+      : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
+  }, [childMode, sourceDocument, refresh, notify]);
 
   function close() {
     if (pendingRef.current) return;
@@ -73,9 +81,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     attempt.current = null;
     dirtyRef.current = false;
     onClose();
-    if (uncertain) void refresh().catch(() => notify(childMode
-      ? '하위 업무 목록을 불러오지 못했습니다. 상위 업무를 다시 열어 확인해 주세요.'
-      : '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.', 'error'));
+    if (uncertain) refreshAfterClose();
   }
 
   useEffect(() => {
@@ -86,11 +92,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         notify('업무 생성이 끝난 뒤 이동해 주세요.', 'error');
         return;
       }
-      const confirmation = attempt.current
+      const uncertain = Boolean(attempt.current);
+      const confirmation = uncertain
         ? `업무가 이미 생성됐을 수 있습니다. 돌아와서 ${confirmationLocation}을 확인할 수 있습니다. 이동할까요?`
         : dirtyRef.current ? '작성 중인 새 업무를 버리고 이동할까요?' : '';
       if (confirmation && !window.confirm(confirmation)) event.preventDefault();
-      else afterAcceptedNavigation(event, () => { attempt.current = null; dirtyRef.current = false; onClose(); });
+      else afterAcceptedNavigation(event, () => {
+        attempt.current = null;
+        dirtyRef.current = false;
+        onClose();
+        if (uncertain && !linkedCreation) refreshAfterClose();
+      });
     };
     const unload = (event: BeforeUnloadEvent) => {
       if (dirtyRef.current || pendingRef.current || attempt.current) { event.preventDefault(); event.returnValue = ''; }
@@ -101,7 +113,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       window.removeEventListener('teamspace:navigate', guard, childMode);
       window.removeEventListener('beforeunload', unload);
     };
-  }, [childMode, confirmationLocation, notify, onClose]);
+  }, [childMode, confirmationLocation, linkedCreation, notify, onClose, refreshAfterClose]);
 
   useEffect(() => {
     if (childMode && busy) dialog.current?.focus({ preventScroll: true });
@@ -187,9 +199,13 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         dirtyRef.current = false;
         onClose();
       } else {
-        const issue = await post<Issue>('/issues', issuePayload(new FormData(form)));
-        dirtyRef.current = false;
+        const request = attempt.current ?? createIssueAttempt(actorId, issuePayload(new FormData(form)));
+        attempt.current = request;
+        const issue = await requestIssueCreation(request, selectedProject);
+        confirmed = true;
         await refresh();
+        attempt.current = null;
+        dirtyRef.current = false;
         notify('새 업무를 만들었습니다.');
         pendingRef.current = false;
         onClose();
@@ -198,20 +214,28 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     } catch (cause) {
       const status = cause instanceof ApiError ? cause.status : null;
       const details = cause instanceof ApiError ? cause.details as { currentVersion?: unknown; reason?: unknown } | undefined : undefined;
-      const definiteFailure = !confirmed && status !== null && status >= 400 && status < 500
-        && (!childMode || (status !== 408 && status !== 429));
+      const definiteFailure = !confirmed && (linkedCreation
+        ? status !== null && status >= 400 && status < 500 && (!childMode || (status !== 408 && status !== 429))
+        : isDefiniteIssueCreationFailure(cause, replay));
       if (attempt.current && !definiteFailure) {
         setRecovering(true);
-        setError(confirmed
-          ? childMode ? '하위 업무를 만들었습니다. 목록을 다시 불러와 결과를 확인해 주세요.' : '업무를 만들었습니다. 목록을 다시 불러와 연결 결과를 확인해 주세요.'
-          : '업무 생성 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.');
+        if (confirmed) {
+          setError(childMode ? '하위 업무를 만들었습니다. 목록을 다시 불러와 결과를 확인해 주세요.'
+            : sourceDocument ? '업무를 만들었습니다. 목록을 다시 불러와 연결 결과를 확인해 주세요.'
+            : '업무를 만들었습니다. 목록을 다시 불러와 결과를 확인해 주세요.');
+        } else {
+          setError(!linkedCreation && replay && (status === 401 || status === 403)
+            ? '팀 접속을 확인한 뒤 같은 요청으로 결과를 다시 확인해 주세요.'
+            : '업무 생성 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.');
+        }
         requestAnimationFrame(() => submitButton.current?.focus());
       } else {
-        attempt.current = null;
+        if (!replay || linkedCreation) attempt.current = null;
         setRecovering(false);
         if (replay) {
           setReplayRejected(true);
-          setError(`${errorMessage(cause)} ${confirmationLocation}을 확인해 주세요.`);
+          setError(linkedCreation ? `${errorMessage(cause)} ${confirmationLocation}을 확인해 주세요.` : errorMessage(cause));
+          if (!linkedCreation) requestAnimationFrame(() => closeButton.current?.focus({ preventScroll: true }));
         } else if (reviewedParent && status === 404 && details?.reason === 'parent_missing') {
           setParentReview({ state: 'missing' });
           setError(errorMessage(cause));
@@ -223,6 +247,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           setError(errorMessage(cause));
         } else {
           setError(errorMessage(cause));
+          if (!linkedCreation) requestAnimationFrame(() => submitButton.current?.focus());
         }
       }
     } finally {
@@ -261,12 +286,12 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           <h2 id="new-issue-title">{childMode ? '하위 업무 만들기' : sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
           {sourceDocument && <p className="issue-follow-up-source">연결할 문서 · <strong>{sourceDocument.title}</strong></p>}
           {reviewedParent && <p className="issue-follow-up-source">상위 업무 · <strong>{reviewedParent.key} {reviewedParent.title}</strong></p>}
-        </div><button className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
+        </div><button ref={closeButton} className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
         {sourceSelection && <section className="issue-follow-up-passage" aria-label="선택한 본문">
           <strong>선택한 본문</strong>
           <blockquote>{sourceSelection.text}</blockquote>
         </section>}
-        <fieldset disabled={busy || recovering} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+        <fieldset disabled={fieldsLocked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
               <select name="projectId" className="field" value={selectedProject} disabled={childMode || Boolean(sourceDocument?.projectId)} onChange={event => {
@@ -292,7 +317,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
             <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={values} onChange={next => {
               dirtyRef.current = true;
               setValuesByProject(previous => ({ ...previous, [selectedProject]: next }));
-            }} disabled={busy || recovering} requiredFields={required} />
+            }} disabled={fieldsLocked} requiredFields={required} />
             {required.length > 0 && <p className="issue-section-empty">필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}
             <details open={required.some(field => ['dueDate', 'estimate', 'labels', 'collaboratorIds', 'cycle', 'module', 'release'].includes(field) || (field === 'parentId' && !childMode))}>
               <summary className="issue-section-caption">추가 속성</summary>

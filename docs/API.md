@@ -95,6 +95,7 @@ curl --fail-with-body \
 
 ```json
 {
+  "requestId": "34ca1269-3ac2-4d0e-becb-fd6a1eba6274",
   "projectId": "조회한 프로젝트 ID",
   "title": "파이프라인 실패 원인 확인",
   "type": "버그",
@@ -104,6 +105,10 @@ curl --fail-with-body \
   "releaseId": null
 }
 ```
+
+업무를 생성할 때 `requestId`에 작업마다 새 UUID v4를 보낼 수 있다. 브라우저와 쓰기 API 키는 같은 형식을 사용하며 쓰기 키는 프로젝트·참조 권한 검사를 거친다. 최초 생성은 `201`과 업무를 반환한다. 같은 작업자가 같은 UUID와 입력 내용으로 다시 요청하면 `200`과 현재 업무를 반환한다. JSON 객체의 키 순서는 무관하며 생략과 `null`은 다르게 처리한다. UUID를 생략한 요청은 호출마다 새 업무를 만든다. UUID 형식이 틀리면 `400`과 `details.reason`의 `invalid_request_id`를 반환한다.
+
+이미 사용한 UUID의 작업자나 내용이 다르면 `409`의 `details.reason`은 `request_conflict`다. 생성한 업무를 현재 조회할 수 없거나 해당 워크스페이스를 JSON 백업으로 교체했다면 `409`의 이유는 `result_unavailable`이다. 재시도 기록은 같은 데이터 디렉터리의 재시작을 거쳐 보존된다. 기록을 다른 데이터 디렉터리로 함께 옮길 때는 물리 백업을 사용한다.
 
 수정·삭제에는 마지막 조회의 `version`을 `expectedVersion`으로 전달한다. 오래된 버전이면 `409`를 반환한다. 자동으로 재시도해 덮어쓰지 말고 최신 내용을 다시 확인한다. 계획 연결은 `cycleId`, `moduleId`, `releaseId`로 지정한다. 응답의 `cycle`, `module`, `release`는 표시용 이름이다.
 

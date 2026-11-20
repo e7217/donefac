@@ -510,9 +510,22 @@ async function runStandardPilot() {
   const savedTeamCapacity = await (await call(pilot.url,teamCapacityPath,{
     method:'PATCH',body:{expectedVersion:teamCapacity.version,exceptions:[{userId:assigneeId,date:workloadDate,availableMinutes:320}]},
   })).json();
-  const issue = await (await call(pilot.url, '/issues', {
-    method:'POST', status:201, body:{projectId,title:'파일럿 백업 복원 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,estimate:2,plannedEffortMinutes:300},
-  })).json();
+  const issueCreation = {
+    method:'POST', headers:{'X-Actor-Id':workspace.users[1].id},
+    body:{requestId:randomUUID(),projectId,title:'파일럿 백업 복원 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,estimate:2,plannedEffortMinutes:300},
+  };
+  const issue = await (await call(pilot.url, '/issues', {...issueCreation,status:201})).json();
+  assert.deepEqual(await (await call(pilot.url,'/issues',issueCreation)).json(),issue);
+  const issueCreationEvidence = async url => {
+    const [current, inbox] = await Promise.all([
+      call(url,'/workspace').then(response=>response.json()),
+      call(url,'/notifications',{headers:{'X-Actor-Id':assigneeId}}).then(response=>response.json()),
+    ]);
+    assert.deepEqual(current.issues.filter(item=>item.projectId===projectId&&item.title===issue.title).map(item=>item.id),[issue.id]);
+    assert.equal(current.activities.filter(item=>item.resourceId===issue.id&&item.action==='티켓 생성').length,1);
+    assert.equal(inbox.items.filter(item=>item.targetId===issue.id&&item.kind==='issue-assigned').length,1);
+  };
+  await issueCreationEvidence(pilot.url);
   const parallelProjectId = workspace.projects[1].id;
   const parallel = await (await call(pilot.url,'/issues',{
     method:'POST',status:201,body:{projectId:parallelProjectId,title:'파일럿 병행 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,plannedEffortMinutes:90},
@@ -674,6 +687,8 @@ async function runStandardPilot() {
   const copy = await start(restored);
   const restoredTrash = await (await call(copy.url,`/trash?scope=project&projectId=${projectId}`)).json();
   assert.equal(restoredTrash.items.find(item=>item.id===trashedIssue.trashEntryId)?.resourceId,issue.id);
+  const unavailable = await (await call(copy.url,'/issues',{...issueCreation,status:409})).json();
+  assert.equal(unavailable.details.reason,'result_unavailable');
   const childArchives = await (await call(copy.url,`/trash/items?scope=project&projectId=${projectId}`)).json();
   assert.deepEqual(new Set(childArchives.items.filter(item=>item.ownerId===issue.id).map(item=>item.id)),new Set([commentArchive.trashItemId,fileArchive.trashItemId]));
   assert.ok(childArchives.items.filter(item=>item.ownerId===issue.id).every(item=>item.ownerAvailable===false));
@@ -692,6 +707,8 @@ async function runStandardPilot() {
   assert.equal(restoredIssue.title,issue.title);
   assert.equal(restoredIssue.estimate,2);
   assert.equal(restoredIssue.plannedEffortMinutes,300);
+  assert.deepEqual(await (await call(copy.url,'/issues',issueCreation)).json(),restoredIssue);
+  await issueCreationEvidence(copy.url);
   await call(copy.url,`/attachments/${archivedRoot.id}/content`,{status:404});
   const commentsPath = `/comments?resourceType=issue&resourceId=${issue.id}`;
   assert.ok(!(await (await call(copy.url,commentsPath)).json()).some(item=>item.id===comment.id));
@@ -775,7 +792,7 @@ async function runStandardPilot() {
   assert.equal(restoredSync.linked,0);
   assert.equal(authenticatedReads,8);
   await stop(copy);
-  console.log('Pilot rehearsal passed for browser workflows, Jira and Confluence migration, GitLab activity linked by migrated keys and by branch and commit URLs, cold backup integrity, ticket form conditions, automation history, time reservations and individual trash restore.');
+  console.log('Pilot rehearsal passed for browser workflows, Jira and Confluence migration, GitLab activity, cold backup integrity, ticket creation retries, ticket form conditions, automation history, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);
