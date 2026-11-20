@@ -131,6 +131,16 @@
   font-size: 11px;
 }
 
+.gantt-date-range-actions {
+  position: absolute;
+  inset: 12px auto auto 12px;
+  display: flex;
+  gap: 7px;
+}
+
+.gantt-date-range-actions > .gantt-no-schedule { position: static; min-height: 32px; }
+.gantt-date-range-actions > button:disabled { opacity: .55; cursor: default; }
+
 .gantt-unscheduled-row .gantt-missing-date-action {
   flex-shrink: 0;
   white-space: nowrap;
@@ -179,4 +189,9 @@
 
 @media (max-width: 900px) {
   .gantt-feature .gantt-left { position: relative; left: auto; }
+}
+
+@media (max-width: 560px) {
+  .gantt-unscheduled-row { flex-wrap: wrap; }
+  .gantt-unscheduled-row > button:first-child { flex-basis: 100%; }
 }

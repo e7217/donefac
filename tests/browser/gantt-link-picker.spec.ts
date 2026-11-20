@@ -186,3 +186,62 @@ test('360px에서 날짜 없는 행을 키보드로 선택하고 기존 연결�
     for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
   }
 });
+
+test('360px 간트에서 선택한 행을 필터로 가려진 같은 프로젝트 업무와 연결한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const project = (await workspace(request)).projects[0];
+  const prefix = `간트 선택 업무 연결 ${randomUUID()}`;
+  const issues: Issue[] = [];
+  try {
+    const predecessor = await createIssue(request, project.id, `${prefix} 기준`, issues, dateAt(1), dateAt(2));
+    const successor = await createIssue(request, project.id, `${prefix} 상대`, issues, dateAt(4), dateAt(6));
+    const writes = countDependencyWrites(page);
+    const { chart, picker } = await openChart(page, project.id, predecessor.title);
+    const chartSelection = (issue: Issue) => chart.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true });
+    await expect(chartSelection(predecessor)).toBeVisible();
+    await expect(chartSelection(successor)).toHaveCount(0);
+    await expect(picker).toBeDisabled();
+
+    await chartSelection(predecessor).check();
+    const anchorLink = page.getByRole('button', { name: '선택 업무에서 연결', exact: true });
+    await anchorLink.click();
+    const dialog = page.getByRole('dialog', { name: '선행·후행 업무 연결', exact: true });
+    await expect(dialog.getByText(`${predecessor.key} · ${predecessor.title}`, { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel('연결 방향', { exact: true })).toHaveValue('successor');
+    const search = dialog.getByRole('searchbox', { name: '연결할 업무 검색', exact: true });
+    await search.fill(successor.key);
+    const candidate = dialog.getByRole('combobox', { name: '연결할 업무', exact: true });
+    await expect(candidate.getByRole('option')).toHaveText(['업무 선택', `${successor.key} · ${successor.title}`]);
+    await candidate.selectOption(successor.id);
+    await expect(dialog.getByLabel('연결 유형', { exact: true })).toHaveValue('FS');
+    expect(writes).toEqual([]);
+
+    const created = page.waitForResponse(response => new URL(response.url()).pathname === '/api/dependencies' && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '업무 연결', exact: true }).click();
+    const response = await created;
+    expect(response.status(), await response.text()).toBe(201);
+    const dependency = await response.json() as Dependency;
+    expect(dependency).toMatchObject({ predecessorId: predecessor.id, successorId: successor.id, type: 'FS', lagDays: 0 });
+    await expect(dialog).toHaveCount(0);
+    await expect(anchorLink).toBeFocused();
+    const chartSearch = page.getByLabel('간트 업무 검색', { exact: true });
+    await expect(chartSearch).toHaveValue(predecessor.title);
+    await expect(chartSelection(successor)).toHaveCount(0);
+    const connector = chart.locator(`[data-dependency-id="${dependency.id}"]`);
+    await expect(connector).toHaveCount(0);
+
+    await chartSearch.clear();
+    await expect(chartSelection(successor)).toBeVisible();
+    await expect(connector).toHaveAttribute('data-dependency-type', 'FS');
+    await expect(connector).toHaveAttribute('data-predecessor-anchor', 'endDate');
+    await expect(connector).toHaveAttribute('data-successor-anchor', 'startDate');
+    const saved = await workspace(request);
+    expect(saved.dependencies.filter(link => link.predecessorId === predecessor.id)).toEqual([dependency]);
+    for (const issue of issues) {
+      expect(saved.issues.find(item => item.id === issue.id)).toMatchObject({ startDate: issue.startDate, endDate: issue.endDate });
+    }
+    expect(writes).toEqual(['POST']);
+  } finally {
+    for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
