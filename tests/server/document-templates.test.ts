@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,14 +10,20 @@ import { createApp } from '../../server/app.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { DocPage, DocRevision, DocumentTemplate, DocumentTemplateSummary, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Attachment, AttachmentHead, DocPage, DocRevision, DocumentTemplate, DocumentTemplateSummary, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const editor = 'user-min';
 const teammate = 'user-seo';
 const project = 'project-neo';
 const otherProject = 'project-team';
 const resource = '/document-templates';
-type Backup = WorkspaceSnapshot & { schemaVersion: number; documentTemplates: DocumentTemplate[]; revisions: DocRevision[] };
+type Backup = WorkspaceSnapshot & {
+  schemaVersion: number;
+  attachments: Attachment[];
+  documentTemplates: DocumentTemplate[];
+  documentTemplateAssets: { id: string; templateId: string; filename: string; mimeType: string; size: number; sha256: string; data: string }[];
+  revisions: DocRevision[];
+};
 type Failure = { error: string; details: { reason: string; currentVersion?: number } };
 
 async function fixture(t: TestContext) {
@@ -27,14 +33,19 @@ async function fixture(t: TestContext) {
   await once(server, 'listening');
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
-  const origin = `http://127.0.0.1:${address.port}/api`;
+  const origin = `http://127.0.0.1:${address.port}`;
   t.after(async () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     runtime.close();
     rmSync(dataDir, { recursive: true, force: true });
   });
+  function request(path: string, options?: RequestInit) {
+    const headers = new Headers(options?.headers);
+    if (!headers.has('X-Actor-Id')) headers.set('X-Actor-Id', editor);
+    return fetch(`${origin}/api${path}`, { ...options, headers });
+  }
   async function call<T = unknown>(path: string, status = 200, method = 'GET', data?: unknown, actorId = editor) {
-    const response = await fetch(origin + path, {
+    const response = await request(path, {
       method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId },
       ...(data === undefined ? {} : { body: JSON.stringify(data) }),
     });
@@ -42,7 +53,7 @@ async function fixture(t: TestContext) {
     assert.equal(response.status, status, JSON.stringify(value));
     return value;
   }
-  return { call, dataDir };
+  return { call, request, origin, dataDir };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -61,6 +72,48 @@ function captureRequest(source: DocPage, name: string) {
 
 function draftRequest(template: DocumentTemplateSummary, projectId = template.projectId, parentId: string | null = null) {
   return { requestId: randomUUID(), templateId: template.id, expectedTemplateVersion: template.version, title: '템플릿으로 만든 문서', projectId, parentId };
+}
+
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
+const documentFiles = (document: DocPage) => `/attachments?${new URLSearchParams({ resourceType: 'document', resourceId: document.id })}`;
+const contentPath = (id: string) => `/attachments/${id}/content`;
+const fileLink = (href: string, text: string): RichContent => ({
+  type: 'paragraph', content: [{ type: 'text', text, marks: [{ type: 'link', attrs: { href } }] }],
+});
+
+async function upload(f: Fixture, path: string, bytes: Buffer) {
+  const response = await f.request(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(bytes),
+  });
+  const body = await response.text();
+  assert.equal(response.status, 201, body);
+  return JSON.parse(body) as AttachmentHead;
+}
+
+function addFile(f: Fixture, document: DocPage, filename: string, bytes: Buffer) {
+  return upload(f, `${documentFiles(document)}&${new URLSearchParams({ filename })}`, bytes);
+}
+
+function appendFile(f: Fixture, attachment: AttachmentHead, filename: string, bytes: Buffer) {
+  const query = new URLSearchParams({ expectedVersionId: attachment.currentVersionId, filename });
+  return upload(f, `/attachments/${attachment.id}/versions?${query}`, bytes);
+}
+
+function saveBlocks(f: Fixture, document: DocPage, content: RichContent[]) {
+  return f.call<DocPage>(`/documents/${document.id}`, 200, 'PATCH', {
+    expectedVersion: document.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content: { type: 'doc', content },
+  });
+}
+
+async function purgeDocument(f: Fixture, document: DocPage) {
+  const { trashEntryId } = await f.call<{ trashEntryId: string }>(`/documents/${document.id}?expectedVersion=${document.version}`, 200, 'DELETE');
+  await f.call(`/trash/${trashEntryId}`, 200, 'DELETE');
+}
+
+async function expectBytes(f: Fixture, path: string, bytes: Buffer) {
+  const response = await f.request(path);
+  assert.equal(response.status, 200);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
 }
 
 test('team and project templates capture portable saved content and create an independent revision once', async t => {
@@ -170,6 +223,112 @@ test('template edits, source replacement, and archive use versions without chang
   assert.deepEqual(await f.call(`${resource}?projectId=${project}`), [restored]);
 });
 
+test('saved templates copy inline images and exact file versions through purge, rollback, retry, and replacement', async t => {
+  const f = await fixture(t);
+  const original = await createSource(f, '첨부가 있는 양식', project);
+  const logo = await addFile(f, original, '팀 로고.png', png);
+  const first = await addFile(f, original, '절차 1.txt', Buffer.from('첫 번째 버전'));
+  const pinnedBytes = Buffer.from('양식에서 링크한 두 번째 버전\n');
+  const pinned = await appendFile(f, first, '절차 2.txt', pinnedBytes);
+  const latest = await appendFile(f, pinned, '절차 3.txt', Buffer.from('현재 버전'));
+  const imagePath = `/api${contentPath(logo.id)}?inline=1`;
+  const pinnedPath = `/attachment-versions/${pinned.currentVersionId}/download`;
+  const sameOriginLink = `${f.origin}/api${pinnedPath}`;
+  const externalLink = `https://teamspace.invalid${imagePath}`;
+  const source = await saveBlocks(f, original, [
+    { type: 'image', attrs: { src: imagePath, alt: '팀 로고' } },
+    fileLink(sameOriginLink, '작업 절차'), fileLink(`/api${pinnedPath}`, '작업 절차 다시 열기'),
+    fileLink(externalLink, '외부 로고'),
+  ]);
+  const capture = captureRequest(source, '첨부가 있는 팀 템플릿');
+  const template = await f.call<DocumentTemplateSummary>(resource, 201, 'POST', capture);
+  assert.equal(template.attachmentCount, 2);
+  assert.deepEqual(await f.call(resource, 200, 'POST', capture), template);
+
+  const removed = await f.call<{ trashItemId: string }>(`/attachments/${logo.id}?expectedVersionId=${logo.currentVersionId}`, 200, 'DELETE');
+  await f.call(`/trash/items/${removed.trashItemId}`, 200, 'DELETE');
+  assert.equal((await f.request(contentPath(logo.id))).status, 404);
+  await purgeDocument(f, source);
+  assert.equal((await f.request(pinnedPath)).status, 404);
+
+  const request = draftRequest(template);
+  const workspace = await f.call<WorkspaceSnapshot>('/workspace');
+  const uploads = () => readdirSync(join(f.dataDir, 'uploads')).sort();
+  const beforeFiles = uploads();
+  const beforeBackup = await f.call<Backup>('/export');
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER fail_asset_template_receipt BEFORE INSERT ON document_creation_requests
+      BEGIN SELECT RAISE(ABORT, 'synthetic template attachment receipt failure'); END`);
+    await f.call('/documents', 500, 'POST', request, teammate);
+    const current = await f.call<Backup>('/export');
+    assert.deepEqual(current.documents, workspace.documents);
+    assert.deepEqual(current.activities, workspace.activities);
+    assert.deepEqual(current.attachments, beforeBackup.attachments);
+    assert.deepEqual(current.revisions, beforeBackup.revisions);
+    assert.deepEqual(uploads(), beforeFiles);
+    assert.ok(!readdirSync(f.dataDir).some(name => name.startsWith('.append-')));
+  } finally {
+    db.exec('DROP TRIGGER fail_asset_template_receipt');
+    db.close();
+  }
+
+  const draft = await f.call<DocPage>('/documents', 201, 'POST', request, teammate);
+  assert.equal(draft.status, 'draft');
+  const copies = await f.call<AttachmentHead[]>(documentFiles(draft));
+  assert.deepEqual(copies.map(file => file.filename).sort(), ['절차 2.txt', '팀 로고.png']);
+  for (const copy of copies) {
+    assert.equal(copy.resourceType, 'document');
+    assert.equal(copy.resourceId, draft.id);
+    assert.equal(copy.authorId, teammate);
+    assert.equal(copy.currentVersionId, copy.id);
+    assert.equal(copy.versionCount, 1);
+    assert.ok(![logo.id, first.id, pinned.currentVersionId, latest.currentVersionId].includes(copy.id));
+  }
+  const copiedLogo = copies.find(file => file.filename === logo.filename)!;
+  const copiedFile = copies.find(file => file.filename === pinned.filename)!;
+  assert.equal(copiedLogo.mimeType, 'image/png');
+  assert.equal(copiedLogo.sha256, logo.sha256);
+  assert.equal(copiedFile.sha256, pinned.sha256);
+  assert.equal(draft.content.content?.[0].attrs?.src, `/api${contentPath(copiedLogo.id)}?inline=1`);
+  const draftLinks = draft.content.content?.slice(1).map(node => node.content?.[0].marks?.[0].attrs?.href);
+  assert.deepEqual(draftLinks, [`/api${contentPath(copiedFile.id)}`, `/api${contentPath(copiedFile.id)}`, externalLink]);
+  await expectBytes(f, `${contentPath(copiedLogo.id)}?inline=1`, png);
+  await expectBytes(f, contentPath(copiedFile.id), pinnedBytes);
+  const afterFiles = uploads();
+  assert.deepEqual(await f.call('/documents', 200, 'POST', request, teammate), draft);
+  assert.deepEqual(await f.call(documentFiles(draft)), copies);
+  assert.deepEqual(uploads(), afterFiles);
+  const secondDraft = await f.call<DocPage>('/documents', 201, 'POST', draftRequest(template));
+  const secondCopies = await f.call<AttachmentHead[]>(documentFiles(secondDraft));
+  assert.deepEqual(secondCopies.map(file => file.filename).sort(), copies.map(file => file.filename).sort());
+  assert.ok(secondCopies.every(file => file.resourceId === secondDraft.id && !copies.some(copy => copy.id === file.id)));
+  await purgeDocument(f, secondDraft);
+
+  const nextDocument = await createSource(f, '개정 첨부가 있는 양식', project);
+  const nextBytes = Buffer.from('개정 양식에서만 쓰는 자료');
+  const nextFile = await addFile(f, nextDocument, '개정.txt', nextBytes);
+  const nextSource = await saveBlocks(f, nextDocument, [fileLink(`/api${contentPath(nextFile.id)}`, '개정 자료')]);
+  const crossDocument = await createSource(f, '다른 문서의 파일을 가리키는 양식', project, {
+    type: 'doc', content: [fileLink(`/api${contentPath(nextFile.id)}`, '다른 문서의 자료')],
+  });
+  const denied = await f.call<Failure>(resource, 422, 'POST', captureRequest(crossDocument, '다른 문서의 첨부가 포함된 양식'));
+  assert.match(denied.error, /첨부/);
+  const replaced = await f.call<DocumentTemplateSummary>(`${resource}/${template.id}`, 200, 'PATCH', {
+    expectedVersion: template.version, sourceDocumentId: nextSource.id, expectedDocumentVersion: nextSource.version,
+  });
+  assert.equal(replaced.attachmentCount, 1);
+  await purgeDocument(f, nextSource);
+  const newer = await f.call<DocPage>('/documents', 201, 'POST', draftRequest(replaced));
+  const newFiles = await f.call<AttachmentHead[]>(documentFiles(newer));
+  assert.deepEqual(newFiles.map(file => file.filename), ['개정.txt']);
+  await expectBytes(f, contentPath(newFiles[0].id), nextBytes);
+  assert.deepEqual(await f.call('/documents', 200, 'POST', request, teammate), draft);
+  assert.deepEqual(await f.call(documentFiles(draft)), copies);
+  await expectBytes(f, `${contentPath(copiedLogo.id)}?inline=1`, png);
+  await expectBytes(f, contentPath(copiedFile.id), pinnedBytes);
+});
+
 test('native backup restores template snapshots after source purge and rejects invalid captured content atomically', async t => {
   const f = await fixture(t);
   const copy = await fixture(t);
@@ -190,7 +349,7 @@ test('native backup restores template snapshots after source purge and rejects i
   assert.deepEqual(saved.content, source.content);
   const oldVersion = await copy.call<Failure>('/import', 400, 'POST', { data: { ...backup, schemaVersion: 62 } });
   assert.match(oldVersion.error, /schemaVersion 63/);
-  await copy.call('/import', 200, 'POST', { data: backup });
+  await copy.call('/import', 200, 'POST', { data: { ...backup, schemaVersion: 64, documentTemplateAssets: undefined } });
   const restored = (await copy.call<DocumentTemplateSummary[]>(resource))[0];
   assert.equal(restored.id, template.id);
   assert.equal(restored.sourceDocumentId, source.id);
@@ -209,6 +368,61 @@ test('native backup restores template snapshots after source purge and rejects i
   await copy.call('/import', 200, 'POST', { data: backup });
   assert.ok((await copy.call<DocumentTemplateSummary[]>(resource))[0].version > restored.version);
   await copy.call('/documents', 409, 'POST', draftRequest(restored, project));
-  await copy.call('/import', 200, 'POST', { data: { ...backup, schemaVersion: 62, documentTemplates: undefined } });
+  await copy.call('/import', 200, 'POST', { data: { ...backup, schemaVersion: 62, documentTemplates: undefined, documentTemplateAssets: undefined } });
   assert.deepEqual(await copy.call(resource), []);
+});
+
+test('native backup restores exact template attachment bytes and rejects missing or altered assets atomically', async t => {
+  const f = await fixture(t);
+  const copy = await fixture(t);
+  const original = await createSource(f, '백업할 첨부 양식', null);
+  const file = await addFile(f, original, '백업.png', png);
+  const source = await saveBlocks(f, original, [{ type: 'image', attrs: { src: `/api${contentPath(file.id)}?inline=1`, alt: '백업' } }]);
+  const template = await f.call<DocumentTemplateSummary>(resource, 201, 'POST', captureRequest(source, '백업할 팀 템플릿'));
+  const unrelated = await createSource(f, '다른 원본', null);
+  const otherTemplate = await f.call<DocumentTemplateSummary>(resource, 201, 'POST', captureRequest(unrelated, '다른 팀 템플릿'));
+  await purgeDocument(f, source);
+  const backup = await f.call<Backup>('/export');
+  assert.ok(backup.schemaVersion >= 65);
+  assert.equal(backup.documentTemplateAssets.length, 1);
+  assert.ok(!backup.attachments.some(attachment => attachment.id === file.id));
+  const [asset] = backup.documentTemplateAssets;
+  assert.equal(asset.templateId, template.id);
+  assert.equal(asset.filename, file.filename);
+  assert.equal(asset.mimeType, 'image/png');
+  assert.equal(asset.size, png.length);
+  assert.equal(asset.sha256, createHash('sha256').update(png).digest('hex'));
+  assert.equal(asset.data, png.toString('base64'));
+  const snapshot = backup.documentTemplates.find(value => value.id === template.id)!;
+  assert.equal(snapshot.content.content?.[0].attrs?.src, `/api/document-template-assets/${asset.id}?inline=1`);
+
+  await copy.call('/import', 200, 'POST', { data: backup });
+  const restoredCatalog = await copy.call<DocumentTemplateSummary[]>(resource);
+  const restored = restoredCatalog.find(value => value.id === template.id)!;
+  assert.equal(restored.attachmentCount, 1);
+  const draft = await copy.call<DocPage>('/documents', 201, 'POST', draftRequest(restored, project));
+  const [attachment] = await copy.call<AttachmentHead[]>(documentFiles(draft));
+  assert.equal(draft.content.content?.[0].attrs?.src, `/api${contentPath(attachment.id)}?inline=1`);
+  await expectBytes(copy, `${contentPath(attachment.id)}?inline=1`, png);
+
+  const changed = Buffer.from(png);
+  changed[changed.length - 1] ^= 1;
+  for (const documentTemplateAssets of [
+    [], [{ ...asset, templateId: otherTemplate.id }], [{ ...asset, sha256: '0'.repeat(64) }],
+    [{ ...asset, mimeType: 'application/octet-stream' }], [{ ...asset, data: changed.toString('base64') }],
+  ]) {
+    await copy.call('/import', 400, 'POST', { data: { ...backup, documentTemplateAssets } });
+    assert.deepEqual(await copy.call(resource), restoredCatalog);
+    assert.ok((await copy.call<WorkspaceSnapshot>('/workspace')).documents.some(document => document.id === draft.id));
+  }
+  const inaccurateCount = backup.documentTemplates.map(value => value.id === template.id ? { ...value, attachmentCount: 2 } : value);
+  await copy.call('/import', 400, 'POST', { data: { ...backup, documentTemplates: inaccurateCount } });
+  assert.deepEqual(await copy.call(resource), restoredCatalog);
+  await copy.call('/import', 400, 'POST', { data: { ...backup, schemaVersion: 64 } });
+  await expectBytes(copy, `${contentPath(attachment.id)}?inline=1`, png);
+  await copy.call('/import', 200, 'POST', { data: backup });
+  const refreshed = (await copy.call<DocumentTemplateSummary[]>(resource)).find(value => value.id === template.id)!;
+  const restoredDraft = await copy.call<DocPage>('/documents', 201, 'POST', draftRequest(refreshed, project));
+  const [restoredAttachment] = await copy.call<AttachmentHead[]>(documentFiles(restoredDraft));
+  await expectBytes(copy, `${contentPath(restoredAttachment.id)}?inline=1`, png);
 });

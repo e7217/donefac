@@ -322,7 +322,7 @@ export function DocumentTemplatesManager({ projectId, scopeLabel, source, latest
         <button className="document-template-row" type="button" aria-label={template.name} aria-pressed={selected?.id === template.id}
           disabled={busy || recovering} onClick={() => choose(template)}>
           <FileStack size={16} aria-hidden="true" /><span><strong>{template.name}</strong><small>버전 {template.version}{template.archived ? ' · 보관' : ''}</small>
-            <small>{template.sourceTitle} · 저장본 {template.sourceVersion}</small></span>
+            <small>{template.sourceTitle} · 저장본 {template.sourceVersion}{(template.attachmentCount ?? 0) > 0 ? ` · 첨부 ${template.attachmentCount}개` : ''}</small></span>
         </button>
       </li>)}</ul> : <p>이 공간에 저장한 템플릿이 없습니다.</p>)}
     </section>

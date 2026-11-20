@@ -1444,7 +1444,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             projectName={data.projects.find(project => project.id === newProject)?.name} disabled={createLocked}
             onChoose={chooseTeamTemplate} />
           {teamTemplate && <p className="document-template-selection">{teamTemplate.projectId === null ? '팀 공통' : data.projects.find(project => project.id === teamTemplate.projectId)?.name}
-            {' · '}템플릿 버전 {teamTemplate.version}</p>}
+            {' · '}템플릿 버전 {teamTemplate.version}{(teamTemplate.attachmentCount ?? 0) > 0 ? ` · 첨부 ${teamTemplate.attachmentCount}개` : ''}</p>}
         </>}
         <div className="docs-location-fields">
           <label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent) || createLocked}

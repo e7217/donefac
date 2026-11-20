@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, attachmentId, safeFilename, sniffMime, hash } from './attachments.js';
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
+import { AttachmentAppend } from './attachment-append.js';
 import { Store } from './store.js';
 import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
@@ -19,6 +20,7 @@ import { DocumentContentService, DocumentContentError, normalizeDocumentContent,
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
 import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent } from './document-templates.js';
+import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
@@ -155,7 +157,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const documentCreation = new DocumentCreationService(store);
-  const documentTemplates = new DocumentTemplatesService(store);
+  const documentTemplateAssets = new DocumentTemplateAssetsService(store, files);
+  const documentTemplates = new DocumentTemplatesService(store, documentTemplateAssets);
+  const templateDraftFiles = new AttachmentAppend(dataDir);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -187,7 +191,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);
   const documentTreeMove=new DocumentTreeMoveService(store,trash);
-  const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
+  const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>
+    Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const app = express(); app.disable('x-powered-by');
@@ -1146,12 +1151,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     }
     res.set('Cache-Control','no-store').json(documentTemplates.list(projectId??null,includeArchived==='1'));
   });
+  const templateOrigins=(req:Request)=>[req.get('origin')??'',`${req.protocol}://${req.get('host')??''}`];
   app.post('/api/document-templates', (req,res) => {
-    const result=documentTemplates.create(actor(req),req.body);
+    const result=documentTemplates.create(actor(req),req.body,templateOrigins(req));
     res.status(result.duplicate?200:201).json(result.template);
   });
   app.patch('/api/document-templates/:id', (req,res) => {
-    res.json(documentTemplates.patch(req.params.id,actor(req),req.body));
+    res.json(documentTemplates.patch(req.params.id,actor(req),req.body,templateOrigins(req)));
   });
   app.post('/api/documents',(req,res)=>{
     const authorId = actor(req);
@@ -1164,22 +1170,39 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       (input.parentId!=null&&(typeof input.parentId!=='string'||!input.parentId)))){
       return fail('팀 템플릿, 문서 공간과 저장 요청을 확인해 주세요.');
     }
-    const result = documentCreation.create(authorId, input, () => {
-      const timestamp=now(), id=uid(), projectId=input.projectId??null;
-      if(usesTemplate&&projectId!==null)get<Project>('projects',projectId);
-      const template=usesTemplate?documentTemplates.forDraft(input.templateId,input.expectedTemplateVersion,projectId):null;
-      const content=template?templateDraftContent(template,id):Object.hasOwn(input,'content')?input.content:{type:'doc',content:[{type:'paragraph'}]};
-      const d:DocPage={id,projectId,parentId:input.parentId??null,title:input.title,
-        ...(Object.hasOwn(input,'labels')?{labels:input.labels}:{}),content,
-        plainText:'',icon:template?.icon??(input.icon||'📄'),status:template?'draft':input.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
-      validateDocument(d,undefined,{allowMissing:Boolean(template)});
-      bindImportedDocumentSections(d);
-      store.put('documents',d);
-      revision(d,authorId,template?`팀 템플릿 사용 · ${template.name}`:'최초 작성');
-      activity(req,'document',d.id,'문서 생성',d.title);
-      notifyDocumentCreated(d);
-      return d;
-    },usesTemplate?'document-template-draft':undefined);
+    let staged:ReturnType<AttachmentAppend['stage']>|undefined;
+    let result:ReturnType<DocumentCreationService['create']>;
+    try {
+      result = documentCreation.create(authorId, input, () => {
+        const timestamp=now(), id=uid(), projectId=input.projectId??null;
+        if(usesTemplate&&projectId!==null)get<Project>('projects',projectId);
+        const template=usesTemplate?documentTemplates.forDraft(input.templateId,input.expectedTemplateVersion,projectId):null;
+        const draft=template?documentTemplateAssets.forDraft(template.id,templateDraftContent(template,id),id,authorId,timestamp):null;
+        const content=draft?draft.content:Object.hasOwn(input,'content')?input.content:{type:'doc',content:[{type:'paragraph'}]};
+        const d:DocPage={id,projectId,parentId:input.parentId??null,title:input.title,
+          ...(Object.hasOwn(input,'labels')?{labels:input.labels}:{}),content,
+          plainText:'',icon:template?.icon??(input.icon||'📄'),status:template?'draft':input.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
+        validateDocument(d,undefined,{allowMissing:Boolean(template)});
+        bindImportedDocumentSections(d);
+        store.put('documents',d);
+        if(draft?.files.length){
+          staged=templateDraftFiles.stage(id,draft.files.map(({attachment,bytes})=>({id:attachment.id,size:attachment.size,sha256:attachment.sha256,bytes})));
+          for(const {attachment} of draft.files){
+            store.put('attachments',attachment);
+            activity(req,'document',d.id,'파일 첨부',attachment.filename);
+          }
+          staged.install();
+        }
+        revision(d,authorId,template?`팀 템플릿 사용 · ${template.name}`:'최초 작성');
+        activity(req,'document',d.id,'문서 생성',d.title);
+        notifyDocumentCreated(d);
+        return d;
+      },usesTemplate?'document-template-draft':undefined);
+    } catch(error) {
+      try{staged?.rollback();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
+      throw error;
+    }
+    try{staged?.commit();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
     res.status(result.duplicate ? 200 : 201).json(result.document);
   });
   app.post('/api/documents/:id/move-preview',(req,res)=>{
@@ -1634,10 +1657,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
-    const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
+    payload.documentTemplateAssets=documentTemplateAssets.export();
     const serialized=JSON.stringify(payload);if(Buffer.byteLength(serialized)>MAX_EXPORT_BYTES)fail('내보내기 파일은 64MiB 미만이어야 합니다.',413);
     res.type('application/json').send(serialized);
   });
@@ -1650,6 +1674,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
     const importedTemplates=data.schemaVersion>=63?documentTemplates.validateRestore(data.documentTemplates,data.projects,data.users,data.exportedAt):[];
+    if(data.schemaVersion<65&&data.documentTemplateAssets!==undefined&&(!Array.isArray(data.documentTemplateAssets)||data.documentTemplateAssets.length)){
+      fail('팀 문서 템플릿 첨부를 포함한 백업은 schemaVersion 65가 필요합니다.');
+    }
+    const importedTemplateAssets=documentTemplateAssets.validateRestore(data.schemaVersion>=65?data.documentTemplateAssets:[],importedTemplates);
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
     const importedIssueOrders = data.schemaVersion >= 23 ? issueOrders.validateImport(data.issueOrders, data.projects, data.issues) : [];
@@ -1941,6 +1969,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       documentTemplates.restore(importedTemplates);
+      documentTemplateAssets.restore(importedTemplateAssets);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);

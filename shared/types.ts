@@ -707,6 +707,7 @@ export interface DocumentTemplateSummary {
   sourceDocumentId: string;
   sourceTitle: string;
   sourceVersion: number;
+  attachmentCount?: number;
   version: number;
   archived: boolean;
   createdAt: string;

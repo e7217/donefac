@@ -58,10 +58,10 @@ export class MigrationService {
   private current: { abort: () => void } | null = null;
   private busy = false;
 
-  constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService, private readonly sources: SourcePreservationService, hasArchivedVersion: (id: string) => boolean) {
+  constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService, private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean) {
     this.append = new AttachmentAppend(dataDir);
     this.files = new AttachmentFiles(dataDir);
-    this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id) || hasArchivedVersion(id));
+    this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id) || hasCommittedAppend(id));
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
     )`);

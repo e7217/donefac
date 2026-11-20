@@ -5,12 +5,12 @@ import { documentSectionHash, isDocumentSectionId } from '../shared/document-sec
 import type { DocPage, DocumentTemplate, DocumentTemplateSummary, Project, RichContent, User } from '../shared/types.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import { DocumentContentError, normalizeDocumentContent } from './document-content.js';
+import type { DocumentTemplateAssetsService } from './document-template-assets.js';
 import type { Store } from './store.js';
 
 type ErrorReason = 'invalid_input' | 'invalid_backup' | 'source_version_conflict' | 'template_version_conflict' |
   'template_archived' | 'template_not_found' | 'source_not_found' | 'template_scope' | 'attachment_reference' |
   'name_conflict' | 'request_conflict' | 'request_unavailable';
-type TemplateFields = Pick<DocumentTemplate, 'projectId' | 'sourceDocumentId' | 'sourceTitle' | 'sourceVersion' | 'icon' | 'content'>;
 type StoredTemplate = { metadata: string; content: string };
 type CreationReceipt = { actor_id: string; fingerprint: string; template_id: string | null };
 
@@ -18,10 +18,8 @@ const MAX_NAME_LENGTH = 100;
 const MAX_TEMPLATE_VERSION = Number.MAX_SAFE_INTEGER;
 const RESTORE_VERSION_FLOOR = 'documentTemplateRestoreVersion';
 const BACKUP_FIELDS = ['id', 'projectId', 'name', 'icon', 'sourceDocumentId', 'sourceTitle', 'sourceVersion', 'version',
-  'archived', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy', 'content'];
+  'archived', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy', 'attachmentCount', 'content'];
 const INVALID_BACKUP = '백업의 문서 템플릿 데이터를 확인해 주세요.';
-const ATTACHMENT_MESSAGE = '템플릿 본문에는 Teamspace 첨부파일 이미지나 링크를 담을 수 없습니다. 첨부파일 참조를 정리한 문서를 저장한 뒤 다시 등록해 주세요.';
-const attachmentPath = /^\/api\/(?:attachments\/.+\/content|attachment-versions\/.+\/download)\/?$/iu;
 const sectionRoute = /^#\/[^/]+\/documents\/([^/?#]+)\?([^#]+)$/u;
 
 export class DocumentTemplateError extends Error {
@@ -80,28 +78,12 @@ function isSourceTitle(value: unknown): value is string {
   return typeof value === 'string' && Boolean(value.trim()) && value.length <= 300;
 }
 
-function isAttachmentHref(value: unknown): boolean {
-  if (typeof value !== 'string') return false;
-  try {
-    const url = new URL(value, 'https://teamspace.invalid/');
-    return /^https?:$/u.test(url.protocol) && attachmentPath.test(decodeURIComponent(url.pathname));
-  } catch { return false; }
-}
-
-function savedTemplateContent(value: unknown, backup = false): RichContent {
-  let content: RichContent;
-  try { ({ content } = normalizeDocumentContent(value)); }
+function restoredTemplateContent(value: unknown): RichContent {
+  try { return normalizeDocumentContent(value).content; }
   catch (error) {
-    if (backup && error instanceof DocumentContentError) fail(400, INVALID_BACKUP, 'invalid_backup');
+    if (error instanceof DocumentContentError) fail(400, INVALID_BACKUP, 'invalid_backup');
     throw error;
   }
-  for (const node of documentNodes(content)) {
-    if ((node.type === 'image' && isAttachmentHref(node.attrs?.src)) ||
-        node.marks?.some(mark => mark.type === 'link' && isAttachmentHref(mark.attrs?.href))) {
-      fail(backup ? 400 : 422, ATTACHMENT_MESSAGE, 'attachment_reference');
-    }
-  }
-  return content;
 }
 
 function ownSection(href: string, sourceId: string, sections: ReadonlySet<string>): string | null {
@@ -142,7 +124,7 @@ function unpack(row: StoredTemplate): DocumentTemplate {
 }
 
 export class DocumentTemplatesService {
-  constructor(private readonly store: Store) {
+  constructor(private readonly store: Store, private readonly assets: DocumentTemplateAssetsService) {
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS document_templates (
         id TEXT PRIMARY KEY,
@@ -177,7 +159,7 @@ export class DocumentTemplatesService {
     return (this.store.db.prepare('SELECT metadata,content FROM document_templates ORDER BY id').all() as StoredTemplate[]).map(unpack);
   }
 
-  create(actorId: string, raw: unknown): { template: DocumentTemplateSummary; duplicate: boolean } {
+  create(actorId: string, raw: unknown, origins: readonly string[] = []): { template: DocumentTemplateSummary; duplicate: boolean } {
     const body = record(raw, ['requestId', 'name', 'sourceDocumentId', 'expectedDocumentVersion']);
     const { requestId, sourceDocumentId } = body;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) fail(400, '템플릿 등록 요청 ID를 확인해 주세요.', 'invalid_input');
@@ -198,19 +180,20 @@ export class DocumentTemplatesService {
         if (!saved) fail(409, '기존 등록 요청의 템플릿을 찾을 수 없습니다. 템플릿 목록을 확인해 주세요.', 'request_unavailable');
         return { template: saved, duplicate: true };
       }
-      const snapshot = this.capture(sourceDocumentId, sourceVersion);
+      const { fields, assets } = this.capture(this.readSource(sourceDocumentId, sourceVersion), origins);
       const timestamp = new Date().toISOString();
-      const template: DocumentTemplate = { id: randomUUID(), name, ...snapshot, version: 1,
+      const template: DocumentTemplate = { id: randomUUID(), name, ...fields, version: 1,
         archived: false, createdBy: actorId, updatedBy: actorId, createdAt: timestamp, updatedAt: timestamp };
       this.requireAvailableName(template);
       const summary = this.put(template);
+      this.assets.replace(template.id, assets);
       this.store.db.prepare('INSERT INTO document_template_creation_requests(id,actor_id,fingerprint,template_id) VALUES(?,?,?,?)')
         .run(receiptId, actorId, fingerprint, template.id);
       return { template: summary, duplicate: false };
     });
   }
 
-  patch(id: string, actorId: string, raw: unknown): DocumentTemplateSummary {
+  patch(id: string, actorId: string, raw: unknown, origins: readonly string[] = []): DocumentTemplateSummary {
     const body = record(raw, ['expectedVersion', 'name', 'archived', 'sourceDocumentId', 'expectedDocumentVersion']);
     const expected = requestVersion(body.expectedVersion, '템플릿');
     const replace = Object.hasOwn(body, 'sourceDocumentId');
@@ -229,15 +212,18 @@ export class DocumentTemplatesService {
       const current = this.find(id);
       if (!current) return fail(404, '문서 템플릿을 찾을 수 없습니다.', 'template_not_found');
       this.requireVersion(current, expected);
-      const snapshot = typeof sourceId === 'string' && sourceVersion !== undefined
-        ? this.capture(sourceId, sourceVersion, current.projectId) : current;
-      const replacement = { ...current, ...snapshot, name: name ?? current.name, archived: (archived as boolean | undefined) ?? current.archived };
-      if (current.name === replacement.name && current.archived === replacement.archived &&
-          current.sourceDocumentId === replacement.sourceDocumentId && current.sourceVersion === replacement.sourceVersion) {
+      const source = typeof sourceId === 'string' && sourceVersion !== undefined
+        ? this.readSource(sourceId, sourceVersion, current.projectId) : undefined;
+      const snapshot = source && (source.id !== current.sourceDocumentId || source.version !== current.sourceVersion)
+        ? this.capture(source, origins) : undefined;
+      const replacement = { ...current, ...snapshot?.fields, name: name ?? current.name, archived: (archived as boolean | undefined) ?? current.archived };
+      if (!snapshot && current.name === replacement.name && current.archived === replacement.archived) {
         return this.summary(id)!;
       }
       this.requireAvailableName(replacement);
-      return this.put({ ...replacement, version: nextVersion(current.version), updatedBy: actorId, updatedAt: new Date().toISOString() });
+      const summary = this.put({ ...replacement, version: nextVersion(current.version), updatedBy: actorId, updatedAt: new Date().toISOString() });
+      if (snapshot) this.assets.replace(id, snapshot.assets);
+      return summary;
     });
   }
 
@@ -262,12 +248,13 @@ export class DocumentTemplatesService {
     const names = new Set<string>();
     return raw.map(value => {
       const row = record(value, BACKUP_FIELDS, true);
-      const { id, projectId, icon, sourceDocumentId, sourceTitle, sourceVersion, version, archived, createdAt, updatedAt, createdBy, updatedBy } = row;
+      const { id, projectId, icon, sourceDocumentId, sourceTitle, sourceVersion, version, archived, createdAt, updatedAt, createdBy, updatedBy, attachmentCount } = row;
       const name = nameValue(row.name);
       if (typeof id !== 'string' || !creationRequestId.test(id) || id !== id.toLowerCase() || ids.has(id) ||
           (projectId !== null && (typeof projectId !== 'string' || !projectIds.has(projectId))) || !name || name !== row.name ||
           !isIcon(icon) || !identifier(sourceDocumentId) || !isSourceTitle(sourceTitle) || !isVersion(sourceVersion) ||
           !isVersion(version) || typeof archived !== 'boolean' || !isIsoTimestamp(createdAt) || !isIsoTimestamp(updatedAt) ||
+          (attachmentCount !== undefined && (typeof attachmentCount !== 'number' || !Number.isSafeInteger(attachmentCount) || attachmentCount < 0)) ||
           createdAt > updatedAt || typeof exportedAt !== 'string' || updatedAt > exportedAt ||
           typeof createdBy !== 'string' || !userIds.has(createdBy) || typeof updatedBy !== 'string' || !userIds.has(updatedBy)) {
         return fail(400, INVALID_BACKUP, 'invalid_backup');
@@ -277,7 +264,7 @@ export class DocumentTemplatesService {
       ids.add(id);
       if (!archived) names.add(key);
       return { id, projectId, name, icon, sourceDocumentId, sourceTitle, sourceVersion, version, archived, createdAt,
-        updatedAt, createdBy, updatedBy, content: savedTemplateContent(row.content, true) };
+        updatedAt, createdBy, updatedBy, ...(attachmentCount !== undefined ? { attachmentCount } : {}), content: restoredTemplateContent(row.content) };
     });
   }
 
@@ -298,15 +285,22 @@ export class DocumentTemplatesService {
     if (highestVersion) this.store.setSetting(RESTORE_VERSION_FLOOR, highestVersion);
   }
 
-  private capture(sourceId: string, version: number, scope?: string | null): TemplateFields {
+  private readSource(sourceId: string, version: number, scope?: string | null): DocPage {
     const document = this.store.get<DocPage>('documents', sourceId);
     if (!document) return fail(404, '원본 문서를 찾을 수 없습니다.', 'source_not_found');
     if (scope !== undefined && document.projectId !== scope) fail(400, '같은 문서 공간의 문서로 템플릿을 교체해 주세요.', 'template_scope');
     if (document.version !== version) {
       fail(409, '원본 문서가 변경되었습니다. 최신 저장본을 확인해 주세요.', 'source_version_conflict', document.version);
     }
-    return { projectId: document.projectId, sourceDocumentId: document.id, sourceTitle: document.title,
-      sourceVersion: document.version, icon: document.icon, content: savedTemplateContent(document.content) };
+    return document;
+  }
+
+  private capture(document: DocPage, origins: readonly string[]) {
+    const { content, assets } = this.assets.capture(normalizeDocumentContent(document.content).content, document.id, origins);
+    return { assets, fields: {
+      projectId: document.projectId, sourceDocumentId: document.id, sourceTitle: document.title,
+      sourceVersion: document.version, icon: document.icon, content, attachmentCount: assets.length || undefined,
+    } };
   }
 
   private requireActor(id: string): void {

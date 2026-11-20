@@ -10,7 +10,7 @@ import { AttachmentAppend } from '../../server/attachment-append.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { hash } from '../../server/attachments.js';
 import { createApp } from '../../server/app.js';
-import type { Attachment, AttachmentHead, AttachmentVersion, DocPage, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Attachment, AttachmentHead, AttachmentVersion, DocPage, DocumentTemplateSummary, WorkspaceSnapshot } from '../../shared/types.js';
 
 const originalBytes = Buffer.from('원본 첨부\0\r\n');
 const firstPdf = Buffer.from('%PDF-1.6\n% 합성 파일 A\n');
@@ -290,4 +290,50 @@ test('interrupted per-version journals keep committed files and remove only aban
   await read(f.request(content(committed.id)), 404);
   await read(f.json(`/trash/${archived.trashEntryId}/restore`, 'POST', {}));
   await exact(f, content(committed.id), secondPdf);
+});
+
+test('template draft journals recover committed document files, including after the draft moves to trash', async t => {
+  const f = await fixture(t);
+  const source = await read<DocPage>(f.json('/documents', 'POST', { title: '첨부 템플릿의 원본' }), 201);
+  const original = await f.forParent('document', source.id).initial(originalBytes, '원본.bin');
+  const saved = await read<DocPage>(f.json(`/documents/${source.id}`, 'PATCH', {
+    expectedVersion: source.version, content: {
+      type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '첨부',
+        marks: [{ type: 'link', attrs: { href: `/api${content(original.id)}` } }] }] }],
+    },
+  }));
+  const template = await read<DocumentTemplateSummary>(f.json('/document-templates', 'POST', {
+    requestId: randomUUID(), sourceDocumentId: source.id, expectedDocumentVersion: saved.version, name: '복구 기록 양식',
+  }), 201);
+  const draft = await read<DocPage>(f.json('/documents', 'POST', {
+    requestId: randomUUID(), templateId: template.id, expectedTemplateVersion: template.version, title: '첨부가 남은 초안',
+  }), 201);
+  const [copied] = await f.forParent('document', draft.id).list();
+  assert.ok(copied);
+  assert.notEqual(copied.id, original.id);
+  const pending = join(f.dir, `.append-${draft.id}.json`);
+  const leaveCommittedJournal = () => writeFileSync(pending, JSON.stringify({
+    id: draft.id, stage: `.append-stage-${draft.id}`, files: [copied.id],
+  }));
+
+  const abandonedId = randomUUID();
+  await f.restart(() => {
+    leaveCommittedJournal();
+    new AttachmentAppend(f.dir).stage(randomUUID(), [
+      { id: abandonedId, bytes: firstPdf, sha256: hash(firstPdf), size: firstPdf.length },
+    ]).install();
+    assert.ok(entries(f).includes(abandonedId));
+  });
+  assert.deepEqual(entries(f), [original.id, copied.id].sort());
+  assert.ok(!readdirSync(f.dir).some(name => name.startsWith('.append-')));
+  await exact(f, content(copied.id), originalBytes);
+  await read(f.request(content(abandonedId)), 404);
+
+  const archived = await read<{ trashEntryId: string }>(f.json(`/documents/${draft.id}`, 'DELETE'));
+  await f.restart(leaveCommittedJournal);
+  assert.ok(!readdirSync(f.dir).some(name => name.startsWith('.append-')));
+  assert.deepEqual(readFileSync(join(f.dir, 'uploads', copied.id)), originalBytes);
+  await read(f.request(content(copied.id)), 404);
+  await read(f.json(`/trash/${archived.trashEntryId}/restore`, 'POST', {}));
+  await exact(f, content(copied.id), originalBytes);
 });

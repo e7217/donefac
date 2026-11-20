@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
 import { documentSectionHash } from '../../shared/document-sections';
-import type { DocPage, DocRevision, DocumentTemplateSummary, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, DocRevision, DocumentTemplateSummary, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, expectedStatus = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(expectedStatus);
@@ -76,6 +77,102 @@ async function expectFitsMobile(dialog: Locator) {
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
 }
+
+test('360px에서 원본이 삭제된 템플릿의 본문 이미지와 첨부를 열 수 있다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [actor] } = await workspace(request);
+  const prefix = `합성 첨부 양식 ${randomUUID().slice(0, 8)}`;
+  const title = `${prefix} 새 초안`;
+  const templateName = `${prefix} 팀 템플릿`;
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
+  const textBytes = Buffer.from('문서 템플릿 다운로드 검증용 원문\n');
+  const logoAlt = '합성 양식 로고';
+  const linkLabel = '체크리스트 열기';
+
+  try {
+    const landing = await createDocument(request, project.id, `${prefix} 시작 문서`);
+    const original = await createDocument(request, project.id, `${prefix} 원본`);
+    const upload = async (filename: string, bytes: Buffer) => json<AttachmentHead>(await request.post('/api/attachments', {
+      params: { resourceType: 'document', resourceId: original.id, filename },
+      headers: { 'Content-Type': 'application/octet-stream' }, data: bytes,
+    }), 201);
+    const logo = await upload('양식 로고.png', png);
+    const checklist = await upload('점검 목록.txt', textBytes);
+    const logoPath = `/api/attachments/${logo.id}/content?inline=1`;
+    const checklistPath = `/api/attachments/${checklist.id}/content`;
+    const content: RichContent = { type: 'doc', content: [
+      { type: 'image', attrs: { src: logoPath, alt: logoAlt } },
+      { type: 'paragraph', content: [{ type: 'text', text: linkLabel, marks: [{ type: 'link', attrs: { href: checklistPath } }] }] },
+    ] };
+    const source = await json<DocPage>(await request.patch(`/api/documents/${original.id}`, { data: {
+      expectedVersion: original.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
+    } }));
+    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.goto(`/#/${project.id}/documents/${source.id}`);
+    await page.getByRole('button', { name: '팀 템플릿으로 저장', exact: true }).click();
+    const manager = captureDialog(page);
+    await expect(manager.dialog).toContainText(source.title);
+    await expectFitsMobile(manager.dialog);
+    await manager.name.fill(templateName);
+    const captured = waitForMutation(page, 'POST', '/api/document-templates');
+    await manager.dialog.getByRole('button', { name: '템플릿 저장', exact: true }).click();
+    const captureResponse = await captured;
+    expect(captureResponse.status(), await captureResponse.text()).toBe(201);
+    expect(await captureResponse.json()).toMatchObject({ attachmentCount: 2 });
+    await expect(manager.dialog.getByRole('button', { name: templateName, exact: true })).toContainText('첨부 2개');
+    await manager.dialog.getByRole('button', { name: '닫기', exact: true }).click();
+    await purgeDocument(request, source);
+    expect((await request.get(logoPath)).status()).toBe(404);
+    expect((await request.get(checklistPath)).status()).toBe(404);
+
+    await page.goto('about:blank');
+    await page.goto(`/#/${project.id}/documents/${landing.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(landing.title);
+    const form = await openNew(page);
+    await form.select.selectOption({ label: templateName });
+    await expect(form.dialog).toContainText('첨부 2개');
+    await expectFitsMobile(form.dialog);
+    await form.title.fill(title);
+    const applied = waitForMutation(page, 'POST', '/api/documents');
+    await form.submit.click();
+    const applyResponse = await applied;
+    expect(applyResponse.status(), await applyResponse.text()).toBe(201);
+    const draft = await applyResponse.json() as DocPage;
+    await expect(form.dialog).toBeHidden();
+    await expect(page).toHaveURL(new RegExp(`/documents/${draft.id}$`));
+    const copies = await json<AttachmentHead[]>(await request.get('/api/attachments', {
+      params: { resourceType: 'document', resourceId: draft.id },
+    }));
+    expect(copies).toHaveLength(2);
+    const copiedLogo = copies.find(file => file.filename === logo.filename)!;
+    const copiedChecklist = copies.find(file => file.filename === checklist.filename)!;
+    expect(copiedLogo.id).not.toBe(logo.id);
+    expect(copiedChecklist.id).not.toBe(checklist.id);
+
+    const editor = page.locator('.docs-prose[contenteditable="true"]');
+    const image = editor.getByRole('img', { name: logoAlt, exact: true });
+    await expect(image).toHaveAttribute('src', `/api/attachments/${copiedLogo.id}/content?inline=1`);
+    await expect(image).toHaveJSProperty('naturalWidth', 1);
+    const link = editor.getByRole('link', { name: linkLabel, exact: true });
+    const copiedChecklistPath = `/api/attachments/${copiedChecklist.id}/content`;
+    await expect(link).toHaveAttribute('href', copiedChecklistPath);
+    const linkedFile = await request.get(copiedChecklistPath);
+    expect(linkedFile.status()).toBe(200);
+    expect(await linkedFile.body()).toEqual(textBytes);
+
+    await page.getByRole('button', { name: '파일 첨부', exact: true }).click();
+    await expect(page.locator('.attachment-row').filter({ hasText: logo.filename })).toBeVisible();
+    const downloaded = page.waitForEvent('download');
+    await page.getByRole('link', { name: `${checklist.filename} 다운로드`, exact: true }).click();
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toBe(checklist.filename);
+    const path = await download.path();
+    expect(path).not.toBeNull();
+    expect(await readFile(path!)).toEqual(textBytes);
+  } finally {
+    await cleanup(request, prefix, project.id);
+  }
+});
 
 test('360px에서 저장한 문서 템플릿으로 독립 초안을 만들고 응답 유실을 재확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
