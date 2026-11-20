@@ -9,6 +9,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacySource, Project, SourceImport, SourceRecordArchive, SourceRecordPage, User } from '../../shared/types.js';
 import { Store } from '../../server/store.js';
 import type { PreparedMigration } from '../../server/migration-contracts.js';
+import { AttachmentVersionsService } from '../../server/attachment-versions.js';
 import { SourcePreservationError, SourcePreservationService, type SourcePreservationContext } from '../../server/source-preservation.js';
 
 const now = '2026-11-19T00:00:00.000Z', old = '2020-01-02T03:04:05.000Z';
@@ -102,6 +103,64 @@ test('native source validation rejects membership, identity, author, owner, vers
     ];
     for (const edit of edits) { const invalid = structuredClone(valid); edit(invalid); assert.throws(() => f.service.validateImport(invalid, f.context()), (error: unknown) => error instanceof SourcePreservationError); }
     assert.deepEqual(data(f), before); assert.deepEqual(f.service.validateImport(valid, f.context()), valid);
+  } finally { f.close(); }
+});
+
+test('Confluence attachment extensions retain a validated source root and yield to manually added versions', () => {
+  const f = fixture(); try {
+    const anchor = f.prepared.attachments[0];
+    const links = f.prepared.sourceRecords.filter(row => row.record.kind === 'attachment');
+    const oldPage = f.prepared.sourceRecords.find(row => row.record.kind === 'revision')!.record;
+    oldPage.metadata.currentVersionId = '200';
+    oldPage.references = [{ kind: 'page', sourceId: '200', relation: 'current-version' }];
+    for (const [index, link] of links.entries()) {
+      link.record.containerId = '200';
+      link.record.references = [{ kind: 'page', sourceId: '200', relation: 'container-content' }];
+      link.record.metadata.attachmentVersion = index === 0 ? '2' : '1';
+      if (index > 0) link.record.metadata.currentVersionId = links[0].record.sourceId;
+    }
+    links[1].record.containerId = oldPage.sourceId;
+    links[1].record.references = [{ kind: 'revision', sourceId: oldPage.sourceId, relation: 'container-content' }];
+    persist(f);
+    const extension = structuredClone(f.prepared);
+    const pkg = extension.sourceImport.packages[1], root = structuredClone(links[0]);
+    const id = randomUUID(), projectId = f.prepared.documents[0].projectId!;
+    extension.sourceImport = { ...extension.sourceImport, id, packages: [pkg], projectIds: [projectId], counts: { attachmentVersions: 1 },
+      configuration: { ...extension.sourceImport.configuration, packageIds: [pkg.stagingId], projects: [], appendPagesTo: { projectId, refreshAttachments: true } } };
+    root.id = randomUUID();
+    root.sourceImportId = id;
+    root.targetId = randomUUID();
+    root.record.metadata = { attachmentVersion: '3', size: 4, sha256: 'e'.repeat(64) };
+    extension.sourceRecords = [root];
+    extension.attachmentVersions = [{ ...extension.attachmentVersions[0], id: root.targetId, size: 4, sha256: 'e'.repeat(64),
+      sourceImportId: id, sourceRecordId: root.id, sourceRevision: 3, versionLabel: '3' }];
+    extension.issueRelations = [];
+
+    const corrupt = structuredClone(extension);
+    corrupt.sourceRecords[0].record.id = 'attachment:different-slot';
+    corrupt.sourceRecords[0].record.sourceId = 'different-slot';
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(corrupt)), /원본 연결과 새 버전/);
+    const unreviewed = structuredClone(extension);
+    delete unreviewed.sourceImport.configuration.appendPagesTo?.refreshAttachments;
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(unreviewed)), /첨부 버전의 출처/);
+
+    const versions = new AttachmentVersionsService(f.store, f.dir);
+    f.store.transaction(() => f.service.persistPrepared(extension));
+    f.store.transaction(() => f.service.persistPrepared(extension));
+    assert.equal(f.service.attachmentVersions(anchor.id).at(0)?.id, root.targetId);
+    assert.equal(versions.head(anchor).currentVersionId, root.targetId);
+    assert.deepEqual(f.store.get('attachments', anchor.id), anchor);
+
+    const manual = versions.append(anchor.id, root.targetId, { filename: 'manual.txt', bytes: Buffer.from('manual'), authorId: 'actor' }, () => {});
+    assert.equal(versions.head(anchor).currentVersionId, manual.currentVersionId);
+    assert.deepEqual(f.service.attachmentVersions(anchor.id).slice(0, 2).map(row => row.id), [manual.currentVersionId, root.targetId]);
+    const backup = data(f);
+    assert.deepEqual(f.service.validateImport(backup, f.context()), backup);
+    const wrongAnchor = structuredClone(backup);
+    const old = wrongAnchor.records.find(row => row.id === links[1].id)!;
+    old.record.metadata.attachmentVersion = '5';
+    for (const receipt of wrongAnchor.imports) delete receipt.integrity;
+    assert.throws(() => f.service.validateImport(wrongAnchor, f.context()), /원본 연결과 새 버전/);
   } finally { f.close(); }
 });
 

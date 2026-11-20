@@ -158,6 +158,80 @@ test('all available attachment versions retain distinct files and a missing newe
   const source=confluence(),sha1=createHash('sha256').update('one').digest('hex'),sha2=createHash('sha256').update('two').digest('hex');source.dataset.records.push(record('attachment','a3',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'3'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a2',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'2',currentVersionId:'a3',packagePath:'attachments/two',sha256:sha2,size:3,mimeType:'text/html'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a1',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'1',currentVersionId:'a3',packagePath:'attachments/one',sha256:sha1,size:3},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}));source.dataset.records.find(row=>row.id==='page:10')!.text='<ac:image><ri:attachment ri:filename="image.png"/></ac:image>';const request=input([source]);request.fileInfo={wiki:{'attachments/one':{size:3,sha256:sha1,mimeType:'image/png'},'attachments/two':{size:3,sha256:sha2,mimeType:'image/png'}}};const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.attachments.length,1);assert.equal(plan.attachmentVersions.length,2);assert.equal(plan.fileCopies.length,2);const latest=plan.attachmentVersions.find(version=>version.versionLabel==='2')!;assert.equal(plan.attachments[0].id,latest.id);assert.equal(plan.attachments[0].mimeType,'image/png');assert.ok(plan.attachmentVersions.every(version=>version.attachmentId===latest.id));assert.equal(new Set(plan.fileCopies.map(file=>file.fileId)).size,2);assert.ok(plan.preview.requiredAcknowledgements.includes('ATTACHMENT_LATEST_MISSING'));const absent=plan.sourceRecords.find(row=>row.record.id==='attachment:a3')!;assert.equal(absent.targetId,null);assert.equal(absent.ownerId,plan.documents[0].id);assert.equal(plan.sourceRecords.find(row=>row.record.id==='attachment:a1')!.targetId,plan.attachmentVersions.find(version=>version.versionLabel==='1')!.id);assert.ok(JSON.stringify(plan.documents[0].content).includes(`attachments/${latest.id}/content?inline=1`));
 });
 
+test('Confluence attachment refresh preserves source pins and guards ambiguous or unavailable versions', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const asset = (id: string, revision: number, bytes?: string, root?: string, sourcePage = '10') => record('attachment', id, {
+    title: 'image.png', containerId: sourcePage, createdAt: created,
+    references: [{ kind: 'page', sourceId: sourcePage, relation: 'container-content' }],
+    metadata: { attachmentVersion: String(revision), ...(root ? { currentVersionId: root } : {}), ...(bytes ? {
+      packagePath: `attachments/${id}/${revision}`, sha256: createHash('sha256').update(bytes).digest('hex'), size: Buffer.byteLength(bytes),
+    } : {}) },
+  });
+  const initial = pkg('first-wiki', 'confluence', [space, page('10', { authorId: null }), asset('file', 1, 'old')]);
+  const baseline = buildMigrationPlan(input([initial]));
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const project = baseline.projects[0], document = baseline.documents[0], firstFile = baseline.attachmentVersions[0];
+  const archive = baseline.sourceRecords.find(row => row.targetId === document.id)!;
+  const knownFile = {
+    sourcePageId: '10', sourceRootId: 'file', sourceId: 'file', sourceRevision: 1, filename: 'image.png',
+    documentId: document.id, version: firstFile, hasLocalVersions: true,
+  };
+  const known = [knownFile];
+  const delta = (rows: LegacyRecord[], prior: NonNullable<MigrationPlanningInput['appendPages']>['knownAttachments'] = known) => {
+    const source = pkg('next-wiki', 'confluence', [space, ...rows]);
+    source.dataset.source.instanceKey = initial.dataset.source.instanceKey;
+    const request = input([source]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true, refreshAttachments: true };
+    request.appendPages = {
+      project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'append-files', knownAttachments: prior,
+      knownPages: [{ sourceId: '10', sourceSpaceId: 's', projectId: project.id, documentId: document.id, sourceTitle: document.title }],
+      refreshDocuments: [{ document, previous: archive, previousTimezone: 'UTC' }],
+    };
+    return buildMigrationPlan(request);
+  };
+  const use = (id?: string) => `<ac:link><ri:attachment ${id ? `ri:content-id="${id}"` : 'ri:filename="image.png"'}><ri:page ri:content-id="10"/></ri:attachment></ac:link>`;
+  const update = (text: string) => page('10', { authorId: null, text, metadata: { version: '4' } });
+  const next = delta([update(`<p>${use()} ${use('old-alias')}</p>`), asset('file', 2, 'new'), asset('old-alias', 1, 'old', 'file')]);
+  assert.equal(next.preview.canApply, true, JSON.stringify(next.preview.notices));
+  assert.deepEqual(next.confluenceAttachmentOwners, [document.id]);
+  assert.equal(next.preview.counts.newConfluenceAttachmentVersions, 1);
+  assert.equal(next.preview.counts.newConfluenceAttachments, 0);
+  assert.equal(next.attachments.length, 0);
+  assert.equal(next.fileCopies.length, 1);
+  const extended = next.attachmentVersions[0];
+  assert.equal(extended.attachmentId, firstFile.attachmentId);
+  assert.equal(extended.sourceRevision, 2);
+  assert.equal(next.sourceRecords.find(row => row.record.id === 'attachment:old-alias')?.targetId, null);
+  assert.deepEqual(next.reusedAttachmentVersions?.map(file => file.id), [firstFile.id]);
+  const body = JSON.stringify(next.documentUpdates?.[0].changes.content);
+  assert.ok(body.includes(`${firstFile.id}/content`));
+  assert.ok(body.includes(`${extended.id}/content`));
+
+  const absent = delta([update(`<p>${use()}</p>`), asset('file', 2)]);
+  assert.equal(absent.preview.canApply, false);
+  assert.equal(absent.documentUpdates?.length, 0);
+  assert.ok(notices(absent).has('CONFLUENCE_REFRESH_BODY_UNAVAILABLE'));
+  assert.equal(absent.reusedAttachmentVersions?.length, 0);
+  const changedBytes = delta([update(`<p>${use()}</p>`), asset('file', 1, 'unexpected')]);
+  assert.equal(changedBytes.preview.canApply, false);
+  assert.ok(notices(changedBytes).has('CONFLUENCE_ATTACHMENT_VERSION_CONFLICT'));
+  const tombstoned = delta([page('10', { authorId: null }), asset('file', 2, 'new')], [{ ...knownFile, version: null }]);
+  assert.equal(tombstoned.preview.canApply, false);
+  assert.equal(tombstoned.attachmentVersions.length, 0);
+
+  const historyOnly = { ...knownFile, sourceId: 'historical-newer', sourceRevision: 2, version: extended };
+  const borrower = delta([page('20', { authorId: null, text: `<p>${use()} ${use('historical-newer')}</p>` })], [knownFile, historyOnly]);
+  assert.equal(borrower.preview.canApply, true, JSON.stringify(borrower.preview.notices));
+  assert.ok(notices(borrower).has('UNRESOLVED_ATTACHMENT'));
+  assert.deepEqual(borrower.reusedAttachmentVersions?.map(file => file.id), [extended.id]);
+  assert.ok(!JSON.stringify(borrower.documents[0].content).includes(`${firstFile.id}/content`));
+
+  const moved = delta([page('20', { authorId: null }), asset('file', 2, 'unexpected', undefined, '20')]);
+  assert.equal(moved.preview.canApply, true, JSON.stringify(moved.preview.notices));
+  assert.equal(moved.attachmentVersions.length, 0);
+  assert.ok(notices(moved).has('CONFLUENCE_ATTACHMENT_OWNER_CONFLICT'));
+});
+
 test('restricted content blocks apply and explicit primary exclusion cascades descendants while preserving source archives',()=>{
   const source=confluence();source.dataset.records.find(row=>row.id==='page:10')!.metadata.restricted=true;source.dataset.diagnostics.push({id:'restricted',severity:'error',code:'CONFLUENCE_RESTRICTED_CONTENT',message:'restricted',recordId:'page:10',path:null});const request=input([source]),blocked=buildMigrationPlan(request);assert.equal(blocked.preview.canApply,false);assert.ok(notices(blocked).has('RESTRICTED_CONTENT'));request.configuration.excludedRecords=['wiki/page:10'];const allowed=buildMigrationPlan(request);assert.equal(allowed.preview.canApply,true,JSON.stringify(allowed.preview.notices));assert.equal(allowed.documents.length,0);assert.equal(allowed.comments.length,0);assert.equal(allowed.revisions.length,0);assert.equal(allowed.preview.counts.excludedRecords,3);for(const archive of allowed.sourceRecords.filter(row=>['page','comment','revision'].includes(row.record.kind))){assert.equal(archive.targetId,null);assert.equal(archive.ownerId,null);}assert.equal(allowed.sourceRecords.length,source.dataset.records.length);for(const[field,value]of [['security',{id:'private',name:'비공개'}],['Security Level','Internal']] as const){const source=jira();(source.dataset.records.find(row=>row.id==='issue:1')!.metadata.fields as Record<string,unknown>)[field]=value;assert.equal(buildMigrationPlan(input([source])).preview.canApply,false);}for(const internal of ['false','true']){const source=jira();source.dataset.records.find(row=>row.id==='comment:jc')!.metadata.visibility=[{key:'sd.public.comment',value:{internal}}];assert.equal(buildMigrationPlan(input([source])).preview.canApply,internal==='false');}
 });

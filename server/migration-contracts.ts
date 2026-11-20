@@ -21,6 +21,16 @@ export interface MigrationConfluenceDocumentUpdate {
   expectedVersion: number;
   changes: ConfluenceMigrationDocumentValues;
 }
+export interface MigrationConfluenceKnownAttachment {
+  sourcePageId: string;
+  sourceRootId: string;
+  sourceId: string;
+  sourceRevision: number | null;
+  filename: string;
+  documentId: string;
+  version: AttachmentVersion | null;
+  hasLocalVersions: boolean;
+}
 export interface MigrationAppendContext {
   project: Project;
   workflow: ProjectWorkflow;
@@ -37,6 +47,7 @@ export interface MigrationPageAppendContext {
   token: string;
   knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string }[];
   refreshDocuments?: MigrationConfluenceRefreshCandidate[];
+  knownAttachments?: MigrationConfluenceKnownAttachment[];
 }
 export interface MigrationPlanningInput {
   id:string;configuration:MigrationConfiguration;actorId:string;users:User[];existingProjectKeys:string[];
@@ -57,4 +68,6 @@ export interface PreparedMigration {
   appendPages?: { projectId: string; token: string };
   issueUpdates?: MigrationJiraIssueUpdate[];
   documentUpdates?: MigrationConfluenceDocumentUpdate[];
+  confluenceAttachmentOwners?: string[];
+  reusedAttachmentVersions?: AttachmentVersion[];
 }

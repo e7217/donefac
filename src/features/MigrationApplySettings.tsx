@@ -15,7 +15,11 @@ const categoryLabels: Record<StatusCategory, string> = { backlog: '백로그', t
 const fieldLabels: Record<CustomFieldKind | 'archive', string> = { archive: '원본 보관만', text: '텍스트', number: '숫자', date: '날짜', select: '단일 선택', multi_select: '여러 선택', checkbox: '체크박스', user: '사용자', url: 'URL' };
 const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinkedAtlassianRecords: '원본 링크 미생성' };
 const jiraRefreshCountLabels = { updatedIssues: '변경 업무', updatedFields: '반영 필드', conflictingFields: '현재 값을 유지할 필드', skippedIssueUpdates: '변경을 건너뛴 업무' };
-const confluenceRefreshCountLabels = { updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서' };
+const confluenceRefreshCountLabels = {
+  updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',
+  newConfluenceAttachments: '기존 문서의 새 첨부', newConfluenceAttachmentVersions: '기존 첨부의 새 버전',
+  reusedConfluenceAttachmentVersions: '재사용한 첨부 버전', skippedConfluenceAttachments: '변경을 건너뛴 첨부',
+};
 const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', labels: '라벨',
   startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량',
@@ -38,8 +42,11 @@ type DestinationMode = 'new' | keyof typeof appendLabels;
 const destinationMode = (configuration: MigrationConfiguration | null | undefined): DestinationMode =>
   configuration?.appendTo ? 'append' : configuration?.appendPagesTo ? 'append-pages' : 'new';
 type RefreshProduct = 'Jira' | 'Confluence';
-const refreshProduct = (configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined =>
-  configuration?.appendTo?.refreshExisting ? 'Jira' : configuration?.appendPagesTo?.refreshExisting ? 'Confluence' : undefined;
+function refreshProduct(configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined {
+  if (configuration?.appendTo?.refreshExisting) return 'Jira';
+  const pages = configuration?.appendPagesTo;
+  if (pages?.refreshExisting || pages?.refreshAttachments) return 'Confluence';
+}
 const refreshNoChanges: Record<RefreshProduct, string> = { Jira: 'JIRA_REFRESH_NO_CHANGES', Confluence: 'CONFLUENCE_REFRESH_NO_CHANGES' };
 const errorText = (error: unknown) => error instanceof Error ? error.message : '요청을 완료하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
@@ -50,6 +57,11 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   const actions: string[] = [];
   if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
+  if (product === 'Confluence') {
+    const { newConfluenceAttachments, newConfluenceAttachmentVersions } = counts;
+    if (newConfluenceAttachments) actions.push(`기존 문서에 새 첨부 ${newConfluenceAttachments.toLocaleString()}건 추가`);
+    if (newConfluenceAttachmentVersions) actions.push(`기존 첨부에 새 버전 ${newConfluenceAttachmentVersions.toLocaleString()}건 추가`);
+  }
   return actions.join(' · ');
 }
 
@@ -188,6 +200,9 @@ function ActorMigration(props: FeatureProps) {
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
             최신 원본의 제목과 본문을 현재 문서와 비교합니다. 팀에서 바꾼 제목이나 본문은 그대로 유지합니다.
           </RefreshOption>}
+          {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} option="refreshAttachments" onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서에 첨부와 버전 추가">
+            새 첨부와 원본 파일의 새 버전을 검토합니다. 팀이 올린 버전은 현재 파일로 유지합니다.
+          </RefreshOption>}
         </section>}
         {mode === 'new' && <><h3>새 프로젝트</h3><p>프로젝트 키와 이름을 지정하세요. 여러 원본 컨테이너에 같은 키·이름을 지정하면 하나로 합칩니다.</p>
         <Paged title="프로젝트 매핑" items={options.containers} label={item => `${item.name} ${item.proposedKey}`} render={item => { const project = configuration.projects.find(value => value.containerId === item.id); if (!project) return <p className="migration-error">기본 매핑에 없는 컨테이너입니다: {item.name}</p>; return <div className="migration-project-row"><div><strong>{item.name}</strong><small>업무 {item.issueCount} · 문서 {item.documentCount}</small></div><label>새 프로젝트 키<input className="field" aria-label={`새 프로젝트 키 ${item.name}`} value={project.key} maxLength={12} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, key: event.target.value } : value) })} /></label><label>새 프로젝트 이름<input className="field" aria-label={`새 프로젝트 이름 ${item.name}`} value={project.name} maxLength={100} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, name: event.target.value } : value) })} /></label></div>; }} />
@@ -325,16 +340,17 @@ type AppendMapping = NonNullable<MigrationConfiguration['appendTo']>;
 type PageAppendMapping = NonNullable<MigrationConfiguration['appendPagesTo']>;
 type MappingChoice = { id: string; label: string; detail?: string };
 
-function RefreshOption<Mapping extends { refreshExisting?: true }>({ value, onChange, label, children }: {
-  value: Mapping; onChange: (next: Mapping) => void; label: string; children: ReactNode;
+type RefreshFlag = 'refreshExisting' | 'refreshAttachments';
+function RefreshOption<Mapping extends Partial<Record<RefreshFlag, true>>>({ value, option = 'refreshExisting', onChange, label, children }: {
+  value: Mapping; option?: RefreshFlag; onChange: (next: Mapping) => void; label: string; children: ReactNode;
 }) {
   const labelId = useId();
   const helpId = useId();
   return <label className="migration-refresh-option">
-    <input type="checkbox" checked={value.refreshExisting === true} aria-labelledby={labelId} aria-describedby={helpId} onChange={event => {
+    <input type="checkbox" checked={value[option] === true} aria-labelledby={labelId} aria-describedby={helpId} onChange={event => {
       const next = { ...value };
-      if (event.target.checked) next.refreshExisting = true;
-      else delete next.refreshExisting;
+      if (event.target.checked) next[option] = true;
+      else delete next[option];
       onChange(next);
     }} />
     <span id={labelId}>{label}</span>

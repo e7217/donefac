@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -425,6 +425,127 @@ test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 
     await selectPackage(settings, next.filename);
     await mode.selectOption('append-pages');
     await refresh.check();
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await expect(review.getByRole('heading', { name: '적용할 Confluence 변경이 없습니다', exact: true })).toBeVisible();
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px에서 기존 Confluence 문서에 첨부를 추가하고 새 버전과 고정된 이전 파일을 내려받는다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), instance = `confluence-attachment-append-${id}`, title = `첨부를 이관한 기존 문서 ${id}`;
+  const teamProjectName = `첨부를 보존하는 프로젝트 ${id}`, seriesName = `자료-${id}.txt`, addedName = `새 자료-${id}.txt`;
+  const oldBytes = Buffer.from('처음 이관한 원본 자료'), newBytes = Buffer.from('새로 반영한 원본 자료 v2'), addedBytes = Buffer.from('기존 문서에 처음 추가하는 파일');
+  const pinnedText = '이관 당시 자료';
+  const body = `<p><ac:link><ri:attachment ri:filename="${seriesName}"/><ac:plain-text-link-body>${pinnedText}</ac:plain-text-link-body></ac:link></p>`;
+  const owner = '<property name="containerContent" class="Page"><id name="id">100</id></property>';
+  const attachment = (sourceId: number, filename: string, version: number, related = '') => `<object class="Attachment">
+    <id name="id">${sourceId}</id><property name="title">${filename}</property><property name="version">${version}</property>
+    <property name="creationDate">2020-01-0${version + 1}T00:00:00Z</property>${owner}${related}</object>`;
+  const exportSpace = (updated: boolean) => zip([
+    { path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+      <object class="Space"><id name="id">42</id><property name="key">CA${id}</property><property name="name">첨부 원본 공간 ${id}</property></object>
+      <object class="Page"><id name="id">100</id><property name="title">${title}</property><property name="version">1</property>
+        <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property>
+        <property name="space" class="Space"><id name="id">42</id></property></object>
+      <object class="BodyContent"><id name="id">500</id><property name="body"><![CDATA[${body}]]></property>
+        <property name="content" class="Page"><id name="id">100</id></property></object>
+      ${updated ? [
+        attachment(700, seriesName, 2, '<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection>'),
+        attachment(701, seriesName, 1, '<property name="originalVersion" class="Attachment"><id name="id">700</id></property>'),
+        attachment(710, addedName, 1),
+      ].join('') : attachment(700, seriesName, 1)}
+    </hibernate-generic>`) },
+    { path: 'attachments/100/700/1', bytes: oldBytes },
+    ...(updated ? [{ path: 'attachments/100/700/2', bytes: newBytes }, { path: 'attachments/100/710/1', bytes: addedBytes }] : []),
+  ]);
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const original = await upload(request, `original-attachments-${id}.zip`, exportSpace(false), instance);
+    staged.push(original);
+    const originalImport = await importIntoProject(request, original, `CA${id}`, teamProjectName);
+    const [projectId] = originalImport.import.projectIds;
+    const before = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).documents.find(doc => doc.projectId === projectId && doc.title === title)!;
+    expect(before).toBeTruthy();
+    const ownerQuery = new URLSearchParams({ resourceType: 'document', resourceId: before.id });
+    const [anchor] = await (await request.get(`/api/attachments?${ownerQuery}`)).json() as AttachmentHead[];
+    expect(anchor).toMatchObject({ filename: seriesName, versionCount: 1 });
+
+    const next = await upload(request, `next-attachments-${id}.zip`, exportSpace(true), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append-pages');
+    const attachmentOption = settings.getByRole('checkbox', { name: '기존 Confluence 문서에 첨부와 버전 추가', exact: true });
+    const documentOption = settings.getByRole('checkbox', { name: '기존 Confluence 문서 변경분 반영', exact: true });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(attachmentOption).not.toBeChecked();
+    const defaultReview = await preview(page, settings);
+    expect(defaultReview.canApply).toBe(false);
+    expect(defaultReview.configuration.appendPagesTo).toEqual({ projectId });
+    await attachmentOption.check();
+    await expect(review).toHaveCount(0);
+    await documentOption.check();
+    await mode.selectOption('new');
+    await expect(attachmentOption).toHaveCount(0);
+    await mode.selectOption('append-pages');
+    await expect(attachmentOption).toBeChecked();
+    await expect(documentOption).toBeChecked();
+    await documentOption.uncheck();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendPagesTo).toEqual({ projectId, refreshAttachments: true });
+    expect(plan.counts).toMatchObject({ documents: 0, newConfluenceAttachments: 1, newConfluenceAttachmentVersions: 1 });
+    await expect(review.getByText('기존 문서의 새 첨부 1', { exact: true })).toBeVisible();
+    await expect(review.getByText('기존 첨부의 새 버전 1', { exact: true })).toBeVisible();
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('기존 문서에 새 첨부 1건 추가');
+      expect(dialog.message()).toContain('기존 첨부에 새 버전 1건 추가');
+      await dialog.accept();
+    });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Confluence 이관 결과', exact: true })).toBeVisible();
+    await expect(receipt.getByText('기존 문서의 새 첨부 1', { exact: true })).toBeVisible();
+    await expect(receipt.getByText('기존 첨부의 새 버전 1', { exact: true })).toBeVisible();
+    const current = await (await request.get(`/api/attachments?${ownerQuery}`)).json() as AttachmentHead[];
+    const newHead = current.find(item => item.id === anchor.id);
+    expect(newHead).toMatchObject({ filename: seriesName, versionCount: 2 });
+    expect(newHead?.currentVersionId).not.toBe(anchor.id);
+    expect((await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).documents.find(doc => doc.id === before.id)).toEqual(before);
+
+    await page.goto(`/#/${projectId}/documents/${before.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(title);
+    const pinned = page.locator('.docs-prose').getByRole('link', { name: pinnedText, exact: true });
+    await expect(pinned).toHaveAttribute('href', `/api/attachments/${anchor.id}/content`);
+    await page.getByRole('button', { name: '파일 첨부', exact: true }).click();
+    const attachmentPanel = page.getByRole('region', { name: '첨부파일', exact: true });
+    await expect(attachmentPanel.getByRole('link', { name: addedName, exact: true })).toBeVisible();
+    const download = async (link: Locator) => {
+      const [file] = await Promise.all([page.waitForEvent('download'), link.click()]);
+      return readFile((await file.path())!);
+    };
+    expect(await download(attachmentPanel.getByRole('link', { name: `${seriesName} 다운로드`, exact: true }))).toEqual(newBytes);
+    await attachmentPanel.getByRole('button', { name: `${seriesName} 버전`, exact: true }).click();
+    const versions = attachmentPanel.getByRole('region', { name: `${seriesName} 보존 버전`, exact: true });
+    const prior = versions.getByRole('link', { name: `${seriesName} 버전 1 다운로드`, exact: true });
+    const latest = versions.getByRole('link', { name: `${seriesName} 버전 2 다운로드`, exact: true });
+    await expect(latest.locator('..')).toContainText('최신 버전');
+    expect(await download(prior)).toEqual(oldBytes);
+    expect(await download(latest)).toEqual(newBytes);
+
+    await open(page, request);
+    await selectPackage(settings, next.filename);
+    await mode.selectOption('append-pages');
+    await attachmentOption.check();
     expect((await preview(page, settings)).canApply).toBe(false);
     await expect(review.getByRole('heading', { name: '적용할 Confluence 변경이 없습니다', exact: true })).toBeVisible();
     await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();

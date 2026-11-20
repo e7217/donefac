@@ -490,16 +490,34 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     persistCanonical(value, req) {
       const refreshedIssues = prepareJiraRefreshes(value);
       const refreshedDocuments = prepareConfluenceRefreshes(value);
+      const attachmentOwners = new Set(value.confluenceAttachmentOwners ?? []);
+      const newConfluenceAttachments = value.attachments.filter(file => attachmentOwners.has(file.resourceId)).length;
+      const newConfluenceVersions = value.attachmentVersions.filter(version => version.sourceRevision !== undefined).length;
       if (value.appendPages) {
         const { projectId } = value.appendPages;
         get<Project>('projects', projectId);
         const newDocumentIds = new Set(value.documents.map(document => document.id));
+        const newAttachmentIds = new Set(value.attachments.map(attachment => attachment.id));
+        if (attachmentOwners.size && (value.preview.configuration.appendPagesTo?.refreshAttachments !== true ||
+            [...attachmentOwners].some(id => store.get<DocPage>('documents', id)?.projectId !== projectId))) {
+          fail('첨부를 추가할 기존 Confluence 문서를 확인해 주세요.', 409);
+        }
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length ||
-            (!value.documents.length && !refreshedDocuments.length) ||
+            (!value.documents.length && !refreshedDocuments.length && !newConfluenceAttachments && !newConfluenceVersions) ||
             value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
             value.revisions.some(revision => !newDocumentIds.has(revision.documentId)) ||
-            [...value.comments, ...value.attachments].some(record => record.resourceType !== 'document' || !newDocumentIds.has(record.resourceId))) {
+            value.comments.some(record => record.resourceType !== 'document' || !newDocumentIds.has(record.resourceId)) ||
+            value.attachments.some(file => file.resourceType !== 'document' || (!newDocumentIds.has(file.resourceId) && !attachmentOwners.has(file.resourceId)) ||
+              store.get('attachments', file.id) || store.get('attachment_versions', file.id))) {
           fail('기존 프로젝트에 추가할 문서의 범위가 올바르지 않습니다.',409);
+        }
+        for (const version of value.attachmentVersions) {
+          if (version.sourceRevision === undefined && newAttachmentIds.has(version.attachmentId)) continue;
+          const anchor = store.get<Attachment>('attachments', version.attachmentId);
+          if (version.sourceRevision === undefined || !attachmentOwners.has(version.resourceId) || version.resourceType !== 'document' ||
+              anchor?.resourceType !== 'document' || anchor.resourceId !== version.resourceId) {
+            fail('기존 Confluence 첨부의 원본 버전과 문서를 확인해 주세요.', 409);
+          }
         }
       } else if (value.append) {
         const { projectId, startIssueNumber } = value.append;
@@ -556,11 +574,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : refreshedDocuments.length ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
+      if (newConfluenceAttachments) details.push(`기존 문서에 첨부 ${newConfluenceAttachments}개 추가`);
+      if (newConfluenceVersions) details.push(`기존 첨부에 버전 ${newConfluenceVersions}개 추가`);
       activity(req, 'source-import', value.sourceImport.id, action, details.join(' · '));
     },
   });
@@ -1278,6 +1298,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<38&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo!==undefined))fail('기존 프로젝트에 Confluence 문서를 추가한 영수증에는 schemaVersion 38 백업이 필요합니다.');
     if(data.schemaVersion<39&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshExisting!==undefined))fail('기존 Jira 업무의 변경분을 반영한 영수증에는 schemaVersion 39 백업이 필요합니다.');
     if(data.schemaVersion<40&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshExisting!==undefined))fail('기존 Confluence 문서의 변경분을 반영한 영수증에는 schemaVersion 40 백업이 필요합니다.');
+    if(data.schemaVersion<41&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshAttachments!==undefined))fail('기존 Confluence 문서의 첨부를 추가한 영수증에는 schemaVersion 41 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

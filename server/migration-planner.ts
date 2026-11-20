@@ -1,5 +1,5 @@
 import { createHash,randomUUID } from 'node:crypto';
-import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,SourceRecordArchive,StatusCategory } from '../shared/types.js';
+import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
 import { defaultIssueSchema, fieldApplies } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
@@ -9,7 +9,7 @@ import { convertLegacyContent } from './migration-content.js';
 import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
-import type { MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
+import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
@@ -225,12 +225,45 @@ type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment
 type KnownIssue = { issueId: string; projectId: string | null };
 type KnownPage = MigrationPageAppendContext['knownPages'][number];
 type ResolvedReference = { id: string; label: string; url?: string };
+type AttachmentOwner = Binding & {type: 'issue' | 'document'};
+interface ConfluenceAttachmentSeries {
+  sourceRootId: string;
+  known: MigrationConfluenceKnownAttachment[];
+  entries: Entry[];
+}
+type PlannedAttachment = { entry: Entry; value: AttachmentVersion; path: string };
 const pageOwnerRelations = new Set(['container-content', 'current-version', 'body-owner']);
+const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+function confluenceAttachmentRevision(row: LegacyRecord): number | null {
+  const label = string(row.metadata.attachmentVersion ?? row.metadata.version);
+  const revision = Number(label);
+  return /^\d+$/.test(label) && Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
+function attachmentFilename(row: LegacyRecord): string {
+  return row.title || string(row.metadata.filename || row.metadata.fileName);
+}
+
+function attachmentReference(version: AttachmentVersion, label = version.filename): ResolvedReference {
+  const inline = imageTypes.has(version.mimeType);
+  return { id: version.id, label, url: `/api/attachments/${version.id}/content${inline ? '?inline=1' : ''}` };
+}
+
+function confluenceAttachmentLocation(sourcePageId: string, sourceRootId: string): string {
+  return JSON.stringify([sourcePageId, sourceRootId]);
+}
 class Planner{
   options:MigrationOptions;result:PreparedMigration;entries:Entry[]=[];entryByKey=new Map<string,Entry>();bindings=new Map<string,Binding>();excluded=new Set<string>();projectsByContainer=new Map<string,Project>();schemas=new Map<string,ProjectIssueSchema>();workflows=new Map<string,ProjectWorkflow>();notices:MigrationNotice[]=[];noticeKeys=new Set<string>();timezoneValid=true;archiveIds=new Map<string,string>();ownerCache=new Map<string,Entry|null>();indexes=new Map<string,Map<string,LegacyRecord>>();issueById=new Map<string,Issue>();documentById=new Map<string,PreparedMigration['documents'][number]>();primaryById=new Map<string,Entry>();referenceIndex=new Map<string,Entry[]>();resolutionCache=new Map<string,{id:string;label:string;url?:string}|null>();fieldOptions=new Map<string,Map<string,MigrationOptions['fields'][number]>>();sourceOptions=new Map<string,Map<string,LegacyRecord[]>>();
   originBases = new Map<string, MigrationOriginBase>();
   private attachmentRoots = new Map<string, Entry | null>();
   private attachmentVersionsById = new Map<string, AttachmentVersion>();
+  private confluenceAttachmentSeries = new Map<string, Map<string, ConfluenceAttachmentSeries>>();
+  private confluenceAttachmentPages = new Map<string, string>();
+  private excludedConfluenceAttachmentPages = new Set<string>();
+  private confluenceAttachmentOwners = new Map<string, AttachmentOwner>();
+  private recognizedConfluenceAttachmentEntries = new Map<string, AttachmentVersion>();
+  private borrowedAttachmentVersions = new Map<string, AttachmentVersion>();
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes: JiraMigrationIssueFieldHashes }>();
@@ -984,8 +1017,263 @@ class Planner{
     for (const key of visited) this.attachmentRoots.set(key, root);
     return root;
   }
+  private fileInfo(entry: Entry) {
+    const metadata = entry.row.metadata;
+    const path = string(metadata.packagePath || metadata.path);
+    const verified = path ? this.input.fileInfo?.[entry.pkg.summary.id]?.[path] : undefined;
+    const size = verified?.size ?? Number(metadata.actualSize ?? metadata.size);
+    const sha = verified?.sha256 || string(metadata.sha256);
+    const present = Boolean(path && /^[a-f\d]{64}$/.test(sha) && Number.isSafeInteger(size) &&
+      (this.input.fileInfo === undefined || verified));
+    return { path, size, sha, present, mimeType: verified?.mimeType || 'application/octet-stream' };
+  }
+
+  private planAttachmentFile(entry: Entry, owner: AttachmentOwner, sourceRevision?: number): PlannedAttachment | null {
+    const metadata = entry.row.metadata;
+    const { path, size, sha, present, mimeType } = this.fileInfo(entry);
+    if (!present) {
+      this.notice('ATTACHMENT_BYTES_MISSING', '이 첨부 버전의 파일 바이트를 확정할 수 없습니다. 메타데이터·원문만 보존하며 가짜 파일은 만들지 않습니다.', 'warning', entry, true);
+      return null;
+    }
+    if (size === 0) {
+      this.notice('ATTACHMENT_EMPTY_ARCHIVED', '0바이트 첨부는 현재 첨부 기능에 추가하지 않고 원본 메타데이터로 보관합니다.', 'warning', entry, true);
+      return null;
+    }
+    if (size < 0 || size > MAX_FILE_BYTES) {
+      this.notice('ATTACHMENT_FILE_LIMIT', '현재 첨부 파일은20MiB 이하여야 합니다. 해당 버전을 제외하거나 패키지를 검토해 주세요.', 'error', entry);
+      return null;
+    }
+    if (metadata.sha256 && string(metadata.sha256) !== sha) {
+      this.notice('ATTACHMENT_HASH_MISMATCH', '원본 분석 메타데이터와 검증한 파일 해시가 다릅니다.', 'error', entry);
+      return null;
+    }
+    let filename: string;
+    try { filename = safeFilename(attachmentFilename(entry.row)); }
+    catch {
+      this.notice('ATTACHMENT_FILENAME_INVALID', '원본 파일명이 현재 첨부 파일명 제한에 맞지 않습니다.', 'error', entry);
+      return null;
+    }
+    const versionLabel = sourceRevision === undefined ? string(metadata.attachmentVersion || metadata.version) || 'unknown' : String(sourceRevision);
+    if (versionLabel.length > 100) this.notice('ATTACHMENT_VERSION_LABEL_LIMIT', '첨부 버전 이름이100자를 넘습니다.', 'error', entry);
+    const value: AttachmentVersion = {
+      id: randomUUID(), attachmentId: '', resourceType: owner.type, resourceId: owner.id, filename, mimeType, size,
+      sha256: sha, authorId: this.author(entry), createdAt: this.time(entry.row.createdAt, entry)!, versionLabel,
+      sourceImportId: this.input.id, sourceRecordId: this.archiveIds.get(entry.key)!,
+      ...(sourceRevision === undefined ? {} : { sourceRevision }),
+    };
+    return { entry, value, path };
+  }
+
+  private storePlannedAttachment(item: PlannedAttachment, attachmentId: string, owner: AttachmentOwner): void {
+    const { entry, value, path } = item;
+    value.attachmentId = attachmentId;
+    this.result.attachmentVersions.push(value);
+    this.result.fileCopies.push({ fileId: value.id, packageId: entry.pkg.summary.id, path, size: value.size, sha256: value.sha256 });
+    this.attachmentVersionsById.set(value.id, value);
+    this.bindings.set(entry.key, { type: 'attachment', id: value.id, projectId: owner.projectId });
+  }
+
+  private createAttachmentGroup(root: Entry, entries: Entry[], owner: AttachmentOwner): void {
+    const ordered = [...entries].sort((a, b) => {
+      if (a.key === root.key) return -1;
+      if (b.key === root.key) return 1;
+      return Number(b.row.metadata.attachmentVersion || b.row.metadata.version || 0) -
+        Number(a.row.metadata.attachmentVersion || a.row.metadata.version || 0) || a.key.localeCompare(b.key);
+    });
+    const available = ordered.flatMap(entry => {
+      const item = this.planAttachmentFile(entry, owner);
+      return item ? [item] : [];
+    });
+    const current = available[0];
+    if (!current) return;
+    if (current.entry.key !== ordered[0].key) this.notice('ATTACHMENT_LATEST_MISSING',
+      `최신 원본 첨부 버전의 바이트가 없어 가용 버전 '${current.value.versionLabel}'을 현재 첨부로 사용합니다. 더 최신 누락 버전은 별도 원본 기록으로 유지합니다.`,
+      'warning', ordered[0], true);
+    const { id, resourceType, resourceId, filename, mimeType, size, sha256, authorId, createdAt } = current.value;
+    this.result.attachments.push({ id, resourceType, resourceId, filename, mimeType, size, sha256, authorId, createdAt });
+    for (const item of available) this.storePlannedAttachment(item, id, owner);
+  }
+
+  private getConfluenceAttachmentSeries(pageId: string, sourceRootId: string): ConfluenceAttachmentSeries {
+    let page = this.confluenceAttachmentSeries.get(pageId);
+    if (!page) this.confluenceAttachmentSeries.set(pageId, page = new Map());
+    let series = page.get(sourceRootId);
+    if (!series) page.set(sourceRootId, series = { sourceRootId, known: [], entries: [] });
+    return series;
+  }
+
+  private indexConfluenceAttachmentSeries(): void {
+    const append = this.input.appendPages;
+    if (!append) return;
+    for (const page of append.knownPages) {
+      if (this.originalPage(page.sourceId)) this.confluenceAttachmentPages.set(page.documentId, page.sourceId);
+    }
+    for (const file of append.knownAttachments ?? []) {
+      if (this.originalPage(file.sourcePageId)?.documentId === file.documentId) {
+        const scoped = !file.version || file.version.resourceType === 'document' && file.version.resourceId === file.documentId;
+        this.getConfluenceAttachmentSeries(file.sourcePageId, file.sourceRootId).known.push(scoped ? file : { ...file, version: null });
+      }
+    }
+    for (const entry of this.entries) {
+      if (entry.row.kind === 'page' && this.excluded.has(entry.key)) this.excludedConfluenceAttachmentPages.add(entry.row.sourceId);
+      if (entry.row.kind !== 'attachment' || entry.pkg.dataset.source.product !== 'confluence') continue;
+      const root = this.attachmentRoot(entry);
+      const pageIds = new Set<string>();
+      for (const candidate of [entry, ...(root && root !== entry ? [root] : [])]) {
+        for (const ref of candidate.row.references) if (ref.kind === 'page' && ref.relation === 'container-content') pageIds.add(ref.sourceId);
+        const owner = this.ownerEntry(candidate);
+        if (owner?.row.kind === 'page') pageIds.add(owner.row.sourceId);
+      }
+      if (!root || pageIds.size !== 1) continue;
+      const [pageId] = pageIds;
+      if (!this.originalPage(pageId)) continue;
+      const sourceRootId = string(root.row.metadata.currentVersionId) || root.row.sourceId;
+      this.getConfluenceAttachmentSeries(pageId, sourceRootId).entries.push(entry);
+    }
+  }
+
+  private confluenceAttachmentAllowed(entry: Entry, sourcePageId: string, sourceErrors: Set<string>): boolean {
+    return !this.excluded.has(entry.key) && !this.restricted(entry) && entry.row.metadata.restricted !== true &&
+      !this.restrictedSourcePages.has(sourcePageId) && !this.excludedConfluenceAttachmentPages.has(sourcePageId) && !sourceErrors.has(entry.key);
+  }
+
+  private matchesKnownAttachment(entry: Entry, version: AttachmentVersion): boolean {
+    const { present, size, sha } = this.fileInfo(entry);
+    const claimedHash = string(entry.row.metadata.sha256);
+    return (!claimedHash || claimedHash === version.sha256) && (!present || size === version.size && sha === version.sha256);
+  }
+
+  private refreshConfluenceAttachmentSeries(sourcePageId: string, series: ConfluenceAttachmentSeries, owner: AttachmentOwner,
+    sourceErrors: Set<string>, sourceLocations: Map<string, Set<string>>): void {
+    const incoming = series.entries.filter(entry => this.confluenceAttachmentAllowed(entry, sourcePageId, sourceErrors));
+    if (!incoming.length || !this.uniqueConfluenceOrigin(incoming)) return;
+    const location = confluenceAttachmentLocation(sourcePageId, series.sourceRootId);
+    const aliases = [series.sourceRootId, ...incoming.map(entry => entry.row.sourceId)];
+    if (aliases.some(alias => [...sourceLocations.get(alias) ?? []].some(previous => previous !== location))) {
+      this.notice('CONFLUENCE_ATTACHMENT_OWNER_CONFLICT', '첨부 원본이 다른 파일 또는 문서와 연결되어 있어 원본 기록만 보관합니다.', 'warning', incoming[0], true);
+      return;
+    }
+    const refresh = this.configuration.appendPagesTo?.refreshAttachments === true;
+    if (!series.known.length) {
+      if (!refresh) return;
+      const roots = incoming.filter(entry => entry.row.sourceId === series.sourceRootId && !entry.row.metadata.currentVersionId);
+      // A new attachment must have exactly one source series and current record.
+      if (roots.length !== 1 || incoming.some(entry => entry.pkg !== roots[0].pkg)) {
+        this.notice('CONFLUENCE_ATTACHMENT_SERIES_UNAVAILABLE', '새 첨부의 원본 파일과 버전 계보를 확정할 수 없어 원본 기록만 보관합니다.', 'warning', incoming[0], true);
+        return;
+      }
+      const count = this.result.attachments.length;
+      this.createAttachmentGroup(roots[0], incoming, owner);
+      if (this.result.attachments.length > count) {
+        this.result.preview.counts.newConfluenceAttachments++;
+        for (const entry of incoming) if (this.bindings.has(entry.key)) this.confluenceAttachmentOwners.set(entry.key, owner);
+      }
+      return;
+    }
+
+    const live = series.known.flatMap(file => file.version ? [file.version] : []);
+    const anchorIds = new Set(live.map(file => file.attachmentId));
+    const knownByRevision = new Map<number, MigrationConfluenceKnownAttachment[]>();
+    for (const file of series.known) {
+      if (file.sourceRevision === null) continue;
+      const matches = knownByRevision.get(file.sourceRevision) ?? [];
+      matches.push(file);
+      knownByRevision.set(file.sourceRevision, matches);
+    }
+    let newestKnown = 0;
+    for (const revision of knownByRevision.keys()) newestKnown = Math.max(newestKnown, revision);
+    const newRevisions = new Map<number, Entry[]>();
+    for (const entry of incoming) {
+      const revision = confluenceAttachmentRevision(entry.row);
+      const previous = revision === null ? series.known.filter(item => item.sourceId === entry.row.sourceId && item.sourceRevision === null)
+        : knownByRevision.get(revision) ?? [];
+      if (previous.length) {
+        const matches = previous.flatMap(item => item.version && this.matchesKnownAttachment(entry, item.version) ? [item.version] : []);
+        if (anchorIds.size === 1 && matches.length === previous.length && new Set(matches.map(file => file.id)).size === 1) {
+          this.recognizedConfluenceAttachmentEntries.set(entry.key, matches[0]);
+        } else if (refresh) {
+          this.notice('CONFLUENCE_ATTACHMENT_VERSION_CONFLICT', '이전 첨부의 같은 원본 버전을 확인할 수 없어 기존 파일을 보존합니다.', 'warning', entry, true);
+        }
+        continue;
+      }
+      if (!refresh) continue;
+      if (anchorIds.size !== 1 || revision === null || !newestKnown || revision <= newestKnown ||
+          series.known.some(file => file.version && file.version.id === file.version.attachmentId && file.sourceRevision === null)) {
+        this.notice('CONFLUENCE_ATTACHMENT_VERSION_SKIPPED', '현재 첨부의 원본 버전보다 새로운 파일인지 확인할 수 없어 원본 기록만 보관합니다.', 'warning', entry, true);
+        continue;
+      }
+      const candidates = newRevisions.get(revision) ?? [];
+      candidates.push(entry);
+      newRevisions.set(revision, candidates);
+    }
+
+    const [attachmentId] = anchorIds;
+    for (const [revision, entries] of [...newRevisions].sort(([a], [b]) => a - b)) {
+      const supplied = entries.filter(entry => this.fileInfo(entry).present);
+      const signatures = new Set(supplied.map(entry => {
+        const file = this.fileInfo(entry);
+        return JSON.stringify([file.size, file.sha]);
+      }));
+      if (signatures.size > 1) {
+        this.notice('CONFLUENCE_ATTACHMENT_VERSION_CONFLICT', '겹치는 내보내기의 같은 첨부 버전에 서로 다른 파일이 있어 원본 기록만 보관합니다.', 'warning', entries[0], true);
+        continue;
+      }
+      const item = this.planAttachmentFile(supplied[0] ?? entries[0], owner, revision);
+      if (!item) continue;
+      this.storePlannedAttachment(item, attachmentId, owner);
+      this.confluenceAttachmentOwners.set(item.entry.key, owner);
+      for (const entry of entries) {
+        if (entry !== item.entry && this.matchesKnownAttachment(entry, item.value)) {
+          this.recognizedConfluenceAttachmentEntries.set(entry.key, item.value);
+        }
+      }
+      this.result.preview.counts.newConfluenceAttachmentVersions++;
+      if (series.known.some(file => file.hasLocalVersions)) this.notice('CONFLUENCE_ATTACHMENT_LOCAL_HEAD_RETAINED',
+        'Teamspace에서 따로 추가한 최신 파일을 유지하고 새 원본 버전은 첨부 이력에 보관합니다.', 'info', item.entry);
+    }
+  }
+
+  private confluenceAttachmentLocations(): Map<string, Set<string>> {
+    const locations = new Map<string, Set<string>>();
+    const track = (alias: string, location: string) => {
+      const matches = locations.get(alias) ?? new Set<string>();
+      matches.add(location);
+      locations.set(alias, matches);
+    };
+    for (const previous of this.input.appendPages?.knownAttachments ?? []) {
+      const location = confluenceAttachmentLocation(previous.sourcePageId, previous.sourceRootId);
+      track(previous.sourceId, location);
+      track(previous.sourceRootId, location);
+    }
+    for (const [sourcePageId, page] of this.confluenceAttachmentSeries) for (const series of page.values()) {
+      const location = confluenceAttachmentLocation(sourcePageId, series.sourceRootId);
+      for (const entry of series.entries) track(entry.row.sourceId, location);
+      if (series.entries.length) track(series.sourceRootId, location);
+    }
+    return locations;
+  }
+
+  private createExistingConfluenceFiles(sourceLocations: Map<string, Set<string>>): void {
+    const append = this.input.appendPages;
+    if (!append) return;
+    this.result.preview.counts.newConfluenceAttachments = 0;
+    this.result.preview.counts.newConfluenceAttachmentVersions = 0;
+    const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
+      .filter(item => item.recordId && item.severity === 'error' && !item.code.endsWith('ATTACHMENT_BYTES_MISSING'))
+      .map(item => `${pkg.summary.id}/${item.recordId}`)));
+    for (const [sourcePageId, page] of this.confluenceAttachmentSeries) {
+      const original = this.originalPage(sourcePageId);
+      if (!original) continue;
+      const owner: AttachmentOwner = { type: 'document', id: original.documentId, projectId: append.project.id };
+      for (const series of page.values()) this.refreshConfluenceAttachmentSeries(sourcePageId, series, owner, sourceErrors, sourceLocations);
+    }
+    this.result.confluenceAttachmentOwners = [...new Set([...this.confluenceAttachmentOwners.values()].map(owner => owner.id))];
+  }
+
   createFiles():void{
-    const groups = new Map<string, Entry[]>();
+    this.indexConfluenceAttachmentSeries();
+    const sourceLocations = this.confluenceAttachmentLocations();
+    const groups = new Map<Entry, Entry[]>();
     for (const entry of this.entries) {
       if (entry.row.kind !== 'attachment' || this.skip(entry)) continue;
       const root = this.attachmentRoot(entry);
@@ -993,25 +1281,33 @@ class Planner{
         this.notice('ATTACHMENT_VERSION_CYCLE', '첨부 버전 관계가 순환합니다.', 'error', entry);
         continue;
       }
-      const group = groups.get(root.key) ?? [];
+      const group = groups.get(root) ?? [];
       group.push(entry);
-      groups.set(root.key, group);
+      groups.set(root, group);
     }
-    for(const[rootKey,versions]of groups){const ownerEntry=this.ownerEntry(versions[0]),owner=ownerEntry?this.bindings.get(ownerEntry.key):undefined;if(!owner||!['issue','document'].includes(owner.type)){this.notice('ATTACHMENT_OWNER_MISSING','첨부 파일의 현재 업무·문서 소유자를 확정할 수 없습니다.','error',versions[0]);continue;}
-      const ordered=[...versions].sort((a,b)=>{if(a.key===rootKey)return-1;if(b.key===rootKey)return 1;return Number(b.row.metadata.attachmentVersion||b.row.metadata.version||0)-Number(a.row.metadata.attachmentVersion||a.row.metadata.version||0)||a.key.localeCompare(b.key);});
-      const available:{entry:Entry;value:AttachmentVersion}[]=[];
-      for(const entry of ordered){const metadata=entry.row.metadata,path=string(metadata.packagePath||metadata.path),verified=path?this.input.fileInfo?.[entry.pkg.summary.id]?.[path]:undefined,size=verified?.size??Number(metadata.actualSize??metadata.size),sha=verified?.sha256||string(metadata.sha256),filePresent=path&&/^[a-f\d]{64}$/.test(sha)&&Number.isSafeInteger(size)&&(this.input.fileInfo===undefined||!!verified);
-        if(!filePresent){this.notice('ATTACHMENT_BYTES_MISSING','이 첨부 버전의 파일 바이트를 확정할 수 없습니다. 메타데이터·원문만 보존하며 가짜 파일은 만들지 않습니다.','warning',entry,true);continue;}
-        if(size===0){this.notice('ATTACHMENT_EMPTY_ARCHIVED','0바이트 첨부는 현재 첨부 기능에 추가하지 않고 원본 메타데이터로 보관합니다.','warning',entry,true);continue;}if(size<0||size>MAX_FILE_BYTES){this.notice('ATTACHMENT_FILE_LIMIT','현재 첨부 파일은20MiB 이하여야 합니다. 해당 버전을 제외하거나 패키지를 검토해 주세요.','error',entry);continue;}
-        if(metadata.sha256&&string(metadata.sha256)!==sha)this.notice('ATTACHMENT_HASH_MISMATCH','원본 분석 메타데이터와 검증한 파일 해시가 다릅니다.','error',entry);
-        let filename=entry.row.title||string(metadata.filename||metadata.fileName);try{filename=safeFilename(filename);}catch{this.notice('ATTACHMENT_FILENAME_INVALID','원본 파일명이 현재 첨부 파일명 제한에 맞지 않습니다.','error',entry);continue;}
-        const versionLabel=string(metadata.attachmentVersion||metadata.version)||'unknown',id=randomUUID();if(versionLabel.length>100)this.notice('ATTACHMENT_VERSION_LABEL_LIMIT','첨부 버전 이름이100자를 넘습니다.','error',entry);const value:AttachmentVersion={id,attachmentId:'',resourceType:owner.type as 'issue'|'document',resourceId:owner.id,filename,mimeType:verified?.mimeType||'application/octet-stream',size,sha256:sha,authorId:this.author(entry),createdAt:this.time(entry.row.createdAt,entry)!,versionLabel,sourceImportId:this.input.id,sourceRecordId:this.archiveIds.get(entry.key)!};available.push({entry,value});this.result.fileCopies.push({fileId:id,packageId:entry.pkg.summary.id,path,size,sha256:sha});
+    for (const [root, versions] of groups) {
+      const ownerEntry = this.ownerEntry(versions[0]);
+      const owner = ownerEntry && this.bindings.get(ownerEntry.key);
+      if (!owner || owner.type !== 'issue' && owner.type !== 'document') {
+        this.notice('ATTACHMENT_OWNER_MISSING', '첨부 파일의 현재 업무·문서 소유자를 확정할 수 없습니다.', 'error', versions[0]);
+        continue;
       }
-      if(!available.length)continue;const current=available[0];if(current.entry.key!==ordered[0].key)this.notice('ATTACHMENT_LATEST_MISSING',`최신 원본 첨부 버전의 바이트가 없어 가용 버전 '${current.value.versionLabel}'을 현재 첨부로 사용합니다. 더 최신 누락 버전은 별도 원본 기록으로 유지합니다.`,'warning',ordered[0],true);
-      this.result.attachments.push({id:current.value.id,resourceType:current.value.resourceType,resourceId:current.value.resourceId,filename:current.value.filename,mimeType:current.value.mimeType,size:current.value.size,sha256:current.value.sha256,authorId:current.value.authorId,createdAt:current.value.createdAt});
-      for(const item of available){item.value.attachmentId=current.value.id;this.result.attachmentVersions.push(item.value);this.attachmentVersionsById.set(item.value.id,item.value);this.bindings.set(item.entry.key,{type:'attachment',id:item.value.id,projectId:owner.projectId});}
+      if (this.input.appendPages && ownerEntry?.row.kind === 'page') {
+        const sourceRootId = string(root.row.metadata.currentVersionId) || root.row.sourceId;
+        const location = confluenceAttachmentLocation(ownerEntry.row.sourceId, sourceRootId);
+        const aliases = [sourceRootId, ...versions.map(entry => entry.row.sourceId)];
+        if (aliases.some(alias => [...sourceLocations.get(alias) ?? []].some(previous => previous !== location)) ||
+            versions.some(entry => this.ownerEntry(entry)?.row.sourceId !== ownerEntry.row.sourceId)) {
+          this.notice('CONFLUENCE_ATTACHMENT_OWNER_CONFLICT', '첨부 원본이 다른 파일 또는 문서와 연결되어 있어 원본 기록만 보관합니다.', 'warning', root, true);
+          continue;
+        }
+      }
+      this.createAttachmentGroup(root, versions, { ...owner, type: owner.type });
     }
-    if(this.result.fileCopies.reduce((sum,file)=>sum+file.size,0)>MAX_EXPANDED_BYTES)this.notice('ATTACHMENT_TOTAL_LIMIT','한 이관의 첨부 바이트 합계는256MiB 이하여야 합니다.','error');
+    this.createExistingConfluenceFiles(sourceLocations);
+    if (this.result.fileCopies.reduce((sum, file) => sum + file.size, 0) > MAX_EXPANDED_BYTES) {
+      this.notice('ATTACHMENT_TOTAL_LIMIT','한 이관의 첨부 바이트 합계는256MiB 이하여야 합니다.','error');
+    }
   }
   private isConfluenceStorageReference(entry: Entry, request: MigrationReferenceInput): boolean {
     return entry.pkg.dataset.source.product === 'confluence' && entry.row.textFormat === 'confluence-storage'
@@ -1114,12 +1410,104 @@ class Planner{
     });
     return imported.length === 1 ? imported[0] : null;
   }
+  private boundConfluenceAttachmentPage(entry: Entry, request: MigrationReferenceInput): string | undefined {
+    if (request.attachmentOwner) {
+      const owner = this.confluencePage(entry, request.attachmentOwner);
+      return owner ? this.confluenceAttachmentPages.get(owner.reference.id) : undefined;
+    }
+    const owner = this.ownerEntry(entry);
+    if (owner?.row.kind === 'page' && this.originalPage(owner.row.sourceId)) return owner.row.sourceId;
+  }
+
+  private localConfluenceAttachmentRows(from: Entry, candidates: Entry[]): Entry[] {
+    const eligible = this.inConfluenceSource(from, candidates);
+    if (!this.uniqueConfluenceOrigin(eligible)) return [];
+    const local = eligible.filter(candidate => candidate.pkg.summary.id === from.pkg.summary.id);
+    return local.length ? local : eligible;
+  }
+
+  private confluenceCurrentAttachmentRows(from: Entry, candidates: Entry[]): Entry[] {
+    const eligible = this.localConfluenceAttachmentRows(from, candidates);
+    if (eligible.length <= 1) return eligible;
+    const revisions = eligible.map(entry => confluenceAttachmentRevision(entry.row));
+    if (revisions.some(revision => revision === null)) return [];
+    const newest = Math.max(...revisions.map(revision => revision ?? 0));
+    return eligible.filter((_, index) => revisions[index] === newest);
+  }
+
+  private uniquelyResolvedAttachment(versions: (AttachmentVersion | null | undefined)[]): AttachmentVersion | null {
+    const [first] = versions;
+    return first && versions.every(version => version?.id === first.id) ? first : null;
+  }
+
+  private incomingAttachmentVersions(entries: Entry[]): AttachmentVersion | null {
+    return this.uniquelyResolvedAttachment(entries.map(entry => {
+      const binding = this.bindings.get(entry.key);
+      return binding ? this.attachmentVersionsById.get(binding.id) : this.recognizedConfluenceAttachmentEntries.get(entry.key);
+    }));
+  }
+
+  private knownCurrentAttachments(series: ConfluenceAttachmentSeries): MigrationConfluenceKnownAttachment[] {
+    let highest = 0;
+    for (const file of series.known) highest = Math.max(highest, file.sourceRevision ?? 0);
+    return series.known.filter(file => file.sourceId === series.sourceRootId && (file.sourceRevision ?? 0) === highest);
+  }
+
+  private lookupBoundConfluenceAttachment(entry: Entry, sourcePageId: string, request: MigrationReferenceInput): ResolvedReference | null {
+    if (this.restrictedSourcePages.has(sourcePageId) || this.excludedConfluenceAttachmentPages.has(sourcePageId)) return null;
+    const seriesForPage = this.confluenceAttachmentSeries.get(sourcePageId);
+    if (!seriesForPage) return null;
+    const { sourceId, title } = request;
+    let version: AttachmentVersion | null;
+    if (sourceId) {
+      const lines = [...seriesForPage.values()].filter(series => series.entries.some(row => row.row.sourceId === sourceId) ||
+        series.known.some(file => file.sourceId === sourceId));
+      if (lines.length !== 1) return null;
+      const [series] = lines;
+      const present = series.entries.filter(candidate => candidate.row.sourceId === sourceId);
+      if (present.length) {
+        const scoped = sourceId === series.sourceRootId ? this.confluenceCurrentAttachmentRows(entry, present)
+          : this.localConfluenceAttachmentRows(entry, present);
+        version = this.incomingAttachmentVersions(scoped);
+      } else {
+        const known = sourceId === series.sourceRootId ? this.knownCurrentAttachments(series)
+          : series.known.filter(file => file.sourceId === sourceId);
+        version = this.uniquelyResolvedAttachment(known.map(file => file.version));
+      }
+    } else if (title) {
+      const candidates: (AttachmentVersion | null)[] = [];
+      for (const series of seriesForPage.values()) {
+        const roots = series.entries.filter(row => row.row.sourceId === series.sourceRootId && !row.row.metadata.currentVersionId);
+        const current = this.confluenceCurrentAttachmentRows(entry, roots);
+        if (roots.length) {
+          if ((current.length ? current : roots).some(row => attachmentFilename(row.row) === title)) {
+            candidates.push(current.every(row => attachmentFilename(row.row) === title) ? this.incomingAttachmentVersions(current) : null);
+          }
+          continue;
+        }
+        const known = this.knownCurrentAttachments(series);
+        if (!known.length) {
+          if (series.known.some(file => file.sourceId === series.sourceRootId && file.filename === title)) candidates.push(null);
+          continue;
+        }
+        if (!known.some(file => file.filename === title)) continue;
+        const latestKnown = known[0]?.sourceRevision ?? 0;
+        const suppliedNewer = series.entries.some(row => (confluenceAttachmentRevision(row.row) ?? 0) > latestKnown);
+        candidates.push(!suppliedNewer && known.every(file => file.filename === title) ? this.uniquelyResolvedAttachment(known.map(file => file.version)) : null);
+      }
+      version = candidates.length === 1 ? candidates[0] : null;
+    } else return null;
+
+    if (!version) return null;
+    if (!this.attachmentVersionsById.has(version.id)) this.borrowedAttachmentVersions.set(version.id, version);
+    return attachmentReference(version, title || version.filename);
+  }
+
   private resolvedReference(candidate: Entry): ResolvedReference {
     const binding = this.bindings.get(candidate.key)!;
     if (binding.type !== 'attachment') return { id: binding.id, label: candidate.row.title };
     const version = this.attachmentVersionsById.get(binding.id);
-    const inline = version && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(version.mimeType);
-    return { id: binding.id, label: candidate.row.title, url: `/api/attachments/${binding.id}/content${inline ? '?inline=1' : ''}` };
+    return version ? attachmentReference(version, candidate.row.title) : { id: binding.id, label: candidate.row.title, url: `/api/attachments/${binding.id}/content` };
   }
   resolve(entry: Entry, request: MigrationReferenceInput): ResolvedReference | null {
     const scoped = this.isConfluenceStorageReference(entry, request);
@@ -1130,8 +1518,12 @@ class Planner{
     let value: ResolvedReference | null;
     if (scoped && request.kind === 'page') value = this.confluencePage(entry, request)?.reference ?? null;
     else if (scoped) {
-      const candidate = this.confluenceAttachment(entry, request);
-      value = candidate ? this.resolvedReference(candidate) : null;
+      const boundPageId = this.boundConfluenceAttachmentPage(entry, request);
+      if (boundPageId) value = this.lookupBoundConfluenceAttachment(entry, boundPageId, request);
+      else {
+        const candidate = this.confluenceAttachment(entry, request);
+        value = candidate ? this.resolvedReference(candidate) : null;
+      }
     } else value = this.resolveUncached(entry, request);
     this.resolutionCache.set(key, value);
     return value;
@@ -1289,7 +1681,8 @@ class Planner{
         : pageCheckpoint ? { type: 'document' as const, id: pageCheckpoint.document.id, projectId: pageCheckpoint.document.projectId }
         : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
-      const owner = issueCheckpoint || pageCheckpoint ? binding : ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
+      const owner = issueCheckpoint || pageCheckpoint ? binding : this.confluenceAttachmentOwners.get(entry.key) ??
+        (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
       const issueHashes = issueCheckpoint?.hashes ??
@@ -1313,7 +1706,29 @@ class Planner{
       this.result.sourceRecords.push(value);
     }
   }
+  private collectReusedAttachmentVersions(): void {
+    if (!this.input.appendPages) return;
+    const versions = new Map<string, AttachmentVersion>();
+    const collect = (value: unknown) => {
+      if (typeof value !== 'string') return;
+      const match = /^\/api\/attachments\/([^/?]+)\/content(?:\?inline=1)?$/.exec(value);
+      const version = match && this.borrowedAttachmentVersions.get(match[1]);
+      if (version) versions.set(version.id, version);
+    };
+    const pending: RichContent[] = [...this.result.documents, ...this.result.revisions].map(document => document.content);
+    for (const update of this.result.documentUpdates ?? []) if (update.changes.content) pending.push(update.changes.content);
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.type === 'image') collect(node.attrs?.src);
+      for (const mark of node.marks ?? []) if (mark.type === 'link') collect(mark.attrs?.href);
+      for (const child of node.content ?? []) pending.push(child);
+    }
+    this.result.reusedAttachmentVersions = [...versions.values()];
+    this.result.preview.counts.reusedConfluenceAttachmentVersions = versions.size;
+  }
+
   finish():PreparedMigration{
+    this.collectReusedAttachmentVersions();
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
     const atlassianLinks = this.result.atlassianLinks.length;
     Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
@@ -1341,8 +1756,10 @@ class Planner{
       if (this.configuration.appendTo?.refreshExisting) this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
       else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
     }
-    if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendPagesTo?.refreshExisting) this.notice('CONFLUENCE_REFRESH_NO_CHANGES', '적용할 새 Confluence 문서나 기존 문서 변경분이 없습니다.', 'error');
+    if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.result.confluenceAttachmentOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendPagesTo?.refreshExisting || this.configuration.appendPagesTo?.refreshAttachments) {
+        this.notice('CONFLUENCE_REFRESH_NO_CHANGES', '적용할 새 Confluence 문서·첨부나 기존 변경분이 없습니다.', 'error');
+      }
       else this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
     }
     this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=projects.map(project=>project.id);this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;

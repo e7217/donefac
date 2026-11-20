@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { DocPage, Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
+import type { AttachmentVersion, DocPage, Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -10,9 +10,10 @@ import { buildMigrationOptions } from './migration-planner.js';
 import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
+import { AttachmentFiles } from './attachments.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
+import { confluenceAttachmentOrigin, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -23,13 +24,14 @@ const conversionVersion = 2;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
+const MAX_REUSED_FILE_BYTES = 256 * MiB;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
 type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourceSpaceId' | 'sourceSpaceKey'> & { instanceKey: string };
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
-const changedPageAppend = '대상 프로젝트, 문서 버전 또는 원본 페이지 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedPageAppend = '대상 프로젝트와 원본 연결 또는 문서·첨부 버전이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
 const jiraNumericId = /^\d+$/;
 
@@ -43,12 +45,14 @@ type Hooks = {
 
 export class MigrationService {
   private readonly append: AttachmentAppend;
+  private readonly files: AttachmentFiles;
   private closed = false;
   private current: { abort: () => void } | null = null;
   private busy = false;
 
   constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService, private readonly sources: SourcePreservationService, hasArchivedVersion: (id: string) => boolean) {
     this.append = new AttachmentAppend(dataDir);
+    this.files = new AttachmentFiles(dataDir);
     this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id) || hasArchivedVersion(id));
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
@@ -271,9 +275,65 @@ export class MigrationService {
     FROM bound_pages AS bound ORDER BY bound.sourceId`).all(instanceKey, sourceSpaceId, instanceKey, project.id) as MigrationPageAppendContext['knownPages'];
     const knownPages = boundPages.filter(page => page.sourceSpaceId === sourceSpaceId || selectedPageIds.has(page.sourceId));
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
+    const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, digest);
     const refreshDocuments = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
-    return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, ...(refreshDocuments ? { refreshDocuments } : {}) };
+    return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
+      ...(refreshDocuments ? { refreshDocuments } : {}) };
+  }
+  private confluenceKnownAttachments(knownPages: MigrationPageAppendContext['knownPages'],
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['knownAttachments']> {
+    const livePages = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
+      .map(page => [page.sourceId, page.documentId]));
+    if (!livePages.size) return [];
+    const rows = this.store.db.prepare(`SELECT snapshot.json AS archive, snapshot.owner_id AS documentId,
+      CASE WHEN anchor.id IS NOT NULL THEN version.json END AS version,
+      (SELECT newer.id FROM attachment_versions AS newer WHERE newer.attachment_id=anchor.id
+        AND json_type(newer.json,'$.localRevision')='integer'
+        ORDER BY json_extract(newer.json,'$.localRevision') DESC LIMIT 1) AS latestLocalId
+      FROM source_records AS snapshot
+      JOIN documents AS document ON document.id=snapshot.owner_id AND document.project_id=?
+      LEFT JOIN attachment_versions AS version ON version.id=snapshot.target_id
+      LEFT JOIN attachments AS anchor ON anchor.id=version.attachment_id AND anchor.resource_type='document' AND anchor.resource_id=document.id
+      WHERE snapshot.product='confluence' AND snapshot.source_instance=? AND snapshot.kind='attachment'
+        AND snapshot.owner_type='document' AND snapshot.target_type='attachment' AND json_extract(snapshot.json,'$.targetProjectId')=?
+      ORDER BY snapshot.source_id,snapshot.id`).iterate(project.id, instanceKey, project.id) as
+      Iterable<{ archive: string; documentId: string; version: string | null; latestLocalId: string | null }>;
+    const known: NonNullable<MigrationPageAppendContext['knownAttachments']> = [];
+    for (const row of rows) {
+      const archive = JSON.parse(row.archive) as SourceRecordArchive;
+      const origin = confluenceAttachmentOrigin(archive.record, (kind, id) => this.sources.confluenceArchivedRecord(archive, kind, id));
+      if (!origin || livePages.get(origin.sourcePageId) !== row.documentId) continue;
+      const stored = row.version ? JSON.parse(row.version) as AttachmentVersion : null;
+      const version = stored?.id === archive.targetId && stored?.sourceRecordId === archive.id && stored.sourceImportId === archive.sourceImportId &&
+        stored.resourceType === 'document' && stored.resourceId === row.documentId && stored.localRevision === undefined ? stored : null;
+      const filename = archive.record.title || archive.record.metadata.fileName;
+      const attachment = { ...origin, sourceId: archive.record.sourceId, filename: typeof filename === 'string' && filename ? filename.trim() : version?.filename ?? '',
+        documentId: row.documentId, version, hasLocalVersions: version !== null && row.latestLocalId !== null };
+      known.push(attachment);
+      digest.update(JSON.stringify([attachment, version ? row.latestLocalId : null])).update('\n');
+    }
+    return known;
+  }
+  private reusedConfluenceAttachmentError(prepared: PreparedMigration, pages?: MigrationPageAppendContext): string | null {
+    const reused = prepared.reusedAttachmentVersions ?? [];
+    if (!reused.length) return null;
+    const verified = new Map(pages?.knownAttachments?.flatMap(item => item.version ? [[item.version.id, item.version] as const] : []));
+    const checked = new Set<string>();
+    let bytes = 0;
+    for (const expected of reused) {
+      if (checked.has(expected.id)) continue;
+      checked.add(expected.id);
+      const current = verified.get(expected.id);
+      if (!current || current.attachmentId !== expected.attachmentId || current.resourceId !== expected.resourceId ||
+          current.sourceRecordId !== expected.sourceRecordId || current.size !== expected.size || current.sha256 !== expected.sha256 ||
+          current.mimeType !== expected.mimeType || current.filename !== expected.filename) return '재사용할 Confluence 첨부 연결이 변경되었습니다.';
+      bytes += current.size;
+      if (bytes > MAX_REUSED_FILE_BYTES) return '한 번에 확인할 재사용 첨부가 256MiB를 넘습니다. 패키지를 나누어 주세요.';
+      try { this.files.read(current); }
+      catch { return `재사용할 Confluence 첨부 파일 '${current.filename}'의 저장 바이트 또는 SHA-256을 확인할 수 없습니다.`; }
+    }
+    return null;
   }
   private confluenceRefreshDocuments(packages: MigrationPackage[], configuration: MigrationConfiguration, knownPages: MigrationPageAppendContext['knownPages'],
     { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['refreshDocuments']> {
@@ -428,6 +488,14 @@ export class MigrationService {
           recordId: sourcePackage ? `${sourcePackage.stagingId}/${duplicate.record.id}` : null, requiresAcknowledgement: false,
         });
       }
+      if (prepared.preview.canApply) {
+        const attachmentError = this.reusedConfluenceAttachmentError(prepared, appendPages);
+        if (attachmentError) {
+          prepared.preview.canApply = false;
+          prepared.preview.notices.unshift({ severity: 'error', code: 'CONFLUENCE_ATTACHMENT_REUSE_INVALID', message: attachmentError,
+            recordId: null, requiresAcknowledgement: false });
+        }
+      }
       if (prepared.preview.canApply && prepared.issueUpdates?.length) hooks.validateIssueUpdates?.(prepared, request);
       if (prepared.preview.canApply && prepared.documentUpdates?.length) hooks.validateDocumentUpdates?.(prepared, request);
 
@@ -529,6 +597,8 @@ export class MigrationService {
           if (appendPages) {
             const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
             if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
+            const attachmentError = this.reusedConfluenceAttachmentError(prepared, current);
+            if (attachmentError) fail(409, attachmentError);
           }
           const keys = new Set(this.store.all<Project>('projects').map(project => project.key));
           if (prepared.projects.some(project => keys.has(project.key))) fail(409, '이관할 프로젝트 키가 이미 사용 중입니다.');

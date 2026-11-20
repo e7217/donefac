@@ -912,6 +912,159 @@ test('reviewed Confluence deltas preserve local edits, guard collaborative sessi
   }
 });
 
+test('Confluence attachment refresh reuses pinned bytes, adds immutable versions and preserves the manual head', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const source = 'synthetic-confluence-attachment-refresh';
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
+  const date = prop('creationDate', '2020-05-01T00:00:00Z');
+  const page = (id: string, title: string, version: number, storage?: string) => [
+    object('Page', id, prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42') + date +
+      prop('lastModificationDate', `2020-05-0${version}T00:00:00Z`)),
+    ...(storage === undefined ? [] : [object('BodyContent', `9${id}`, prop('body', `<![CDATA[${storage}]]>`) + ref('content', 'Page', id))]),
+  ].join('');
+  const attachment = (id: string, version: number, filename: string, current?: string) => object('Attachment', id,
+    prop('title', filename) + prop('version', String(version)) + ref('containerContent', 'Page', '100') + date +
+    (current ? ref('originalVersion', 'Attachment', current) : ''));
+  const upload = (name: string, rows: string[], files: [string, Buffer][] = []) => f.upload(zip([
+    { path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${object('Space', '42', prop('key', 'WFILE') + prop('name', '팀 첨부 위키'))}${rows.join('')}</hibernate-generic>`) },
+    ...files.map(([path, bytes]) => ({ path: `attachments/100/${path}`, bytes })),
+  ]), `${name}.zip`, 'confluence', source);
+  const firstBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+2TmcAAAAASUVORK5CYII=', 'base64');
+  const secondBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNg+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const thirdBytes = Buffer.concat([firstBytes, Buffer.from('synthetic-third-version')]);
+  const manualBytes = Buffer.from('팀에서 직접 올린 버전');
+  const image = (attributes: string, owner = '') => `<ac:image><ri:attachment ${attributes}>${owner}</ri:attachment></ac:image>`;
+  const sources = (content: RichContent): unknown[] => [
+    ...(content.type === 'image' ? [content.attrs?.src] : []), ...(content.content ?? []).flatMap(sources),
+  ];
+  const imageUrl = (id: string) => `/api/attachments/${id}/content?inline=1`;
+  const initialPack = await upload('first-attachment', [
+    page('100', '원본 첨부 문서', 1, image('ri:filename="diagram.png"')),
+    attachment('700', 1, 'diagram.png'),
+  ], [['700/1', firstBytes]]);
+  const initial = await f.apply(await f.preview(await f.configuration(initialPack, 'WFIL')));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  const workspace = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+  const doc = (await workspace()).documents.find(page => page.projectId === projectId)!;
+  const list = () => f.call<AttachmentHead[]>(`/attachments?resourceType=document&resourceId=${doc.id}`).then(result => result.data);
+  const [anchor] = await list();
+  assert.ok(anchor);
+  assert.deepEqual(sources(doc.content), [imageUrl(anchor.id)]);
+  const expectedBytes = async (id: string, bytes: Buffer) => {
+    const response = await fetch(`${f.base}/attachments/${id}/content`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  };
+  async function config(pkg: LegacyPackageSummary, refreshAttachments = false, refreshExisting = false): Promise<MigrationConfiguration> {
+    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    assert.equal(options.appendPagesTarget?.projectId, projectId);
+    return { ...options.defaultConfiguration, appendPagesTo: { projectId,
+      ...(refreshAttachments ? { refreshAttachments: true } : {}), ...(refreshExisting ? { refreshExisting: true } : {}),
+    } };
+  }
+
+  const referencePack = await upload('new-page-with-existing-image', [page('200', '기존 이미지를 참조한 새 문서', 1,
+    image('ri:filename="diagram.png"', '<ri:page ri:content-id="100"/>'))]);
+  const referenceConfig = await config(referencePack);
+  const anchorFile = join(f.dir, 'uploads', anchor.id);
+  try {
+    writeFileSync(anchorFile, Buffer.from(firstBytes).fill(7));
+    const damaged = await f.preview(referenceConfig);
+    assert.equal(damaged.canApply, false, JSON.stringify(damaged.notices));
+  } finally { writeFileSync(anchorFile, firstBytes); }
+  const referencePlan = await f.preview(referenceConfig);
+  assert.equal(referencePlan.canApply, true, JSON.stringify(referencePlan.notices));
+  assert.equal(referencePlan.counts.reusedConfluenceAttachmentVersions, 1);
+  assert.equal(referencePlan.counts.fileCopies, 0);
+  try {
+    writeFileSync(anchorFile, Buffer.from(firstBytes).fill(9));
+    assert.equal((await f.apply(referencePlan)).status, 409);
+  } finally { writeFileSync(anchorFile, firstBytes); }
+  assert.equal((await f.apply(referencePlan)).status, 201);
+  const referencing = (await workspace()).documents.find(page => page.title === '기존 이미지를 참조한 새 문서')!;
+  assert.deepEqual(sources(referencing.content), [imageUrl(anchor.id)]);
+
+  const reviewVersions = await upload('version-two-and-new-root', [
+    page('100', '원본 첨부 문서', 2), attachment('700', 2, 'diagram.png'), attachment('701', 1, 'diagram.png', '700'),
+    attachment('710', 1, 'report.txt'),
+  ], [['700/1', firstBytes], ['700/2', secondBytes], ['710/1', Buffer.from('새 원본 보고서')]]);
+  assert.equal((await f.preview(await config(reviewVersions))).canApply, false);
+  const attachmentPlan = await f.preview(await config(reviewVersions, true));
+  assert.equal(attachmentPlan.canApply, true, JSON.stringify(attachmentPlan.notices));
+  assert.equal(attachmentPlan.counts.newConfluenceAttachments, 1);
+  assert.equal(attachmentPlan.counts.newConfluenceAttachmentVersions, 1);
+  assert.equal(attachmentPlan.counts.fileCopies, 2);
+  const secondReceipt = await f.apply(attachmentPlan);
+  assert.equal(secondReceipt.status, 201, JSON.stringify(secondReceipt.data));
+  assert.equal((await f.apply(attachmentPlan)).data.duplicate, true);
+  const secondHead = (await list()).find(file => file.id === anchor.id)!;
+  assert.notEqual(secondHead.currentVersionId, anchor.id);
+  assert.equal(secondHead.versionCount, 2);
+  assert.equal((await workspace()).documents.find(page => page.id === doc.id)?.version, doc.version);
+  await expectedBytes(anchor.id, firstBytes);
+  await expectedBytes(secondHead.currentVersionId, secondBytes);
+
+  const inconsistent = await upload('same-version-different-bytes', [page('100', '원본 첨부 문서', 2), attachment('700', 2, 'diagram.png')],
+    [['700/2', Buffer.from('같은 원본 버전 번호의 다른 바이트')]]);
+  const rejected = await f.preview(await config(inconsistent, true));
+  assert.equal(rejected.canApply, false);
+  assert.equal((await list()).find(file => file.id === anchor.id)?.currentVersionId, secondHead.currentVersionId);
+
+  const thirdPack = await upload('version-three-and-body', [
+    page('100', '원본 첨부 문서', 3, '<p>세 번째 버전과 당시 원본</p>' + image('ri:filename="diagram.png"') +
+      image('ri:filename="diagram.png" ri:content-id="701"')), attachment('700', 3, 'diagram.png'),
+    attachment('701', 1, 'diagram.png', '700'), attachment('702', 2, 'diagram.png', '700'),
+  ], [['700/1', firstBytes], ['700/2', secondBytes], ['700/3', thirdBytes]]);
+  const thirdConfig = await config(thirdPack, true, true);
+  const stale = await f.preview(thirdConfig);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  const local = await fetch(`${f.base}/attachments/${anchor.id}/versions?${new URLSearchParams({ expectedVersionId: secondHead.currentVersionId, filename: 'manual.txt' })}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(manualBytes),
+  });
+  assert.equal(local.status, 201);
+  const manualHead = await local.json() as AttachmentHead;
+  assert.equal((await f.apply(stale)).status, 409);
+  const thirdPlan = await f.preview(thirdConfig);
+  assert.equal(thirdPlan.canApply, true, JSON.stringify(thirdPlan.notices));
+  assert.equal(thirdPlan.counts.newConfluenceAttachmentVersions, 1);
+  assert.equal(thirdPlan.counts.updatedDocuments, 1);
+  assert.ok(thirdPlan.counts.reusedConfluenceAttachmentVersions >= 1);
+  const thirdReceipt = await f.apply(thirdPlan);
+  assert.equal(thirdReceipt.status, 201, JSON.stringify(thirdReceipt.data));
+  assert.equal((await list()).find(file => file.id === anchor.id)?.currentVersionId, manualHead.currentVersionId);
+  const versionsPath = `/attachments/${anchor.id}/versions`;
+  const versions = (await f.call<AttachmentVersion[]>(versionsPath)).data;
+  const third = versions.find(version => version.sourceRevision === 3);
+  assert.ok(third);
+  assert.equal(versions.length, 4);
+  const current = (await workspace()).documents.find(page => page.id === doc.id)!;
+  assert.deepEqual(sources(current.content), [imageUrl(third.id), imageUrl(anchor.id)]);
+  assert.deepEqual(sources((await workspace()).documents.find(page => page.id === referencing.id)!.content), [imageUrl(anchor.id)]);
+  await expectedBytes(third.id, thirdBytes);
+  await expectedBytes(manualHead.currentVersionId, manualBytes);
+  assert.equal((await f.preview(thirdConfig)).canApply, false);
+
+  const archived = await f.call<{trashItemId: string}>(`/attachments/${anchor.id}?expectedVersionId=${manualHead.currentVersionId}`, 'DELETE');
+  assert.equal(archived.status, 200);
+  const later = await upload('version-four-after-trash', [page('100', '원본 첨부 문서', 4), attachment('700', 4, 'diagram.png')],
+    [['700/4', Buffer.from('휴지통에서 되살리면 안 되는 파일')]]);
+  assert.equal((await f.preview(await config(later, true))).canApply, false);
+  type Backup = WorkspaceSnapshot & {schemaVersion: number};
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 40 } })).status, 400);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal((await f.call(`/trash/items/${archived.data.trashItemId}/restore`, 'POST')).status, 200);
+  assert.equal((await list()).find(file => file.id === anchor.id)?.currentVersionId, manualHead.currentVersionId);
+  await expectedBytes(anchor.id, firstBytes);
+  await expectedBytes(third.id, thirdBytes);
+});
+
 function confluence(withAuditFixtures = false) {
   const first = Buffer.from('첫 버전\r\n\x00바이너리'), latest = Buffer.from('두 번째 버전😀\r\n원본');
   const prop = (name: string, text: string) => `<property name="${name}">${text}</property>`, ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`, object = (type: string, id: string, text: string) => `<object class="${type}"><id name="id">${id}</id>${text}</object>`;

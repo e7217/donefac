@@ -368,6 +368,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 `preview.documentRefresh`로 현재 값·원본 값·반영 여부와 서식만 바뀐 본문을 확인한다. `updatedDocuments`, `updatedDocumentFields`, `conflictingDocumentFields`, `skippedDocumentUpdates`는 검토 수량이다. 한 요청은 기존 문서 300개와 비교 데이터 64MiB까지 지원한다. 본문을 갱신할 때는 문서 버전, 현재 공동 편집 참여자, 적용 후 포함 관계의 순환 여부를 확인한다. 적용은 새 문서 이력과 영수증을 함께 저장하며, 형식 40 자체 백업은 다음 이관에 사용할 필드별 비교 기준을 보존한다.
 
+### 기존 Confluence 문서에 첨부와 버전 추가
+
+`appendPagesTo.refreshAttachments: true`로 기존 문서에 새 원본 첨부를 추가하고, 이전에 연결된 첨부에는 더 높은 원본 버전 번호를 확인해 추가한다. 제목·본문의 변경분 옵션과 함께 또는 개별로 적용할 수 있다. 원본 첨부 ID, 원래 소유 페이지와 버전으로 첨부를 식별한다. 휴지통과 영구 삭제 기록이 있는 기존 첨부는 원문에 보관한다.
+
+같은 공간의 기존 원본 첨부는 원본 ID나 확인된 소유 페이지와 파일명으로 찾아 저장한 파일의 고정 버전에 연결한다. 재사용 대상은 미리보기와 적용 시 크기·SHA-256으로 검사한다. `newConfluenceAttachments`, `newConfluenceAttachmentVersions`, `reusedConfluenceAttachmentVersions`에서 기존 문서의 새 첨부, 기존 첨부에 추가할 버전과 본문에서 재사용할 버전을 확인한다. 이전 링크는 당시 파일 ID로 열리며, 파일 목록은 팀이 직접 추가한 최신 버전을 우선한다. 형식 41 자체 백업은 추가 원본 버전과 이관 설정을 보존한다.
+
 ### 적용 후 대조
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.

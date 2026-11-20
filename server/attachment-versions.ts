@@ -24,8 +24,9 @@ export class AttachmentVersionsService {
   constructor(private readonly store: Store, dataDir: string) {
     this.files = new AttachmentAppend(dataDir);
     this.summary = store.db.prepare(`SELECT (
-      SELECT json FROM attachment_versions WHERE attachment_id=? AND json_type(json,'$.localRevision')='integer'
-      ORDER BY json_extract(json,'$.localRevision') DESC LIMIT 1
+      SELECT json FROM attachment_versions WHERE attachment_id=? AND
+        (json_type(json,'$.localRevision')='integer' OR json_type(json,'$.sourceRevision')='integer')
+      ORDER BY json_extract(json,'$.localRevision') DESC, json_extract(json,'$.sourceRevision') DESC LIMIT 1
     ) AS latest, COUNT(*) AS stored, COUNT(*) FILTER (WHERE id=?) AS storedAnchor
       FROM attachment_versions WHERE attachment_id=?`);
     this.insert = store.db.prepare('INSERT INTO attachment_versions(id,attachment_id,json) VALUES(?,?,?)');
@@ -35,13 +36,13 @@ export class AttachmentVersionsService {
     const { latest, stored, storedAnchor } = this.summary.get(attachment.id, attachment.id, attachment.id) as {
       latest: string | null; stored: number; storedAnchor: number;
     };
-    const local: AttachmentVersion | null = latest ? JSON.parse(latest) : null;
-    const { filename, mimeType, size, sha256, authorId, createdAt } = local ?? attachment;
+    const version: AttachmentVersion | null = latest ? JSON.parse(latest) : null;
+    const { filename, mimeType, size, sha256, authorId, createdAt } = version ?? attachment;
     const head: AttachmentHead = {
       ...attachment, filename, mimeType, size, sha256, authorId, createdAt,
-      currentVersionId: local?.id ?? attachment.id, versionCount: stored + 1 - storedAnchor, hasVersionHistory: stored > 0,
+      currentVersionId: version?.id ?? attachment.id, versionCount: stored + 1 - storedAnchor, hasVersionHistory: stored > 0,
     };
-    return { head, localRevision: local?.localRevision ?? 1 };
+    return { head, localRevision: version?.localRevision ?? 1 };
   }
 
   head(attachment: Attachment): AttachmentHead {

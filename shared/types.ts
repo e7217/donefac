@@ -162,6 +162,7 @@ export interface MigrationPageAppendTarget {
 export interface MigrationPageAppendConfiguration {
   projectId: string;
   refreshExisting?: true;
+  refreshAttachments?: true;
 }
 export const CONFLUENCE_MIGRATION_DOCUMENT_FIELDS = ['title', 'content'] as const;
 export type ConfluenceMigrationDocumentField = typeof CONFLUENCE_MIGRATION_DOCUMENT_FIELDS[number];
@@ -219,7 +220,7 @@ export interface SourceRecordArchive {
   jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
 }
-export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number }
+export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string }
 export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
 export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};
