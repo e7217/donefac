@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
@@ -9,6 +9,7 @@ import { downloadText } from '../lib/download';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
 import { CustomFieldSummary, IssueTypeName } from './CustomFields';
+import { IssuePasteDialog } from './IssuePasteDialog';
 import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
@@ -107,6 +108,7 @@ export function Issues(props: FeatureProps & {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
   }, schema), [filters,data.issueSchemas,data.users,data.gitlabLinks,schema]);
   const [creating, setCreating] = useState(false);
+  const [pasteScope, setPasteScope] = useState<string | null>(null);
   const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');
   const [busy, setBusy] = useState<string | null>(null);
   const [orderEditProject, setOrderEditProject] = useState<string | null>(null);
@@ -129,7 +131,10 @@ export function Issues(props: FeatureProps & {
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const issues = unavailableView ? [] : projectIssues.filter(matchesIssue);
   const bulk = useIssueBulkEdit(props, issues);
-  const projectSelected = data.projects.some(project => project.id === projectId);
+  const project = data.projects.find(value => value.id === projectId);
+  const projectSelected = Boolean(project);
+  const currentPasteScope = JSON.stringify([projectId, props.actorId]);
+  if (pasteScope !== null && pasteScope !== currentPasteScope) setPasteScope(null);
   const capacities = useMemo(() => {
     const byStatus = new Map<string, BoardStatusCapacity>();
     if (projectSelected && view === 'board') {
@@ -147,6 +152,10 @@ export function Issues(props: FeatureProps & {
   const selectedCapacity = capacitySelection?.projectId === projectId ? capacities.get(capacitySelection.statusId) : undefined;
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
+  function beginPaste() {
+    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    setPasteScope(currentPasteScope);
+  }
   const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab);
   function updateProjectFilters(change: ProjectFilters) {
     setProjectFilters(previous => {
@@ -322,6 +331,8 @@ export function Issues(props: FeatureProps & {
     <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
       <div className="issue-heading-actions">
         {projectSelected && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
+        {projectSelected && view === 'list' && <button className="btn" type="button" disabled={Boolean(busy) || bulk.busy}
+          onClick={beginPaste}><ClipboardPaste size={15} aria-hidden="true" />업무 붙여넣기</button>}
         <button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button>
       </div>
     </div>
@@ -420,6 +431,8 @@ export function Issues(props: FeatureProps & {
         })}{column.length === 0 && <div className="issue-column-empty">{capacity?.issues.length ? '필터에 맞는 업무가 없습니다' : '이 상태의 업무가 없습니다'}</div>}
       </section>;
     })}</div></>)}
+    {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
+      refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
   </div>;
 }

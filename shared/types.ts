@@ -488,6 +488,21 @@ export interface Issue {
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
+export interface IssuePasteDiagnostic { line: number | null; message: string }
+export interface IssuePastePreviewRow extends Pick<Issue,
+  'title' | 'description' | 'type' | 'status' | 'priority' | 'assigneeId' | 'startDate' | 'endDate' | 'dueDate' | 'labels'
+> {
+  line: number;
+  typeName: string;
+  statusLabel: string;
+  assigneeLabel: string | null;
+}
+export interface IssuePastePreview {
+  previewId: string | null;
+  rows: IssuePastePreviewRow[];
+  errors: IssuePasteDiagnostic[];
+}
+export interface IssuePasteResult { issues: Issue[]; duplicate: boolean }
 export const ISSUE_BULK_EDIT_LIMIT = 100;
 export const ISSUE_BULK_LABEL_LIMIT = 100;
 export const ISSUE_BULK_LABEL_MAX_LENGTH = 60;

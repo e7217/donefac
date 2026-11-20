@@ -22,6 +22,7 @@ import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecision
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { IssuePasteError, IssuePasteService } from './issue-paste.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
@@ -967,13 +968,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.json(result);
   });
-  // The caller owns the transaction, including any links created with the issue.
-  const createIssueInTransaction=(req:Request,input:Record<string,unknown>):Issue=>{
+  const prepareIssueCreation=(input:Record<string,unknown>):Issue=>{
     const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
     const projectId=text(input.projectId,'프로젝트',200);
     const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
     const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
-    Object.assign(i,planning.resolveIssueFields(input,i.projectId));validateIssue(i);
+    Object.assign(i,planning.resolveIssueFields(input,i.projectId));
+    return validateIssue(i);
+  };
+  // The caller owns the transaction, including any links created with the issue.
+  const commitIssueCreation=(req:Request,i:Issue):Issue=>{
+    const timestamp=i.createdAt;
     const p=get<Project>('projects',i.projectId), row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as {next_number:number}|undefined;
     const num=row?.next_number||1;i.key=`${p.key}-${num}`;
     store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);
@@ -984,6 +989,27 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     notifyIssue(i,actorId,'issue-created',projectSubscribers(i).filter(id=>id!==i.assigneeId),timestamp);
     return i;
   };
+  const createIssueInTransaction=(req:Request,input:Record<string,unknown>):Issue=>
+    commitIssueCreation(req,prepareIssueCreation(input));
+
+  const issuePaste = new IssuePasteService(store, {
+    schema: projectId => issueSchemas.get(projectId),
+    workflow: projectId => workflows.get(projectId),
+    prepare: prepareIssueCreation,
+    validationMessage(error) {
+      return error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
+        error instanceof PlanningError || error instanceof WorkloadError ? error.message : null;
+    },
+  });
+  app.post('/api/projects/:projectId/issues/paste-preview', (req, res) => {
+    const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
+    res.set('Cache-Control', 'no-store').json(issuePaste.preview(scope, req.body.text));
+  });
+  app.post('/api/projects/:projectId/issues/paste-apply', (req, res) => {
+    const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
+    const result = issuePaste.apply(scope, req.body.previewId, issue => commitIssueCreation(req, issue));
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
+  });
   app.post('/api/issues',(req,res)=>{
     const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,req.body));
     res.status(result.duplicate?200:201).json(result.issue);
@@ -1796,6 +1822,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentSelectionComments.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      issuePaste.resetForImport();
       documentCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
@@ -1880,7 +1907,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof DocumentCreationError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

@@ -1,6 +1,7 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../shared/schedule-dependencies.js';
 import type { DependencyType, SchedulePasteDiagnostic } from '../shared/types.js';
+import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from './delimited-paste.js';
 
 export const SCHEDULE_PASTE_MAX_ROWS = 500;
 export const SCHEDULE_PASTE_MAX_BYTES = 128 * 1024;
@@ -11,16 +12,6 @@ export interface SchedulePasteRow {
   startDate: string | null | undefined;
   endDate: string | null | undefined;
   dependency?: { predecessorKey: string; type?: DependencyType | '-'; lagDays?: number };
-}
-
-interface DelimitedRecord {
-  line: number;
-  cells: string[];
-}
-
-interface DelimitedText {
-  records: DelimitedRecord[];
-  error?: SchedulePasteDiagnostic;
 }
 
 interface Header {
@@ -60,83 +51,7 @@ const columnAliases = new Map<string, Column>([
   ['근무일간격', 'lag'], ['lagdays', 'lag'],
 ]);
 
-const blankRecord = (record: DelimitedRecord) => record.cells.every(cell => !cell.trim());
 const requiredHeader = '업무 키와 시작일·종료일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
-
-/** Strict quoting avoids shifting an issue's dates into another physical row. */
-function readDelimited(text: string, delimiter: '\t' | ','): DelimitedText {
-  const records: DelimitedRecord[] = [];
-  let cells: string[] = [];
-  let cell = '';
-  let mode: 'start' | 'plain' | 'quoted' | 'closed' = 'start';
-  let line = 1;
-  let recordLine = 1;
-  let quoteLine = 1;
-  let endedWithNewline = false;
-
-  const finishCell = () => {
-    cells.push(cell);
-    cell = '';
-    mode = 'start';
-  };
-  const finishRecord = () => {
-    finishCell();
-    records.push({ line: recordLine, cells });
-    cells = [];
-  };
-
-  for (let index = 0; index < text.length; index++) {
-    const character = text[index];
-    const newline = character === '\r' || character === '\n';
-    const newlineText = character === '\r' && text[index + 1] === '\n' ? '\r\n' : character;
-    endedWithNewline = false;
-
-    if (mode === 'quoted') {
-      if (character === '"') {
-        if (text[index + 1] === '"') {
-          cell += '"';
-          index++;
-        } else {
-          mode = 'closed';
-        }
-      } else {
-        cell += newline ? newlineText : character;
-        if (newline) {
-          line++;
-          if (newlineText.length === 2) index++;
-        }
-      }
-      continue;
-    }
-
-    if (character === delimiter) {
-      finishCell();
-    } else if (newline) {
-      finishRecord();
-      line++;
-      recordLine = line;
-      if (newlineText.length === 2) index++;
-      endedWithNewline = true;
-    } else if (character === '"' && mode === 'start') {
-      mode = 'quoted';
-      quoteLine = line;
-    } else if (character === '"' || mode === 'closed') {
-      return {
-        records,
-        error: { line, message: '따옴표 형식이 올바르지 않습니다. 셀 전체를 큰따옴표로 감싸고 내부 큰따옴표는 두 번 써 주세요.' },
-      };
-    } else {
-      cell += character;
-      mode = 'plain';
-    }
-  }
-
-  if (mode === 'quoted') {
-    return { records, error: { line: quoteLine, message: '닫히지 않은 큰따옴표가 있습니다.' } };
-  }
-  if (!endedWithNewline) finishRecord();
-  return { records };
-}
 
 function inspectHeader(parsed: DelimitedText): Candidate {
   const recordIndex = parsed.records.findIndex(record => !blankRecord(record));
