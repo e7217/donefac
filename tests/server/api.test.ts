@@ -95,7 +95,8 @@ test('attachments persist bytes and hashes, reject unsafe names and oversized up
   assert.equal((await upload(f,bytes,'없는 대상.txt','issue','missing')).status,404);
   assert.equal((await upload(f,Buffer.alloc(0),'empty.txt')).status,400);
   assert.equal((await upload(f,Buffer.alloc(20*1024*1024+1,97),'too-big.bin')).status,413);
-  assert.equal((await f.request('/attachments/'+made.data.id,'DELETE')).status,200);assert.equal(existsSync(join(f.dir,'uploads',made.data.id)),false);assert.equal((await fetch(`${f.base}/api/attachments/${made.data.id}/content`)).status,404);
+  const archived=await f.request('/attachments/'+made.data.id,'DELETE');assert.equal(archived.status,200);assert.equal(existsSync(join(f.dir,'uploads',made.data.id)),true);assert.equal((await fetch(`${f.base}/api/attachments/${made.data.id}/content`)).status,404);
+  assert.equal((await f.request('/trash/items/'+archived.data.trashItemId,'DELETE')).status,200);assert.equal(existsSync(join(f.dir,'uploads',made.data.id)),false);
   assert.equal((await f.request('/documents/doc-retry','DELETE')).status,200);
   await f.request('/issues/issue-2','DELETE');
   assert.equal((await f.request('/attachments?resourceType=issue&resourceId=issue-1')).data.length,1);

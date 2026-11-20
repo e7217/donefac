@@ -1,20 +1,26 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, ChevronLeft, ChevronRight, FileText, ListTodo, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
-import type { FeatureProps, TrashEntrySummary, TrashPage, TrashResourceType, TrashRestoreResult } from '../../shared/types';
+import { ArrowUpRight, ChevronLeft, ChevronRight, FileText, ListTodo, MessageSquare, Paperclip, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import type { FeatureProps, TrashEntrySummary, TrashItemPage, TrashItemSummary, TrashItemType, TrashPage, TrashResourceType, TrashRestoreResult } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './trash.css';
 
 type Criteria = {
-  resourceType: TrashResourceType | 'all';
+  resourceType: TrashResourceType | TrashItemType | 'all';
   scope: 'all' | 'project' | 'common';
   projectId: string;
   offset: number;
 };
-type Result = { entry: TrashEntrySummary; restored: TrashRestoreResult | null };
+type TrashEntry = TrashEntrySummary | TrashItemSummary;
+type ListedPage = Omit<TrashPage, 'items'> & { items: TrashEntry[] };
+type Result = { entry: TrashEntry; restored: TrashRestoreResult | TrashItemSummary | null };
+const resourceLabels = { issue: '업무', document: '문서' } as const;
+const itemLabels = { comment: '댓글', attachment: '첨부파일' } as const;
+const icons = { issue: ListTodo, document: FileText, comment: MessageSquare, attachment: Paperclip };
 const timestamp = new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium', timeStyle: 'short' });
 const message = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
+const isItem = (entry: TrashEntry): entry is TrashItemSummary => 'itemType' in entry;
 
 export function Trash(props: FeatureProps) {
   return <TrashList key={`${props.actorId}:${props.projectId}`} {...props} />;
@@ -22,7 +28,7 @@ export function Trash(props: FeatureProps) {
 
 function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument }: FeatureProps) {
   const [criteria, setCriteria] = useState<Criteria>({ resourceType: 'all', scope: 'all', projectId, offset: 0 });
-  const [page, setPage] = useState<TrashPage | null>(null);
+  const [page, setPage] = useState<ListedPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState('');
   const [actionError, setActionError] = useState('');
@@ -40,10 +46,12 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
     setLoading(true);
     setListError('');
     const query = new URLSearchParams({ scope: criteria.scope, offset: String(criteria.offset) });
-    if (criteria.resourceType !== 'all') query.set('resourceType', criteria.resourceType);
+    const itemType = criteria.resourceType === 'comment' || criteria.resourceType === 'attachment' ? criteria.resourceType : null;
+    if (itemType) query.set('itemType', itemType);
+    else if (criteria.resourceType !== 'all') query.set('resourceType', criteria.resourceType);
     if (criteria.scope === 'project') query.set('projectId', criteria.projectId);
     try {
-      const next = await api<TrashPage>(`/trash?${query}`, { signal: request.signal, headers: { 'X-Actor-Id': actorId } });
+      const next = await api<TrashPage | TrashItemPage>(`/trash${itemType ? '/items' : ''}?${query}`, { signal: request.signal, headers: { 'X-Actor-Id': actorId } });
       if (request.signal.aborted) return;
       if (criteria.offset && criteria.offset >= next.total) {
         const offset = Math.max(0, Math.floor((next.total - 1) / next.limit) * next.limit);
@@ -62,7 +70,7 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
     return () => { clearTimeout(timer); listRequest.current?.abort(); };
   }, [load]);
   useEffect(() => {
-    const changed = () => void load();
+    const changed = () => { if (!actionRequest.current) void load(); };
     window.addEventListener('teamspace:trash-changed', changed);
     return () => window.removeEventListener('teamspace:trash-changed', changed);
   }, [load]);
@@ -96,31 +104,36 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
     if (!request.signal.aborted) setPending(false);
   }
 
-  async function change(entry: TrashEntrySummary, action: 'restore' | 'purge') {
+  async function change(entry: TrashEntry, action: 'restore' | 'purge') {
     if (actionRequest.current) return;
-    if (action === 'purge' && !window.confirm(`“${entry.title}” 항목을 영구 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+    if (action === 'restore' && isItem(entry) && !entry.ownerAvailable) return;
+    if (action === 'purge') {
+      const related = isItem(entry) ? '' : ' 이 항목의 댓글과 첨부파일도 함께 지웁니다.';
+      if (!window.confirm(`“${entry.title}” 항목을 영구 삭제할까요?${related} 이 작업은 되돌릴 수 없습니다.`)) return;
+    }
     const request = new AbortController();
     actionRequest.current = request;
     setPending(true);
     setResult(null);
     setRefreshError('');
     setActionError('');
-    const path = `/trash/${encodeURIComponent(entry.id)}`;
+    const path = `/trash${isItem(entry) ? '/items' : ''}/${encodeURIComponent(entry.id)}`;
     const options = { signal: request.signal, headers: { 'X-Actor-Id': actorId } };
     try {
-      let restored: TrashRestoreResult | null = null;
-      if (action === 'restore') restored = await api<TrashRestoreResult>(`${path}/restore`, { ...options, method: 'POST', body: '{}' });
+      let restored: Result['restored'] = null;
+      if (action === 'restore') restored = await api<NonNullable<Result['restored']>>(`${path}/restore`, { ...options, method: 'POST', body: '{}' });
       else await api(path, { ...options, method: 'DELETE' });
       if (request.signal.aborted) return;
       setPage(previous => previous && { ...previous, total: Math.max(0, previous.total - 1), items: previous.items.filter(item => item.id !== entry.id) });
       setResult({ entry, restored });
+      window.dispatchEvent(new Event('teamspace:trash-changed'));
       const reloading = load();
       if (restored) await refreshWorkspace(request);
       await reloading;
     } catch (error) {
       if (request.signal.aborted) return;
       setActionError(message(error, '휴지통 항목을 처리하지 못했습니다.'));
-      if (error instanceof ApiError && error.status === 404) await load();
+      if (error instanceof ApiError && (error.status === 404 || error.status === 409)) await load();
     } finally {
       if (actionRequest.current === request) actionRequest.current = null;
       if (!request.signal.aborted) setPending(false);
@@ -128,9 +141,13 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
   }
 
   const restored = result?.restored;
-  const ready = restored && (restored.resourceType === 'issue' ? data.issues : data.documents)
-    .some(item => item.id === restored.resourceId);
-  const label = result?.entry.resourceType === 'issue' ? '업무' : '문서';
+  const restoredOwner = restored && ('itemType' in restored
+    ? { type: restored.ownerType, id: restored.ownerId, label: `원래 ${resourceLabels[restored.ownerType]} 열기` }
+    : { type: restored.resourceType, id: restored.resourceId, label: `복원한 ${resourceLabels[restored.resourceType]} 열기` });
+  const ready = restoredOwner && (restoredOwner.type === 'issue' ? data.issues : data.documents)
+    .some(item => item.id === restoredOwner.id);
+  const subject = result && (isItem(result.entry) ? `${itemLabels[result.entry.itemType]}을` : `${resourceLabels[result.entry.resourceType]}를`);
+  const warnings = restored && 'warnings' in restored ? restored.warnings : [];
   const count = page ? `${page.total.toLocaleString('ko-KR')}개` : '';
 
   return (
@@ -146,7 +163,8 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
         <label>항목 종류
           <select className="field" value={criteria.resourceType} disabled={pending}
             onChange={event => filter({ resourceType: event.target.value as Criteria['resourceType'] })}>
-            <option value="all">전체</option><option value="issue">업무</option><option value="document">문서</option>
+            <option value="all">전체 업무·문서</option><option value="issue">업무</option><option value="document">문서</option>
+            <option value="comment">댓글</option><option value="attachment">첨부파일</option>
           </select>
         </label>
         <label>휴지통 범위
@@ -167,11 +185,11 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
 
       {actionError && <p className="trash-error" role="alert">{actionError}</p>}
       {result && <div className="trash-result" tabIndex={-1} ref={announcement}>
-        <div role="status">{result.restored ? `${label}를 복원했습니다.` : `${label}를 영구 삭제했습니다.`} <strong>{result.entry.title}</strong></div>
-        {!!restored?.warnings.length && <ul className="trash-warnings">{restored.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
-        {restored && <button className="btn btn-secondary" type="button" disabled={pending || !ready}
-          onClick={() => restored.resourceType === 'issue' ? openIssue(restored.resourceId) : openDocument(restored.resourceId)}>
-          복원한 {label} 열기 <ArrowUpRight size={15} aria-hidden="true" />
+        <div role="status">{subject} {result.restored ? '복원했습니다.' : '영구 삭제했습니다.'} <strong>{result.entry.title}</strong></div>
+        {!!warnings.length && <ul className="trash-warnings">{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+        {restoredOwner && <button className="btn btn-secondary" type="button" disabled={pending || !ready}
+          onClick={() => restoredOwner.type === 'issue' ? openIssue(restoredOwner.id) : openDocument(restoredOwner.id)}>
+          {restoredOwner.label} <ArrowUpRight size={15} aria-hidden="true" />
         </button>}
         {refreshError && <><p className="trash-error" role="alert">{refreshError}</p><button className="btn" type="button" disabled={pending} onClick={() => void retryRefresh()}>워크스페이스 다시 불러오기</button></>}
       </div>}
@@ -183,17 +201,23 @@ function TrashList({ data, projectId, actorId, refresh, openIssue, openDocument 
           {page.items.length === 0 && !loading && <div className="trash-empty"><p>이 범위의 휴지통이 비어 있습니다.</p></div>}
           <ul className="trash-entries" aria-label="휴지통 항목">
             {page.items.map(entry => {
-              const Icon = entry.resourceType === 'issue' ? ListTodo : FileText;
+              const child = isItem(entry);
+              const Icon = icons[child ? entry.itemType : entry.resourceType];
+              const label = child ? itemLabels[entry.itemType] : resourceLabels[entry.resourceType];
+              const issueKey = child ? null : entry.issueKey;
+              const blocked = child && !entry.ownerAvailable;
               const project = entry.projectId === null ? '공통 문서' : data.projects.find(item => item.id === entry.projectId)?.name ?? '프로젝트';
               const person = data.users.find(user => user.id === entry.deletedById)?.name ?? '팀원';
               return <li key={entry.id} className="trash-entry">
                 <span className="trash-entry-icon"><Icon size={18} aria-hidden="true" /></span>
                 <div className="trash-entry-content">
-                  <h2>{entry.issueKey && <span className="trash-entry-key">{entry.issueKey} </span>}{entry.title}</h2>
-                  <p><span>{entry.resourceType === 'issue' ? '업무' : '문서'} · {project}</span><span>{person} · <time dateTime={entry.deletedAt}>{timestamp.format(new Date(entry.deletedAt))}</time></span></p>
+                  <h2>{issueKey && <span className="trash-entry-key">{issueKey} </span>}{entry.title}</h2>
+                  {child && <p className="trash-entry-owner"><span>원래 {resourceLabels[entry.ownerType]} · {entry.ownerIssueKey && `${entry.ownerIssueKey} `}{entry.ownerTitle}</span></p>}
+                  <p><span>{label} · {project}{child && entry.versionCount !== null && ` · 버전 ${entry.versionCount}개`}</span><span>{person} · <time dateTime={entry.deletedAt}>{timestamp.format(new Date(entry.deletedAt))}</time></span></p>
+                  {blocked && <p className="trash-entry-blocked">원래 {resourceLabels[entry.ownerType]}를 먼저 복원해 주세요.</p>}
                 </div>
                 <div className="trash-entry-actions">
-                  <button className="btn btn-secondary" type="button" disabled={pending || loading} onClick={() => void change(entry, 'restore')}><RotateCcw size={15} aria-hidden="true" />복원</button>
+                  <button className="btn btn-secondary" type="button" disabled={pending || loading || blocked} onClick={() => void change(entry, 'restore')}><RotateCcw size={15} aria-hidden="true" />복원</button>
                   <button className="btn btn-ghost trash-purge" type="button" disabled={pending || loading} onClick={() => void change(entry, 'purge')}><Trash2 size={15} aria-hidden="true" />영구 삭제</button>
                 </div>
               </li>;

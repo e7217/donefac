@@ -450,3 +450,11 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | `DELETE /api/issues/:issueId/time-reservations/:id` | 쿼리 `expectedVersion`으로 배정을 취소한다. |
 
 배정 상태는 `reserved` 또는 `needs-review`다. 휴지통 복원 중 이미 다른 업무에 예약된 시간은 `needs-review`로 보존한다. 편집 버전이 오래되면 `409`로 응답한다. 자체 백업 형식 30부터 `timeReservations`가 포함된다.
+
+## 개별 댓글·첨부 휴지통
+
+브라우저의 `DELETE /api/comments/:id`는 선택한 작업자가 작성한 댓글을 휴지통으로 옮긴다. `DELETE /api/attachments/:id`는 첨부와 모든 버전을 함께 옮긴다. 파일 목록의 `currentVersionId`를 `expectedVersionId` 쿼리로 보내면, 이후 새 버전이 올라간 경우 `409`로 응답한다. 성공 시 두 경로는 `ok`와 `trashItemId`를 반환한다.
+
+`GET /api/trash/items`로 개별 휴지통을 읽는다. `itemType`에는 `comment` 또는 `attachment`, `scope`에는 `all`·`project`·`common`을 사용할 수 있다. `scope=project`에는 `projectId`가 필요하다. `offset` 기본값은 0, `limit`은 50이며 최대 100이다. 항목에는 원래 업무·문서 ID와 `ownerAvailable`, 파일 버전 수가 표시된다.
+
+`POST /api/trash/items/:id/restore`는 원래 ID로 복원하고 항목 요약을 반환한다. 원래 업무·문서가 휴지통에 있으면 `409`, 첨부 바이트 무결성 확인에 실패하면 `503`으로 응답한다. `DELETE /api/trash/items/:id`는 해당 댓글이나 첨부와 모든 버전을 영구 삭제한다. 자체 백업 형식 31에는 `trashItems`와 보관 중인 첨부 바이트가 포함된다.

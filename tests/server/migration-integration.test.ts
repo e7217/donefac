@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -428,18 +428,40 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.equal(movedAudit.rows.find(row => row.sourceRecordId === document.sourceRecordId)?.target?.projectId, destination.projectId);
     assert.equal(movedAudit.rows.find(row => row.sourceRecordId === older.sourceRecordId)?.target?.owner?.projectId, destination.projectId);
 
-    assert.equal((await f.call(`/attachments/${removed.target.id}`, 'DELETE')).status, 200);
+    const versionArchive = await f.call<{ trashItemId: string }>(`/attachments/${newer.target.id}`, 'DELETE');
+    assert.equal(versionArchive.status, 200, JSON.stringify(versionArchive.data));
+    assert.deepEqual(new Set((await audit('?status=trashed')).rows.map(row => row.sourceRecordId)), new Set([older.sourceRecordId, newer.sourceRecordId]));
+    assert.deepEqual(await checkFile(older.sourceRecordId), expectedOlder);
+    const versionedFiles = new Set([older.target.id, newer.target.id]);
+    const archivedVersions = (await fullAudit()).attachments.filter(row => row.fileId && versionedFiles.has(row.fileId));
+    assert.equal(archivedVersions.length, 2);
+    assert.ok(archivedVersions.every(row => row.recordStatus === 'trashed' && row.status === 'verified'));
+    assert.equal((await f.call(`/trash/items/${versionArchive.data.trashItemId}/restore`, 'POST')).status, 200);
+    assert.equal((await audit('?status=trashed')).total, 0);
+
+    const commentSource = related.find(row => row.kind === 'comment')!;
+    const commentsPath = `/comments?resourceType=document&resourceId=${documentId}`;
+    const comment = (await f.call<Comment[]>(commentsPath)).data.find(row => row.id === commentSource.target?.id)!;
+    assert.ok(comment);
+    const commentArchive = await f.call<{ trashItemId: string }>(`/comments/${comment.id}`, 'DELETE', undefined, comment.authorId);
+    const attachmentArchive = await f.call<{ trashItemId: string }>(`/attachments/${removed.target.id}`, 'DELETE');
+    assert.equal(commentArchive.status, 200, JSON.stringify(commentArchive.data));
+    assert.equal(attachmentArchive.status, 200, JSON.stringify(attachmentArchive.data));
+    const individual = await audit('?status=trashed');
+    assert.deepEqual(new Set(individual.rows.map(row => row.sourceRecordId)), new Set([commentSource.sourceRecordId, removed.sourceRecordId]));
+    assert.ok(individual.rows.every(row => row.target?.owner?.projectId === destination.projectId));
+    assert.equal((await checkFile(removed.sourceRecordId)).status, 'verified');
+
     const trashed = await f.call<{ trashEntryId: string }>(`/documents/${documentId}`, 'DELETE');
     assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
     const trashAudit = await audit('?status=trashed');
-    assert.deepEqual(new Set(trashAudit.rows.map(row => row.sourceRecordId)), new Set(archivedTogether.map(row => row.sourceRecordId)));
-    const missingChild = await audit('?status=missing');
-    assert.deepEqual(missingChild.rows.map(row => row.sourceRecordId), [removed.sourceRecordId]);
+    assert.deepEqual(new Set(trashAudit.rows.map(row => row.sourceRecordId)), new Set([...archivedTogether, removed].map(row => row.sourceRecordId)));
+    assert.equal((await audit('?status=missing')).total, 0);
     assert.deepEqual(await checkFile(older.sourceRecordId), expectedOlder);
     const fullTrash = await fullAudit();
     assert.deepEqual(fullTrash.recordCounts, trashAudit.counts);
-    assert.deepEqual(fullTrash.attachmentCounts, { ...clean.attachmentCounts, verified: 2, missing: 1 });
-    assert.ok([older, newer].every(value => fullTrash.attachments.some(row => row.sourceRecordId === value.sourceRecordId && row.recordStatus === 'trashed' && row.status === 'verified')));
+    assert.deepEqual(fullTrash.attachmentCounts, clean.attachmentCounts);
+    assert.ok([older, newer, removed].every(value => fullTrash.attachments.some(row => row.sourceRecordId === value.sourceRecordId && row.recordStatus === 'trashed' && row.status === 'verified')));
 
     const backup = await f.call('/export');
     assert.equal(backup.status, 200);
@@ -452,9 +474,15 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.deepEqual((await fullAudit(sameArchived.receiptVersion)).attachments, fullTrash.attachments);
 
     assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
+    const stillArchived = await audit('?status=trashed');
+    assert.deepEqual(new Set(stillArchived.rows.map(row => row.sourceRecordId)), new Set([commentSource.sourceRecordId, removed.sourceRecordId]));
+    assert.equal((await f.call(`/trash/items/${commentArchive.data.trashItemId}/restore`, 'POST')).status, 200);
+    assert.equal((await f.call(`/trash/items/${attachmentArchive.data.trashItemId}`, 'DELETE')).status, 200);
     assert.equal((await audit('?status=trashed')).total, 0);
     const restored = await audit();
     assert.ok(archivedTogether.every(original => restored.rows.find(row => row.sourceRecordId === original.sourceRecordId)?.status === 'linked'));
+    assert.deepEqual((await f.call<Comment[]>(commentsPath)).data.find(row => row.id === comment.id), comment);
+    assert.equal((await checkFile(removed.sourceRecordId)).status, 'missing');
     const trashedAgain = await f.call<{ trashEntryId: string }>(`/documents/${documentId}`, 'DELETE');
     assert.equal(trashedAgain.status, 200);
     assert.equal((await f.call(`/trash/${trashedAgain.data.trashEntryId}`, 'DELETE')).status, 200);

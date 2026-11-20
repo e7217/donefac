@@ -272,6 +272,12 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     expect(target).toBeTruthy();
     const deletion = await request.delete(`/api/attachments/${target}`);
     expect(deletion.ok(), await deletion.text()).toBe(true);
+    const { trashItemId } = await deletion.json() as { trashItemId: string };
+    const inTrash = await checkAll();
+    expect(inTrash.attachmentCounts).toEqual(good.attachmentCounts);
+    expect(inTrash.attachments.find(row => row.fileId === target)).toMatchObject({ recordStatus: 'trashed', status: 'verified' });
+    const purge = await request.delete(`/api/trash/items/${trashItemId}`);
+    expect(purge.ok(), await purge.text()).toBe(true);
     const mixed = await checkAll();
     expect(mixed.attachmentCounts).toEqual({ ...good.attachmentCounts, verified: 2, missing: 1 });
     await expect(filter).toHaveValue('findings');

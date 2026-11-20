@@ -45,6 +45,7 @@ import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
+import { TrashItemsService, trashItemFiles } from './trash-items.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
@@ -57,7 +58,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink } from '../shared/types.js';
+import { PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -144,7 +145,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
   const trash=new TrashService(store);
-  const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>trash.hasLocalAttachmentVersion(id));
+  const trashItems=new TrashItemsService(store,files);
+  const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
+  trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
@@ -182,12 +185,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return rows.map(row=>JSON.parse(row.json) as Attachment);
   };
   const attachmentTarget=(type:unknown,id:unknown)=>{if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('첨부파일 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);};
-  const attachmentFiles=(rows:Attachment[])=>[...rows,...sourcePreservation.versionsForAttachments(rows.map(row=>row.id))];
   const detachArchivedChildren=(type:string,id:string)=>{
     store.db.prepare('DELETE FROM comments WHERE resource_type=? AND resource_id=?').run(type,id);
     store.db.prepare('DELETE FROM attachments WHERE resource_type=? AND resource_id=?').run(type,id);
   };
-  const cleanupAttachments=(rows:Attachment[])=>{for(const id of new Set(rows.map(row=>row.id)))try{files.remove(id);}catch{console.error('[teamspace attachments] orphan cleanup needed:',id);}};
   const snapshot = (): WorkspaceSnapshot => {
     const rows = store.db.prepare('SELECT json FROM issues ORDER BY rowid').all() as { json: string }[];
     const issues = rows.map(row => JSON.parse(row.json) as Issue);
@@ -730,6 +731,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/trash',(req,res)=>{
     res.set('Cache-Control','no-store').json(trash.list(req.query));
   });
+  trashItems.registerRoutes(app,{actor,activity});
   app.post('/api/trash/:id/restore',(req,res)=>{
     const actorId=actor(req);
     const restored=store.withMutationContext({actorId,origin:'restore'},()=>store.transaction(():TrashRestoreResult=>{
@@ -789,17 +791,18 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.json(restored);
   });
   app.delete('/api/trash/:id',(req,res)=>{
-    const cleanup=store.transaction(()=>{
+    store.transaction(()=>{
       const entry=trash.get(String(req.params.id));
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
       subscriptions.removeTarget(entry.resourceType,entry.resourceId);
       atlassianLinks.removeTarget(entry.resourceType,entry.resourceId);
       if(entry.resourceType==='issue')timeReservations.purgeIssue(entry.resourceId);
+      trashItems.purgeOwner(entry.resourceType,entry.resourceId);
+      trashItems.queueCleanup(archivedFiles(entry));
       trash.remove(entry.id);
       activity(req,entry.resourceType,entry.resourceId,'휴지통에서 영구 삭제',entry.title);
-      return archivedFiles(entry);
     });
-    cleanupAttachments(cleanup);
+    trashItems.finishCleanup();
     res.json({ok:true});
   });
   app.get('/api/documents/:id/revisions',(req,res)=>{get('documents',req.params.id);res.json(store.all<any>('revisions').filter(r=>r.documentId===req.params.id).sort((a,b)=>b.version-a.version));});
@@ -831,7 +834,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.post('/api/documents/:id/collaboration/enable',(req,res)=>res.json(collaboration.enable(String(req.params.id),req.body.expectedVersion,actor(req))));
   app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary,
     (document,revision)=>notifyDocumentUpdate(document,revision.authorId,revision.createdAt))));
-  app.get('/api/comments',(req,res)=>{const type=req.query.resourceType,id=req.query.resourceId;if(!['issue','document'].includes(type as string)||typeof id!=='string')fail('댓글 대상을 확인해 주세요.');get(type==='issue'?'issues':'documents',id);res.json(store.all<any>('comments').filter(c=>c.resourceType===type&&c.resourceId===id));});
+  app.get('/api/comments',(req,res)=>{
+    const {resourceType,resourceId}=req.query;
+    if((resourceType!=='issue'&&resourceType!=='document')||typeof resourceId!=='string')return fail('댓글 대상을 확인해 주세요.');
+    get(resourceType==='issue'?'issues':'documents',resourceId);
+    res.set('Cache-Control','no-store').json(store.commentsForResource(resourceType,resourceId));
+  });
   app.post('/api/comments',(req,res)=>{
     const {resourceType,resourceId}=req.body;
     if(!['issue','document'].includes(resourceType))return fail('댓글 대상을 확인해 주세요.');
@@ -846,6 +854,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       }
       store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));
     });res.status(201).json(c);
+  });
+  app.delete('/api/comments/:id',(req,res)=>{
+    const trashItemId=store.transaction(()=>{
+      const comment=get<Comment>('comments',req.params.id);
+      const archivedId=trashItems.archiveComment(comment,actor(req));
+      activity(req,comment.resourceType,comment.resourceId,'댓글 휴지통 이동');
+      return archivedId;
+    });
+    res.json({ok:true,trashItemId});
   });
   app.get('/api/attachments',(req,res)=>{
     attachmentTarget(req.query.resourceType,req.query.resourceId);
@@ -904,12 +921,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   app.delete('/api/attachments/:id',(req,res)=>{
     const expected=req.query.expectedVersionId===undefined?undefined:expectedAttachmentVersion(req.query.expectedVersionId);
-    const rows=store.transaction(()=>{
+    const trashItemId=store.transaction(()=>{
       const base=get<Attachment>('attachments',req.params.id), head=attachmentVersions.head(base);
       if(expected!==undefined&&expected!==head.currentVersionId)fail('다른 작업자가 새 파일 버전을 올렸습니다. 버전 목록을 다시 확인해 주세요.',409,{currentVersionId:head.currentVersionId});
-      const rows=attachmentFiles([base]);store.remove('attachments',base.id);activity(req,base.resourceType,base.resourceId,'첨부파일 삭제',head.filename);return rows;
+      const archivedId=trashItems.archiveAttachment(base,sourcePreservation.versionsForAttachments([base.id]),actor(req),head.filename);
+      activity(req,base.resourceType,base.resourceId,'첨부파일 휴지통 이동',head.filename);
+      return archivedId;
     });
-    cleanupAttachments(rows);res.json({ok:true});
+    res.json({ok:true,trashItemId});
   });
   app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
@@ -1007,12 +1026,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
     const attachmentVersions=sourcePreservation.allVersions();
+    const itemArchives=trashItems.all();
     const trashEntries=trash.all().map(entry=>entry.gitlabLinks.some(link=>link.kind==='branch')
       ? {...entry,gitlabLinks:entry.gitlabLinks.map(link=>gitlab.latestObservedBranchLink(link))}
       : entry);
-    const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles)].map(file=>[file.id,file])).values()];
+    const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1052,7 +1072,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedReportSnapshots=data.schemaVersion>=10?reports.validateRestore(data.reportSnapshots,data.exportedAt,data.projects,data.users):[];
     if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
     if(data.schemaVersion<17&&((Array.isArray(data.trashEntries)&&data.trashEntries.length)||importedReportLedger.events.some(event=>event.kind==='restored')))fail('휴지통과 복원 이력이 있는 백업은 schemaVersion 17이 필요합니다.');
+    if(data.schemaVersion>=9&&(!Array.isArray(data.attachmentVersions)||data.attachmentVersions.some((value:unknown)=>!value||typeof value!=='object'||!('id' in value)||typeof value.id!=='string')))fail('첨부 버전 목록을 확인해 주세요.');
     const importedTrash=trash.validateImport(data.schemaVersion>=17?data.trashEntries:[],data);
+    if(data.schemaVersion<31&&data.trashItems!==undefined&&(!Array.isArray(data.trashItems)||data.trashItems.length))fail('개별 댓글·첨부 휴지통을 포함한 백업은 schemaVersion 31이 필요합니다.');
+    const importedTrashItems=trashItems.validateImport(data.schemaVersion>=31?data.trashItems:[],{...data,trash:importedTrash});
     if (data.schemaVersion < 24 && (data.gitlabLinks.some((link: { kind: string }) => link.kind === 'branch') ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.kind === 'branch')))) {
       fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
@@ -1085,18 +1108,19 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     for(const issue of effortIssues)validatePlannedEffortMinutes(issue.plannedEffortMinutes);
     const importedCapacity=workload.validateImport(data.schemaVersion>=18?data.workloadCapacities:[],data.projects,data.users,{legacy:data.schemaVersion<18});
     const importedTeamCapacity=teamCapacity.validateImport(data.teamWorkloadCapacity,data.users,{legacy:data.schemaVersion<19});
-    const archiveAttachments=importedTrash.flatMap(entry=>entry.attachments);
-    const archiveVersions=importedTrash.flatMap(entry=>entry.attachmentVersions);
-    if(data.schemaVersion>=9&&!Array.isArray(data.attachmentVersions))fail('첨부 버전 목록을 확인해 주세요.');
+    const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];
+    const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
+    const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
-    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:data.comments,revisions:data.revisions,attachments:[...data.attachments,...archiveAttachments]});
+    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:[...data.comments,...archiveComments],revisions:data.revisions,attachments:[...data.attachments,...archiveAttachments]});
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     for(const entry of importedTrash){
       entry.attachmentVersions=entry.attachmentVersions.map(version=>versionById.get(version.id)!);
     }
+    for(const entry of importedTrashItems)if(entry.itemType==='attachment')entry.versions=entry.versions.map(version=>versionById.get(version.id)!);
     for (const entry of archivedDocuments) {
       entry.resource = importDocument(entry.resource);
       entry.revisions = entry.revisions.map(importDocument);
@@ -1225,6 +1249,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       collaboration.replaceImported(importedCollaboration);
       sourcePreservation.replaceImported(liveSources,previousImports);
       trash.replaceImported(importedTrash);
+      trashItems.replaceImported(importedTrashItems);
       timeReservations.replaceRestored(importedReservations);
       reportLedger.replaceRestored(importedReportLedger,restoreAt);
       reports.replaceRestored(importedReportSnapshots);

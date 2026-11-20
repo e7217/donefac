@@ -23,6 +23,7 @@ import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevisi
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
+import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
@@ -393,7 +394,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const documentId = draft?.id;
   useEffect(() => {
     if (!documentId) return;
-    let active = true;
     rememberComment();
     const context = { actorId, documentId };
     commentContextRef.current = context;
@@ -401,11 +401,27 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     try { cached = localStorage.getItem(commentCacheKey(actorId, documentId)) || ''; } catch { setStorageProblem(true); }
     commentBodyRef.current = cached;
     setComments([]); setCommentBody(cached); setCommentsLoading(true); setCommentError('');
-    api<Comment[]>(`/comments?resourceType=document&resourceId=${encodeURIComponent(documentId)}`)
-      .then(result => { if (active) setComments(result); })
-      .catch(error => { if (active) setCommentError(error instanceof Error ? error.message : '댓글을 불러오지 못했습니다.'); })
-      .finally(() => { if (active) setCommentsLoading(false); });
-    return () => { active = false; };
+    let activeRequest: AbortController | undefined;
+    const loadComments = () => {
+      activeRequest?.abort();
+      const request = new AbortController();
+      activeRequest = request;
+      void api<Comment[]>(`/comments?resourceType=document&resourceId=${encodeURIComponent(documentId)}`, {
+        signal: request.signal, headers: { 'X-Actor-Id': actorId },
+      }).then(result => { if (!request.signal.aborted) { setComments(result); setCommentError(''); } })
+        .catch(error => { if (!request.signal.aborted) setCommentError(error instanceof Error ? error.message : '댓글을 불러오지 못했습니다.'); })
+        .finally(() => { if (!request.signal.aborted) setCommentsLoading(false); });
+    };
+    loadComments();
+    window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
+    window.addEventListener('teamspace:trash-changed', loadComments);
+    window.addEventListener('teamspace:workspace-imported', loadComments);
+    return () => {
+      activeRequest?.abort();
+      window.removeEventListener(COMMENT_LIST_CHANGED, loadComments);
+      window.removeEventListener('teamspace:trash-changed', loadComments);
+      window.removeEventListener('teamspace:workspace-imported', loadComments);
+    };
   }, [documentId, actorId, rememberComment]);
 
   useEffect(() => {
@@ -471,7 +487,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const result = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': context.actorId }, body: JSON.stringify({ resourceType: 'document', resourceId: context.documentId, body }) });
       const current = commentContextRef.current;
       if (current?.documentId === context.documentId && current.actorId === context.actorId && activeActorRef.current === context.actorId) {
-        setComments(items => [...items, result]);
+        setComments(items => items.some(item => item.id === result.id) ? items : [...items, result]);
         if (commentBodyRef.current.trim() === body) updateCommentBody('');
       } else {
         try {
@@ -479,6 +495,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           if (localStorage.getItem(key)?.trim() === body) localStorage.removeItem(key);
         } catch { setStorageProblem(true); }
       }
+      window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
       await refresh();
     } catch (error) { notify(error instanceof Error ? error.message : '댓글을 등록하지 못했습니다.', 'error'); }
     finally { setCommentBusy(false); }
@@ -778,7 +795,32 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보"><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
-            {sideTab === 'comments' && <><div className="docs-panel-heading"><h3>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>{commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}{commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}{!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}{comments.map(comment => { const user = data.users.find(item => item.id === comment.authorId); return <article className="docs-comment" key={comment.id}><div className="docs-comment-head"><span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span><strong>{user?.name || '팀원'}</strong><time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time></div><p>{comment.body}</p></article>; })}<form className="docs-comment-form" onSubmit={submitComment}><textarea className="field" value={commentBody} onChange={event => updateCommentBody(event.target.value)} placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} /><button type="submit" className="btn btn-primary" disabled={!commentBody.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button></form></>}
+            {sideTab === 'comments' && <>
+              <div className="docs-panel-heading"><h3>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
+              {commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}
+              {commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}
+              {!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}
+              {comments.map(comment => {
+                const user = data.users.find(item => item.id === comment.authorId);
+                return <article className="docs-comment" key={comment.id}>
+                  <div className="docs-comment-head">
+                    <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
+                    <strong>{user?.name || '팀원'}</strong>
+                    <time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time>
+                    <CommentTrashButton comment={comment} actorId={actorId} notify={notify} refresh={refresh}
+                      disabled={commentBusy || saving || comment.resourceId !== documentId}
+                      onArchived={removed => {
+                        const current = commentContextRef.current;
+                        if (current?.documentId === removed.resourceId && current.actorId === actorId && activeActorRef.current === actorId) {
+                          setComments(previous => previous.filter(value => value.id !== removed.id));
+                        }
+                      }} />
+                  </div>
+                  <p>{comment.body}</p>
+                </article>;
+              })}
+              <form className="docs-comment-form" onSubmit={submitComment}><textarea className="field" value={commentBody} onChange={event => updateCommentBody(event.target.value)} placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} /><button type="submit" className="btn btn-primary" disabled={!commentBody.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button></form>
+            </>}
             {sideTab === 'links' && <><div className="docs-panel-heading"><h3>연결된 업무</h3><p>문서의 맥락을 실제 업무와 연결하세요.</p>
               <button ref={followUpOpener} className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={() => setFollowUpSource({
                 id: selectedPage.id, title: selectedPage.title, projectId: selectedPage.projectId, version: selectedPage.version,

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Download, File, History, ImageIcon, Loader2, Paperclip, Plus, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react';
 import type { AttachmentHead, AttachmentVersion } from '../../shared/types';
-import { api, ApiError, remove } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import './attachments.css';
 
 export type AttachmentsProps = {
@@ -86,9 +86,12 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
     batchBusyRef.current = false;
     xhrRef.current = null;
     const initialLoad = setTimeout(() => void load(), 0);
+    const trashChanged = () => { versionCache.current.clear(); void load(); };
+    window.addEventListener('teamspace:trash-changed', trashChanged);
     return () => {
       mountedRef.current = false;
       clearTimeout(initialLoad);
+      window.removeEventListener('teamspace:trash-changed', trashChanged);
       listRequest.current?.abort();
       xhrRef.current?.abort();
       versionRequest.current?.abort();
@@ -187,11 +190,12 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
   }
 
   async function deleteFile(attachment: AttachmentHead) {
-    if (deleting || batchBusyRef.current || !window.confirm(`“${attachment.filename}” 파일과 모든 버전을 삭제할까요? 삽입한 이미지나 링크도 더 이상 열리지 않습니다.`)) return;
+    if (deleting || batchBusyRef.current || !window.confirm(`“${attachment.filename}” 파일과 모든 버전을 휴지통으로 옮길까요? 일반 첨부 링크는 복원한 뒤 다시 열 수 있습니다.`)) return;
     setDeleting(attachment.id);
     try {
       const expected = encodeURIComponent(attachment.currentVersionId);
-      await remove(`/attachments/${encodeURIComponent(attachment.id)}?expectedVersionId=${expected}`);
+      await api(`/attachments/${encodeURIComponent(attachment.id)}?expectedVersionId=${expected}`, { method: 'DELETE', headers: { 'X-Actor-Id': actorId } });
+      window.dispatchEvent(new Event('teamspace:trash-changed'));
       if (mountedRef.current) {
         setAttachments(previous => previous.filter(item => item.id !== attachment.id));
         versionCache.current.delete(attachment.id);
@@ -199,12 +203,12 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
           versionRequest.current?.abort();
           setVersions(null);
         }
-        notify('첨부파일을 삭제했습니다.', 'success');
+        notify('첨부파일을 휴지통으로 옮겼습니다.', 'success');
         void refreshRelated();
       }
     } catch (error) {
       if (mountedRef.current) {
-        notify(message(error, '첨부파일을 삭제하지 못했습니다.'), 'error');
+        notify(message(error, '첨부파일을 휴지통으로 옮기지 못했습니다.'), 'error');
         if (error instanceof ApiError && [404, 409].includes(error.status)) await refreshAttachments();
       }
     } finally { if (mountedRef.current) setDeleting(null); }
@@ -303,7 +307,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
           </div>
         </div>
         <a className="attachment-action" href={downloadUrl} download={attachment.filename} aria-label={`${attachment.filename} 다운로드`} title="다운로드"><Download size={13} /></a>
-        <button className="attachment-action attachment-delete" type="button" aria-label={`${attachment.filename} 삭제`} title="모든 버전 삭제"
+        <button className="attachment-action attachment-delete" type="button" aria-label={`${attachment.filename} 삭제`} title="모든 버전을 휴지통으로 이동"
           disabled={busy || loading} onClick={() => void deleteFile(attachment)}>{deleting === attachment.id ? <Loader2 size={13} className="attachments-spin" /> : <Trash2 size={13} />}</button>
       </article>
       {history && <section className="attachment-history" aria-label={`${attachment.filename} 보존 버전`}>

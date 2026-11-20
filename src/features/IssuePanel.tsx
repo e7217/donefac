@@ -13,6 +13,7 @@ import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
+import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
@@ -107,10 +108,28 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
   }, [issue, notify, tab]);
   useEffect(() => {
-    let active = true;
-    api<Comment[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`).then(value => { if (active) setComments(value); }).catch(err => { if (active) setCommentError(errorMessage(err)); }).finally(() => { if (active) setLoadingComments(false); });
-    return () => { active = false; };
-  }, [issueId]);
+    let activeRequest: AbortController | undefined;
+    const loadComments = () => {
+      activeRequest?.abort();
+      const request = new AbortController();
+      activeRequest = request;
+      void api<Comment[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`, {
+        signal: request.signal, headers: { 'X-Actor-Id': props.actorId },
+      }).then(value => { if (!request.signal.aborted) { setComments(value); setCommentError(''); } })
+        .catch(err => { if (!request.signal.aborted) setCommentError(errorMessage(err)); })
+        .finally(() => { if (!request.signal.aborted) setLoadingComments(false); });
+    };
+    loadComments();
+    window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
+    window.addEventListener('teamspace:trash-changed', loadComments);
+    window.addEventListener('teamspace:workspace-imported', loadComments);
+    return () => {
+      activeRequest?.abort();
+      window.removeEventListener(COMMENT_LIST_CHANGED, loadComments);
+      window.removeEventListener('teamspace:trash-changed', loadComments);
+      window.removeEventListener('teamspace:workspace-imported', loadComments);
+    };
+  }, [issueId, props.actorId]);
   useEffect(() => { const handler = (event: KeyboardEvent) => { if (event.key === 'Escape' && !saving) closePanel(); }; document.addEventListener('keydown', handler); return () => document.removeEventListener('keydown', handler); }, [closePanel, saving]);
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
@@ -158,7 +177,13 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   }
   async function addComment(event: FormEvent) {
     event.preventDefault(); if (!commentBody.trim()) return; setCommenting(true); setCommentError('');
-    try { const value = await post<Comment>('/comments', { resourceType: 'issue', resourceId: issueId, body: commentBody.trim() }); setComments(previous => [...previous, value]); setCommentBody(''); await refresh(); }
+    try {
+      const value = await post<Comment>('/comments', { resourceType: 'issue', resourceId: issueId, body: commentBody.trim() });
+      setComments(previous => previous.some(item => item.id === value.id) ? previous : [...previous, value]);
+      setCommentBody('');
+      window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
+      await refresh();
+    }
     catch (err) { setCommentError(errorMessage(err)); } finally { setCommenting(false); }
   }
   async function linkDocument() {
@@ -226,7 +251,24 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         })}
       </section>}
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
-      <section className="issue-related-section issue-comments"><h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>{loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => { const user = data.users.find(u => u.id === comment.authorId); return <article key={comment.id} className="issue-comment"><span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span><div><header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>; })}{commentError && <div className="issue-form-error" role="alert">{commentError}</div>}<form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form></section>
+      <section className="issue-related-section issue-comments">
+        <h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>
+        {loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => {
+          const user = data.users.find(value => value.id === comment.authorId);
+          return <article key={comment.id} className="issue-comment">
+            <span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span>
+            <div>
+              <header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time>
+                <CommentTrashButton comment={comment} actorId={props.actorId} notify={notify} refresh={refresh} disabled={commenting || saving}
+                  onArchived={removed => setComments(previous => previous.filter(value => value.id !== removed.id))} />
+              </header>
+              <p>{comment.body}</p>
+            </div>
+          </article>;
+        })}
+        {commentError && <div className="issue-form-error" role="alert">{commentError}</div>}
+        <form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form>
+      </section>
       <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentBody.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>

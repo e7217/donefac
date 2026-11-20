@@ -219,7 +219,9 @@ test('native backup carries exact immutable version bytes and rejects invalid hi
   assert.deepEqual(await read(f.request(versionsPath(first.id))), history);
   for (const [id, bytes] of originals) await exact(f, content(id), bytes);
 
-  await read(f.json(`/attachments/${first.id}`, 'DELETE'));
+  const removed = await read<{trashItemId: string}>(f.json(`/attachments/${first.id}`, 'DELETE'));
+  assert.deepEqual(entries(f), [...originals.keys()].sort());
+  await read(f.json(`/trash/items/${removed.trashItemId}`, 'DELETE'));
   assert.deepEqual(entries(f), []);
   await read(f.json('/import', 'POST', { data: backup }));
   assert.deepEqual(await parent.list(), [third]);
@@ -269,9 +271,19 @@ test('interrupted per-version journals keep committed files and remove only aban
   await exact(f, content(committed.id), secondPdf);
   await read(f.request(content(abandonedId)), 404);
 
-  const archived = await read<{trashEntryId:string}>(f.json('/issues/issue-2', 'DELETE'));
   const pendingJournal = join(f.dir, `.append-${committed.id}.json`);
-  writeFileSync(pendingJournal, JSON.stringify({id:committed.id,stage:`.append-stage-${committed.id}`,files:[committed.id]}));
+  const writePendingJournal = () => writeFileSync(pendingJournal, JSON.stringify({id:committed.id,stage:`.append-stage-${committed.id}`,files:[committed.id]}));
+  const individual = await read<{trashItemId:string}>(f.json(`/attachments/${first.id}`, 'DELETE'));
+  writePendingJournal();
+  await f.restart();
+  assert.ok(!readdirSync(f.dir).some(name => name.startsWith('.append-')));
+  assert.deepEqual(readFileSync(join(f.dir, 'uploads', committed.id)), secondPdf);
+  await read(f.request(content(committed.id)), 404);
+  await read(f.json(`/trash/items/${individual.trashItemId}/restore`, 'POST', {}));
+  await exact(f, content(committed.id), secondPdf);
+
+  const archived = await read<{trashEntryId:string}>(f.json('/issues/issue-2', 'DELETE'));
+  writePendingJournal();
   await f.restart();
   assert.ok(!readdirSync(f.dir).some(name => name.startsWith('.append-')));
   assert.deepEqual(readFileSync(join(f.dir, 'uploads', committed.id)), secondPdf);

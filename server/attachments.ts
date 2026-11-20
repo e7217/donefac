@@ -48,7 +48,7 @@ export class AttachmentFiles {
     const stage=join(this.root,`.upload-${randomUUID()}`),dest=this.path(id);
     try{writeFileSync(stage,bytes,{mode:0o600,flag:'wx',flush:true});renameSync(stage,dest);this.syncDirectory(this.root);}finally{rmSync(stage,{force:true});}
   }
-  remove(id:string) { rmSync(this.path(id),{force:true}); }
+  remove(id:string) { rmSync(this.path(id),{force:true});this.syncDirectory(this.root); }
   stageImport(attachments: Attachment[], contents: {id:string;data:string}[]) {
     const stage=join(this.dataDir,`.uploads-import-${randomUUID()}`);
     mkdirSync(stage,{mode:0o700});

@@ -57,6 +57,17 @@ function referencesImage(content: RichContent, fileId: string) {
 }
 
 function archivedImage(store: Store, documentId: string, fileId: string): Attachment | undefined {
+  const hasIndividuallyArchivedFiles = store.db.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='trash_item_files'",
+  ).get();
+  if (hasIndividuallyArchivedFiles) {
+    const individual = store.db.prepare(`SELECT file.json FROM trash_item_files AS file
+      JOIN trash_items AS entry ON entry.id=file.entry_id
+      WHERE file.file_id=? AND entry.item_type='attachment' AND entry.owner_type='document' AND entry.owner_id=?
+        AND json_extract(file.json,'$.resourceType')=entry.owner_type AND json_extract(file.json,'$.resourceId')=entry.owner_id`)
+      .get(fileId, documentId) as RevisionRow | undefined;
+    if (individual) return JSON.parse(individual.json) as Attachment;
+  }
   if (!hasTrashArchive(store)) return undefined;
   const row = store.db.prepare(`
     SELECT file.value AS json

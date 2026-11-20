@@ -1,0 +1,38 @@
+.comment-trash-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #8a5753;
+  cursor: pointer;
+}
+
+.comment-trash-button:hover:not(:disabled) {
+  background: #fff1ee;
+  color: #85362f;
+}
+
+.comment-trash-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.comment-trash-button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.issue-comment .comment-trash-button {
+  margin-left: auto;
+}
+
+.issue-comment header strong,
+.docs-comment-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

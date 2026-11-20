@@ -90,6 +90,14 @@
   overflow-wrap: anywhere;
 }
 
+.trash-entry p.trash-entry-owner {
+  color: #426056;
+}
+
+.trash-entry p.trash-entry-blocked {
+  color: #71541f;
+}
+
 .trash-entry-actions,
 .trash-pagination,
 .trash-pagination > div {

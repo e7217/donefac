@@ -40,6 +40,15 @@ export class TrashError extends Error {
   constructor(readonly status: number, message: string, readonly details?: unknown) { super(message); }
 }
 function fail(status: number, message: string): never { throw new TrashError(status, message); }
+export function trashPageBounds(query: Record<string, unknown>): { offset: number; limit: number } {
+  const readNumber = (value: unknown, fallback: number, min: number, max: number) => {
+    if (value === undefined) return fallback;
+    const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isSafeInteger(number) || number < min || number > max) fail(400, '휴지통 페이지 범위를 확인해 주세요.');
+    return number;
+  };
+  return { offset: readNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER), limit: readNumber(query.limit, 50, 1, 100) };
+}
 function malformed(label: string): never { return fail(400, `백업의 휴지통 ${label}을(를) 확인해 주세요.`); }
 function typeOf(value: unknown): TrashResourceType | null { return value === 'issue' || value === 'document' ? value : null; }
 const tableFor = (type: TrashResourceType) => type === 'issue' ? 'issues' : 'documents';
@@ -155,14 +164,7 @@ export class TrashService {
     if (scope !== 'all' && scope !== 'project' && scope !== 'common' || resourceType !== undefined && !typeOf(resourceType) ||
       (scope === 'project' ? !validString(projectId) : projectId !== undefined)) fail(400, '휴지통 범위와 항목 종류를 확인해 주세요.');
     if (scope === 'project' && !this.store.get('projects', projectId as string)) fail(404, '프로젝트를 찾을 수 없습니다.');
-    const readNumber = (value: unknown, fallback: number, min: number, max: number) => {
-      if (value === undefined) return fallback;
-      const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
-      if (!Number.isSafeInteger(number) || number < min || number > max) fail(400, '휴지통 페이지 범위를 확인해 주세요.');
-      return number;
-    };
-    const offset = readNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const limit = readNumber(query.limit, 50, 1, 100);
+    const { offset, limit } = trashPageBounds(query);
     const conditions: string[] = [], params: string[] = [];
     if (scope === 'project') { conditions.push('project_id=?'); params.push(projectId as string); }
     if (scope === 'common') conditions.push('project_id IS NULL');

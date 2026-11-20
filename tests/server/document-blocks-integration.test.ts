@@ -142,10 +142,13 @@ test('native schema 26 preserves pinned revisions and archived sources and rejec
     assert.equal(appended.status,201);
     const {currentVersionId:attachmentId}=await appended.json() as {currentVersionId:string};
     assert.notEqual(attachmentId,attachmentRoot);
+    const imageNode:RichContent={type:'image',attrs:{src:`/api/attachments/${attachmentId}/content?inline=1`,alt:'승인용 그림'}};
     const saved=await f.call<DocPage>(`/documents/${source.id}`,'PATCH',{
-      expectedVersion:source.version,content:body(p('보관할 원문과 그림'),{type:'image',attrs:{src:`/api/attachments/${attachmentId}/content?inline=1`,alt:'승인용 그림'}}),
+      expectedVersion:source.version,content:body(p('보관할 원문과 그림'),imageNode),
     });
     assert.equal(saved.status,200);
+    assert.equal((await f.call(`/documents/${alternate.id}`,'PATCH',{expectedVersion:alternate.version,content:body(imageNode)})).status,200);
+    const [wrong]=(await f.call<DocRevision[]>(`/documents/${alternate.id}/revisions`)).data;
     const [revision,earlier]=(await f.call<DocRevision[]>(`/documents/${source.id}/revisions`)).data;
     const imageRoute=(id:string,fileId=attachmentId)=>f.base+`/documents/${source.id}/include-revisions/${id}/images/${fileId}`;
     const checkImage=async()=>{
@@ -160,7 +163,16 @@ test('native schema 26 preserves pinned revisions and archived sources and rejec
       await unreferenced.arrayBuffer();
     }
     await checkImage();
-    const [wrong]=(await f.call<DocRevision[]>(`/documents/${alternate.id}/revisions`)).data;
+    const archiveImage=await f.call<{trashItemId:string}>(`/attachments/${attachmentRoot}?expectedVersionId=${attachmentId}`,'DELETE');
+    assert.equal(archiveImage.status,200);
+    assert.equal((await fetch(`${f.base}/attachments/${attachmentId}/content?inline=1`)).status,404);
+    assert.equal((await fetch(imageRoute(earlier.id))).status,404);
+    assert.equal((await fetch(`${f.base}/documents/${alternate.id}/include-revisions/${wrong.id}/images/${attachmentId}`)).status,404);
+    await checkImage();
+    assert.equal((await f.call(`/trash/items/${archiveImage.data.trashItemId}/restore`,'POST',{})).status,200);
+    const direct=await fetch(`${f.base}/attachments/${attachmentId}/content?inline=1`);
+    assert.equal(direct.status,200);
+    assert.deepEqual(Buffer.from(await direct.arrayBuffer()),png);
     const content=body(pinnedInclude(source.id,revision.id,revision.title));
     const host=await make(f,'참조 버전이 고정된 문서',content);
     const enabled=await f.call<CollaborationSession>(`/documents/${host.id}/collaboration/enable`,'POST',{expectedVersion:host.version});
@@ -190,6 +202,11 @@ test('native schema 26 preserves pinned revisions and archived sources and rejec
     await checkImage();
     assert.equal((await f.call(`/trash/${archival.data.trashEntryId}/restore`,'POST')).status,200);
     assert.deepEqual((await f.call<DocRevision>(`/documents/${source.id}/include-revisions/${revision.id}`)).data,revision);
+    const purgable=await f.call<{trashItemId:string}>(`/attachments/${attachmentRoot}`,'DELETE');
+    assert.equal(purgable.status,200);
+    await checkImage();
+    assert.equal((await f.call(`/trash/items/${purgable.data.trashItemId}`,'DELETE')).status,200);
+    assert.equal((await fetch(imageRoute(revision.id))).status,404);
   } finally{await f.close();}
 });
 

@@ -21,6 +21,7 @@ type MatchRow = SourceIdentity & {
   ownerType: SourceReconciliationOwner['type'] | null; ownerId: string | null;
   ownerLabel: string | null; ownerProjectId: string | null;
   trashId: string | null; trashTitle: string | null; trashIssueKey: string | null; trashProjectId: string | null;
+  individualTrashId: string | null; individualTrashLabel: string | null;
 };
 type AuditMatchRow = MatchRow & {
   originalSize: string | number | null; originalSha: string | null; size: number | null; sha: string | null;
@@ -61,13 +62,14 @@ function parseQuery(input: Record<string, unknown>): ReceiptQuery {
 }
 
 // The projection keeps archived bodies, metadata values and file bytes outside the response and JS scan.
+const attachmentJson = 'coalesce(av.json,a.json,CASE WHEN archived_attachment.id IS NOT NULL THEN archived_file.json END)';
 const auditProjection = `
     CASE WHEN r.kind='attachment' THEN coalesce(json_extract(r.json,'$.record.metadata.actualSize'),json_extract(r.json,'$.record.metadata.size')) END AS originalSize,
     CASE WHEN r.kind='attachment' THEN json_extract(r.json,'$.record.metadata.sha256') END AS originalSha,
-    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.size') ELSE json_extract(a.json,'$.size') END AS size,
-    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.sha256') ELSE json_extract(a.json,'$.sha256') END AS sha,
-    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.resourceId') ELSE json_extract(a.json,'$.resourceId') END AS fileOwnerId,
-    CASE WHEN av.id IS NOT NULL THEN json_extract(av.json,'$.resourceType') ELSE json_extract(a.json,'$.resourceType') END AS fileOwnerType,
+    json_extract(${attachmentJson},'$.size') AS size,
+    json_extract(${attachmentJson},'$.sha256') AS sha,
+    json_extract(${attachmentJson},'$.resourceId') AS fileOwnerId,
+    json_extract(${attachmentJson},'$.resourceType') AS fileOwnerType,
     r.owner_id AS originalOwnerId, r.owner_type AS originalOwnerType,
     coalesce(json_extract(i.json,'$.version'),json_extract(d.json,'$.version')) AS ownerVersion,
     coalesce(json_extract(v.json,'$.version'),json_extract(w.json,'$.version')) AS targetVersion,
@@ -104,7 +106,12 @@ const rowsSql = (audit: boolean) => `
     coalesce(json_extract(i.json,'$.key') || ' · ' || json_extract(i.json,'$.title'),json_extract(d.json,'$.title')) AS ownerLabel,
     coalesce(i.project_id,d.project_id) AS ownerProjectId,
     t.id AS trashId, json_extract(t.summary,'$.title') AS trashTitle, json_extract(t.summary,'$.issueKey') AS trashIssueKey,
-    t.project_id AS trashProjectId
+    t.project_id AS trashProjectId,
+    coalesce(archived_comment.id,archived_attachment.id) AS individualTrashId,
+    CASE WHEN archived_comment.id IS NOT NULL THEN '댓글'
+      WHEN archived_attachment.id IS NOT NULL THEN coalesce(
+        json_extract(archived_file.json,'$.filename') || ' · ' || json_extract(archived_file.json,'$.versionLabel'),
+        json_extract(archived_file.json,'$.filename')) END AS individualTrashLabel
   FROM source_records r
   LEFT JOIN projects p ON r.target_type='project' AND p.id=r.target_id
   -- Unary + removes the column's TEXT affinity so SQLite can seek the expression index.
@@ -115,6 +122,11 @@ const rowsSql = (audit: boolean) => `
   LEFT JOIN revisions v ON r.target_type='revision' AND v.id=r.target_id
   LEFT JOIN attachment_versions av ON r.target_type='attachment' AND av.id=r.target_id
   LEFT JOIN attachments a ON r.target_type='attachment' AND a.id=r.target_id
+  LEFT JOIN trash_items archived_comment ON r.target_type='comment' AND archived_comment.item_type='comment'
+    AND archived_comment.item_id=r.target_id AND archived_comment.owner_type=r.owner_type AND archived_comment.owner_id=r.owner_id
+  LEFT JOIN trash_item_files archived_file ON r.target_type='attachment' AND archived_file.file_id=r.target_id
+  LEFT JOIN trash_items archived_attachment ON archived_attachment.id=archived_file.entry_id AND archived_attachment.item_type='attachment'
+    AND archived_attachment.owner_type=r.owner_type AND archived_attachment.owner_id=r.owner_id
   LEFT JOIN trash_entries t ON t.resource_type=CASE WHEN r.target_type IN ('issue','document') THEN r.target_type ELSE r.owner_type END
     AND t.resource_id=CASE WHEN r.target_type IN ('issue','document') THEN r.target_id ELSE r.owner_id END
   WHERE r.import_id=? ORDER BY r.kind,r.rowid`;
@@ -164,7 +176,9 @@ function scanReceipt(
     let archivedFile: FileMetadata | undefined;
     if (status !== 'excluded' && row.targetType && row.targetId) {
       let archived: string | null = null;
-      if (!row.linked && row.trashId) {
+      if (!row.linked && row.individualTrashId) {
+        archived = row.individualTrashLabel ?? row.targetId;
+      } else if (!row.linked && row.trashId) {
         if (row.targetType === 'issue' || row.targetType === 'document') {
           archived = [row.trashIssueKey, row.trashTitle].filter(Boolean).join(' · ') || row.targetId;
         } else if (['comment', 'revision', 'attachment'].includes(row.targetType)) {
@@ -179,7 +193,7 @@ function scanReceipt(
       } : null;
       target = {
         type: row.targetType, id: row.targetId, label: archived ?? row.targetLabel ?? row.targetId,
-        projectId: archived !== null ? row.trashProjectId : row.targetProjectId, owner,
+        projectId: archived !== null && row.trashId ? row.trashProjectId : row.targetProjectId, owner,
       };
     }
     counts[status]++;
@@ -210,8 +224,15 @@ function checkFile({store, files, preservation, trash}: Dependencies, importId: 
   const fileId = source.targetId;
   let file = store.get<AttachmentVersion>('attachment_versions', fileId) ?? store.get<Attachment>('attachments', fileId);
   if (!file && source.ownerType && source.ownerId) {
-    const archived = trash.find(source.ownerType, source.ownerId);
-    file = archived?.attachmentVersions.find(value => value.id === fileId) ?? archived?.attachments.find(value => value.id === fileId);
+    const row = store.db.prepare(`SELECT file.json FROM trash_item_files AS file
+      JOIN trash_items AS entry ON entry.id=file.entry_id
+      WHERE file.file_id=? AND entry.item_type='attachment' AND entry.owner_type=? AND entry.owner_id=?`)
+      .get(fileId, source.ownerType, source.ownerId) as {json: string} | undefined;
+    if (row) file = JSON.parse(row.json) as Attachment;
+    else {
+      const archived = trash.find(source.ownerType, source.ownerId);
+      file = archived?.attachmentVersions.find(value => value.id === fileId) ?? archived?.attachments.find(value => value.id === fileId);
+    }
   }
   if (!file) return { sourceRecordId, status: 'missing', fileId, size: null, sha256: null };
   const details = { sourceRecordId, fileId, size: file.size, sha256: file.sha256 };

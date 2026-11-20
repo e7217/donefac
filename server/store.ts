@@ -3,7 +3,7 @@ import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { MutationOrigin } from '../shared/types.js';
+import type { Comment, MutationOrigin } from '../shared/types.js';
 
 export interface MutationContext { actorId: string | null; origin: MutationOrigin; sourceEventId?: string | null }
 export interface StoreChange { table: string; before: unknown; after: unknown; context: MutationContext }
@@ -66,6 +66,11 @@ export class Store {
     `);
   }
   all<T = any>(table: string): T[] { return (this.db.prepare(`SELECT json FROM ${table}`).all() as {json: string}[]).map(r => JSON.parse(r.json)); }
+  commentsForResource(type: Comment['resourceType'], id: string): Comment[] {
+    const rows = this.db.prepare(`SELECT json FROM comments WHERE resource_type=? AND resource_id=?
+      ORDER BY julianday(json_extract(json,'$.createdAt')),rowid`).all(type, id) as {json:string}[];
+    return rows.map(row => JSON.parse(row.json) as Comment);
+  }
   get<T = any>(table: string, id: string): T | undefined {
     const row = this.db.prepare(`SELECT json FROM ${table} WHERE id=?`).get(id) as {json: string} | undefined;
     return row && JSON.parse(row.json);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +14,7 @@ import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type Collaborati
 import type {
   ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentPublicationView,
   GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
-  TrashResourceType, TrashRestoreResult, WorklogEntry, WorkspaceSnapshot,
+  TrashItemPage, TrashItemSummary, TrashResourceType, TrashRestoreResult, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -33,6 +33,7 @@ type Backup = WorkspaceSnapshot & {
   attachmentContents: { id: string; data: string }[];
   reportingLedger: ReportingLedgerData;
   trashEntries?: unknown[];
+  trashItems?: unknown[];
 };
 type GitlabBackup = Omit<Backup, 'trashEntries'> & { trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
 const branchInTrash = (backup: GitlabBackup, entry: TrashEntrySummary) => backup.trashEntries.find(row => row.id === entry.id)?.gitlabLinks.find(link => link.kind === 'branch');
@@ -97,6 +98,8 @@ const issuePath = (id: string) => `/issues/${id}`;
 const documentPath = (id: string) => `/documents/${id}`;
 const trashPath = (entry: TrashEntrySummary) => `/trash/${entry.id}`;
 const trash = (f: Fixture, query = '') => f.call<TrashPage>('/trash' + query);
+const trashItems = (f: Fixture, query = '') => f.call<TrashItemPage>('/trash/items' + query);
+const itemPath = (id: string) => `/trash/items/${id}`;
 const workspace = (f: Fixture) => f.call<WorkspaceSnapshot>('/workspace');
 const makeIssue = (f: Fixture, title: string, extra: Partial<Issue> = {}) => f.call<Issue>('/issues', 'POST', { projectId, title, ...extra }, 201);
 const makeDocument = (f: Fixture, title: string, docProjectId: string | null = projectId) =>
@@ -131,6 +134,149 @@ async function archive(f: Fixture, resourceType: TrashResourceType, resource: Is
 function restore(f: Fixture, entry: TrashEntrySummary, status = 200) {
   return f.call<TrashRestoreResult>(`${trashPath(entry)}/restore`, 'POST', {}, status, reviewer);
 }
+
+test('individual comment trash enforces authorship and restores the same ordered discussion without redelivery', async t => {
+  const f = await fixture(t);
+  const issue = await makeIssue(f, '댓글 복원 검증', { assigneeId: actor });
+  const input = { resourceType: 'issue', resourceId: issue.id };
+  const commentList = `/comments?${new URLSearchParams(input)}`;
+  const endpoint = await f.call<WebhookEndpointCreated>('/webhook-endpoints', 'POST', {
+    name: '합성 댓글 발신 검증', url: 'http://127.0.0.1:1/unused', projectIds: [projectId], eventTypes: ['comment.created'],
+  }, 201);
+  await f.call(`/webhook-endpoints/${endpoint.endpoint.id}`, 'PATCH', { expectedVersion: endpoint.endpoint.version, enabled: true });
+  const first = await f.call<Comment>('/comments', 'POST', { ...input, body: '복원할 첫 댓글' }, 201, reviewer);
+  const second = await f.call<Comment>('/comments', 'POST', { ...input, body: '뒤에 남긴 댓글' }, 201, reviewer);
+  const deliveries = await f.call<unknown[]>('/webhook-deliveries');
+  const inbox = await f.call('/notifications');
+  assert.equal(deliveries.length, 2);
+
+  const path = `/comments/${first.id}`;
+  await f.call(path, 'DELETE', undefined, 403, actor);
+  assert.equal((await trashItems(f)).total, 0);
+  assert.deepEqual(await f.call<Comment[]>(commentList), [first, second]);
+  const { trashItemId } = await f.call<{ trashItemId: string }>(path, 'DELETE', undefined, 200, reviewer);
+  assert.ok(trashItemId);
+  await f.call(path, 'DELETE', undefined, 404, reviewer);
+  assert.deepEqual(await f.call<Comment[]>(commentList), [second]);
+
+  const listed = await trashItems(f, `?scope=project&projectId=${projectId}&itemType=comment&limit=1`);
+  assert.equal(listed.total, 1);
+  const [item] = listed.items;
+  assert.ok(item);
+  assert.deepEqual({ id: item.id, itemType: item.itemType, itemId: item.itemId, ownerType: item.ownerType, ownerId: item.ownerId,
+    ownerTitle: item.ownerTitle, ownerIssueKey: item.ownerIssueKey, ownerAvailable: item.ownerAvailable, projectId: item.projectId,
+    deletedById: item.deletedById, authorId: item.authorId, versionCount: item.versionCount }, {
+    id: trashItemId, itemType: 'comment', itemId: first.id, ownerType: 'issue', ownerId: issue.id,
+    ownerTitle: issue.title, ownerIssueKey: issue.key, ownerAvailable: true, projectId,
+    deletedById: reviewer, authorId: reviewer, versionCount: null,
+  });
+  assert.ok(item.title.includes(first.body));
+  assert.ok(Number.isFinite(Date.parse(item.deletedAt)));
+  assert.equal((await trashItems(f, '?scope=project&projectId=project-team')).total, 0);
+  assert.equal((await trashItems(f, '?scope=common')).total, 0);
+  await f.call('/trash/items?itemType=comment&itemType=attachment', 'GET', undefined, 400);
+
+  assert.equal((await f.call<TrashItemSummary>(`${itemPath(trashItemId)}/restore`, 'POST', {})).itemId, first.id);
+  assert.equal((await trashItems(f)).total, 0);
+  assert.deepEqual(await f.call<Comment[]>(commentList), [first, second]);
+  assert.deepEqual(await f.call<unknown[]>('/webhook-deliveries'), deliveries);
+  assert.deepEqual(await f.call('/notifications'), inbox);
+  await f.call(`${itemPath(trashItemId)}/restore`, 'POST', {}, 404);
+});
+
+test('individual attachment and comment archives survive restart and backup; parent restore and purge preserve their lifecycle', async t => {
+  const f = await fixture(t);
+  const doc = await makeDocument(f, '개별 휴지통과 상위 문서 검증');
+  const { original, latest } = await makeAttachment(f, 'document', doc.id);
+  const fileIds = [original.id, latest.currentVersionId];
+  const files = await f.call<AttachmentVersion[]>(`/attachments/${original.id}/versions`);
+  const attachmentList = `/attachments?resourceType=document&resourceId=${doc.id}`;
+  const commentList = `/comments?resourceType=document&resourceId=${doc.id}`;
+  const comment = await f.call<Comment>('/comments', 'POST', { resourceType: 'document', resourceId: doc.id, body: '분리하여 보관할 댓글' }, 201, reviewer);
+
+  await f.call(`/attachments/${original.id}?expectedVersionId=${original.id}`, 'DELETE', undefined, 409);
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    db.exec("CREATE TRIGGER fail_item_trash_audit BEFORE INSERT ON activities BEGIN SELECT RAISE(ABORT,'synthetic item rollback'); END");
+    await f.call(`/attachments/${original.id}`, 'DELETE', undefined, 500);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS fail_item_trash_audit');
+    db.close();
+  }
+  assert.deepEqual(await f.call(attachmentList), [latest]);
+  assert.equal((await trashItems(f)).total, 0);
+
+  const { trashItemId: attachmentEntry } = await f.call<{ trashItemId: string }>(`/attachments/${original.id}?expectedVersionId=${latest.currentVersionId}`, 'DELETE');
+  const { trashItemId: commentEntry } = await f.call<{ trashItemId: string }>(`/comments/${comment.id}`, 'DELETE', undefined, 200, reviewer);
+  const [attachment] = (await trashItems(f, '?itemType=attachment')).items;
+  assert.equal(attachment.id, attachmentEntry);
+  assert.equal(attachment.title, latest.filename);
+  assert.equal(attachment.versionCount, 2);
+  assert.equal(attachment.ownerAvailable, true);
+  assert.deepEqual(await f.call(attachmentList), []);
+  assert.deepEqual(await f.call(commentList), []);
+  await f.call(`/attachments/${original.id}/versions`, 'GET', undefined, 404);
+  for (const id of fileIds) {
+    await f.call(contentPath(id), 'GET', undefined, 404);
+    await f.call(versionPath(id), 'GET', undefined, 404);
+  }
+  assert.deepEqual(readdirSync(join(f.dataDir, 'uploads')).sort(), [...fileIds].sort());
+
+  const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '개별 휴지통 공개 경계', access: 'write', projectIds: [projectId], expiresAt: null }, 201);
+  const headers = { Authorization: `Bearer ${key.token}` };
+  assert.equal((await f.request(`/v1${contentPath(latest.currentVersionId)}`, { headers })).status, 404);
+  assert.equal((await f.request('/v1/trash/items', { headers })).status, 403);
+  assert.equal((await f.request(`/v1${itemPath(attachmentEntry)}/restore`, { method: 'POST', headers })).status, 403);
+
+  const owner = await archive(f, 'document', doc);
+  assert.equal((await trashItems(f)).total, 2);
+  assert.ok((await trashItems(f)).items.every(item => !item.ownerAvailable && item.ownerId === doc.id));
+  await f.call(`${itemPath(attachmentEntry)}/restore`, 'POST', {}, 409);
+  await f.call(`${itemPath(commentEntry)}/restore`, 'POST', {}, 409);
+  const originalBackup = await f.call<Backup>('/export');
+  assert.equal(originalBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.equal(originalBackup.trashItems?.length, 2);
+  assert.deepEqual(new Map(originalBackup.attachmentContents.map(item => [item.id, Buffer.from(item.data, 'base64')])), new Map([
+    [original.id, originalBytes], [latest.currentVersionId, revisedBytes],
+  ]));
+  await f.call('/import', 'POST', { data: { ...originalBackup, schemaVersion: 30 } }, 400);
+  const duplicate = structuredClone(originalBackup);
+  duplicate.trashItems!.push(duplicate.trashItems![0]);
+  await f.call('/import', 'POST', { data: duplicate }, 400);
+  const corrupt = structuredClone(originalBackup);
+  corrupt.attachmentContents.find(item => item.id === latest.currentVersionId)!.data = Buffer.from('변조된 합성 첨부').toString('base64');
+  await f.call('/import', 'POST', { data: corrupt }, 400);
+  assert.equal((await trashItems(f)).total, 2);
+
+  await f.call('/import', 'POST', { data: originalBackup });
+  await f.restart();
+  await restore(f, owner);
+  assert.deepEqual(await f.call(attachmentList), []);
+  assert.deepEqual(await f.call(commentList), []);
+  assert.ok((await trashItems(f)).items.every(item => item.ownerAvailable));
+  const latestPath = join(f.dataDir, 'uploads', latest.currentVersionId);
+  try {
+    writeFileSync(latestPath, Buffer.from('복원 직전 손상된 합성 첨부'));
+    await f.call(`${itemPath(attachmentEntry)}/restore`, 'POST', {}, 503);
+    assert.deepEqual(await f.call(attachmentList), []);
+    assert.equal((await trashItems(f, '?itemType=attachment')).items[0]?.id, attachmentEntry);
+  } finally { writeFileSync(latestPath, revisedBytes); }
+  await f.call(`${itemPath(attachmentEntry)}/restore`, 'POST', {});
+  await f.call(`${itemPath(commentEntry)}/restore`, 'POST', {});
+  assert.deepEqual(await f.call<Comment[]>(commentList), [comment]);
+  assert.deepEqual(await f.call(attachmentList), [latest]);
+  assert.deepEqual(await f.call(`/attachments/${original.id}/versions`), files);
+  await bytes(f, contentPath(original.id), originalBytes);
+  await bytes(f, versionPath(latest.currentVersionId), revisedBytes);
+
+  await f.call(`/attachments/${original.id}`, 'DELETE');
+  await f.call(`/comments/${comment.id}`, 'DELETE', undefined, 200, reviewer);
+  const current = (await workspace(f)).documents.find(row => row.id === doc.id)!;
+  const parentPurge = await archive(f, 'document', current);
+  await f.call(trashPath(parentPurge), 'DELETE');
+  assert.equal((await trashItems(f)).total, 0);
+  assert.deepEqual(readdirSync(join(f.dataDir, 'uploads')), []);
+});
 
 test('native schema 24 retains live and trashed GitLab branches and rejects malformed or older branch records', async t => {
   const f = await fixture(t);
@@ -422,6 +568,27 @@ test('issue trash hides canonical data and restores attachments, worklogs, and d
   await f.call('/import', 'POST', { data: exported });
   const reloaded = await f.call<Backup>('/export');
   assert.deepEqual(reloaded.reportingLedger.events.filter(event => event.issueId === target.id && event.kind !== 'baseline'), events);
+});
+
+test('permanent deletion resumes pending file cleanup on restart', async t => {
+  const f = await fixture(t);
+  const issue = await makeIssue(f, '재시작 시 첨부 정리 검증');
+  const { original, latest } = await makeAttachment(f, 'issue', issue.id);
+  const archived = await f.call<{ trashItemId: string }>(`/attachments/${original.id}?expectedVersionId=${latest.currentVersionId}`, 'DELETE');
+  const originalPath = join(f.dataDir, 'uploads', original.id);
+  const heldPath = join(f.dataDir, 'interrupted-upload-cleanup');
+  renameSync(originalPath, heldPath);
+  mkdirSync(originalPath); // Force the immediate unlink to fail after the database commit.
+  await f.call(itemPath(archived.trashItemId), 'DELETE');
+  assert.ok(existsSync(originalPath));
+  assert.equal((await trashItems(f)).total, 0);
+  await f.call(contentPath(original.id), 'GET', undefined, 404);
+  rmSync(originalPath, { recursive: true });
+  renameSync(heldPath, originalPath);
+  await f.restart();
+  assert.ok(!existsSync(originalPath));
+  assert.ok(!existsSync(join(f.dataDir, 'uploads', latest.currentVersionId)));
+  await f.call(`${itemPath(archived.trashItemId)}/restore`, 'POST', {}, 404);
 });
 
 test('trash filters its scope and retains children until their parent can be restored', async t => {

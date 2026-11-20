@@ -497,6 +497,19 @@ async function runStandardPilot() {
   })).json();
   assert.equal(updatedAttachment.id,attachment.id);
   assert.equal(updatedAttachment.versionCount,2);
+  const comment = await (await call(pilot.url,'/comments',{
+    method:'POST',status:201,body:{resourceType:'issue',resourceId:issue.id,body:'파일럿에서 개별 복구할 합성 댓글'},
+  })).json();
+  const commentArchive = await (await call(pilot.url,`/comments/${comment.id}`,{method:'DELETE'})).json();
+  const archivedContents = ['개별 복구 파일 첫 버전','개별 복구 파일 두 번째 버전'].map(text=>Buffer.from(text));
+  const archivedRoot = await (await call(pilot.url,target,{
+    method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:archivedContents[0],
+  })).json();
+  const archivedHead = await (await call(pilot.url,`/attachments/${archivedRoot.id}/versions?expectedVersionId=${archivedRoot.currentVersionId}&filename=pilot-child.bin`,{
+    method:'POST',status:201,headers:{'Content-Type':'application/octet-stream'},body:archivedContents[1],
+  })).json();
+  const fileArchive = await (await call(pilot.url,`/attachments/${archivedRoot.id}?expectedVersionId=${archivedHead.currentVersionId}`,{method:'DELETE'})).json();
+  await call(pilot.url,`/attachments/${archivedHead.currentVersionId}/content`,{status:404});
   const migration = await applyPilotSourceMigration(pilot.url, assigneeId, workspace.users[1].id);
   const sourceAudit = await verifyPilotSourceMigration(pilot.url, migration);
   const key = await (await call(pilot.url,'/api-keys',{
@@ -537,6 +550,10 @@ async function runStandardPilot() {
   const copy = await start(restored);
   const restoredTrash = await (await call(copy.url,`/trash?scope=project&projectId=${projectId}`)).json();
   assert.equal(restoredTrash.items.find(item=>item.id===trashedIssue.trashEntryId)?.resourceId,issue.id);
+  const childArchives = await (await call(copy.url,`/trash/items?scope=project&projectId=${projectId}`)).json();
+  assert.deepEqual(new Set(childArchives.items.filter(item=>item.ownerId===issue.id).map(item=>item.id)),new Set([commentArchive.trashItemId,fileArchive.trashItemId]));
+  assert.ok(childArchives.items.filter(item=>item.ownerId===issue.id).every(item=>item.ownerAvailable===false));
+  await call(copy.url,`/trash/items/${fileArchive.trashItemId}/restore`,{method:'POST',body:{},status:409});
   await call(copy.url,`/attachments/${attachment.id}/content`,{status:404});
   const undone = await (await call(copy.url,`/trash/${trashedIssue.trashEntryId}/restore`,{method:'POST',body:{}})).json();
   assert.equal(undone.resourceId,issue.id);
@@ -551,6 +568,17 @@ async function runStandardPilot() {
   assert.equal(restoredIssue.title,issue.title);
   assert.equal(restoredIssue.estimate,2);
   assert.equal(restoredIssue.plannedEffortMinutes,300);
+  await call(copy.url,`/attachments/${archivedRoot.id}/content`,{status:404});
+  const commentsPath = `/comments?resourceType=issue&resourceId=${issue.id}`;
+  assert.ok(!(await (await call(copy.url,commentsPath)).json()).some(item=>item.id===comment.id));
+  await call(copy.url,`/trash/items/${commentArchive.trashItemId}/restore`,{method:'POST',body:{}});
+  await call(copy.url,`/trash/items/${fileArchive.trashItemId}/restore`,{method:'POST',body:{}});
+  assert.deepEqual((await (await call(copy.url,commentsPath)).json()).find(item=>item.id===comment.id),comment);
+  const restoredChildFiles = [archivedRoot.id,archivedHead.currentVersionId];
+  for (const [index,id] of restoredChildFiles.entries()) {
+    const downloaded = await call(copy.url,`/attachment-versions/${id}/download`);
+    assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()),archivedContents[index]);
+  }
   const restoredWorkload = await (await call(copy.url,`/v1${workloadPath}`,{
     headers:{Authorization:`Bearer ${key.token}`},
   })).json();
@@ -599,7 +627,7 @@ async function runStandardPilot() {
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, time reservations and restored data.');
+  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);

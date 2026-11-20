@@ -295,7 +295,7 @@ export class ApiKeyService {
         const query = this.query(request, ['resourceType', 'resourceId']);
         if (!['issue', 'document'].includes(query.resourceType) || !query.resourceId) fail(400, '댓글 대상을 확인해 주세요.');
         this.resource(key, query.resourceType === 'issue' ? 'issues' : 'documents', query.resourceId);
-        this.used(key); response.json(this.store.all<Comment>('comments').filter(comment => comment.resourceType === query.resourceType && comment.resourceId === query.resourceId)); return;
+        this.used(key); response.json(this.store.commentsForResource(query.resourceType as Comment['resourceType'], query.resourceId)); return;
       }
       return fail(403, '공개 API에서 지원하지 않는 경로입니다.');
     }

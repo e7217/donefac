@@ -428,6 +428,24 @@ export interface TrashRestoreResult {
   projectId: string | null;
   warnings: string[];
 }
+export type TrashItemType = 'comment' | 'attachment';
+export interface TrashItemSummary {
+  id: string;
+  itemType: TrashItemType;
+  itemId: string;
+  ownerType: TrashResourceType;
+  ownerId: string;
+  ownerTitle: string;
+  ownerIssueKey: string | null;
+  ownerAvailable: boolean;
+  projectId: string | null;
+  title: string;
+  deletedAt: string;
+  deletedById: string;
+  authorId: string;
+  versionCount: number | null;
+}
+export interface TrashItemPage { items: TrashItemSummary[]; total: number; offset: number; limit: number }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', 'document-created', 'document-comment', 'document-updated', 'document-review-requested',
