@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { buffer } from 'node:stream/consumers';
 import { fileURLToPath } from 'node:url';
 import { zip } from '../tests/fixtures/legacy-export-zip.mjs';
+import { startPilotTestProxy } from './pilot-test-proxy.mjs';
 
 const mode = process.argv[2];
 assert.ok(process.argv.length === 2 || (process.argv.length === 3 && mode === '--team'), 'Usage: node scripts/test-pilot.mjs [--team]');
@@ -49,11 +52,15 @@ async function deadline(completion, milliseconds, message) {
   } finally { clearTimeout(timer); }
 }
 
-async function start(dataDir, demo = false) {
+async function start(dataDir, demo = false, access) {
   interruption.signal.throwIfAborted();
   const env = {...process.env, TEAMSPACE_PILOT_PORT: '0', TEAMSPACE_PILOT_DEMO: demo ? '1' : '0', TEAMSPACE_PILOT_OUTBOUND: '0'};
   delete env.TEAMSPACE_PILOT_ORIGIN;
   delete env.TEAMSPACE_PILOT_ACCESS_FILE;
+  if (access) {
+    env.TEAMSPACE_PILOT_ORIGIN = access.origin;
+    env.TEAMSPACE_PILOT_ACCESS_FILE = access.file;
+  }
   const child = spawn('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
     cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env,
   });
@@ -97,6 +104,54 @@ async function call(url, path, { method = 'GET', body, headers = {}, status = 20
   });
   assert.equal(response.status, status, `${method} ${path} returned ${response.status}`);
   return response;
+}
+
+function requestTeamPilot(proxy, path, { method = 'GET', body, headers = {} } = {}) {
+  const target = new URL(path, proxy.origin);
+  assert.equal(target.origin, proxy.origin, 'Invalid team pilot test route.');
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(target, {
+      method, headers, ca: proxy.certificate, agent: false,
+      signal: AbortSignal.any([interruption.signal, AbortSignal.timeout(25_000)]),
+    }, response => {
+      buffer(response).then(bytes => resolve({ status: response.statusCode, headers: response.headers, bytes }), reject);
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
+async function openTeamPilot(proxy, access, dataDir, retiredCookies) {
+  const pilot = await start(dataDir, false, access);
+  proxy.setBackendPort(Number(new URL(pilot.url).port));
+  const sessionProbe = '/api/workspace';
+  assert.equal((await requestTeamPilot(proxy, sessionProbe)).status, 401, 'Anonymous HTTPS could read the pilot workspace.');
+  for (const cookie of retiredCookies) {
+    assert.equal((await requestTeamPilot(proxy, sessionProbe, { headers: { Cookie: cookie } })).status, 401,
+      'A prior session could read the restarted or restored workspace.');
+  }
+
+  const login = await requestTeamPilot(proxy, '/pilot-access', {
+    method: 'POST', headers: { Origin: proxy.origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ accessCode: access.code }).toString(),
+  });
+  assert.equal(login.status, 303, 'The team pilot did not accept the synthetic key.');
+  const [cookie] = login.headers['set-cookie'] ?? [];
+  const token = /^__Host-teamspace-pilot=([A-Za-z0-9_-]{43});/.exec(cookie)?.[1];
+  assert.ok(token && /; Secure; HttpOnly; SameSite=Lax$/.test(cookie), 'Missing opaque secure team session.');
+  const session = `__Host-teamspace-pilot=${token}`;
+  assert.ok(!retiredCookies.has(session), 'A new session must have a fresh cookie.');
+  retiredCookies.add(session);
+
+  const api = async (path, { method = 'GET', body, headers = {}, status = 200 } = {}) => {
+    const reply = await requestTeamPilot(proxy, `/api${path}`, {
+      method, headers: { 'Content-Type': 'application/json', ...headers, Origin: proxy.origin, Cookie: session },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    assert.equal(reply.status, status, `${method} ${path} returned ${reply.status} through the HTTPS proxy.`);
+    return JSON.parse(reply.bytes.toString('utf8'));
+  };
+  return { ...pilot, api };
 }
 
 function cli(action, from, to) {
@@ -317,12 +372,19 @@ async function verifyPilotSourceMigration(url, migration) {
   };
 }
 
-async function browser(url, teamFixture) {
+async function browser(url, teamFixture, accessFile) {
   interruption.signal.throwIfAborted();
   const playwright = fileURLToPath(new URL('../node_modules/@playwright/test/cli.js', import.meta.url));
   const env = { ...process.env, TEAMSPACE_PILOT_TEST_URL: url };
   delete env.TEAMSPACE_PILOT_TEAM_FIXTURE;
-  if (teamFixture) env.TEAMSPACE_PILOT_TEAM_FIXTURE = JSON.stringify(teamFixture);
+  delete env.TEAMSPACE_PILOT_TEST_ACCESS_FILE;
+  if (teamFixture) {
+    env.TEAMSPACE_PILOT_TEAM_FIXTURE = JSON.stringify(teamFixture);
+    env.TEAMSPACE_PILOT_TEST_ACCESS_FILE = accessFile;
+    delete env.DEBUG;
+    delete env.PWDEBUG;
+    delete env.NODE_DEBUG;
+  }
   const child = spawn(process.execPath, [playwright, 'test', '--config=playwright.pilot.config.ts', `--output=${join(scratch,'browser')}`, '--reporter=line'], {
     cwd: repo, stdio: 'inherit', env, detached: process.platform !== 'win32',
   });
@@ -369,10 +431,10 @@ const gitlab = createServer((request, response) => {
   response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
 });
 
-async function teamSnapshot(url, fixture, evidence) {
+async function teamSnapshot(api, fixture, evidence) {
   const documentPath = `/documents/${fixture.documentId}`;
-  const session = await (await call(url, `${documentPath}/collaboration`)).json();
-  const workspace = await (await call(url, '/export')).json();
+  const session = await api(`${documentPath}/collaboration`);
+  const workspace = await api('/export');
   const current = workspace.documents.find(document => document.id === fixture.documentId);
   const recovery = workspace.documents.find(document => document.id === evidence.recoveryDocumentId);
   const state = workspace.collabStates.find(value => value.documentId === fixture.documentId);
@@ -400,62 +462,84 @@ async function teamSnapshot(url, fixture, evidence) {
   assert.equal(issue.version, traffic.issueVersion);
   assert.equal(issue.plannedEffortMinutes, traffic.plannedEffortMinutes);
   assert.equal(issue.startDate, traffic.workingDate);
+  assert.equal(issue.endDate, traffic.workingDate);
   const listNode = issueList.content.content?.find(node => node.type === 'issueList' && node.attrs?.projectId === fixture.projectId);
   const view = workspace.savedViews?.find(value => value.id === listNode?.attrs.savedViewId && value.projectId === fixture.projectId);
   assert.ok(listNode && view, 'The issue list must retain its project and same-project saved view.');
+  const scheduled = traffic.scheduledSuccessor;
+  assert.ok(scheduled && scheduled.issueId !== issue.id, 'The dependency schedule must include a different successor.');
+  const successor = workspace.issues.find(value => value.id === scheduled.issueId && value.projectId === fixture.projectId);
+  const dependency = workspace.dependencies.find(value => value.id === scheduled.dependencyId);
+  assert.ok(successor && dependency, 'The committed successor schedule and its dependency must exist.');
+  assert.deepEqual([successor.version, successor.startDate, successor.endDate], [scheduled.issueVersion, scheduled.startDate, scheduled.endDate]);
+  assert.deepEqual([dependency.predecessorId, dependency.successorId, dependency.type, dependency.lagDays],
+    [issue.id, successor.id, 'FS', scheduled.lagDays]);
 
   return {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
-    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, issueList, view })).digest('hex'),
+    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, successor, dependency, issueList, view })).digest('hex'),
   };
 }
 
 async function runTeamPilot(seconds) {
-  const pilot = await start(source);
+  const file = join(scratch, 'team-access-key');
+  const code = randomBytes(32).toString('hex');
+  writeFileSync(file, `${code}\n`, { flag: 'wx', mode: 0o600 });
+  const proxy = await startPilotTestProxy(scratch);
+  try { await rehearseTeamPilot(seconds, proxy, { origin: proxy.origin, file, code }); }
+  finally { await proxy.close(); }
+}
+
+async function rehearseTeamPilot(seconds, proxy, access) {
+  const retiredCookies = new Set();
+  const pilot = await openTeamPilot(proxy, access, source, retiredCookies);
   const actorIds = [];
   for (let index = 1; index <= 20; index++) {
     const actorNumber = String(index).padStart(2, '0');
-    const user = await (await call(pilot.url, '/users', {
+    const user = await pilot.api('/users', {
       method: 'POST', status: 201, body: { name: `합성 팀원 ${actorNumber}`, email: `pilot-${actorNumber}@example.invalid` },
-    })).json();
+    });
     actorIds.push(user.id);
   }
   assert.equal(new Set(actorIds).size, 20);
   const headers = { 'X-Actor-Id': actorIds[0] };
-  const project = await (await call(pilot.url, '/projects', {
+  const project = await pilot.api('/projects', {
     method: 'POST', status: 201, headers, body: { key: 'TEAM', name: '합성 팀 파일럿' },
-  })).json();
+  });
   const planned = new Date();
   do { planned.setUTCDate(planned.getUTCDate() + 1); } while ([0, 6].includes(planned.getUTCDay()));
   const workingDate = planned.toISOString().slice(0, 10);
-  const issue = await (await call(pilot.url, '/issues', {
+  const issue = await pilot.api('/issues', {
     method: 'POST', status: 201, headers, body: {
       projectId: project.id, title: '동시 편집 중 검증할 업무', assigneeId: actorIds[0],
       startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
     },
-  })).json();
+  });
   const title = '20명 공동 편집 리허설';
   const initialText = '이 문장은 팀 파일럿의 합성 원문입니다.';
-  const document = await (await call(pilot.url, '/documents', {
+  const document = await pilot.api('/documents', {
     method: 'POST', status: 201, headers, body: {
       projectId: project.id, title,
       content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: initialText }] }] },
     },
-  })).json();
-  const session = await (await call(pilot.url, `/documents/${document.id}/collaboration/enable`, {
+  });
+  const session = await pilot.api(`/documents/${document.id}/collaboration/enable`, {
     method: 'POST', headers, body: { expectedVersion: document.version },
-  })).json();
+  });
   assert.ok(session.enabled && session.epoch);
   const evidencePath = join(scratch, 'team-evidence.json');
   const fixture = {
     actorIds, projectId: project.id, documentId: document.id, issueId: issue.id, title, initialText,
     initialEpoch: session.epoch, seconds, evidencePath,
   };
-  console.log(`Team pilot started: ${actorIds.length} actors, at least ${seconds}s of shared editing.`);
-  await browser(pilot.url, fixture);
+  console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing.`);
+  await browser(proxy.origin, fixture, access.file);
 
-  const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'));
+  const browserEvidence = readFileSync(evidencePath, 'utf8');
+  assert.ok(!browserEvidence.includes(access.code), 'The browser evidence must exclude the access key.');
+  const evidence = JSON.parse(browserEvidence);
+  assert.deepEqual(evidence.authentication, { transport: 'https', browserSessions: actorIds.length });
   assert.equal(evidence.documentId, document.id);
   assert.equal(evidence.originalEpoch, session.epoch);
   assert.ok(typeof evidence.finalEpoch === 'string' && evidence.finalEpoch !== session.epoch);
@@ -469,22 +553,30 @@ async function runTeamPilot(seconds) {
   assert.ok(Number.isSafeInteger(evidence.editCount) && evidence.editCount >= actorIds.length);
   assert.ok(Number.isFinite(evidence.elapsedMs) && evidence.elapsedMs >= seconds * 1_000);
   assert.ok(evidence.workspaceTraffic, 'The browser must verify issue and issue-list changes during editing.');
-  const baseline = await teamSnapshot(pilot.url, fixture, evidence);
+  const baseline = await teamSnapshot(pilot.api, fixture, evidence);
   await stop(pilot);
+  proxy.setBackendPort(null);
 
-  const reopened = await start(source);
-  assert.deepEqual(await teamSnapshot(reopened.url, fixture, evidence), baseline, 'The source changed across a restart.');
+  const reopened = await openTeamPilot(proxy, access, source, retiredCookies);
+  assert.deepEqual(await teamSnapshot(reopened.api, fixture, evidence), baseline, 'The source changed across a restart.');
   await stop(reopened);
+  proxy.setBackendPort(null);
 
   const saved = cli('backup', source, backup);
   assert.equal(saved.status, 0, saved.stderr);
+  for (const entry of readdirSync(backup, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const bytes = readFileSync(join(entry.parentPath, entry.name));
+    assert.ok(!bytes.includes(access.code) && [...retiredCookies].every(cookie => !bytes.includes(cookie.split('=')[1])),
+      'The pilot backup must exclude the access key and active session tokens.');
+  }
   const recovery = cli('restore', backup, restored);
   assert.equal(recovery.status, 0, recovery.stderr);
-  const copy = await start(restored);
-  assert.deepEqual(await teamSnapshot(copy.url, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
+  const copy = await openTeamPilot(proxy, access, restored, retiredCookies);
+  assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
   await stop(copy);
-  console.log(`Team pilot passed: ${evidence.peerCount} browser actors, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Original document, recovery copy, issue and issue list matched after restart and separate restore.`);
+  console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched the original document, recovery copy, ticket schedule, dependency and issue list.`);
 }
 
 async function runStandardPilot() {

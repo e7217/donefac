@@ -1,6 +1,7 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { expect, test, type APIRequestContext, type BrowserContext, type Dialog, type Page } from '@playwright/test';
+import { expect, request as apiRequest, test, type APIRequestContext, type BrowserContext, type Dialog, type Page } from '@playwright/test';
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
 import type { DocPage, DocRevision } from '../../shared/types';
@@ -34,6 +35,7 @@ interface Peer {
 const TEAM_SIZE = 20;
 const OPEN_BATCH_SIZE = 4;
 const SYNC_TIMEOUT = 25_000;
+const SESSION_COOKIE = '__Host-teamspace-pilot';
 const state = (page: Page) => page.locator('.docs-collaboration-state');
 const editor = (page: Page) => page.locator('.docs-live-prose');
 const presence = (page: Page) => page.locator('.docs-collaboration-presence');
@@ -51,12 +53,54 @@ function loadFixture(): Fixture {
   return fixture;
 }
 
+async function loadAccessCode() {
+  const filename = process.env.TEAMSPACE_PILOT_TEST_ACCESS_FILE;
+  if (!filename || !isAbsolute(filename)) throw new Error('An isolated pilot access file is required.');
+  const accessCode = (await readFile(filename, 'utf8').catch(() => {
+    throw new Error('The isolated pilot access file could not be read.');
+  })).trim();
+  if (!/^[0-9a-f]{64}$/.test(accessCode)) throw new Error('The isolated pilot access code is invalid.');
+  return accessCode;
+}
+
+async function signInRequests(request: APIRequestContext, accessCode: string) {
+  expect((await request.get('/api/workspace')).status(), 'Anonymous pilot API access').toBe(401);
+  const status = await request.post('/pilot-access', { form: { accessCode }, maxRedirects: 0 })
+    .then(response => response.status())
+    .catch(() => { throw new Error('Could not submit the pilot API session login.'); });
+  expect(status, 'Pilot API session login').toBe(303);
+}
+
+async function signInBrowser(peer: Peer, baseURL: string, location: string, accessCode: string, sessionTokens: Set<string>) {
+  const password = peer.page.getByLabel('팀 접속 키', { exact: true });
+  await expect(password).toHaveAttribute('type', 'password', { timeout: SYNC_TIMEOUT });
+  try {
+    await password.fill(accessCode, { timeout: SYNC_TIMEOUT });
+    const [response] = await Promise.all([
+      peer.page.waitForResponse(response => response.url() === `${baseURL}/pilot-access` && response.request().method() === 'POST', { timeout: SYNC_TIMEOUT }),
+      peer.page.getByRole('button', { name: '접속', exact: true }).click({ timeout: SYNC_TIMEOUT }),
+    ]);
+    if (response.status() !== 303) throw new Error('Pilot access did not redirect.');
+    await peer.page.waitForURL(`${baseURL}${location}`, { waitUntil: 'domcontentloaded', timeout: SYNC_TIMEOUT });
+  } catch {
+    throw new Error(`Player ${peer.ordinal} could not sign in and return to the document.`);
+  }
+  const cookie = (await peer.context.cookies(baseURL)).find(entry => entry.name === SESSION_COOKIE);
+  if (!cookie?.secure || !cookie.httpOnly || cookie.sameSite !== 'Lax' || cookie.path !== '/' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(cookie.value) || sessionTokens.has(cookie.value)) {
+    throw new Error(`Player ${peer.ordinal} did not receive a unique protected session cookie.`);
+  }
+  sessionTokens.add(cookie.value);
+}
+
 function observeWire(peer: Peer, baseURL: string, documentId: string) {
   const expectedOrigin = new URL(baseURL);
-  expectedOrigin.protocol = 'ws:';
+  expectedOrigin.protocol = 'wss:';
   peer.page.on('websocket', socket => {
     const url = new URL(socket.url());
-    if (url.origin !== expectedOrigin.origin || url.pathname !== '/api/collaboration' ||
+    const queryFields = [...url.searchParams.keys()].sort();
+    if (url.origin !== expectedOrigin.origin || url.pathname !== '/api/collaboration' || url.username || url.password || url.hash ||
+      queryFields.length !== 2 || queryFields[0] !== 'actorId' || queryFields[1] !== 'documentId' ||
       url.searchParams.get('actorId') !== peer.actorId || url.searchParams.get('documentId') !== documentId) {
       peer.errors.push(`Unexpected WebSocket for player ${peer.ordinal}.`);
       return;
@@ -136,20 +180,47 @@ async function openLatest(peer: Peer) {
   finally { peer.page.off('dialog', accept); }
 }
 
-test('twenty real browser actors keep collaborating, reconnect, and recover a stale draft into a separate copy', async ({ browser, baseURL, request }) => {
+async function verifyGantt(context: BrowserContext, projectId: string, traffic: Awaited<ReturnType<typeof verifyWorkspaceTraffic>>) {
+  const page = await context.newPage();
+  try {
+    const successor = traffic.scheduledSuccessor;
+    await page.goto(`/#/${projectId}/gantt?focusIssue=${successor.issueId}&focusDate=startDate`, { waitUntil: 'domcontentloaded' });
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    for (const [id, start, end] of [
+      [traffic.issueId, traffic.workingDate, traffic.workingDate],
+      [successor.issueId, successor.startDate, successor.endDate],
+    ]) {
+      const bar = chart.locator(`[data-issue-id="${id}"]`).getByRole('button', { name: / 일정 이동$/ });
+      await expect(bar).toHaveAttribute('title', new RegExp(`${start} ~ ${end}`), { timeout: SYNC_TIMEOUT });
+    }
+    const connector = chart.locator(`[data-dependency-id="${successor.dependencyId}"]`);
+    await expect(connector).toHaveAttribute('data-dependency-type', 'FS');
+    await expect(connector).not.toHaveAttribute('data-dependency-conflict', 'true');
+  } finally {
+    await page.close();
+  }
+}
+
+test('twenty individually signed-in HTTPS browser actors collaborate, reconnect, and recover a stale draft', async ({ browser, baseURL }) => {
   const fixture = loadFixture();
-  if (!baseURL || baseURL !== new URL(process.env.TEAMSPACE_PILOT_TEST_URL!).origin) throw new Error('The isolated pilot origin is required.');
+  if (!baseURL || !/^https:\/\/127\.0\.0\.1:\d+$/.test(baseURL) || baseURL !== new URL(process.env.TEAMSPACE_PILOT_TEST_URL!).origin) {
+    throw new Error('The isolated HTTPS pilot origin is required.');
+  }
   test.setTimeout((fixture.seconds + 240) * 1000);
+  const accessCode = await loadAccessCode();
+  const request = await apiRequest.newContext({ baseURL, ignoreHTTPSErrors: true, extraHTTPHeaders: { Origin: baseURL } });
   const location = `/#/${fixture.projectId}/documents/${fixture.documentId}`;
   const peers: Peer[] = [];
   const contexts: BrowserContext[] = [];
+  const sessionTokens = new Set<string>();
   try {
+    await signInRequests(request, accessCode);
     const initial = await session(request, fixture.documentId);
     expect(initial).toMatchObject({ enabled: true, epoch: fixture.initialEpoch, document: { plainText: fixture.initialText } });
     const originalEpoch = fixture.initialEpoch;
     for (let first = 0; first < TEAM_SIZE; first += OPEN_BATCH_SIZE) {
       const opened = await Promise.allSettled(fixture.actorIds.slice(first, first + OPEN_BATCH_SIZE).map(async (actorId, index) => {
-        const context = await browser.newContext({ baseURL, viewport: { width: 1024, height: 768 } });
+        const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, viewport: { width: 1024, height: 768 } });
         contexts.push(context);
         await context.addInitScript(value => localStorage.setItem('teamspace.actor', value), actorId);
         const page = await context.newPage();
@@ -157,6 +228,8 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
           errors: [], welcomedEpochs: [], sentUpdates: new Set(), acknowledgments: new Set() };
         observeWire(peer, baseURL, fixture.documentId);
         await page.goto(location, { waitUntil: 'domcontentloaded', timeout: SYNC_TIMEOUT });
+        await signInBrowser(peer, baseURL, location, accessCode, sessionTokens);
+        await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(actorId, { timeout: SYNC_TIMEOUT });
         await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(fixture.title, { timeout: SYNC_TIMEOUT });
         await expect(state(page)).toHaveText('서버에 동기화됨', { timeout: SYNC_TIMEOUT });
         return peer;
@@ -166,6 +239,7 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
         peers.push(outcome.value);
       }
     }
+    expect(sessionTokens.size, 'Distinct HTTPS browser sessions').toBe(TEAM_SIZE);
     await matchesRendered(peers, initial.document, originalEpoch);
     const startedAt = performance.now();
     const keepConnected = () => {
@@ -176,7 +250,7 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
       }
     };
     keepConnected();
-    console.log(`Team pilot confirmed ${peers.length} synchronized Chromium actors.`);
+    console.log(`Team pilot confirmed ${peers.length} signed-in Chromium actors synchronized over WSS.`);
     const rounds = Math.min(10, Math.max(3, Math.ceil(fixture.seconds / 15) + 1));
     const storedEdits: string[] = [];
     let current = initial.document;
@@ -192,7 +266,7 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
       if (round === 1) {
         [current, workspaceTraffic] = await Promise.all([
           wave(request, current, originalEpoch, peers, edits),
-          verifyWorkspaceTraffic(request, { projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId }),
+          verifyWorkspaceTraffic(peers[0].context.request, { projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL }),
         ]);
       } else current = await wave(request, current, originalEpoch, peers, edits);
       storedEdits.push(...edits.map(edit => edit.value));
@@ -202,6 +276,10 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
     }
     const elapsedMs = Math.floor(performance.now() - startedAt);
     expect(elapsedMs).toBeGreaterThanOrEqual(fixture.seconds * 1000);
+    if (!workspaceTraffic) throw new Error('The team pilot did not run project traffic.');
+    await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
+    keepConnected();
+    console.log('The protected Gantt rendered both moved dates and the resolved dependency.');
 
     const delayed = peers.at(-1)!;
     const onlinePeers = peers.slice(0, -1);
@@ -282,9 +360,10 @@ test('twenty real browser actors keep collaborating, reconnect, and recover a st
       documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
       plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
       rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, workspaceTraffic,
+      authentication: { transport: 'https', browserSessions: sessionTokens.size },
     }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');
   } finally {
-    await Promise.allSettled(contexts.map(context => context.close()));
+    await Promise.allSettled([request.dispose(), ...contexts.map(context => context.close())]);
   }
 });

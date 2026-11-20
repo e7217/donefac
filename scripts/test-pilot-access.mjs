@@ -3,15 +3,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
-import { createServer } from 'node:https';
-import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, expect, request } from '@playwright/test';
 import WebSocket from 'ws';
 import browserConfig from '../playwright.config.ts';
+import { startPilotTestProxy } from './pilot-test-proxy.mjs';
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), 'teamspace-pilot-access-'));
@@ -26,12 +24,10 @@ const expectSoon = expect.configure({ timeout: 8000 });
 const interruption = new AbortController();
 
 let proxy;
-let backendPort;
 let backend;
 let backendExit;
 let backendLogs = '';
 let browser;
-const proxySockets = new Set();
 
 function interrupt(signal, exitCode) {
   process.exitCode = exitCode;
@@ -57,59 +53,6 @@ function checkCredentials(bytes, source) {
   }
 }
 
-function trackSocket(socket) {
-  proxySockets.add(socket);
-  socket.once('close', () => proxySockets.delete(socket));
-}
-
-async function startProxy() {
-  const key = join(scratch, 'loopback.key');
-  const cert = join(scratch, 'loopback.pem');
-  const tls = spawnSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
-    '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
-  ], { encoding: 'utf8', timeout: 15_000 });
-  if (tls.error) throw tls.error;
-  assert.equal(tls.status, 0, 'OpenSSL could not create the temporary loopback certificate.');
-
-  proxy = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, (incoming, outgoing) => {
-    const upstream = httpRequest({
-      hostname: '127.0.0.1', port: backendPort, agent: false,
-      method: incoming.method, path: incoming.url, headers: incoming.headers,
-    }, response => {
-      outgoing.writeHead(response.statusCode, response.headers);
-      response.pipe(outgoing);
-    });
-    upstream.on('error', () => {
-      if (outgoing.headersSent) outgoing.destroy();
-      else outgoing.writeHead(502).end();
-    });
-    outgoing.once('close', () => upstream.destroy());
-    incoming.pipe(upstream);
-  });
-  proxy.on('connection', trackSocket);
-  proxy.on('upgrade', (incoming, client, head) => {
-    const upstream = connect({ host: '127.0.0.1', port: backendPort });
-    trackSocket(upstream);
-    client.on('error', () => upstream.destroy());
-    upstream.on('error', () => client.destroy());
-    client.once('close', () => upstream.destroy());
-    upstream.once('close', () => client.destroy());
-    upstream.once('connect', () => {
-      const headers = [];
-      for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
-        headers.push(`${incoming.rawHeaders[index]}: ${incoming.rawHeaders[index + 1]}`);
-      }
-      upstream.write(`${incoming.method} ${incoming.url} HTTP/1.1\r\n${headers.join('\r\n')}\r\n\r\n`);
-      if (head.length) upstream.write(head);
-      client.pipe(upstream).pipe(client);
-    });
-  });
-  proxy.listen(0, '127.0.0.1');
-  await once(proxy, 'listening');
-  return `https://127.0.0.1:${proxy.address().port}`;
-}
-
 async function startBackend(origin) {
   interruption.signal.throwIfAborted();
   writeFileSync(accessFile, `${accessCode}\n`, { mode: 0o600 });
@@ -129,9 +72,10 @@ async function startBackend(origin) {
       if (match) resolve(Number(match[1]));
     });
   });
-  backendPort = await deadline(Promise.race([ready, backendExit.then(([code, signal]) => {
+  const port = await deadline(Promise.race([ready, backendExit.then(([code, signal]) => {
     throw new Error(`Pilot exited during startup (${code ?? signal}).\n${backendLogs}`);
   })]), 'Pilot startup timed out.', 25_000);
+  proxy.setBackendPort(port);
 }
 
 async function stopBackend(verifyExit = true) {
@@ -144,6 +88,7 @@ async function stopBackend(verifyExit = true) {
     if (backend.exitCode === null && backend.signalCode === null) backend.kill('SIGKILL');
     await backendExit.catch(() => {});
     backend = undefined;
+    proxy.setBackendPort(null);
   }
 }
 
@@ -342,7 +287,8 @@ async function run() {
   process.once('SIGINT', onInterrupt);
   process.once('SIGTERM', onTerminate);
   try {
-    const origin = await startProxy();
+    proxy = await startPilotTestProxy(scratch);
+    const { origin } = proxy;
     await startBackend(origin);
     await verifyBrowser(origin);
     await stopBackend();
@@ -364,9 +310,8 @@ async function run() {
       await browser?.close();
     } finally {
       try {
-        for (const socket of proxySockets) socket.destroy();
-        if (proxy?.listening) await new Promise(resolve => proxy.close(resolve));
-        await stopBackend(false);
+        try { await proxy?.close(); }
+        finally { await stopBackend(false); }
       } finally {
         rmSync(scratch, { recursive: true, force: true });
         process.removeListener('SIGINT', onInterrupt);

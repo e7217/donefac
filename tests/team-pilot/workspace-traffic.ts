@@ -1,8 +1,13 @@
 import { expect, type APIRequestContext, type APIResponse } from '@playwright/test';
-import { defaultWorkCalendar, workingDateOnOrAfter } from '../../shared/calendar';
+import { defaultWorkCalendar, shiftWorkingDate, workingDateOnOrAfter } from '../../shared/calendar';
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
-import type { DocPage, DocRevision, Issue, ProjectWorkloadResult, RichContent, SavedView, TeamWorkloadResult, WorkspaceSnapshot } from '../../shared/types';
+import type {
+  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, ProjectWorkloadResult, RichContent,
+  SavedView, SchedulePreview, TeamWorkloadResult, WorkspaceSnapshot,
+} from '../../shared/types';
+
+type ScheduleApplyResult = { updated: Issue[]; warnings: string[]; undoId: string };
 
 async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> {
   const response = await pending;
@@ -12,22 +17,22 @@ async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> 
 
 /** Exercise independent project work while the main document receives concurrent edits. */
 export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
-  projectId, issueId, actorId, workingDate: providedDate,
-}: { projectId: string; issueId: string; actorId: string; workingDate?: string }) {
-  const headers = { 'X-Actor-Id': actorId };
+  projectId, issueId, actorId, workingDate: providedDate, origin,
+}: { projectId: string; issueId: string; actorId: string; workingDate?: string; origin?: string }) {
+  const headers = { 'X-Actor-Id': actorId, ...(origin ? { Origin: origin } : {}) };
   const before = await json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers }));
   const issue = before.issues.find(item => item.id === issueId && item.projectId === projectId);
   expect(issue, 'Expected the synthetic pilot issue in its project').toBeDefined();
   if (!issue) throw new Error('Synthetic pilot issue is missing.');
 
   const calendar = before.calendars?.find(item => item.projectId === projectId) ?? defaultWorkCalendar(projectId);
-  const workingDate = providedDate ?? workingDateOnOrAfter(new Date().toISOString().slice(0, 10), calendar);
+  const initialDate = workingDateOnOrAfter(providedDate ?? issue.startDate ?? new Date().toISOString().slice(0, 10), calendar);
   const plannedEffortMinutes = 95;
   const changes = {
     status: issue.status === 'in_progress' ? 'review' : 'in_progress',
     assigneeId: actorId,
-    startDate: workingDate,
-    endDate: workingDate,
+    startDate: initialDate,
+    endDate: initialDate,
     plannedEffortMinutes,
   };
   const issuePath = `/api/issues/${encodeURIComponent(issueId)}`;
@@ -39,6 +44,47 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
     headers, data: { expectedVersion: issue.version, plannedEffortMinutes: plannedEffortMinutes + 1 },
   });
   expect(rejected.status()).toBe(409);
+
+  const lagDays = 1;
+  const firstAllowedSuccessor = shiftWorkingDate(initialDate, lagDays + 1, calendar);
+  const successor = await json<Issue>(requests.post('/api/issues', {
+    headers, data: { projectId, title: `${issue.key} 후속 일정`, startDate: firstAllowedSuccessor,
+      endDate: shiftWorkingDate(firstAllowedSuccessor, 1, calendar) },
+  }), 201);
+  const link = { predecessorId: issueId, successorId: successor.id, type: 'FS' as const, lagDays };
+  const dependency = await json<Dependency>(requests.post('/api/dependencies', { headers, data: link }), 201);
+  expect(dependency).toMatchObject(link);
+
+  const workingDate = shiftWorkingDate(initialDate, 2, calendar);
+  const shift = await json<SchedulePreview>(requests.post('/api/schedule/preview', {
+    headers, data: { issueIds: [issueId], days: 2, workingDays: true },
+  }));
+  expect(shift.calendarVersions).toMatchObject({ [projectId]: calendar.version });
+  expect(shift.changes).toMatchObject([{ id: issueId, fromStart: initialDate, fromEnd: initialDate,
+    toStart: workingDate, toEnd: workingDate, version: updated.version }]);
+  expect(shift.warnings.some(warning => warning.includes(successor.key) && warning.includes('FS'))).toBe(true);
+  const moved = await json<ScheduleApplyResult>(requests.post('/api/schedule/apply', {
+    headers, data: { calendarVersions: shift.calendarVersions, changes: shift.changes.map(change => ({
+      id: change.id, expectedVersion: change.version, startDate: change.toStart, endDate: change.toEnd,
+    })) },
+  }));
+  expect(moved.updated).toMatchObject([{ ...changes, id: issueId, projectId, version: updated.version + 1,
+    startDate: workingDate, endDate: workingDate }]);
+
+  const successorStart = shiftWorkingDate(workingDate, lagDays + 1, calendar);
+  const successorEnd = shiftWorkingDate(successorStart, 1, calendar);
+  const auto = await json<AutomaticSchedulePreview>(requests.post('/api/schedule/auto-preview', {
+    headers, data: { projectId, issueIds: [issueId] },
+  }));
+  expect(auto.blocking).toEqual([]);
+  expect(auto.changes).toMatchObject([{ id: successor.id, fromStart: successor.startDate, fromEnd: successor.endDate,
+    toStart: successorStart, toEnd: successorEnd, version: successor.version }]);
+  const corrected = await json<ScheduleApplyResult>(requests.post('/api/schedule/auto-apply', {
+    headers, data: { previewId: auto.previewId },
+  }));
+  expect(corrected.updated).toMatchObject([{ id: successor.id, projectId, startDate: successorStart, endDate: successorEnd,
+    version: successor.version + 1 }]);
+  expect(corrected.warnings).toEqual([]);
 
   const dateQuery = new URLSearchParams({ startDate: workingDate, endDate: workingDate });
   const filters = { query: issue.key, status: changes.status, assigneeId: actorId, type: 'all' };
@@ -68,7 +114,9 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
     json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers })),
     json<DocRevision[]>(requests.get(`/api/documents/${encodeURIComponent(document.id)}/revisions`, { headers })),
   ]);
-  expect(current.issues.find(item => item.id === issueId)).toEqual(updated);
+  expect(current.issues.find(item => item.id === issueId)).toEqual(moved.updated[0]);
+  expect(current.issues.find(item => item.id === successor.id)).toEqual(corrected.updated[0]);
+  expect(current.dependencies.find(item => item.id === dependency.id)).toEqual(dependency);
   expect(current.documents.find(item => item.id === document.id)).toMatchObject({ authorId: actorId, projectId, content: note });
   expect(revisions[0]).toMatchObject({ authorId: actorId, documentId: document.id, version: document.version, content: note });
   const savedView = current.savedViews?.find(item => item.id === view.id && item.projectId === projectId);
@@ -78,5 +126,9 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   const matches = createIssueViewMatcher(savedView.filters, current, projectIssueSchema(current, projectId));
   expect(current.issues.filter(item => item.projectId === projectId && matches(item)).map(item => item.id)).toEqual([issueId]);
 
-  return { issueId, issueVersion: updated.version, issueListDocumentId: document.id, plannedEffortMinutes, workingDate };
+  return {
+    issueId, issueVersion: moved.updated[0].version, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
+    scheduledSuccessor: { issueId: successor.id, issueVersion: corrected.updated[0].version, startDate: successorStart,
+      endDate: successorEnd, dependencyId: dependency.id, lagDays },
+  };
 }
