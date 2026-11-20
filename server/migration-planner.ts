@@ -7,7 +7,7 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
 import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migration-worklog.js';
-import type { MigrationReferenceInput } from './migration-content.js';
+import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationPackage,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
@@ -67,6 +67,9 @@ type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment
 class Planner{
   options:MigrationOptions;result:PreparedMigration;entries:Entry[]=[];entryByKey=new Map<string,Entry>();bindings=new Map<string,Binding>();excluded=new Set<string>();projectsByContainer=new Map<string,Project>();schemas=new Map<string,ProjectIssueSchema>();workflows=new Map<string,ProjectWorkflow>();notices:MigrationNotice[]=[];noticeKeys=new Set<string>();timezoneValid=true;archiveIds=new Map<string,string>();ownerCache=new Map<string,Entry|null>();indexes=new Map<string,Map<string,LegacyRecord>>();issueById=new Map<string,Issue>();documentById=new Map<string,PreparedMigration['documents'][number]>();primaryById=new Map<string,Entry>();referenceIndex=new Map<string,Entry[]>();resolutionCache=new Map<string,{id:string;label:string;url?:string}|null>();fieldOptions=new Map<string,Map<string,MigrationOptions['fields'][number]>>();sourceOptions=new Map<string,Map<string,LegacyRecord[]>>();
   originBases = new Map<string, MigrationOriginBase>();
+  private attachmentRoots = new Map<string, Entry | null>();
+  private attachmentVersionsById = new Map<string, AttachmentVersion>();
+  private confluenceSpacesByKey = new Map<string, Entry[]>();
   constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
@@ -159,7 +162,20 @@ class Planner{
     const projectConfigs=new Map<string,MigrationConfiguration['projects'][number]>();for(const mapping of config.projects){if(projectConfigs.has(mapping.containerId)||!this.options.containers.some(container=>container.id===mapping.containerId))this.notice('PROJECT_MAPPING_INVALID','프로젝트 매핑이 중복되거나 원본 컨테이너가 없습니다.','error');projectConfigs.set(mapping.containerId,mapping);}
     const activeContainers=new Set(this.entries.filter(entry=>!this.excluded.has(entry.key)&&(entry.row.kind==='issue'||entry.row.kind==='page')).map(entry=>optionId(entry.pkg.summary.id,'container',entry.container)));const grouped=new Map<string,Project>();for(const container of this.options.containers){const active=activeContainers.has(container.id);if(!active)continue;const mapping=projectConfigs.get(container.id);if(!mapping){this.notice('PROJECT_MAPPING_REQUIRED',`새 프로젝트를 지정해 주세요: ${container.name}`,'error');continue;}const key=string(mapping.key).trim().toUpperCase(),name=string(mapping.name).trim();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(key)||!name||name.length>100){this.notice('PROJECT_MAPPING_INVALID','프로젝트 키는2~12자 영문·숫자, 이름은1~100자여야 합니다.','error');continue;}if(this.input.existingProjectKeys.some(existing=>existing.toUpperCase()===key)){this.notice('PROJECT_KEY_CONFLICT',`기존 프로젝트 키와 충돌합니다: ${key}`,'error');continue;}let project=grouped.get(key);if(project&&project.name!==name){this.notice('PROJECT_NAME_CONFLICT',`같은 프로젝트 키 ${key}에 서로 다른 이름을 지정했습니다.`,'error');continue;}if(!project){project={id:randomUUID(),key,name,description:'기존 도구에서 이관한 프로젝트',color:'#668899',createdAt:this.input.now};grouped.set(key,project);this.result.projects.push(project);}this.projectsByContainer.set(container.id,project);}
     if(this.result.projects.length>MAX_PROJECTS)this.notice('PROJECT_LIMIT','한 번에 새 프로젝트100개까지 이관할 수 있습니다.','error');
-    for(const entry of this.entries)if(entry.row.kind==='project'){const project=this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.row.sourceId));if(project&&!this.excluded.has(entry.key))this.bindings.set(entry.key,{type:'project',id:project.id,projectId:project.id});}
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'project') continue;
+      if (entry.pkg.dataset.source.product === 'confluence') {
+        const keys = new Set([entry.row.metadata.spaceKey, entry.row.metadata.key, entry.row.metadata.pkey]);
+        for (const key of keys) {
+          if (typeof key !== 'string' || !key) continue;
+          const spaces = this.confluenceSpacesByKey.get(key) ?? [];
+          spaces.push(entry);
+          this.confluenceSpacesByKey.set(key, spaces);
+        }
+      }
+      const project = this.projectsByContainer.get(optionId(entry.pkg.summary.id, 'container', entry.row.sourceId));
+      if (project && !this.excluded.has(entry.key)) this.bindings.set(entry.key, { type: 'project', id: project.id, projectId: project.id });
+    }
     if(this.result.projects.length)this.notice('PROJECT_ACCESS_NOT_REPRODUCED','원본 Jira/Confluence 프로젝트·공간 권한 체계는 새 팀 프로젝트에 재현하지 않습니다. 제한된 개별 콘텐츠는 제외 전까지 차단하며 원래 권한 자료는 보관합니다.','warning',undefined,true);
     const sourceAliases=new Map<string,string>();for(const entry of this.entries)if(!this.excluded.has(entry.key)&&['issue','page','project'].includes(entry.row.kind)){const target=this.bindings.get(entry.key)?.id;for(const alias of [entry.row.sourceId,...(entry.row.kind==='issue'&&entry.row.metadata.key?[string(entry.row.metadata.key)]:[])]){const key=JSON.stringify([entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,entry.row.kind,alias]),previous=sourceAliases.get(key);if(previous&&previous!==entry.key&&!(target&&target===this.bindings.get(previous)?.id))this.notice('SOURCE_BINDING_AMBIGUOUS','같은 원본 인스턴스·ID가 여러 적용 대상으로 존재합니다. 겹치는 내보내기를 제외해 주세요.','error',entry);else sourceAliases.set(key,entry.key);}}
     for(const entry of this.entries)if(!this.excluded.has(entry.key)&&this.restricted(entry))this.notice('RESTRICTED_CONTENT','권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.','error',entry);
@@ -210,8 +226,40 @@ class Planner{
     const choose=(raw:unknown):string|null=>{const objectValue=object(raw),id=string(objectValue.id||objectValue.value||objectValue.name||raw);if(!id)return null;const direct=this.sourceEntry(entry,'option',id)?.row,original=direct?.containerId===sourceId?direct:this.sourceEntry(entry,'option',`${sourceId}:${id}`)?.row,label=string(objectValue.value||objectValue.name)||original?.title||id,optionId=`o_${hash(definition.id,id).slice(0,24)}`;if(label.length>120){bad();return null;}if(!definition.options.some(option=>option.id===optionId))definition.options.push({id:optionId,name:label,archived:false});if(definition.options.length>200||new Set(definition.options.map(option=>option.name)).size!==definition.options.length){bad();return null;}return optionId;};
     if(definition.kind==='multi_select'){const values=Array.isArray(value)?value:[value],result=values.map(choose);return result.some(value=>value===null)?bad():[...new Set(result as string[])];}return Array.isArray(value)?bad():choose(value);
   }
+  private attachmentRoot(entry: Entry): Entry | null {
+    const visited = new Set<string>();
+    let current = entry;
+    let root: Entry | null = null;
+    while (!visited.has(current.key)) {
+      if (this.attachmentRoots.has(current.key)) {
+        root = this.attachmentRoots.get(current.key)!;
+        break;
+      }
+      visited.add(current.key);
+      const nextId = string(current.row.metadata.currentVersionId);
+      const next = nextId && this.sourceEntry(current, 'attachment', nextId);
+      if (!next) {
+        root = current;
+        break;
+      }
+      current = next;
+    }
+    for (const key of visited) this.attachmentRoots.set(key, root);
+    return root;
+  }
   createFiles():void{
-    const groups=new Map<string,Entry[]>();for(const entry of this.entries){if(entry.row.kind!=='attachment'||this.excluded.has(entry.key))continue;let current=entry;const visited=new Set<string>();while(string(current.row.metadata.currentVersionId)){if(visited.has(current.key)){this.notice('ATTACHMENT_VERSION_CYCLE','첨부 버전 관계가 순환합니다.','error',entry);break;}visited.add(current.key);const next=this.sourceEntry(current,'attachment',string(current.row.metadata.currentVersionId));if(!next)break;current=next;}const group=groups.get(current.key)||[];group.push(entry);groups.set(current.key,group);}
+    const groups = new Map<string, Entry[]>();
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'attachment' || this.excluded.has(entry.key)) continue;
+      const root = this.attachmentRoot(entry);
+      if (!root) {
+        this.notice('ATTACHMENT_VERSION_CYCLE', '첨부 버전 관계가 순환합니다.', 'error', entry);
+        continue;
+      }
+      const group = groups.get(root.key) ?? [];
+      group.push(entry);
+      groups.set(root.key, group);
+    }
     for(const[rootKey,versions]of groups){const ownerEntry=this.ownerEntry(versions[0]),owner=ownerEntry?this.bindings.get(ownerEntry.key):undefined;if(!owner||!['issue','document'].includes(owner.type)){this.notice('ATTACHMENT_OWNER_MISSING','첨부 파일의 현재 업무·문서 소유자를 확정할 수 없습니다.','error',versions[0]);continue;}
       const ordered=[...versions].sort((a,b)=>{if(a.key===rootKey)return-1;if(b.key===rootKey)return 1;return Number(b.row.metadata.attachmentVersion||b.row.metadata.version||0)-Number(a.row.metadata.attachmentVersion||a.row.metadata.version||0)||a.key.localeCompare(b.key);});
       const available:{entry:Entry;value:AttachmentVersion}[]=[];
@@ -224,19 +272,128 @@ class Planner{
       }
       if(!available.length)continue;const current=available[0];if(current.entry.key!==ordered[0].key)this.notice('ATTACHMENT_LATEST_MISSING',`최신 원본 첨부 버전의 바이트가 없어 가용 버전 '${current.value.versionLabel}'을 현재 첨부로 사용합니다. 더 최신 누락 버전은 별도 원본 기록으로 유지합니다.`,'warning',ordered[0],true);
       this.result.attachments.push({id:current.value.id,resourceType:current.value.resourceType,resourceId:current.value.resourceId,filename:current.value.filename,mimeType:current.value.mimeType,size:current.value.size,sha256:current.value.sha256,authorId:current.value.authorId,createdAt:current.value.createdAt});
-      for(const item of available){item.value.attachmentId=current.value.id;this.result.attachmentVersions.push(item.value);this.bindings.set(item.entry.key,{type:'attachment',id:item.value.id,projectId:owner.projectId});}
+      for(const item of available){item.value.attachmentId=current.value.id;this.result.attachmentVersions.push(item.value);this.attachmentVersionsById.set(item.value.id,item.value);this.bindings.set(item.entry.key,{type:'attachment',id:item.value.id,projectId:owner.projectId});}
     }
     if(this.result.fileCopies.reduce((sum,file)=>sum+file.size,0)>MAX_EXPANDED_BYTES)this.notice('ATTACHMENT_TOTAL_LIMIT','한 이관의 첨부 바이트 합계는256MiB 이하여야 합니다.','error');
   }
-  resolve(entry:Entry,request:MigrationReferenceInput):{id:string;label:string;url?:string}|null{const key=JSON.stringify([entry.pkg.summary.id,request.kind==='attachment'?this.ownerEntry(entry)?.key:null,request]);if(this.resolutionCache.has(key))return this.resolutionCache.get(key)!;const value=this.resolveUncached(entry,request);this.resolutionCache.set(key,value);return value;}
+  private isConfluenceStorageReference(entry: Entry, request: MigrationReferenceInput): boolean {
+    return entry.pkg.dataset.source.product === 'confluence' && entry.row.textFormat === 'confluence-storage'
+      && (request.kind === 'page' || request.kind === 'attachment') && (!request.url || request.attachmentOwner !== undefined);
+  }
+  private confluenceSpace(entry: Entry): string | null {
+    const declared = entry.row.references.find(reference => reference.kind === 'project' && reference.relation === 'space')?.sourceId;
+    const sourceSpace = declared ?? this.ownerEntry(entry)?.container;
+    return sourceSpace && sourceSpace !== '__unassigned__' ? sourceSpace : null;
+  }
+  private originIdentity(entry: Entry): string | undefined {
+    const base = this.originBases.get(entry.pkg.summary.id);
+    return base && `${base.origin}${base.contextPath}`;
+  }
+  private inConfluenceSource(entry: Entry, candidates: Entry[]): Entry[] {
+    const origin = this.originIdentity(entry);
+    return candidates.filter(candidate => {
+      const source = candidate.pkg.dataset.source;
+      const candidateOrigin = this.originIdentity(candidate);
+      return source.product === 'confluence' && source.instanceKey === entry.pkg.dataset.source.instanceKey
+        && (!origin || !candidateOrigin || candidateOrigin === origin);
+    });
+  }
+  private confluenceCandidates(entry: Entry, kind: 'page' | 'attachment', sourceId: string | undefined, title: string | undefined): Entry[] {
+    if (!sourceId && !title) return [];
+    const candidates = this.referenceIndex.get(JSON.stringify([kind, sourceId ? 'id' : 'title', sourceId || title])) ?? [];
+    return this.inConfluenceSource(entry, candidates);
+  }
+  private uniqueConfluenceOrigin(candidates: Entry[]): boolean {
+    return new Set(candidates.map(candidate => this.originIdentity(candidate)).filter(Boolean)).size <= 1;
+  }
+  private inSpace(candidate: Entry, spaceKey: string): boolean {
+    const project = this.sourceEntry(candidate, 'project', candidate.container)?.row;
+    return [project?.metadata.spaceKey, project?.metadata.key, project?.metadata.pkey].includes(spaceKey);
+  }
+  private confluencePage(entry: Entry, { sourceId, title, spaceKey }: MigrationPageIdentity): Entry | null {
+    let candidates = this.confluenceCandidates(entry, 'page', sourceId, title);
+    if (spaceKey || !sourceId) {
+      let spaceId: string | null;
+      let spaceOrigin: string | undefined;
+      if (spaceKey) {
+        const spaces = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []);
+        const spaceIds = new Set(spaces.map(space => space.row.sourceId));
+        if (spaceIds.size !== 1 || !this.uniqueConfluenceOrigin(spaces)) return null;
+        spaceId = spaces[0].row.sourceId;
+        spaceOrigin = spaces.map(space => this.originIdentity(space)).find(Boolean);
+      } else spaceId = this.confluenceSpace(entry);
+      if (!spaceId) return null;
+      candidates = candidates.filter(candidate => {
+        const origin = this.originIdentity(candidate);
+        return candidate.container === spaceId && (!spaceOrigin || !origin || spaceOrigin === origin);
+      });
+    }
+    // Excluding a document does not make another source document with the same title its target.
+    if (new Set(candidates.map(candidate => candidate.row.sourceId)).size !== 1 || !this.uniqueConfluenceOrigin(candidates)) return null;
+    const imported = candidates.filter(candidate => this.bindings.get(candidate.key)?.type === 'document');
+    return imported.length === 1 ? imported[0] : null;
+  }
+  private confluenceAttachment(entry: Entry, request: MigrationReferenceInput): Entry | null {
+    const { attachmentOwner, sourceId, title } = request;
+    if (attachmentOwner === null) return null;
+    let candidates = this.confluenceCandidates(entry, 'attachment', sourceId, title);
+    let ownerId: string | undefined;
+    if (attachmentOwner || !sourceId) {
+      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner) : this.ownerEntry(entry);
+      if (owner?.row.kind !== 'page') return null;
+      const binding = this.bindings.get(owner.key);
+      if (binding?.type !== 'document') return null;
+      ownerId = binding.id;
+      const origin = this.originIdentity(owner);
+      candidates = candidates.filter(candidate => {
+        const parent = this.ownerEntry(candidate);
+        const candidateOrigin = this.originIdentity(candidate);
+        return parent?.row.kind === 'page' && parent.row.sourceId === owner.row.sourceId
+          && (!origin || !candidateOrigin || origin === candidateOrigin);
+      });
+    }
+    if (!this.uniqueConfluenceOrigin(candidates)) return null;
+    if (!sourceId) {
+      const roots = new Set(candidates.map(candidate => this.attachmentRoot(candidate)?.row.sourceId));
+      if (roots.size !== 1 || roots.has(undefined)) return null;
+    }
+    const imported = candidates.filter(candidate => {
+      const binding = this.bindings.get(candidate.key);
+      if (!binding) return false;
+      const version = this.attachmentVersionsById.get(binding.id);
+      return version && (!ownerId || version.resourceId === ownerId) && (sourceId || version.attachmentId === version.id);
+    });
+    return imported.length === 1 ? imported[0] : null;
+  }
+  private resolvedReference(candidate: Entry): { id: string; label: string; url?: string } {
+    const binding = this.bindings.get(candidate.key)!;
+    if (binding.type !== 'attachment') return { id: binding.id, label: candidate.row.title };
+    const version = this.attachmentVersionsById.get(binding.id);
+    const inline = version && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(version.mimeType);
+    return { id: binding.id, label: candidate.row.title, url: `/api/attachments/${binding.id}/content${inline ? '?inline=1' : ''}` };
+  }
+  resolve(entry: Entry, request: MigrationReferenceInput): { id: string; label: string; url?: string } | null {
+    const scoped = this.isConfluenceStorageReference(entry, request);
+    const space = scoped ? this.confluenceSpace(entry) : null;
+    const owner = request.kind === 'attachment' ? this.ownerEntry(entry)?.key : null;
+    const key = JSON.stringify([entry.pkg.summary.id, scoped, space, owner, request]);
+    if (this.resolutionCache.has(key)) return this.resolutionCache.get(key)!;
+    let value: { id: string; label: string; url?: string } | null;
+    if (scoped) {
+      const candidate = request.kind === 'page' ? this.confluencePage(entry, request) : this.confluenceAttachment(entry, request);
+      value = candidate ? this.resolvedReference(candidate) : null;
+    } else value = this.resolveUncached(entry, request);
+    this.resolutionCache.set(key, value);
+    return value;
+  }
   resolveUncached(entry:Entry,request:MigrationReferenceInput):{id:string;label:string;url?:string}|null{
     let requestedId=request.sourceId||'',requestedUrl:URL|null=null;const requestedTitle=request.title||'';if(request.url){try{const url=new URL(request.url);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;requestedUrl=url;requestedId=requestedId||url.searchParams.get('pageId')||url.pathname.match(/\/browse\/([^/]+)$/)?.[1]||url.pathname.match(/\/pages\/(\d+)/)?.[1]||'';}catch{return null;}}
     let candidates=(this.referenceIndex.get(JSON.stringify([request.kind,requestedId?'id':'title',requestedId||requestedTitle]))||[]).filter(candidate=>!this.excluded.has(candidate.key)&&this.bindings.has(candidate.key));
     if(requestedUrl)candidates=candidates.filter(candidate=>{const base=this.originBases.get(candidate.pkg.summary.id);return base!==undefined&&isWithinMigrationOrigin(requestedUrl!,base);});
     if(requestedId)candidates=candidates.filter(candidate=>candidate.row.sourceId===requestedId||request.kind==='issue'&&candidate.row.metadata.key===requestedId);else if(requestedTitle)candidates=candidates.filter(candidate=>candidate.row.title===requestedTitle);else return null;
-    if(request.spaceKey)candidates=candidates.filter(candidate=>{const project=this.sourceEntry(candidate,'project',candidate.container)?.row;return[project?.metadata.spaceKey,project?.metadata.key,project?.metadata.pkey].some(key=>key===request.spaceKey);});
+    if(request.spaceKey)candidates=candidates.filter(candidate=>this.inSpace(candidate,request.spaceKey!));
     if(request.kind==='attachment'&&!requestedId){const owner=this.ownerEntry(entry);candidates=candidates.filter(candidate=>this.ownerEntry(candidate)?.key===owner?.key);const currents=new Set(this.result.attachments.map(attachment=>attachment.id));candidates=candidates.filter(candidate=>currents.has(this.bindings.get(candidate.key)!.id));}
-    const local=candidates.filter(candidate=>candidate.pkg.summary.id===entry.pkg.summary.id);if(local.length===1)candidates=local;if(candidates.length!==1)return null;const candidate=candidates[0],binding=this.bindings.get(candidate.key)!;if(request.kind==='attachment'){const attachment=this.result.attachmentVersions.find(version=>version.id===binding.id);return{id:binding.id,label:candidate.row.title,url:attachment&&['image/png','image/jpeg','image/gif','image/webp'].includes(attachment.mimeType)?`/api/attachments/${binding.id}/content?inline=1`:`/api/attachments/${binding.id}/content`};}return{id:binding.id,label:candidate.row.title};
+    const local=candidates.filter(candidate=>candidate.pkg.summary.id===entry.pkg.summary.id);if(local.length===1)candidates=local;return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }
   converted(entry:Entry){const result=convertLegacyContent(entry.row,{resolveReference:request=>this.resolve(entry,request)});for(const diagnostic of result.diagnostics)this.notice(diagnostic.code,diagnostic.message,diagnostic.severity,entry,diagnostic.severity==='warning');return result;}
   convertDocuments():void{

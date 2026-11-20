@@ -48,6 +48,37 @@ test('Confluence references/includes and local images resolve through callbacks,
   assert.ok(calls.some(value => value.kind === 'page' && value.spaceKey === 'SYN'));
 });
 
+test('Confluence attachments carry the declared owner to link and image resolution', () => {
+  const calls: MigrationReferenceInput[] = [];
+  const context: MigrationContentContext = { resolveReference: input => {
+    calls.push(input);
+    if (input.attachmentOwner?.title === '공유 문서' && input.attachmentOwner.spaceKey === 'DOC') {
+      return { id: 'remote-report', label: 'report.pdf', url: '/api/attachments/remote-report/content' };
+    }
+    if (input.attachmentOwner?.sourceId === '123') {
+      return { id: 'remote-diagram', label: 'diagram.png', url: '/api/attachments/remote-diagram/content?inline=1' };
+    }
+    return null;
+  } };
+  const xml = `<p><ac:link><ri:attachment ri:filename="report.pdf"><ri:page ri:content-title="공유 문서" ri:space-key="DOC"/></ri:attachment><ac:plain-text-link-body>공유 보고서</ac:plain-text-link-body></ac:link></p>
+    <ac:image ac:alt="공유 그림"><ri:attachment ri:filename="diagram.png" ri:content-id="987"><ri:content-entity ri:content-id="123"/></ri:attachment></ac:image>
+    <ac:image><ri:attachment ri:filename="unknown.png"><ri:blog-post ri:content-title="블로그"/></ri:attachment></ac:image>`;
+  const result = convertLegacyContent(source('confluence-storage', xml), context);
+  canonical(result);
+  const [report, diagram, unknown] = calls;
+  assert.equal(calls.length, 3);
+  assert.equal(report.attachmentOwner?.title, '공유 문서');
+  assert.equal(report.attachmentOwner.spaceKey, 'DOC');
+  assert.equal(diagram.sourceId, '987');
+  assert.deepEqual(diagram.attachmentOwner, { sourceId: '123' });
+  assert.equal(unknown.attachmentOwner, null);
+  const label = nodes(result.content, 'text').find(node => node.text === '공유 보고서');
+  assert.equal(label?.marks?.[0].attrs?.href, '/api/attachments/remote-report/content');
+  assert.deepEqual(nodes(result.content, 'image').map(node => node.attrs?.src), ['/api/attachments/remote-diagram/content?inline=1']);
+  assert.match(result.plainText, /unknown\.png/);
+  assert.ok(result.diagnostics.some(notice => notice.code === 'UNRESOLVED_IMAGE'));
+});
+
 test('unsupported macros, script/HTML, unresolved references and unsafe URLs stay visible with diagnostics and no active unsafe nodes', () => {
   const xml = '<p><a href="javascript:alert(1)">위험 링크</a></p><script>dangerous()</script><ac:structured-macro ac:name="unknown-widget"><ac:parameter ac:name="value">보존해야 할 값</ac:parameter><ac:rich-text-body><p>미지원 본문</p></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="excerpt-include"><ac:parameter ac:name="">Target</ac:parameter></ac:structured-macro><ac:image><ri:url ri:value="https://example.test/remote.png"/></ac:image><ac:link><ri:page ri:content-title="Missing"/></ac:link>';
   const result = convertLegacyContent(source('confluence-storage', xml), resolver()); canonical(result);

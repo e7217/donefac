@@ -19,6 +19,75 @@ async function preview(page: Page, settings: Locator) { const response = page.wa
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
 
+test('360px 이관 진단에서 해당 패키지의 원본을 확인하고 같은 미리보기로 돌아간다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), originalId = `동일/업무-${id}`, firstKey = `DIA${id}`, otherKey = `DIB${id}`;
+  const firstTitle = `확인할 원본 ${id}`, otherTitle = `다른 패키지 원본 ${id}`;
+  const rawBody = '<img src="/should-not-load.png"><script>원본 그대로</script>';
+  const input = (key: string, title: string, body: string) => csv([
+    ['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter'],
+    [`${key}-1`, originalId, key, `원본 프로젝트 ${key}`, title, body, 'Ready', 'Task', '확인할 날짜 문자열', '2020-02-03T04:05:06Z', 'diag-author'],
+  ]);
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const first = await upload(request, `first-${id}.csv`, input(firstKey, firstTitle, rawBody), `diagnostic-first-${id}`);
+    staged.push(first);
+    const other = await upload(request, `other-${id}.csv`, input(otherKey, otherTitle, '별도 원본 내용'), `diagnostic-other-${id}`);
+    staged.push(other);
+    const { settings } = await open(page, request);
+    await settings.getByLabel(`이관 패키지 ${other.filename}`, { exact: true }).check();
+    await selectPackage(settings, first.filename);
+    const keyInput = settings.getByLabel(`새 프로젝트 키 원본 프로젝트 ${firstKey}`, { exact: true });
+    const mappedKey = `REV${id}`;
+    await keyInput.fill(mappedKey);
+    const plan = await preview(page, settings);
+    expect(plan.canApply).toBe(false);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const reference = `${first.id}/issue:${originalId}`;
+    const opener = review.locator('.migration-notice').filter({ hasText: 'DATE_UNRESOLVED' }).filter({ hasText: reference })
+      .getByRole('button', { name: '원본 상세 보기', exact: true });
+    await opener.scrollIntoViewIfNeeded();
+    const initialPosition = await opener.boundingBox();
+    expect(initialPosition).not.toBeNull();
+
+    const originalPath = `/api/legacy-import/packages/${first.id}/records/${encodeURIComponent(`issue:${originalId}`)}`;
+    await page.route(url => url.pathname === originalPath, route => route.fulfill({
+      status: 503, contentType: 'application/json', body: JSON.stringify({ error: '합성 원본 조회 오류' }),
+    }), { times: 1 });
+    await opener.click();
+    const dialog = page.getByRole('dialog', { name: '이관 진단 원본 기록', exact: true });
+    await expect(dialog.getByRole('alert')).toHaveText('합성 원본 조회 오류');
+    const loaded = page.waitForResponse(response => new URL(response.url()).pathname === originalPath && response.ok());
+    await dialog.getByRole('button', { name: '원본 다시 불러오기', exact: true }).click();
+    await loaded;
+    const detail = dialog.getByRole('region', { name: '원본 객체 상세', exact: true });
+    await expect(dialog).toContainText(first.filename);
+    await expect(detail.getByRole('heading', { name: firstTitle, exact: true })).toBeVisible();
+    await expect(detail).toContainText(originalId);
+    await expect(detail.getByLabel('원본 본문', { exact: true })).toHaveText(rawBody);
+    await expect(detail.locator('script, img')).toHaveCount(0);
+    const references = detail.getByText(/^원본 관계 \d+개$/);
+    await references.click();
+    await expect(detail.locator('details[open] pre')).toContainText(firstKey);
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    const restoredPosition = await opener.boundingBox();
+    expect(Math.abs(restoredPosition!.y - initialPosition!.y)).toBeLessThan(2);
+    await expect(keyInput).toHaveValue(mappedKey);
+    await expect(review).toContainText('적용을 막는 항목을 해결하세요');
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px 이관 원본 주소를 검토하고 영수증 집계와 저장된 연결을 확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

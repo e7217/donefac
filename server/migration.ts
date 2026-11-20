@@ -17,7 +17,8 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-type PreviewRow = { json: string; generation: string };
+const conversionVersion = 1;
+type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 
 type Hooks = {
   actor: (request: Request) => string;
@@ -180,7 +181,7 @@ export class MigrationService {
     } finally { this.busy = false; }
   }
   private storePreview(prepared: Pick<PreparedMigration, 'preview'>, generation: string) {
-    const json = JSON.stringify(prepared);
+    const json = JSON.stringify({ ...prepared, conversionVersion });
     const size = Buffer.byteLength(json);
     if (size > 192 * MiB) fail(413, '변환 결과가 192MiB를 넘습니다. 패키지를 나누어 주세요.');
     this.store.transaction(() => {
@@ -196,11 +197,13 @@ export class MigrationService {
   }
   private getPreview(id: string, actorId: string, reviewOnly = false): { prepared: PreparedMigration; generation: string } {
     const json = reviewOnly ? "json_object('preview',json_extract(json,'$.preview'))" : 'json';
-    const row = this.store.db.prepare(`SELECT ${json} AS json,generation FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
+    const row = this.store.db.prepare(`SELECT ${json} AS json, generation,
+      json_extract(json,'$.conversionVersion') AS conversionVersion FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
     if (!row) return fail(408, '미리보기 보관 기간이 지났거나 새로 검토해야 합니다.');
     const prepared = JSON.parse(row.json) as PreparedMigration;
     if (prepared.preview.actorId !== actorId) fail(403, '미리보기를 만든 작업자를 선택해 주세요.');
     if (row.generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
+    if (row.conversionVersion !== conversionVersion) fail(409, '원본 변환 규칙이 변경되었습니다. 새 미리보기를 만들어 주세요.');
     if (Date.parse(prepared.preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
     return { prepared, generation: row.generation };
   }

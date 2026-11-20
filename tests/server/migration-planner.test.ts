@@ -45,6 +45,105 @@ test('cross-package URLs must match configured source host and ambiguous unquali
   const source=pkg('source','confluence',[record('project','s',{title:'원본 공간'}),page('10',{text:'<p><a href="https://wiki-a.test/wiki/pages/viewpage.action?pageId=20">올바른 주소</a></p><p><a href="https://evil.test/pages/viewpage.action?pageId=20">외부 주소</a></p><p><a href="https://wiki-a.test/wiki-other/pages/viewpage.action?pageId=20">다른 컨텍스트</a></p><ac:link><ri:page ri:content-id="20"/></ac:link>'})]),a=pkg('a','confluence',[record('project','s',{title:'공간 A'}),page('20',{title:'문서 A'})]),b=pkg('b','confluence',[record('project','s',{title:'공간 B'}),page('20',{title:'문서 B'})]),request=input([source,a,b]);request.configuration.sourceBaseUrls={source:'https://origin.test',a:'https://wiki-a.test/wiki',b:'https://wiki-b.test'};const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));const document=plan.documents.find(document=>document.title==='문서 10')!,references=contentReferences(document.content);assert.equal(references.length,1);assert.equal(references[0].id,plan.documents.find(document=>document.title==='문서 A')!.id);assert.ok(document.plainText.includes('evil.test'));assert.ok(document.plainText.includes('wiki-other'));assert.ok(notices(plan).has('UNRESOLVED_REFERENCE'));
 });
 
+test('Confluence titles use the original page space for current documents, historical revisions, and comments', () => {
+  const sourceLink = (title: string, space?: string) =>
+    `<ac:link><ri:page ri:content-title="${title}"${space ? ` ri:space-key="${space}"` : ''}/></ac:link>`;
+  const source = pkg('source', 'confluence', [
+    record('project', '20', { title: '원본 업무 공간', metadata: { spaceKey: 'OPS' } }),
+    page('100', {
+      title: '링크가 있는 페이지', containerId: '20', authorId: null,
+      text: [sourceLink('공통 제목'), sourceLink('공통 제목', 'QA'), sourceLink('타 공간의 제목'),
+        sourceLink('제외 대상'), sourceLink('중복 제목'), sourceLink('다른 인스턴스 전용', 'OPS')].join(''),
+    }),
+    page('101', { title: '공통 제목', containerId: '20', authorId: null }),
+    page('102', { title: '제외 대상', containerId: '20', authorId: null }),
+    page('103', { title: '중복 제목', containerId: '20', authorId: null }),
+    page('104', { title: '중복 제목', containerId: '20', authorId: null }),
+    record('revision', '099', {
+      title: '이전 문서 제목', createdAt: created, updatedAt: created, text: sourceLink('공통 제목'), textFormat: 'confluence-storage',
+      metadata: { version: '1', currentVersionId: '100' }, references: [{ kind: 'page', sourceId: '100', relation: 'current-version' }],
+    }),
+    record('comment', '500', {
+      title: '참조가 있는 댓글', createdAt: created, containerId: '100', textFormat: 'confluence-storage',
+      text: `<p>참조 댓글</p>${sourceLink('공통 제목')}${sourceLink('타 공간의 제목')}`,
+      references: [{ kind: 'page', sourceId: '100', relation: 'container-content' }],
+    }),
+  ]);
+  const anotherSpace = pkg('another-space', 'confluence', [
+    record('project', '30', { title: '원본 검증 공간', metadata: { spaceKey: 'QA' } }),
+    page('201', { title: '공통 제목', containerId: '30', authorId: null }),
+    page('202', { title: '타 공간의 제목', containerId: '30', authorId: null }),
+    page('203', { title: '제외 대상', containerId: '30', authorId: null }),
+  ]);
+  anotherSpace.dataset.source.instanceKey = source.dataset.source.instanceKey;
+  const anotherInstance = pkg('another-instance', 'confluence', [
+    record('project', '40', { title: '다른 서버의 업무 공간', metadata: { spaceKey: 'OPS' } }),
+    page('301', { title: '공통 제목', containerId: '40', authorId: null }),
+    page('302', { title: '다른 인스턴스 전용', containerId: '40', authorId: null }),
+  ]);
+  const request = input([source, anotherSpace, anotherInstance]);
+  request.configuration.sourceBaseUrls = {
+    source: 'https://original.example.test/wiki', 'another-space': 'https://original.example.test/wiki',
+    'another-instance': 'https://separate.example.test/wiki',
+  };
+  request.configuration.excludedRecords = ['source/page:102', 'source/page:103'];
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.projects.length, 1, 'Original space, not the merged Teamspace project, governs title matching.');
+  const target = (packageId: string, recordId: string) => plan.sourceRecords.find(row =>
+    row.packageSha256 === request.packages.find(pkg => pkg.summary.id === packageId)?.summary.sha256 && row.record.id === recordId)?.targetId;
+  const sourcePageId = target('source', 'page:100');
+  const ownSpacePage = target('source', 'page:101');
+  const otherSpacePage = target('another-space', 'page:201');
+  assert.ok(sourcePageId && ownSpacePage && otherSpacePage);
+  const current = plan.documents.find(document => document.id === sourcePageId)!;
+  const historical = plan.revisions.find(revision => revision.id === target('source', 'revision:099'))!;
+  const comment = plan.comments.find(value => value.id === target('source', 'comment:500'))!;
+  assert.deepEqual(contentReferences(current.content).map(reference => reference.id), [ownSpacePage, otherSpacePage]);
+  assert.deepEqual(contentReferences(historical.content).map(reference => reference.id), [ownSpacePage]);
+  assert.equal(comment.resourceId, sourcePageId);
+  assert.ok(comment.body.includes(ownSpacePage));
+  assert.match(comment.body, /\[문서 참조: 타 공간의 제목\]/);
+  for (const label of ['타 공간의 제목', '제외 대상', '중복 제목', 'OPS:다른 인스턴스 전용']) {
+    assert.ok(current.plainText.includes(`[문서 참조: ${label}]`));
+  }
+  assert.ok(plan.preview.notices.some(value => value.recordId === 'source/page:100' && value.code === 'UNRESOLVED_REFERENCE'));
+  assert.ok(plan.preview.notices.some(value => value.recordId === 'source/comment:500' && value.code === 'UNRESOLVED_REFERENCE'));
+});
+
+test('attachment owner and filename ambiguity remain unresolved even when exclusions leave one imported candidate', () => {
+  const attachmentLink = (owner: string, label: string) =>
+    `<p><ac:link><ri:attachment ri:filename="report.bin"><ri:page ri:content-title="${owner}" ri:space-key="QA"/></ri:attachment><ac:link-body>${label}</ac:link-body></ac:link></p>`;
+  const binarySha = createHash('sha256').update('bytes').digest('hex');
+  const attachment = (id: string, owner: string) => record('attachment', id, {
+    title: 'report.bin', containerId: owner, createdAt: created,
+    metadata: { version: '1', packagePath: `attachments/${owner}/${id}`, size: 5, sha256: binarySha },
+    references: [{ kind: 'page', sourceId: owner, relation: 'container-content' }],
+  });
+  const source = pkg('wiki', 'confluence', [
+    record('project', '20', { title: '업무 공간', metadata: { spaceKey: 'OPS' } }),
+    record('project', '30', { title: '검토 공간', metadata: { spaceKey: 'QA' } }),
+    page('100', { title: '첨부 참조 원본', containerId: '20', authorId: null, text: [
+      attachmentLink('중복 페이지', '중복 소유'), attachmentLink('제외 페이지', '제외된 소유'), attachmentLink('첨부 페이지', '중복 이름'),
+    ].join('') }),
+    page('200', { title: '중복 페이지', containerId: '30', authorId: null }),
+    page('201', { title: '중복 페이지', containerId: '30', authorId: null }),
+    page('202', { title: '제외 페이지', containerId: '30', authorId: null }),
+    page('203', { title: '첨부 페이지', containerId: '30', authorId: null }),
+    attachment('700', '100'), attachment('710', '200'), attachment('711', '201'),
+    attachment('712', '202'), attachment('713', '203'), attachment('714', '203'),
+  ]);
+  const request = input([source]);
+  request.configuration.excludedRecords = ['wiki/page:200', 'wiki/page:202', 'wiki/attachment:713'];
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.attachments.length, 3);
+  const converted = plan.documents.find(document => document.title === '첨부 참조 원본')!;
+  for (const label of ['중복 소유', '제외된 소유', '중복 이름']) assert.ok(converted.plainText.includes(`[첨부: ${label}]`));
+  assert.doesNotMatch(JSON.stringify(converted.content), /\/api\/attachments\//);
+  assert.ok(plan.preview.notices.some(value => value.recordId === 'wiki/page:100' && value.code === 'UNRESOLVED_ATTACHMENT'));
+});
+
 test('source issue links remain typed relations and document links do not become scheduling dependencies',()=>{
   const source=jira(),wiki=confluence();source.dataset.records.push(record('relation','remote',{title:'문서 연결',metadata:{url:'https://wiki.test/pages/viewpage.action?pageId=10'},references:[{kind:'issue',sourceId:'1',relation:'source'},{kind:'page',sourceId:'10',relation:'externalDocument'}]}));wiki.dataset.records.find(row=>row.id==='page:10')!.text='<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>';const request=input([source,wiki]);request.configuration.sourceBaseUrls.wiki='https://wiki.test';const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true);assert.equal(plan.issueRelations.length,1);assert.equal(plan.issueRelations[0].type,'Blocks');assert.equal(plan.resourceLinks.length,1);assert.ok(!Object.hasOwn(plan,'dependencies'));
 });

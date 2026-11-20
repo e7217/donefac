@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, RichContent, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -246,6 +246,117 @@ test('actual ZIP attachment versions survive native9 exact downloads and migrati
     assert.deepEqual(Buffer.from(await localBytesAgain.arrayBuffer()), localBytes);
     await exactDownloads();
   } finally { await f.close(); }
+});
+
+test('Confluence XML worker imports remote page attachments by original owner and downloads exact linked bytes after native restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`;
+  const object = (type: string, id: string, children: string) => `<object class="${type}"><id name="id">${id}</id>${children}</object>`;
+  const date = prop('creationDate', '2020-01-02T00:00:00Z');
+  const file = (id: string, owner: string, filename: string, version: string, history: string) =>
+    object('Attachment', id, prop('title', filename) + prop('version', version) + ref('containerContent', 'Page', owner) + date + history);
+  const projectPage = (id: string, space: string) => object('Page', id, prop('title', '원본 현황') + prop('version', '1') + ref('space', 'Space', space) + date);
+  const storage = [
+    '<p>파일을 참조하는 원본</p>',
+    '<ac:image ac:alt="원격 소유 PNG"><ri:attachment ri:filename="shared.png"><ri:page ri:space-key="QA" ri:content-title="원본 현황"/></ri:attachment></ac:image>',
+    '<p><ac:link><ri:attachment ri:filename="report.bin" ri:content-id="721"><ri:content-entity ri:content-id="200"/></ri:attachment><ac:link-body>원격 예전 보고서</ac:link-body></ac:link></p>',
+    '<ac:image ac:alt="누락된 소유 PNG"><ri:attachment ri:filename="shared.png"><ri:page ri:space-key="ABSENT" ri:content-title="원본 현황"/></ri:attachment></ac:image>',
+    '<p><ac:link><ri:attachment ri:filename="report.bin" ri:content-id="701"><ri:content-entity ri:content-id="200"/></ri:attachment><ac:link-body>잘못된 소유 보고서</ac:link-body></ac:link></p>',
+  ].join('');
+  const xml = `<hibernate-generic>${[
+    object('Space', '20', prop('key', 'OPS') + prop('name', '원본 업무 공간')),
+    object('Space', '30', prop('key', 'QA') + prop('name', '원본 검증 공간')),
+    projectPage('100', '20'), projectPage('200', '30'),
+    object('BodyContent', '500', prop('body', `<![CDATA[${storage}]]>`) + ref('content', 'Page', '100')),
+    file('700', '100', 'shared.png', '1', ''),
+    file('701', '100', 'report.bin', '1', ''),
+    file('710', '200', 'shared.png', '1', ''),
+    file('720', '200', 'report.bin', '2', '<collection name="historicalVersions"><element class="Attachment"><id name="id">721</id></element></collection>'),
+    file('721', '200', 'report.bin', '1', ref('originalVersion', 'Attachment', '720')),
+  ].join('')}</hibernate-generic>`;
+  const localPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+2TmcAAAAASUVORK5CYII=', 'base64');
+  const remotePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgYGD4DwABBAEAMHhqrQAAAABJRU5ErkJggg==', 'base64');
+  const oldReport = Buffer.from('원격 보고서의 예전 버전\x00\n');
+  const pack = await f.upload(zip([
+    { path: 'entities.xml', bytes: Buffer.from(xml) },
+    { path: 'attachments/100/700/1', bytes: localPng },
+    { path: 'attachments/100/701/1', bytes: Buffer.from('같은 이름의 로컬 보고서') },
+    { path: 'attachments/200/710/1', bytes: remotePng },
+    { path: 'attachments/200/720/1', bytes: oldReport },
+    { path: 'attachments/200/720/2', bytes: Buffer.from('원격 보고서의 현재 버전') },
+  ]), 'confluence-remote-owner.zip', 'confluence');
+  const configuration = await f.configuration(pack);
+  configuration.sourceBaseUrls[pack.id] = 'https://wiki.example.test/confluence';
+  const previous = await f.preview(configuration);
+  assert.equal(previous.canApply, true, JSON.stringify(previous.notices));
+  f.db.prepare("UPDATE migration_previews SET json=json_remove(json,'$.conversionVersion') WHERE id=?").run(previous.id);
+  assert.equal((await f.apply(previous)).status, 409);
+  const preview = await f.preview(configuration);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.ok(preview.notices.some(notice => notice.code === 'UNRESOLVED_IMAGE' && notice.recordId === `${pack.id}/page:100`));
+  assert.ok(preview.notices.some(notice => notice.code === 'UNRESOLVED_ATTACHMENT' && notice.recordId === `${pack.id}/page:100`));
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+
+  async function checkBindingsAndDownloads() {
+    const recordsPath = `/source-imports/${receipt.id}/records`;
+    const originals = await f.call<SourceRecordPage>(recordsPath);
+    assert.equal(originals.status, 200);
+    const archive = (id: string) => originals.data.records.find(row => row.record.id === id)!;
+    const sourcePage = archive('page:100');
+    const localFile = archive('attachment:700');
+    const remoteFile = archive('attachment:710');
+    const historicalReport = archive('attachment:721');
+    const currentReport = archive('attachment:720');
+    const remoteDocument = archive('page:200');
+    assert.ok(sourcePage?.targetId && localFile?.targetId && remoteFile?.targetId && historicalReport?.targetId && currentReport?.targetId && remoteDocument?.targetId);
+    assert.equal(localFile.ownerId, sourcePage.targetId);
+    assert.equal(remoteFile.ownerId, remoteDocument.targetId);
+    assert.equal(historicalReport.ownerId, remoteDocument.targetId);
+    assert.notEqual(historicalReport.targetId, currentReport.targetId);
+
+    const workspace = await f.call<WorkspaceSnapshot>('/workspace');
+    assert.equal(workspace.status, 200);
+    const source = workspace.data.documents.find(document => document.id === sourcePage.targetId)!;
+    const images: Array<RichContent['attrs']> = [];
+    const links: unknown[] = [];
+    const pending = [source.content];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.type === 'image') images.push(node.attrs);
+      for (const mark of node.marks ?? []) if (mark.type === 'link') links.push(mark.attrs?.href);
+      pending.push(...node.content ?? []);
+    }
+    const imageUrl = `/api/attachments/${remoteFile.targetId}/content?inline=1`;
+    const versionUrl = `/api/attachments/${historicalReport.targetId}/content`;
+    assert.deepEqual(images.map(image => [image?.src, image?.alt]), [[imageUrl, '원격 소유 PNG']]);
+    assert.deepEqual(links, [versionUrl]);
+    assert.match(source.plainText, /\[이미지: 누락된 소유 PNG\]/);
+    assert.match(source.plainText, /\[첨부: 잘못된 소유 보고서\]/);
+    const original = await f.call<SourceRecordArchive>(`${recordsPath}/${sourcePage.id}`);
+    assert.equal(original.status, 200);
+    assert.equal(original.data.record.text, storage);
+
+    const version = await fetch(new URL(versionUrl, f.base));
+    assert.equal(version.status, 200);
+    assert.match(version.headers.get('Content-Disposition') || '', /^attachment;/);
+    assert.deepEqual(Buffer.from(await version.arrayBuffer()), oldReport);
+    const image = await fetch(new URL(imageUrl, f.base));
+    assert.equal(image.status, 200);
+    assert.equal(image.headers.get('Content-Type'), 'image/png');
+    assert.match(image.headers.get('Content-Disposition') || '', /^inline;/);
+    assert.deepEqual(Buffer.from(await image.arrayBuffer()), remotePng);
+    return source.content;
+  }
+
+  const before = await checkBindingsAndDownloads();
+  const backup = await f.call('/export');
+  assert.equal(backup.status, 200);
+  assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+  assert.deepEqual(await checkBindingsAndDownloads(), before);
 });
 
 test('reconciliation and the whole-receipt audit follow exact migrated attachment versions through corruption, trash, native restore, and deletion', async t => {

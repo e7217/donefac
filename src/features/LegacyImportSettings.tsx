@@ -5,12 +5,12 @@ import { Archive, ChevronLeft, ChevronRight, FileSearch, Loader2, RefreshCw, Sea
 import type { FeatureProps, LegacyDiagnosticPage, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacyRecordKind, LegacyRecordPage } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { LegacyRecordDetail, legacyRecordKindLabels as KINDS } from './LegacyRecordDetail';
 import './legacy-import.css';
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024, PAGE_SIZE = 50;
 type Product = 'auto' | 'jira' | 'confluence';
 type Tab = 'records' | 'diagnostics' | 'files';
-const KINDS: Record<LegacyRecordKind, string> = { identity: '사용자', project: '프로젝트·공간', issue: '업무', page: '문서', comment: '댓글', revision: '문서 버전', history: '변경 이력', attachment: '첨부파일', relation: '관계', field: '필드', option: '선택지', workflow: '워크플로' };
 const message = (cause: unknown) => cause instanceof Error ? cause.message : '원본 분석 요청을 처리하지 못했습니다.';
 const sizeLabel = (bytes: number) => bytes < 1024 ? `${bytes.toLocaleString()} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 const dateLabel = (value: string | null) => value ? new Date(value).toLocaleString('ko-KR') : '원본에 없음';
@@ -141,7 +141,7 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
           {tab === 'records' && <section role="tabpanel" id="legacy-panel-records" aria-labelledby="legacy-tab-records"><form className="legacy-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); setAppliedQuery(query.trim()); setRecordOffset(0); clearRecord(); }}><label>객체 종류<select className="field" aria-label="원본 객체 종류" value={kind} onChange={event => { setKind(event.target.value); setRecordOffset(0); clearRecord(); }}><option value="">전체 종류</option>{Object.entries(KINDS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>원본 객체 검색<input className="field" aria-label="원본 객체 검색" value={query} maxLength={500} onChange={event => setQuery(event.target.value)} placeholder="제목·식별자·본문 검색" /></label><button className="btn" type="submit"><Search size={15} />검색</button></form>
             {recordError && <p className="legacy-error" role="alert">{recordError}</p>}{recordLoading && <p role="status">원본 객체를 불러오는 중…</p>}
             {recordPage && <><div className="legacy-record-list" aria-label="원본 객체 목록">{recordPage.records.length ? recordPage.records.map(value => <button className={`legacy-record-item ${selectedRecord?.id === value.id ? 'is-selected' : ''}`} type="button" key={value.id} onClick={() => void openRecord(value.id)}><span>{KINDS[value.kind]}</span><strong>{value.title || '(제목 없음)'}</strong><small>{value.sourceId}</small></button>) : <p className="muted">조건에 맞는 원본 객체가 없습니다.</p>}</div><Pagination label="원본 객체" offset={recordOffset} total={recordPage.total} loading={recordLoading} onChange={value => { setRecordOffset(value); clearRecord(); }} /></>}
-            {recordDetailLoading && <p role="status">원본 객체 상세를 불러오는 중…</p>}{recordDetailError && <p className="legacy-error" role="alert">{recordDetailError}</p>}{selectedRecord && <RecordDetail record={selectedRecord} onClose={clearRecord} />}
+            {recordDetailLoading && <p role="status">원본 객체 상세를 불러오는 중…</p>}{recordDetailError && <p className="legacy-error" role="alert">{recordDetailError}</p>}{selectedRecord && <LegacyRecordDetail record={selectedRecord} onClose={clearRecord} />}
           </section>}
           {tab === 'diagnostics' && <section role="tabpanel" id="legacy-panel-diagnostics" aria-labelledby="legacy-tab-diagnostics"><div className="legacy-filters"><label>진단 심각도<select className="field" aria-label="분석 진단 심각도" value={severity} onChange={event => { setSeverity(event.target.value); setDiagnosticOffset(0); }}><option value="">전체 진단</option><option value="error">오류</option><option value="warning">경고</option><option value="info">안내</option></select></label></div>{diagnosticError && <p className="legacy-error" role="alert">{diagnosticError}</p>}{diagnosticLoading && <p role="status">진단을 불러오는 중…</p>}{diagnosticPage && <><ul className="legacy-diagnostics">{diagnosticPage.diagnostics.map(value => <li key={value.id}><div><span className={`legacy-severity is-${value.severity}`}>{value.severity === 'error' ? '오류' : value.severity === 'warning' ? '경고' : '안내'}</span><code>{value.code}</code></div><p>{value.message}</p>{value.recordId && <small>원본 객체: {value.recordId}</small>}{value.path && <small>파일: {value.path}</small>}</li>)}</ul>{!diagnosticPage.total && <p className="muted">이 조건에 해당하는 진단이 없습니다.</p>}<Pagination label="진단" offset={diagnosticOffset} total={diagnosticPage.total} loading={diagnosticLoading} onChange={setDiagnosticOffset} /></>}</section>}
           {tab === 'files' && <section role="tabpanel" id="legacy-panel-files" aria-labelledby="legacy-tab-files"><div className="legacy-file-table"><table><thead><tr><th>파일 경로</th><th>크기</th><th>SHA-256</th></tr></thead><tbody>{selectedDetail.files.slice(fileOffset, fileOffset + PAGE_SIZE).map(value => <tr key={value.path}><td>{value.path}</td><td>{sizeLabel(value.size)}</td><td><code>{value.sha256}</code></td></tr>)}</tbody></table></div><Pagination label="파일" offset={fileOffset} total={selectedDetail.files.length} loading={false} onChange={setFileOffset} /></section>}
@@ -152,22 +152,4 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
 }
 function Pagination({ label, offset, total, loading, onChange }: { label: string; offset: number; total: number; loading: boolean; onChange: (offset: number) => void }) {
   return <div className="legacy-pagination"><span>{total ? `${offset + 1}–${Math.min(total, offset + PAGE_SIZE)} / ${total.toLocaleString()}개` : '0개'}</span><button className="btn btn-ghost" type="button" aria-label={`${label} 이전 페이지`} disabled={loading || offset === 0} onClick={() => onChange(Math.max(0, offset - PAGE_SIZE))}><ChevronLeft size={16} />이전</button><button className="btn btn-ghost" type="button" aria-label={`${label} 다음 페이지`} disabled={loading || offset + PAGE_SIZE >= total} onClick={() => onChange(offset + PAGE_SIZE)}><ChevronRight size={16} />다음</button></div>;
-}
-function RecordDetail({ record, onClose }: { record: LegacyRecord; onClose: () => void }) {
-  const limit = 20000, metadata = JSON.stringify(record.metadata, null, 2), references = JSON.stringify(record.references, null, 2);
-  const bodyPreview = record.text.slice(0, limit), metadataPreview = metadata.slice(0, Math.max(0, limit - bodyPreview.length));
-  const referencePreview = references.slice(0, Math.max(0, limit - bodyPreview.length - metadataPreview.length));
-  const truncated = record.text.length + metadata.length + references.length > limit;
-  function download() {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: 'application/json;charset=utf-8' }));
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `legacy-${record.kind}-${record.sourceId.replace(/[^a-zA-Z0-9가-힣_-]/g, '_').slice(0, 80)}.json`; anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  return <section className="legacy-record-detail" aria-label="원본 객체 상세"><header><h4>{record.title || '(제목 없음)'}</h4><button className="btn btn-ghost" type="button" aria-label="원본 객체 상세 닫기" onClick={onClose}><X size={16} />닫기</button></header>
-    <dl><dt>원본 ID / 종류</dt><dd>{record.sourceId} · {KINDS[record.kind]}</dd><dt>컨테이너 / 상위 ID</dt><dd>{record.containerId || '없음'} / {record.parentId || '없음'}</dd><dt>작성자 ID</dt><dd>{record.authorId || '원본에 없음'}</dd><dt>생성 시각</dt><dd>{record.createdAt || '원본에 없음'}</dd><dt>수정 시각</dt><dd>{record.updatedAt || '원본에 없음'}</dd><dt>본문 형식</dt><dd>{record.textFormat}</dd></dl>
-    <div className="legacy-raw-actions"><p>{truncated ? '부분 표시: 본문·메타데이터·관계는 화면에 합계 20,000자까지만 표시합니다. 전체 JSON에는 원문 전체가 보존됩니다.' : '원본 문자열을 읽기 전용으로 표시합니다. 마크업은 실행하지 않습니다.'}</p><button className="btn" type="button" onClick={download}>원본 객체 전체 JSON 다운로드</button></div>
-    <h5>원본 본문</h5><pre className="legacy-raw-body" aria-label="원본 본문">{bodyPreview || '(본문 없음)'}</pre>
-    <details><summary>원본 메타데이터</summary>{metadataPreview ? <pre>{metadataPreview}</pre> : <p>화면 표시 한도에 도달했습니다. 전체 JSON에서 확인해 주세요.</p>}</details>
-    <details><summary>원본 관계 {record.references.length}개</summary>{referencePreview ? <pre>{referencePreview}</pre> : <p>화면 표시 한도에 도달했습니다. 전체 JSON에서 확인해 주세요.</p>}</details>
-  </section>;
 }

@@ -6,6 +6,27 @@
 .migration-origin-summary { margin: .75rem 0; }
 .migration-origin-summary small { margin-top: .35rem; }
 
+.migration-notice-source-button { margin-top: .4rem; }
+.migration-original-dialog {
+  --border: #d5e3df;
+  --muted: #516965;
+  --surface-subtle: #f6faf8;
+  width: min(47rem, calc(100% - 1.5rem));
+  max-height: min(85dvh, 52rem);
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid #cbded8;
+  border-radius: .65rem;
+  background: #fff;
+  color: #233936;
+}
+.migration-original-dialog::backdrop { background: #173b345c; }
+.migration-original-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
+.migration-original-heading > div { min-width: 0; overflow-wrap: anywhere; }
+.migration-original-heading h3 { margin: 0; font-size: 1.05rem; }
+.migration-original-heading p { margin: .3rem 0 0; font-size: .8125rem; color: #516965; }
+.migration-original-dialog .legacy-record-detail { margin-top: .9rem; }
+
 .migration-reconciliation-entry { margin: .75rem 0; }
 .migration-reconciliation { margin-top: .75rem; border: 1px solid #cbded8; border-radius: .65rem; padding: 1rem; background: #fff; }
 .migration-reconciliation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }

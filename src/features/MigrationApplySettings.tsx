@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { ArchiveRestore, CheckCircle2, FileCheck2, Loader2, RefreshCw } from 'lucide-react';
-import { ISSUE_TYPES, type CustomFieldKind, type FeatureProps, type LegacyPackageSummary, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type SourceImport, type StatusCategory } from '../../shared/types';
+import { ArchiveRestore, CheckCircle2, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
+import { ISSUE_TYPES, type CustomFieldKind, type FeatureProps, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type SourceImport, type StatusCategory } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { LegacyRecordDetail } from './LegacyRecordDetail';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceImportRecords } from './SourceOrigins';
 import './migration-apply.css';
@@ -103,7 +104,7 @@ function ActorMigration(props: FeatureProps) {
     {preview && <section className="migration-review" aria-label="이관 적용 미리보기"><header><div><h3>{preview.canApply ? '검토 후 적용할 수 있습니다' : '적용을 막는 항목을 해결하세요'}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div><button className="btn btn-ghost" disabled={Boolean(pending)} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button></header>
       <MigrationCounts entries={Object.entries(preview.counts)} />
       <Paged title="생성할 프로젝트" items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · 업무 {item.issueCount} · 문서 {item.documentCount}</p>} />
-      <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}><strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}</div>} />
+      <MigrationPreviewNotices key={preview.id} preview={preview} packages={options?.packages ?? packages} actorId={actorId} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
         {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
@@ -127,6 +128,75 @@ function ActorMigration(props: FeatureProps) {
       </div>}
     </section>
   </section>;
+}
+
+type DiagnosticOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement };
+
+function MigrationPreviewNotices({ preview, packages, actorId }: { preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string }) {
+  const [original, setOriginal] = useState<DiagnosticOriginal | null>(null);
+  const sources = new Map(packages.filter(item => preview.configuration.packageIds.includes(item.id)).map(item => [item.id, item]));
+  return <>
+    <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => {
+      const qualifiedId = item.recordId ?? '';
+      const separator = qualifiedId.indexOf('/');
+      const source = separator > 0 ? sources.get(qualifiedId.slice(0, separator)) : undefined;
+      const recordId = qualifiedId.slice(separator + 1);
+      return <div className={`migration-notice is-${item.severity}`}>
+        <strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong>
+        <p>{item.message}</p>
+        {item.recordId && <small>원본 항목 {item.recordId}</small>}
+        {source && recordId && <button className="btn btn-ghost migration-notice-source-button" type="button"
+          onClick={event => setOriginal({ source, recordId, opener: event.currentTarget })}>
+          <FileSearch size={16} aria-hidden="true" />원본 상세 보기
+        </button>}
+      </div>;
+    }} />
+    {original && <MigrationOriginalDialog {...original} actorId={actorId} onClose={() => setOriginal(null)} />}
+  </>;
+}
+
+function MigrationOriginalDialog({ source, recordId, opener, actorId, onClose }: DiagnosticOriginal & { actorId: string; onClose: () => void }) {
+  const element = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [response, setResponse] = useState<{ record: LegacyRecord } | { error: string } | null>(null);
+
+  useEffect(() => {
+    const dialog = element.current;
+    if (!dialog) return;
+    dialog.showModal();
+    closeButton.current?.focus({ preventScroll: true });
+    return () => {
+      dialog.close();
+      if (opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, [opener]);
+
+  useEffect(() => {
+    const request = new AbortController();
+    const path = `/legacy-import/packages/${encodeURIComponent(source.id)}/records/${encodeURIComponent(recordId)}`;
+    void api<LegacyRecord>(path, { cache: 'no-store', signal: request.signal, headers: { 'X-Actor-Id': actorId } })
+      .then(record => { if (!request.signal.aborted) setResponse({ record }); })
+      .catch(cause => { if (!request.signal.aborted) setResponse({ error: errorText(cause) }); });
+    return () => request.abort();
+  }, [actorId, attempt, recordId, source.id]);
+
+  return <dialog className="migration-original-dialog" ref={element} aria-labelledby="migration-original-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+    <header className="migration-original-heading">
+      <div><h3 id="migration-original-title">이관 진단 원본 기록</h3><p>{source.filename} · {source.source.instanceKey}</p></div>
+      <button ref={closeButton} className="btn btn-ghost" type="button" aria-label="이관 진단 원본 닫기" onClick={onClose}><X size={16} aria-hidden="true" />닫기</button>
+    </header>
+    {!response && <p role="status">원본 객체를 불러오는 중…</p>}
+    {response && 'error' in response && <div>
+      <p className="migration-error" role="alert">{response.error}</p>
+      <button type="button" className="btn" onClick={() => {
+        closeButton.current?.focus({ preventScroll: true });
+        setResponse(null);
+        setAttempt(current => current + 1);
+      }}>원본 다시 불러오기</button>
+    </div>}
+    {response && 'record' in response && <LegacyRecordDetail record={response.record} />}
+  </dialog>;
 }
 
 function MigrationCounts({ entries }: { entries: [string, number][] }) { return <div className="migration-counts">{entries.map(([name, count]) => <span key={name}>{countLabels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>; }

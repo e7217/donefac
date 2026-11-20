@@ -6,7 +6,13 @@ import { parseLegacyXml } from './legacy-import-archive.js';
 // Format references (conversion is local and never requests these URLs):
 // https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html
 // https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
-export interface MigrationReferenceInput { kind: 'page' | 'issue' | 'attachment'; sourceId?: string; title?: string; spaceKey?: string; url?: string }
+export interface MigrationPageIdentity { sourceId?: string; title?: string; spaceKey?: string }
+export interface MigrationReferenceInput extends MigrationPageIdentity {
+  kind: 'page' | 'issue' | 'attachment';
+  url?: string;
+  // A null owner marks an explicit container that cannot be resolved safely.
+  attachmentOwner?: MigrationPageIdentity | null;
+}
 export interface MigrationContentContext { resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null }
 export interface MigrationContentDiagnostic { severity: 'warning' | 'error'; code: string; message: string }
 export interface MigrationContentResult { content: RichContent; plainText: string; diagnostics: MigrationContentDiagnostic[] }
@@ -27,6 +33,24 @@ function flow(nodes: RichContent[], type = 'paragraph', attrs?: Record<string, u
 const codeBlock = (value: string, language = ''): RichContent => ({ type: 'codeBlock', ...(language ? { attrs: { language } } : {}), content: text(value) });
 class ConversionLimit extends Error {}
 interface XmlNode { name: string; attrs: Record<string, string>; children: (XmlNode | string)[] }
+function pageIdentity(node: XmlNode): MigrationPageIdentity {
+  return { sourceId: node.attrs['ri:content-id'] || node.attrs['ri:page-id'], title: node.attrs['ri:content-title'], spaceKey: node.attrs['ri:space-key'] };
+}
+function attachmentIdentity(node: XmlNode): MigrationReferenceInput {
+  const reference: MigrationReferenceInput = { kind: 'attachment', sourceId: node.attrs['ri:content-id'], title: node.attrs['ri:filename'] };
+  const containers = node.children.filter((child): child is XmlNode => typeof child !== 'string');
+  if (!containers.length) return reference;
+  reference.attachmentOwner = null;
+  if (containers.length !== 1) return reference;
+  const [container] = containers;
+  if (container.name === 'ri:page') {
+    const page = pageIdentity(container);
+    if (page.sourceId || page.title) reference.attachmentOwner = page;
+  } else if (container.name === 'ri:content-entity' && container.attrs['ri:content-id']) {
+    reference.attachmentOwner = { sourceId: container.attrs['ri:content-id'] };
+  }
+  return reference;
+}
 const escapeXml = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 function serializeXml(node: XmlNode | string): string { return typeof node === 'string' ? escapeXml(node) : `<${node.name}${Object.entries(node.attrs).map(([key, value]) => ` ${key}="${escapeXml(value)}"`).join('')}>${node.children.map(serializeXml).join('')}</${node.name}>`; }
 function decodeXml(value: string): string {
@@ -214,14 +238,20 @@ class Converter {
       }
       case 'ac:link': {
         const page = child('ri:page'), attachment = child('ri:attachment'), body = child('ac:plain-text-link-body') || child('ac:link-body'), label = body ? this.xmlText(body) : '';
-        if (page) return this.reference({ kind: 'page', sourceId: page.attrs['ri:content-id'] || page.attrs['ri:page-id'], title: page.attrs['ri:content-title'], spaceKey: page.attrs['ri:space-key'] }, false, label);
-        if (attachment) { const input: MigrationReferenceInput = { kind: 'attachment', sourceId: attachment.attrs['ri:content-id'], title: attachment.attrs['ri:filename'] }, found = this.resolve(input); if (found?.url) return this.link(text(label || found.label), found.url); this.warn('UNRESOLVED_ATTACHMENT', '첨부 링크를 이관 대상 파일로 확정하지 못해 원본 파일명을 보존했습니다.'); return text(`[첨부: ${label || input.title || input.sourceId || '원본 파일'}]`); }
+        if (page) return this.reference({ kind: 'page', ...pageIdentity(page) }, false, label);
+        if (attachment) {
+          const input = attachmentIdentity(attachment), found = this.resolve(input);
+          if (found?.url) return this.link(text(label || found.label), found.url);
+          this.warn('UNRESOLVED_ATTACHMENT', '첨부 링크를 이관 대상 파일로 확정하지 못해 원본 파일명을 보존했습니다.');
+          return text(`[첨부: ${label || input.title || input.sourceId || '원본 파일'}]`);
+        }
         if (node.attrs['ac:anchor']) { this.warn('ANCHOR_FLATTENED', '원본 페이지 내 앵커 링크는 앵커 이름을 텍스트로 보존했습니다.'); return text(`${label || '앵커'} (#${node.attrs['ac:anchor']})`); }
         return this.fallback('해석할 수 없는 Confluence 링크', serializeXml(node));
       }
       case 'ac:image': {
         const attachment = child('ri:attachment'), url = child('ri:url');
-        return this.image({ kind: 'attachment', sourceId: attachment?.attrs['ri:content-id'], title: attachment?.attrs['ri:filename'], url: url?.attrs['ri:value'] }, node.attrs['ac:alt'] || node.attrs['ac:title'] || '');
+        const input = attachment ? attachmentIdentity(attachment) : { kind: 'attachment' as const, url: url?.attrs['ri:value'] };
+        return this.image(input, node.attrs['ac:alt'] || node.attrs['ac:title'] || '');
       }
       case 'img': return this.image({ kind: 'attachment', url: node.attrs.src }, node.attrs.alt || '');
       case 'ac:task-list': return [{ type: 'taskList', content: node.children.filter(value => typeof value !== 'string' || value.trim()).flatMap(value => this.xml(value, depth + 1)) }];

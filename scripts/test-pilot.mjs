@@ -132,15 +132,23 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
     {path: 'attachments/OLD/OLD-1/800', bytes: jiraAttachment},
   ]);
   const wikiVersions = [Buffer.from('보존할 첨부 첫 버전\r\n'), Buffer.from('보존할 첨부 두 번째 버전\x00\n')];
+  const sharedWikiAttachment = Buffer.from('다른 공간의 같은 이름 첨부\x00\n');
   const confluence = zip([
     {path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
       <object class="Space"><id name="id">42</id><property name="key">SYN</property><property name="name">파일럿 원본 공간</property></object>
+      <object class="Space"><id name="id">43</id><property name="key">ALT</property><property name="name">파일럿 공유 공간</property></object>
       <object class="Page"><id name="id">100</id><property name="title">파일럿 원본 설계 문서</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property></object>
-      <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>이관 뒤 검토할 설계 내용</p><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+      <object class="Page"><id name="id">101</id><property name="title">파일럿 공유 자료</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property></object>
+      <object class="Page"><id name="id">102</id><property name="title">파일럿 공유 자료</property><property name="version">1</property><property name="space" class="Space"><id name="id">43</id></property><property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property></object>
+      <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>이관 뒤 검토할 설계 내용</p><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro><p><ac:link><ri:page ri:content-title="파일럿 공유 자료"/></ac:link></p><p><ac:link><ri:attachment ri:filename="pilot-origin.bin"><ri:page ri:space-key="ALT" ri:content-title="파일럿 공유 자료"/></ri:attachment><ac:plain-text-link-body>다른 공간의 원본 첨부</ac:plain-text-link-body></ac:link></p>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+      <object class="BodyContent"><id name="id">301</id><property name="body"><![CDATA[<p>설계 문서와 같은 원본 공간</p>]]></property><property name="content" class="Page"><id name="id">101</id></property></object>
+      <object class="BodyContent"><id name="id">302</id><property name="body"><![CDATA[<p>공유 첨부를 가진 다른 원본 공간</p>]]></property><property name="content" class="Page"><id name="id">102</id></property></object>
       <object class="Attachment"><id name="id">700</id><property name="title">pilot-origin.bin</property><property name="version">2</property><property name="containerContent" class="Page"><id name="id">100</id></property><collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection><property name="creationDate">2020-01-02T00:00:00Z</property></object>
       <object class="Attachment"><id name="id">701</id><property name="title">pilot-origin.bin</property><property name="version">1</property><property name="containerContent" class="Page"><id name="id">100</id></property><property name="originalVersion" class="Attachment"><id name="id">700</id></property><property name="creationDate">2020-01-01T00:00:00Z</property></object>
+      <object class="Attachment"><id name="id">702</id><property name="title">pilot-origin.bin</property><property name="version">1</property><property name="containerContent" class="Page"><id name="id">102</id></property><property name="creationDate">2020-01-02T00:00:00Z</property></object>
     </hibernate-generic>`)},
     ...wikiVersions.map((bytes, index) => ({path: `attachments/100/700/${index + 1}`, bytes})),
+    {path: 'attachments/102/702/1', bytes: sharedWikiAttachment},
   ]);
   const headers = { 'X-Actor-Id': actorId };
   async function stage(filename, product, body) {
@@ -185,7 +193,7 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
   migration.excludedRecords = [restrictedRecord];
   const preview = await previewMigration();
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
-  assert.equal(preview.counts.atlassianLinks, 3);
+  assert.equal(preview.counts.atlassianLinks, 5);
   assert.equal(preview.counts.unlinkedAtlassianRecords, 0);
   assert.equal(preview.counts.worklogs, 1);
   const {import: receipt} = await applyMigration(preview, 201);
@@ -197,6 +205,7 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
       {product: 'jira', sourceId: '800', packageSha256: jiraPackage.sha256, bytes: jiraAttachment},
       {product: 'confluence', sourceId: '701', packageSha256: wikiPackage.sha256, bytes: wikiVersions[0]},
       {product: 'confluence', sourceId: '700', packageSha256: wikiPackage.sha256, bytes: wikiVersions[1]},
+      {product: 'confluence', sourceId: '702', packageSha256: wikiPackage.sha256, bytes: sharedWikiAttachment},
     ],
   };
 }
@@ -209,22 +218,29 @@ async function verifyPilotSourceMigration(url, migration) {
   const workspace = await (await call(url, '/workspace')).json();
   const issue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 원본 업무');
   const otherIssue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 두 번째 업무');
-  const document = workspace.documents.find(item => item.projectId === projectId);
+  const documents = workspace.documents.filter(item => item.projectId === projectId);
+  const document = documents.find(item => item.title === '파일럿 원본 설계 문서');
+  const sameSpaceDocument = documents.find(item => item.plainText.includes('설계 문서와 같은 원본 공간'));
+  const remoteDocument = documents.find(item => item.plainText.includes('공유 첨부를 가진 다른 원본 공간'));
   const workflow = workspace.workflows.find(item => item.projectId === projectId);
   const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
   assert.ok(issue && otherIssue && nextStatus && nextStatus !== issue.status);
   assert.equal(otherIssue.status, nextStatus);
   assert.equal(issue.assigneeId, authorId);
   assert.match(issue.description, /보관할 원본 내용/);
-  assert.equal(document?.title, '파일럿 원본 설계 문서');
+  assert.ok(document && sameSpaceDocument && remoteDocument);
+  assert.equal(sameSpaceDocument.title, remoteDocument.title);
   assert.ok(document.plainText.includes('이관 뒤 검토할 설계 내용'));
   assert.ok(document.content.content.some(node => node.type === 'issueReference' && node.attrs.issueId === issue.id));
+  assert.deepEqual(document.content.content.filter(node => node.type === 'documentReference').map(node => node.attrs.documentId), [sameSpaceDocument.id]);
   assert.ok(workspace.resourceLinks.some(link => link.issueId === issue.id && link.documentId === document.id));
   const originalLinks = [];
   for (const [targetType, targetId, originalUrl] of [
     ['issue', issue.id, 'https://jira.example.test/jira/browse/OLD-1'],
     ['issue', otherIssue.id, 'https://jira.example.test/jira/browse/OLD-2'],
     ['document', document.id, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=100'],
+    ['document', sameSpaceDocument.id, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=101'],
+    ['document', remoteDocument.id, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=102'],
   ]) {
     const query = new URLSearchParams({targetType, targetId});
     const links = await (await call(url, `/atlassian-links?${query}`)).json();
@@ -237,6 +253,8 @@ async function verifyPilotSourceMigration(url, migration) {
     ['jira', 'issue', '100', 'OLD-1', issue],
     ['jira', 'issue', '101', 'OLD-2', otherIssue],
     ['confluence', 'page', '100', null, document],
+    ['confluence', 'page', '101', null, sameSpaceDocument],
+    ['confluence', 'page', '102', null, remoteDocument],
   ]) {
     const sourceRow = sourceRows.find(row => row.product === product && row.kind === kind && row.sourceId === sourceId);
     assert.equal(sourceRow?.sourceKey, key);
@@ -276,6 +294,11 @@ async function verifyPilotSourceMigration(url, migration) {
     const download = await call(url, `/attachment-versions/${checked.fileId}/download`);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
   }
+  const sharedFile = audit.attachments.find(file => file.product === 'confluence' && file.sourceId === '702');
+  const attachmentLabel = document.content.content.flatMap(node => node.content ?? []).find(node => node.text === '다른 공간의 원본 첨부');
+  assert.deepEqual(attachmentLabel?.marks?.map(mark => mark.attrs.href), [`/api/attachments/${sharedFile.fileId}/content`]);
+  const sharedDownload = await call(url, `/attachments/${sharedFile.fileId}/content`);
+  assert.deepEqual(Buffer.from(await sharedDownload.arrayBuffer()), expectedFiles.find(file => file.sourceId === '702').bytes);
   return {issue, document, nextStatus, originalLinks, sourceRows, worklog, recordCounts: audit.recordCounts, attachments: audit.attachments};
 }
 
