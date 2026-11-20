@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import type { Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, SchedulePasteApplyResult, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext) {
   return (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
@@ -234,5 +234,137 @@ test('360px 간트에서 날짜와 업무 연결을 함께 붙여넣고 연결�
     expect(await storedLink()).toMatchObject({ ...pair, type: 'FF', lagDays: -1 });
   } finally {
     for (const issue of [predecessor, successor]) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
+
+test('360px 간트에서 한 업무의 선행 연결 여러 개와 날짜를 함께 검토·적용·되돌린다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const project = (await workspace(request)).projects[0];
+  const edited = await createIssue(request, project.id, 0);
+  const removed = await createIssue(request, project.id, 2);
+  const added = await createIssue(request, project.id, 4);
+  const successor = await createIssue(request, project.id, 7);
+  const startDate = dateAt(13);
+  const endDate = dateAt(17);
+
+  async function addPredecessor(predecessor: Issue, type: Dependency['type'], lagDays: number) {
+    const response = await request.post('/api/dependencies', {
+      data: { predecessorId: predecessor.id, successorId: successor.id, type, lagDays },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+    return (await response.json()) as Dependency;
+  }
+
+  async function readState() {
+    const snapshot = await workspace(request);
+    return {
+      successor: snapshot.issues.find(issue => issue.id === successor.id),
+      links: snapshot.dependencies.filter(link => link.successorId === successor.id)
+        .sort((left, right) => left.predecessorId.localeCompare(right.predecessorId)),
+    };
+  }
+
+  try {
+    const originalEdit = await addPredecessor(edited, 'FS', 0);
+    const originalRemoval = await addPredecessor(removed, 'FF', 1);
+    const before = await readState();
+    const header = ['업무 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격'];
+    const editRow = [successor.key, startDate, '', edited.key, 'SS', '2'];
+    const removeRow = [successor.key, '', endDate, removed.key, '-', ''];
+    const addRow = [successor.key, '', '', added.key, 'SF', '-2'];
+    const tsv = (rows: string[][]) => rows.map(row => row.join('\t')).join('\n');
+    const invalid = tsv([header, editRow, removeRow, [successor.key, dateAt(14), '', added.key, 'SF', '-2'],
+      [successor.key.toLowerCase(), '', '', edited.key.toLowerCase(), '-', '']]);
+    const text = tsv([header, editRow, removeRow, addRow]);
+
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByRole('button', { name: '일정 붙여넣기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
+    const preview = dialog.getByRole('button', { name: '붙여넣기 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '검토한 일정 적용', exact: true });
+    const startField = page.getByLabel(`${successor.key} 시작일`, { exact: true });
+    const endField = page.getByLabel(`${successor.key} 종료일`, { exact: true });
+
+    await input.fill(invalid);
+    await preview.click();
+    const errors = dialog.getByRole('region', { name: '일정 붙여넣기 오류' });
+    await expect(errors.getByRole('listitem').filter({ hasText: `4행 · ${successor.key}` })).toContainText('시작일');
+    await expect(errors.getByRole('listitem').filter({ hasText: `5행 · ${successor.key}` })).toContainText('중복');
+    await expect(apply).toBeDisabled();
+    await expect(input).toHaveValue(invalid);
+    expect(await readState()).toEqual(before);
+
+    await input.fill(text);
+    await preview.click();
+    const review = dialog.getByRole('region', { name: '붙여넣기 변경 검토' });
+    await expect(review.getByRole('heading', { name: /날짜 1건 · 업무 연결 3건/ })).toBeVisible();
+    const dates = review.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
+    await expect(dates.getByRole('row')).toHaveCount(2);
+    const mergedDates = dates.getByRole('row').filter({ hasText: successor.key });
+    await expect(mergedDates).toContainText(startDate);
+    await expect(mergedDates).toContainText(endDate);
+    const links = review.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록' });
+    await expect(links.getByRole('row')).toHaveCount(4);
+    const linkRow = (predecessor: Issue) => links.getByRole('row').filter({
+      has: page.getByText(predecessor.key, { exact: true }),
+    });
+    await expect(linkRow(edited)).toContainText('입력 2행');
+    await expect(linkRow(edited)).toContainText('FS · 완료 후 시작');
+    await expect(linkRow(edited)).toContainText('SS · 시작 후 시작');
+    await expect(linkRow(edited)).toContainText('+2근무일');
+    await expect(linkRow(removed)).toContainText('입력 3행');
+    await expect(linkRow(removed)).toContainText('삭제');
+    await expect(linkRow(added)).toContainText('입력 4행');
+    await expect(linkRow(added)).toContainText('SF · 시작 후 완료');
+    await expect(linkRow(added)).toContainText('-2근무일');
+    const bounds = await links.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    expect(await readState()).toEqual(before);
+
+    const attempts: { previewId: string; result: SchedulePasteApplyResult }[] = [];
+    await page.route('**/api/schedule/paste-apply', async route => {
+      const { previewId } = route.request().postDataJSON() as { previewId: string };
+      const response = await route.fetch();
+      expect(response.ok(), await response.text()).toBeTruthy();
+      attempts.push({ previewId, result: await response.json() as SchedulePasteApplyResult });
+      if (attempts.length === 1) await route.abort('failed');
+      else await route.fulfill({ response });
+    });
+    await apply.click();
+    const retry = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeEnabled();
+    await expect(input).toHaveValue(text);
+    expect(attempts[0].result.dependencyChanges).toBe(3);
+    expect(attempts[0].result.updated.map(issue => issue.id)).toEqual([successor.id]);
+    const committed = await readState();
+    expect(committed.successor).toMatchObject({ startDate, endDate, version: successor.version + 1 });
+    expect(committed.links).toHaveLength(2);
+    expect(committed.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: originalEdit.id, predecessorId: edited.id, type: 'SS', lagDays: 2 }),
+      expect.objectContaining({ predecessorId: added.id, type: 'SF', lagDays: -2 }),
+    ]));
+
+    await retry.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(startField).toHaveValue(startDate);
+    await expect(endField).toHaveValue(endDate);
+    expect(attempts).toEqual([attempts[0], attempts[0]]);
+    expect(await readState()).toEqual(committed);
+
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await expect(startField).toHaveValue(successor.startDate!);
+    await expect(endField).toHaveValue(successor.endDate!);
+    const reverted = await readState();
+    expect(reverted.successor).toMatchObject({ startDate: successor.startDate, endDate: successor.endDate });
+    expect(reverted.links).toHaveLength(2);
+    expect(reverted.links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: originalEdit.id, predecessorId: edited.id, type: 'FS', lagDays: 0 }),
+      expect.objectContaining({ id: originalRemoval.id, predecessorId: removed.id, type: 'FF', lagDays: 1 }),
+    ]));
+  } finally {
+    for (const issue of [edited, removed, added, successor]) await request.delete(`/api/issues/${issue.id}`);
   }
 });

@@ -323,6 +323,7 @@ function ProjectPasteDialog({
             <p id="schedule-paste-help">
               날짜는 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
               빈 칸은 기존 날짜를 유지합니다.
+              선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
             </p>
             <details className="schedule-paste-examples">
               <summary>입력 예시 보기</summary>
@@ -335,11 +336,12 @@ function ProjectPasteDialog({
                 {'key,startDate,endDate\nPROJ-123,2026-12-01,2026-12-05\nPROJ-124,,-'}
               </pre>
               <p>
-                업무 연결만 붙여넣을 때는 날짜 열을 생략할 수 있습니다. 업무 키는 후행 업무를 가리키며,
-                같은 행의 선행 업무에는 업무 키를 하나 입력합니다.
+                업무 키는 후행 업무를 가리킵니다. 같은 업무의 시작일과 종료일은 서로 다른 행에 적을 수
+                있으며, 같은 날짜 열에 값을 여러 번 쓰면 값이 모두 같아야 합니다. 연결만 수정할 때는 날짜
+                열을 생략할 수 있습니다.
               </p>
               <pre aria-label="선행 업무 연결 예시">
-                {'업무 키\t선행 업무\t연결 유형\t근무일 간격\nPROJ-124\tPROJ-123\tSS\t2\nPROJ-125\tPROJ-123\t-\t'}
+                {'업무 키\t선행 업무\t연결 유형\t근무일 간격\nPROJ-124\tPROJ-123\tSS\t2\nPROJ-124\tPROJ-122\tFS\t0\nPROJ-124\tPROJ-121\t-\t'}
               </pre>
               <p>
                 유형은 FS·SS·FF·SF를 지원합니다. 유형과 간격이 비어 있으면 기존 값을 유지하고, 새 연결은
@@ -578,6 +580,7 @@ function DependencyChangeTable({ changes }: { changes: SchedulePasteDependencyCh
           {changes.slice(start, start + PAGE_SIZE).map((change) => (
             <tr key={change.line}>
               <th scope="row">
+                <small>입력 {change.line}행</small>
                 <small>{change.predecessorKey}</small>
                 <strong>{change.predecessorTitle}</strong>
                 <ArrowDown className="schedule-paste-dependency-arrow" aria-hidden="true" size={14} />

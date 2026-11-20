@@ -4,7 +4,7 @@ import type { Dependency, Issue, SchedulePasteApplyResult, SchedulePasteDependen
 import { dependencyGuardFields } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
-import { parseSchedulePaste } from './schedule-paste-parser.js';
+import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
 import type { Store } from './store.js';
 
 export class SchedulePasteError extends Error {
@@ -106,6 +106,8 @@ export class SchedulePasteService {
       const linkChanges: ScheduleDependencyMutation[] = [];
       const byPair = new Map(dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
       const targetIds = new Set<string>();
+      const resolvedRows: { row: SchedulePasteRow; issue: Issue; datesChanged: boolean }[] = [];
+      const requestedDates = new Map<string, { issue: Issue; line: number; change: AutomaticScheduleMutation }>();
       for (const row of parsed.rows) {
         const issue = byKey.get(row.key);
         if (!issue) {
@@ -113,28 +115,44 @@ export class SchedulePasteService {
           preview.errors.push({line:row.line,key:row.key,message});
           continue;
         }
-        const startDate = row.startDate === undefined ? issue.startDate : row.startDate;
-        const endDate = row.endDate === undefined ? issue.endDate : row.endDate;
+        const datesChanged = (row.startDate !== undefined && row.startDate !== issue.startDate) ||
+          (row.endDate !== undefined && row.endDate !== issue.endDate);
+        resolvedRows.push({ row, issue, datesChanged });
+        if (!datesChanged) continue;
+        const previous = requestedDates.get(issue.id);
+        const dates = previous ? previous.change : issue;
+        requestedDates.set(issue.id, {
+          issue, line:previous?.line ?? row.line,
+          change:{ id:issue.id,expectedVersion:issue.version,
+            startDate:row.startDate === undefined ? dates.startDate : row.startDate,
+            endDate:row.endDate === undefined ? dates.endDate : row.endDate },
+        });
+      }
+
+      const invalidDates = new Set<string>();
+      for (const { issue, line, change } of requestedDates.values()) {
+        const { startDate, endDate } = change;
+        let error: string | null;
         if (startDate && endDate && startDate > endDate) {
-          preview.errors.push({line:row.line,key:row.key,message:'종료일을 시작일 이후로 지정해 주세요.'});
+          error = '종료일을 시작일 이후로 지정해 주세요.';
+        } else {
+          error = hooks.validateChange(issue, change);
+        }
+        if (error) {
+          invalidDates.add(issue.id);
+          preview.errors.push({line,key:issue.key.toUpperCase(),message:error});
           continue;
         }
-        targetIds.add(issue.id);
-        const datesChanged = startDate !== issue.startDate || endDate !== issue.endDate;
-        if (datesChanged) {
-          const change = {id:issue.id,expectedVersion:issue.version,startDate,endDate};
-          const error = hooks.validateChange(issue, change);
-          if (error) {
-            preview.errors.push({line:row.line,key:row.key,message:error});
-            continue;
-          }
-          changes.set(issue.id, change);
-          preview.changes.push({
-            id:issue.id,key:issue.key,title:issue.title,version:issue.version,
-            fromStart:issue.startDate,fromEnd:issue.endDate,toStart:startDate,toEnd:endDate,
-          });
-        }
+        changes.set(issue.id, change);
+        preview.changes.push({
+          id:issue.id,key:issue.key,title:issue.title,version:issue.version,
+          fromStart:issue.startDate,fromEnd:issue.endDate,toStart:startDate,toEnd:endDate,
+        });
+      }
 
+      for (const { row, issue, datesChanged } of resolvedRows) {
+        if (invalidDates.has(issue.id)) continue;
+        targetIds.add(issue.id);
         const input = row.dependency;
         if (input) {
           const predecessor = byKey.get(input.predecessorKey);

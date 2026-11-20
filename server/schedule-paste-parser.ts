@@ -32,6 +32,11 @@ interface Candidate {
   recognized: number;
 }
 
+interface SeenIssueRows {
+  predecessorLines: Map<string, number>;
+  dates: Partial<Record<'startDate' | 'endDate', { value: string | null; line: number }>>;
+}
+
 const columnLabels = {
   key: '업무 키',
   start: '시작일',
@@ -94,19 +99,11 @@ function inspectHeader(parsed: DelimitedText): Candidate {
   return candidate;
 }
 
-function readDate(cell: string | undefined): string | null | undefined {
-  if (cell === undefined || !cell.trim()) return undefined;
-  const value = cell.trim();
-  if (value === '-') return null;
-  return isCalendarDate(value) ? value : undefined;
-}
-
 const normalizedKey = (cell: string | undefined) => cell?.trim().toUpperCase() ?? '';
 const validKey = (key: string) => Boolean(key && key.length <= 200 && !/[\u0000-\u001f\u007f]/.test(key));
 
-function readDependency(row: DelimitedRecord, header: Header): SchedulePasteRow['dependency'] | string {
+function readDependency(row: DelimitedRecord, header: Header, predecessorKey: string): SchedulePasteRow['dependency'] | string {
   const cell = (index: number | undefined) => index === undefined ? undefined : row.cells[index];
-  const predecessorKey = normalizedKey(cell(header.predecessorIndex));
   const type = cell(header.typeIndex)?.trim().toUpperCase() ?? '';
   const lag = cell(header.lagIndex)?.trim() ?? '';
   if (!predecessorKey) {
@@ -151,7 +148,7 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
 
   const { parsed, header } = valid[0];
   if (parsed.error) return { rows: [], errors: [parsed.error] };
-  const { recordIndex, record, keyIndex, startIndex, endIndex } = header!;
+  const { recordIndex, record, keyIndex, startIndex, endIndex, predecessorIndex } = header!;
   const dataRecords = parsed.records.slice(recordIndex + 1).filter(row => !blankRecord(row));
   if (dataRecords.length > SCHEDULE_PASTE_MAX_ROWS) {
     return { rows: [], errors: [{ line: dataRecords[SCHEDULE_PASTE_MAX_ROWS].line, message: '일정은 한 번에 500행까지 붙여넣을 수 있습니다.' }] };
@@ -159,7 +156,8 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
 
   const rows: SchedulePasteRow[] = [];
   const errors: SchedulePasteDiagnostic[] = [];
-  const seenKeys = new Map<string, number>();
+  const seenKeys = new Map<string, SeenIssueRows>();
+  const dateColumns = [[startIndex, 'startDate', '시작일'], [endIndex, 'endDate', '종료일']] as const;
   for (const row of dataRecords) {
     if (row.cells.length !== record.cells.length) {
       errors.push({ line: row.line, message: `열 수가 헤더(${record.cells.length}개)와 다릅니다. 빈 날짜 셀도 구분자를 유지해 주세요.` });
@@ -170,31 +168,48 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
       errors.push({ line: row.line, message: '업무 키는 제어 문자가 없는 1~200자여야 합니다.' });
       continue;
     }
-    const firstLine = seenKeys.get(key);
+    let seen = seenKeys.get(key);
+    if (!seen) {
+      seen = { predecessorLines: new Map(), dates: {} };
+      seenKeys.set(key, seen);
+    }
+    const predecessorKey = normalizedKey(predecessorIndex === undefined ? undefined : row.cells[predecessorIndex]);
+    const firstLine = seen.predecessorLines.get(predecessorKey);
     if (firstLine !== undefined) {
-      errors.push({ line: row.line, key, message: `업무 키가 중복되었습니다. ${firstLine}번째 줄에도 ${key}가 있습니다.` });
+      const message = predecessorKey
+        ? `선행 업무 연결이 중복되었습니다. ${firstLine}번째 줄에도 ${predecessorKey} → ${key}가 있습니다.`
+        : `업무 키가 중복되었습니다. ${firstLine}번째 줄에도 선행 업무 없이 ${key}가 있습니다.`;
+      errors.push({ line: row.line, key, message });
       continue;
     }
-    seenKeys.set(key, row.line);
+    seen.predecessorLines.set(predecessorKey, row.line);
 
+    const parsedRow: SchedulePasteRow = { line: row.line, key, startDate: undefined, endDate: undefined };
     let validDates = true;
-    for (const [index, label] of [[startIndex, '시작일'], [endIndex, '종료일']] as const) {
+    for (const [index, field, label] of dateColumns) {
       if (index === undefined) continue;
       const value = row.cells[index].trim();
-      if (value && value !== '-' && !isCalendarDate(value)) {
+      if (!value) continue;
+      if (value !== '-' && !isCalendarDate(value)) {
         errors.push({ line: row.line, key, message: `${label}은 유효한 YYYY-MM-DD 날짜, 빈칸(유지), -(삭제)만 사용할 수 있습니다.` });
         validDates = false;
+        continue;
       }
+      const date = value === '-' ? null : value;
+      const previous = seen.dates[field];
+      if (previous && previous.value !== date) {
+        errors.push({ line: row.line, key, message: `${label} 값이 ${previous.line}번째 줄의 값과 충돌합니다.` });
+        validDates = false;
+        continue;
+      }
+      seen.dates[field] ??= { value: date, line: row.line };
+      parsedRow[field] = date;
     }
-    const dependency = readDependency(row, header!);
+    const dependency = readDependency(row, header!, predecessorKey);
     if (typeof dependency === 'string') errors.push({ line: row.line, key, message: dependency });
     if (validDates && typeof dependency !== 'string') {
-      rows.push({
-        line: row.line, key,
-        startDate: readDate(startIndex === undefined ? undefined : row.cells[startIndex]),
-        endDate: readDate(endIndex === undefined ? undefined : row.cells[endIndex]),
-        ...(dependency ? { dependency } : {}),
-      });
+      if (dependency) parsedRow.dependency = dependency;
+      rows.push(parsedRow);
     }
   }
   return { rows, errors };

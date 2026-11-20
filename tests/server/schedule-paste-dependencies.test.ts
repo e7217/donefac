@@ -134,6 +134,127 @@ test('schedule paste previews and commits dates and a new link together, replays
   assert.equal((await f.undo(applied.data.undoId)).status, 409);
 });
 
+test('repeated successor rows merge split dates once and add, edit and remove distinct links in source order', async t => {
+  const f = await fixture(t);
+  const added = await f.issue('추가할 선행 업무');
+  const edited = await f.issue('간격을 바꿀 선행 업무');
+  const removed = await f.issue('해제할 선행 업무');
+  const kept = await f.issue('유지할 선행 업무');
+  const successor = await f.issue('여러 선행 업무에 연결');
+  const editLink = await f.link(edited, successor, 'SS', -2);
+  const removeLink = await f.link(removed, successor, 'FF', 1);
+  const keepLink = await f.link(kept, successor, 'SS');
+  const before = await f.workspace();
+  const preview = await f.preview([
+    [successor.key, '2026-11-23', '', added.key, '', ''],
+    [successor.key.toLowerCase(), '', '2026-11-24', edited.key, '', '2'],
+    [successor.key, '', '', removed.key, '-', ''],
+    [successor.key, '', '', kept.key, '', ''],
+    [successor.key, '2026-11-23', '', '', '', ''],
+  ], true);
+  assert.deepEqual(preview.errors, []);
+  assert.deepEqual(preview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
+    [successor.id, '2026-11-23', '2026-11-24'],
+  ]);
+  assert.deepEqual(preview.dependencyChanges, [
+    expectedChange(2, added, successor, null, { type: 'FS', lagDays: 0 }),
+    expectedChange(3, edited, successor, { type: 'SS', lagDays: -2 }, { type: 'SS', lagDays: 2 }),
+    expectedChange(4, removed, successor, { type: 'FF', lagDays: 1 }, null),
+  ]);
+  assert.equal(preview.unchanged, 1);
+  assert.deepEqual(await f.workspace(), before);
+
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.dependencyChanges, 3);
+  assert.deepEqual(applied.data.updated.map(({ id, version, startDate, endDate }) => [id, version, startDate, endDate]), [
+    [successor.id, successor.version + 1, '2026-11-23', '2026-11-24'],
+  ]);
+  const after = await f.workspace();
+  assert.equal(byPair(after, added, successor)?.type, 'FS');
+  assert.equal(byPair(after, edited, successor)?.lagDays, 2);
+  assert.equal(byPair(after, removed, successor), undefined);
+  assert.deepEqual(byPair(after, kept, successor), keepLink);
+  assert.deepEqual(await f.apply(preview), applied);
+  assert.deepEqual(await f.workspace(), after);
+
+  const undone = await f.undo(applied.data.undoId);
+  assert.equal(undone.status, 200, JSON.stringify(undone.data));
+  assert.deepEqual(undone.data.updated.map(({ id, version, startDate, endDate }) => [id, version, startDate, endDate]), [
+    [successor.id, successor.version + 2, successor.startDate, successor.endDate],
+  ]);
+  const reverted = await f.workspace();
+  assert.equal(byPair(reverted, added, successor), undefined);
+  const restoredEdit = byPair(reverted, edited, successor);
+  const restoredRemoval = byPair(reverted, removed, successor);
+  assert.deepEqual([restoredEdit?.id, restoredEdit?.lagDays], [editLink.id, editLink.lagDays]);
+  assert.deepEqual([restoredRemoval?.id, restoredRemoval?.type, restoredRemoval?.lagDays], [removeLink.id, removeLink.type, removeLink.lagDays]);
+  assert.deepEqual(byPair(reverted, kept, successor), keepLink);
+});
+
+test('merged dates still reject an invalid final range, conflicting explicit dates and repeated links', async t => {
+  const f = await fixture(t);
+  const a = await f.issue('첫 선행 업무');
+  const b = await f.issue('두 번째 선행 업무');
+  const successor = await f.issue('잘못된 일정이 들어간 후행 업무');
+  const before = await f.workspace();
+
+  const invalidRange = await f.preview([
+    [successor.key, '2026-11-25', '', a.key, '', ''],
+    [successor.key, '', '2026-11-24', b.key, '', ''],
+  ]);
+  assert.equal(invalidRange.previewId, null);
+  assert.deepEqual(invalidRange.errors.map(error => [error.line, error.key]), [[2, successor.key]]);
+  assert.match(invalidRange.errors[0].message, /종료일/u);
+
+  const conflicting = await f.preview([
+    [successor.key, '2026-11-23', '2026-11-24', a.key, '', ''],
+    [successor.key, '-', '', b.key, '', ''],
+    [successor.key.toLowerCase(), '', '', a.key.toLowerCase(), '-', ''],
+  ]);
+  assert.equal(conflicting.previewId, null);
+  assert.deepEqual(conflicting.errors.map(error => [error.line, error.key]), [[3, successor.key], [4, successor.key]]);
+  assert.match(conflicting.errors[0].message, /시작일/u);
+  assert.match(conflicting.errors[1].message, /중복/u);
+  assert.deepEqual(await f.workspace(), before);
+});
+
+test('a multi-link preview checks every new endpoint and evaluates cycles after all removals', async t => {
+  const f = await fixture(t);
+  const a = await f.issue('A');
+  const b = await f.issue('B');
+  const c = await f.issue('C');
+  const original = await f.link(a, b);
+  const additions = [
+    [a.key, '', '', b.key, 'SS', '0'],
+    [a.key, '', '', c.key, 'FF', '0'],
+  ];
+  const cyclic = await f.preview(additions);
+  assert.equal(cyclic.previewId, null);
+  assert.ok(cyclic.errors.some(error => error.message.includes('순환')));
+
+  const replacement = [...additions, [b.key, '', '', a.key, '-', '']];
+  const stale = await f.preview(replacement);
+  assert.deepEqual(stale.errors, []);
+  const edit = await f.call(`/issues/${c.id}`, 'PATCH', { expectedVersion: c.version, title: '다른 작업자가 변경한 C' });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+  const beforeApply = await f.workspace();
+  const rejected = await f.apply(stale);
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+  assert.deepEqual(await f.workspace(), beforeApply);
+  assert.deepEqual(byPair(beforeApply, a, b), original);
+
+  const fresh = await f.preview(replacement);
+  assert.deepEqual(fresh.errors, []);
+  const applied = await f.apply(fresh);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.dependencyChanges, 3);
+  const after = await f.workspace();
+  assert.equal(byPair(after, b, a)?.type, 'SS');
+  assert.equal(byPair(after, c, a)?.type, 'FF');
+  assert.equal(byPair(after, a, b), undefined);
+});
+
 test('link-only paste preserves blank settings, edits and removes chosen links, and restores both with one undo', async t => {
   const f = await fixture(t);
   const predecessor = await f.issue('공통 선행');

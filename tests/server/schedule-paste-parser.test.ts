@@ -86,7 +86,7 @@ test('relationship diagnostics preserve physical rows and reject fields without 
     'p-9,,p-1,,1e2',
     'p-10,,"p-\n1",,',
     'p-11,,p-1,,1',
-    'P-11,,p-2,,1',
+    'P-11,,P-1,-,',
   ].join('\n'));
   assert.deepEqual(result.errors.map(error => error.line), [2, 3, 4, 5, 6, 7, 8, 9, 10, 13]);
   assert.match(result.errors[0].message, /선행 업무 키를 지정/);
@@ -95,12 +95,49 @@ test('relationship diagnostics preserve physical rows and reject fields without 
   assert.match(result.errors[3].message, /간격을 비워/);
   for (const error of result.errors.slice(4, 8)) assert.match(error.message, /정수/);
   assert.match(result.errors[8].message, /제어 문자/);
-  assert.match(result.errors[9].message, /12번째 줄/);
+  assert.match(result.errors[9].message, /연결이 중복.*12번째 줄.*P-1 → P-11/);
   assert.deepEqual(result.rows, [
     { line: 12, key: 'P-11', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-1', lagDays: 1 } },
   ]);
   assert.match(parseSchedulePaste('key,startDate,dependency type\np-1,2026-11-19,FS').errors[0].message, /선행 업무 키를 지정/);
   assert.match(parseSchedulePaste('key,predecessor,선행 업무\np-2,p-1,p-1').errors[0].message, /선행 업무 헤더가 중복/);
+});
+
+test('CSV and TSV retain each predecessor and allow one date-only row per successor', () => {
+  for (const delimiter of [',', '\t']) {
+    const sheet = [
+      ['업무 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격'],
+      ['p-4', '2026-12-01', '-', '', '', ''],
+      [' P-4 ', '2026-12-01', '', 'p-1', 'SS', '2'],
+      ['p-4', '', '-', ' P-2 ', 'FF', ''],
+      ['p-4', '', '', 'p-3', '-', ''],
+    ].map(row => row.join(delimiter)).join('\r\n');
+    assert.deepEqual(parseSchedulePaste(sheet), {
+      rows: [
+        { line: 2, key: 'P-4', startDate: '2026-12-01', endDate: null },
+        { line: 3, key: 'P-4', startDate: '2026-12-01', endDate: undefined, dependency: { predecessorKey: 'P-1', type: 'SS', lagDays: 2 } },
+        { line: 4, key: 'P-4', startDate: undefined, endDate: null, dependency: { predecessorKey: 'P-2', type: 'FF' } },
+        { line: 5, key: 'P-4', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-3', type: '-' } },
+      ],
+      errors: [],
+    });
+  }
+});
+
+test('conflicting dates identify the first supplied value for each column at its physical line', () => {
+  const result = parseSchedulePaste([
+    'key,startDate,endDate,predecessor,notes',
+    'p-3,2026-12-01,,p-1,"first\nsecond"',
+    'p-3,,-,p-2,notes',
+    'P-3,2026-12-02,2026-12-10,,conflict',
+  ].join('\n'));
+  assert.deepEqual(result.rows, [
+    { line: 2, key: 'P-3', startDate: '2026-12-01', endDate: undefined, dependency: { predecessorKey: 'P-1' } },
+    { line: 4, key: 'P-3', startDate: undefined, endDate: null, dependency: { predecessorKey: 'P-2' } },
+  ]);
+  assert.deepEqual(result.errors.map(({ line, key }) => [line, key]), [[5, 'P-3'], [5, 'P-3']]);
+  assert.match(result.errors[0].message, /시작일.*2번째 줄.*충돌/);
+  assert.match(result.errors[1].message, /종료일.*4번째 줄.*충돌/);
 });
 
 test('missing, empty, duplicate or ambiguous headers produce errors without guessing', () => {
