@@ -4,6 +4,7 @@ import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_F
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
+import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
@@ -1140,19 +1141,76 @@ class Planner{
     if(row.kind==='issue'){const security=scalar(sourceField(row,'security','Security Level','Issue Security Level'));if(security!==undefined&&security!==null&&security!==false&&(typeof security==='object'?Object.keys(object(security)).some(key=>!!object(security)[key]):!!string(security)))return true;}
     return false;
   }
+  private excludedConfluencePageLabels(): Map<string, Set<string>> {
+    const labels = new Map<string, Set<string>>();
+    for (const key of this.excluded) {
+      const entry = this.entryByKey.get(key);
+      if (!entry || entry.pkg.dataset.source.product !== 'confluence' || entry.row.kind !== 'relation' ||
+          !['Labelling', 'ContentLabel'].includes(string(entry.row.metadata.sourceClass))) continue;
+      const page = entry.row.references.find(reference => reference.kind === 'page' && ['content', 'contentEntity'].includes(reference.relation));
+      const label = entry.row.references.find(reference => reference.kind === 'option' && reference.relation === 'label');
+      if (!page || !label) continue;
+      const pageKey = `${entry.pkg.summary.id}/page:${page.sourceId}`;
+      const excluded = labels.get(pageKey) ?? new Set<string>();
+      excluded.add(label.sourceId);
+      labels.set(pageKey, excluded);
+    }
+    return labels;
+  }
+  private confluenceDocumentLabels(entry: Entry, excludedLabels?: ReadonlySet<string>): string[] {
+    if (entry.pkg.dataset.source.product !== 'confluence') return [];
+    const labels = new Map<string, string>();
+    let archivedScope = false, archivedValue = false;
+    for (const reference of entry.row.references) {
+      if (reference.kind !== 'option' || reference.relation !== 'label' || excludedLabels?.has(reference.sourceId)) continue;
+      const option = this.sourceEntry(entry, 'option', reference.sourceId);
+      if (!option || this.skip(option)) continue;
+      const { sourceClass, namespace, owner, ownerReference } = option.row.metadata;
+      if (sourceClass !== 'Label' || namespace !== 'global' || (owner != null && owner !== '') || ownerReference !== undefined) {
+        archivedScope = true;
+        continue;
+      }
+      const label = normalizeDocumentLabel(option.row.title);
+      if (label === null) {
+        archivedValue = true;
+        continue;
+      }
+      const key = documentLabelKey(label);
+      if (labels.has(key)) continue;
+      if (labels.size >= MAX_DOCUMENT_LABELS) {
+        archivedValue = true;
+        continue;
+      }
+      labels.set(key, label);
+    }
+    if (archivedScope) this.notice('CONFLUENCE_LABEL_SCOPE_ARCHIVED', '개인용 또는 공용 범위를 확인할 수 없는 문서 라벨은 원본으로 보관합니다.', 'warning', entry, true);
+    if (archivedValue) this.notice('CONFLUENCE_LABEL_VALUE_ARCHIVED', '이름이나 개수 제한을 충족하지 않는 문서 라벨은 원본으로 보관합니다.', 'warning', entry, true);
+    return [...labels.keys()].sort().map(key => labels.get(key)!);
+  }
   createPrimary():void{
     for(const project of this.result.projects){this.schemas.set(project.id,{...defaultIssueSchema(project.id,this.input.now),issueTypes:[],fields:[]});this.workflows.set(project.id,{...defaultWorkflow(project.id,this.input.now),statuses:[],transitions:[],fieldRules:[]});}
     const append = this.input.append;
     const mapping = this.configuration.appendTo;
     const issueNumbers=new Map<string,number>();
+    const excludedLabels = this.excludedConfluencePageLabels();
     if (append) {
       this.schemas.set(append.project.id, append.schema);
       this.workflows.set(append.project.id, append.workflow);
       issueNumbers.set(append.project.id, append.nextIssueNumber - 1);
     }
     for(const entry of this.entries){if(this.skip(entry)||!['issue','page'].includes(entry.row.kind))continue;const project=this.project(entry);if(!project)continue;const row=entry.row,id=randomUUID();if(!row.title.trim()||row.title.trim().length>300)this.notice('TITLE_INVALID','제목이 비어 있거나300자를 넘습니다. 원본은 보존하지만 현재 객체로 적용할 수 없습니다.','error',entry);const title=row.title.trim().slice(0,300)||'제목 없음',createdAt=this.time(row.createdAt,entry)!,updatedAt=this.time(row.updatedAt,entry,false)||createdAt;
-      if(row.kind==='page'){this.result.documents.push({id,projectId:project.id,parentId:null,title,content:{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:'📄',status:'published',version:1,authorId:this.author(entry),createdAt,updatedAt});this.documentById.set(id,this.result.documents[this.result.documents.length-1]);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'document',id,projectId:project.id});}
-      else {
+      if (row.kind === 'page') {
+        const labels = this.confluenceDocumentLabels(entry, excludedLabels.get(entry.key));
+        const document: DocPage = {
+          id, projectId: project.id, parentId: null, title, content: { type: 'doc', content: [{ type: 'paragraph' }] },
+          plainText: '', icon: '📄', status: 'published', version: 1, authorId: this.author(entry), createdAt, updatedAt,
+          ...(labels.length ? { labels } : {}),
+        };
+        this.result.documents.push(document);
+        this.documentById.set(id, document);
+        this.primaryById.set(id, entry);
+        this.bindings.set(entry.key, { type: 'document', id, projectId: project.id });
+      } else {
         const state = builtin(entry.pkg, row, 'status', this.indexes.get(entry.pkg.summary.id));
         const statusOption = optionId(entry.pkg.summary.id, 'status', state.value);
         const stateId = mapping ? mapping.statuses[statusOption] : `s_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,state.value).slice(0,24)}`;

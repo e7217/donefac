@@ -146,7 +146,18 @@ function attachBodies(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
 
 function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map<string,LegacyRecord>,objects:Map<string,XmlObject>,path:string):void{
   const labels=new Map<string,LegacyRecord>();
-  for(const item of byType.get('Label')??[]){const row=record('option',item.id,{title:prop(item.node,'name'),metadata:{sourceClass:'Label',originalId:item.id,...primitiveProperties(item.node,['name','namespace','owner'])}});addRecord(data,row);labels.set(item.id,row);}
+  for (const item of byType.get('Label') ?? []) {
+    const owner = property(item.node, 'owner');
+    const row = record('option', item.id, {
+      title: prop(item.node, 'name'),
+      metadata: {
+        sourceClass: 'Label', originalId: item.id, ...primitiveProperties(item.node, ['name', 'namespace', 'owner']),
+        ...(owner?.children.length ? { ownerReference: idOf(owner) || null } : {}),
+      },
+    });
+    addRecord(data, row);
+    labels.set(item.id, row);
+  }
   const apply=(owner:LegacyRecord,labelId:string)=>{addReference(owner,'option',labelId,'label');const label=labels.get(labelId);if(label){const values=Array.isArray(owner.metadata.labels)?owner.metadata.labels:[];if(!values.includes(label.title))values.push(label.title);owner.metadata.labels=values;}else diagnostic(data,{severity:'warning',code:'CONFLUENCE_LABEL_MISSING',message:'레이블 관계의 원본 Label 객체가 없습니다.',recordId:owner.id,path});};
   for(const item of [...(byType.get('Labelling')??[]),...(byType.get('ContentLabel')??[])]){const contentNode=property(item.node,'content')??property(item.node,'contentEntity'),ownerId=idOf(contentNode),ownerType=contentNode?objectClass(contentNode)||'Page':'Page',labelId=ref(item.node,'label');const owner=rows.get(`${ownerType}:${ownerId}`);if(owner&&labelId)apply(owner,labelId);else diagnostic(data,{severity:'warning',code:'CONFLUENCE_LABEL_RELATION_UNRESOLVED',message:'레이블과 콘텐츠의 연결을 확정할 수 없습니다.',recordId:`relation:${item.type}:${item.id}`,path});}
   for(const [key,row]of rows){const object=objects.get(key);if(!object)continue;for(const element of collection(object.node,'labels')?.children??[]){if(objectClass(element)==='Label')apply(row,idOf(element));}}

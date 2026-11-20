@@ -563,6 +563,7 @@ export interface DocPage {
   id: string; projectId: string | null; parentId: string | null; title: string;
   content: RichContent; plainText: string; icon: string; status: 'draft' | 'published';
   version: number; authorId: string; createdAt: string; updatedAt: string;
+  labels?: string[];
 }
 export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string; confluenceSourceVersion?: number }
 export interface DocumentReview {

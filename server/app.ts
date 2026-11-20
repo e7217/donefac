@@ -59,6 +59,7 @@ import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
+import { documentLabelKey, documentSearchText, MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -76,6 +77,14 @@ type ScheduleUndoRecord = { id:string; records:ScheduleUndoIssue[]; used:boolean
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
+function normalizeDocumentMetadataLabels(document: DocPage): DocPage {
+  if (!Object.hasOwn(document, 'labels')) return document;
+  const labels = normalizeDocumentLabels(document.labels);
+  if (!labels) return fail(`문서 라벨은 최대 ${MAX_DOCUMENT_LABELS}개이며 각 라벨은 ${MAX_DOCUMENT_LABEL_LENGTH}자 이하여야 합니다. 라벨을 확인해 주세요.`);
+  if (labels.length) document.labels = labels;
+  else delete document.labels;
+  return document;
+}
 const uid = () => randomUUID();
 const now = () => new Date().toISOString();
 const planScheduleLabel = (dates:PlanScheduleDates) => `${dates.startDate ?? '미정'} ~ ${dates.endDate ?? '미정'} · 목표일 ${dates.targetDate ?? '미정'}`;
@@ -242,6 +251,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   };
   const validateDocument = (d: DocPage, previous?: DocPage, options: {allowMissing?: boolean;skipReferences?:boolean} = {}) => {
     d.title=text(d.title,'문서 제목',300);if(d.projectId!==null)get('projects',d.projectId);get('users',d.authorId);
+    normalizeDocumentMetadataLabels(d);
     const normalized=documentContent.normalize(d.content);d.content=normalized.content;d.plainText=normalized.plainText;if(!options.skipReferences)documentContent.validate(d.id,d.content,previous?.content,options);if(!['draft','published'].includes(d.status))fail('문서 상태를 확인해 주세요.');
     if(typeof d.icon!=='string'||d.icon.length>20)fail('아이콘을 확인해 주세요.');
     let parentId=d.parentId;const visited=new Set([d.id]);
@@ -1006,13 +1016,21 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       return entry;
     });res.json({ok:true,trashEntryId:archived.id});
   });
-  app.post('/api/documents',(req,res)=>{const timestamp=now(),authorId=actor(req);const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};store.transaction(()=>{validateDocument(d);store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);notifyDocumentCreated(d);});res.status(201).json(d);});
+  app.post('/api/documents',(req,res)=>{
+    const timestamp=now(), authorId=actor(req);
+    const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,
+      ...(Object.hasOwn(req.body,'labels')?{labels:req.body.labels}:{}),
+      content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},
+      plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
+    store.transaction(()=>{validateDocument(d);store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);notifyDocumentCreated(d);});
+    res.status(201).json(d);
+  });
   app.patch('/api/documents/:id',(req,res)=>{
     const bodyChanged=Object.hasOwn(req.body,'content');
     const updated=store.transaction(()=>{
       const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
-      const fields=['projectId','parentId','title','content','icon','status'];
-      let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);
+      const fields=['projectId','parentId','title','content','icon','status','labels'];
+      let d=validateDocument({...old,...Object.fromEntries(fields.filter(k=>Object.hasOwn(req.body,k)).map(k=>[k,req.body[k]])),version:old.version+1,updatedAt:now()},old);
       if (bodyChanged) {
         const existingSchema = documentContentSchemaVersion(old.content);
         const clientSchema = req.body.contentSchemaVersion;
@@ -1031,7 +1049,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const actorId=actor(req);
       revision(d,actorId,nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);
       if (d.title!==old.title || d.status!==old.status || d.projectId!==old.projectId || d.parentId!==old.parentId ||
-        d.icon!==old.icon || (bodyChanged && JSON.stringify(d.content)!==JSON.stringify(old.content))) notifyDocumentUpdate(d,actorId,d.updatedAt);
+        d.icon!==old.icon || JSON.stringify(d.labels)!==JSON.stringify(old.labels) ||
+        (bodyChanged && JSON.stringify(d.content)!==JSON.stringify(old.content))) notifyDocumentUpdate(d,actorId,d.updatedAt);
       return d;
     });
     if(bodyChanged)collaboration.reset(updated.id,'문서 본문이 교체되었습니다.');else collaboration.notifyMetadata(updated.id);
@@ -1396,7 +1415,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.json(result);
   });
-  app.get('/api/search',(req,res)=>{const q=String(req.query.q||'').trim().toLocaleLowerCase();if(q.length>500)fail('검색어가 너무 깁니다.');const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),documents:store.all<DocPage>('documents').filter(d=>`${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q))});});
+  app.get('/api/search',(req,res)=>{
+    const query=String(req.query.q||'').trim(), q=query.toLocaleLowerCase();
+    if(q.length>500)fail('검색어가 너무 깁니다.');
+    const documentQuery=documentLabelKey(query);
+    const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};
+    res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),
+      documents:store.all<DocPage>('documents').filter(d=>documentSearchText(d).includes(documentQuery))});
+  });
   app.get('/api/export',(_req,res)=>{
     const attachments=store.all<Attachment>('attachments');
     const attachmentVersions=sourcePreservation.allVersions();
@@ -1567,12 +1593,16 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if (hasDuplicateTeamspaceIssueRelations(importedTeamspaceRelations)) fail('같은 업무 사이의 동일한 관계가 중복되었습니다.');
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
+    if (data.schemaVersion < 58 && (importedDocuments.some(document => Object.hasOwn(document, 'labels')) ||
+        archivedDocuments.some(entry => Object.hasOwn(entry.resource, 'labels')))) {
+      fail('문서 라벨을 포함한 백업은 schemaVersion 58이 필요합니다.');
+    }
     for(const entry of importedTrash){
       entry.attachmentVersions=entry.attachmentVersions.map(version=>versionById.get(version.id)!);
     }
     for(const entry of importedTrashItems)if(entry.itemType==='attachment')entry.versions=entry.versions.map(version=>versionById.get(version.id)!);
     for (const entry of archivedDocuments) {
-      entry.resource = importDocument(entry.resource);
+      entry.resource = normalizeDocumentMetadataLabels(importDocument(entry.resource));
       entry.revisions = entry.revisions.map(importDocument);
     }
     const revisionsById = new Map([...importedRevisions, ...archivedDocuments.flatMap(entry => entry.revisions)].map(revision => [revision.id, revision]));

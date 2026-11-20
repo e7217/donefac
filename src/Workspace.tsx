@@ -11,6 +11,7 @@ import { issueSearchText } from '../shared/issue-schema';
 import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
+import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
@@ -52,6 +53,7 @@ type WorkspaceRoute = {
   savedViewId?: string | null; ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
+  documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
 };
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
@@ -71,6 +73,7 @@ function routeHash(route: WorkspaceRoute) {
     query.set('revision', route.publication.revisionId);
   }
   if (route.view === 'documents' && route.documentId && route.sectionId) query.set('section', route.sectionId);
+  if (route.view === 'documents' && route.documentLabel) query.set('label', route.documentLabel);
   if (route.view === 'teamoverview' && route.teamOverviewFilters) {
     const { projectId, memberId, date, issueMetric, issueOffset } = route.teamOverviewFilters;
     if (projectId) query.set('teamProject', projectId);
@@ -145,6 +148,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
   const section = parameters.get('section');
   const sectionId = view === 'documents' && documentId && isDocumentSectionId(section) ? section : null;
+  const documentLabel = view === 'documents' ? normalizeDocumentLabelKey(parameters.get('label')) : null;
   const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
   const teamQueue = parameters.get('teamQueue'), teamQueueOffset = parameters.get('teamQueueOffset');
   const issueMetric = isTeamOverviewIssueMetric(teamQueue) ? teamQueue : undefined;
@@ -156,7 +160,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
     issueMetric, issueOffset,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentLabel, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -169,6 +173,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [issueId, setIssueId] = useState<string | null>(null);
   const [documentPreviewId, setDocumentPreviewId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
+  const [documentLabel, setDocumentLabel] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
@@ -267,6 +272,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
     setGanttFocusIssueId(route.ganttFocusIssueId ?? null);
@@ -317,6 +323,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const navigate = (nextView: View, nextProject = projectId, nextDoc?: string) => {
     const sameView = nextView === view && nextProject === projectId;
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
+      documentLabel: sameView ? documentLabel : null,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
@@ -382,7 +389,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       closeIssuePanel(current.issueId);
       return;
     }
-    if (requestRoute({projectId:document.projectId || projectId, view:'documents',documentId:id,issueId:null})) setSearchOpen(false);
+    const targetProject = document.projectId || projectId;
+    if (requestRoute({projectId:targetProject, view:'documents',documentId:id,issueId:null,
+      documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null})) setSearchOpen(false);
   };
   const openNotification = async (notification: TeamNotification) => {
     const request = ++notificationOpenRequest.current;
@@ -435,7 +444,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
   const selectDocument = (id: string) => {
     if (!dataRef.current) return;
-    const route = normalizeRoute(dataRef.current, routeHash({projectId,view:'documents',documentId:id,issueId:null}));
+    const route = normalizeRoute(dataRef.current, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel}));
     const previous = acceptedRouteRef.current;
     if (previous && routeHash(previous) === routeHash(route)) return;
     const automaticSelection = previous?.view === 'documents' && !previous.documentId;
@@ -505,7 +514,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
-        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}/></Suspense>}
+        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
+          documentLabel={documentLabel} onChangeDocumentLabel={label => {
+            const current = acceptedRouteRef.current;
+            if (current?.view === 'documents') requestRoute({...current, documentLabel:label});
+          }}/></Suspense>}
         {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} initialTab={publicationTab} onOpenPublication={openPublication}
           onTabChange={tab => requestRoute({projectId,view:'publication',documentId:null,issueId:null,publicationTab:tab})}/></Suspense>}
         {view === 'development' && <Development {...props}/>}
@@ -593,7 +606,8 @@ function SearchDialog(props: FeatureProps & {onClose:()=>void}) {
   const [query,setQuery] = useState('');
   const q = query.toLocaleLowerCase().trim();
   const issues = q ? props.data.issues.filter(i => issueSearchText(props.data,i).toLocaleLowerCase().includes(q)).slice(0,12) : [];
-  const docs = q ? props.data.documents.filter(d => `${d.title} ${d.plainText}`.toLocaleLowerCase().includes(q)).slice(0,8) : [];
+  const documentQuery = documentLabelKey(query.trim());
+  const docs = documentQuery ? props.data.documents.filter(d => documentSearchText(d).includes(documentQuery)).slice(0,8) : [];
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && props.onClose()}><div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색"><div className="search-input-wrap"><Search size={21}/><input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="티켓 번호, 업무 제목, 문서 내용 검색…"/><button className="icon-btn" onClick={props.onClose} aria-label="검색 닫기"><X size={19}/></button></div><div className="search-results">{!q ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>{issues.length > 0 && <div className="search-label">업무</div>}{issues.map(i => <button className="search-result" key={i.id} onClick={() => props.openIssue(i.id)}><CircleDot size={17} style={{color:statusMeta(props.data,i.projectId,i.status).color}}/><span className="issue-key">{i.key}</span><span>{i.title}</span><ChevronRight size={15}/></button>)}{docs.length > 0 && <div className="search-label">문서</div>}{docs.map(d => <button className="search-result" key={d.id} onClick={() => props.openDocument(d.id)}><BookOpen size={17}/><span>{d.title}</span><ChevronRight size={15}/></button>)}{!issues.length && !docs.length && <div className="empty-state"><Search/><p>검색 결과가 없습니다.</p></div>}</>}</div><div className="search-footer"><span>업무 · 문서 · 프로젝트</span><kbd>ESC 닫기</kbd></div></div></div>;
 }
 

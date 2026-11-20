@@ -94,6 +94,40 @@ test('two clients merge concurrent text without duplicate initialization; ACK co
   }finally{peers.forEach(p=>p.dispose());if(reopened)await reopened.close();await f.close();f.remove();}
 });
 
+test('metadata-only document label edits reach live peers and watchers without resetting the body', async () => {
+  const f = await fixture(); let peer: Peer | undefined;
+  try {
+    const { document, epoch } = await make(f), path = `/documents/${document.id}`, watcher = 'user-seo';
+    const watch = await f.request(`/notifications/subscriptions/document/${document.id}`, 'PUT', { subscribed: true }, watcher);
+    assert.equal(watch.status, 200);
+    ({ p: peer } = await connected(f, document.id, watcher, epoch));
+
+    const labeled = await f.request(path, 'PATCH', { expectedVersion: document.version, labels: [' Release '] });
+    assert.equal(labeled.status, 200);
+    const changed = await peer.next('update');
+    assert.equal(changed.epoch, epoch);
+    assert.deepEqual(changed.document.labels, ['Release']);
+    assert.deepEqual(changed.document.content, document.content);
+    assert.deepEqual(Buffer.from(changed.update, 'base64'), Buffer.from([0, 0]));
+    assert.deepEqual(content(peer), document.content);
+
+    const unchanged = await f.request(path, 'PATCH', { expectedVersion: labeled.data.version, labels: ['Release', 'release'] });
+    assert.equal(unchanged.status, 200);
+    assert.equal((await peer.next('update')).epoch, epoch);
+    const notifications = (await f.request('/notifications', 'GET', undefined, watcher)).data as TeamNotificationPage;
+    assert.deepEqual(notifications.items.filter(item => item.targetId === document.id).map(item => item.kind), ['document-updated']);
+
+    const state = Y.encodeStateVector(peer.doc);
+    text(peer).insert(0, '추가 ');
+    const edited = await sendUpdate(peer, epoch, Y.encodeStateAsUpdate(peer.doc, state));
+    assert.deepEqual(edited.document.labels, ['Release']);
+    assert.equal(edited.document.plainText, '추가 원본');
+    const session = await f.request(`${path}/collaboration`);
+    assert.equal(session.data.epoch, epoch);
+    assert.deepEqual(session.data.document.labels, ['Release']);
+  } finally { peer?.dispose(); await f.close(); f.remove(); }
+});
+
 test('out-of-order Yjs updates persist pending structs and resolve when missing predecessors arrive',async()=>{
   const f=await fixture();let p:Peer|undefined;
   try{

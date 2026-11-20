@@ -13,6 +13,7 @@ import {
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
+import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
@@ -21,6 +22,7 @@ import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from
 import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
+import { DocumentLabels } from './DocumentLabels';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
@@ -44,6 +46,8 @@ import './documents.css';
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
   onSelectDocument: (id: string) => void;
+  documentLabel?: string | null;
+  onChangeDocumentLabel?: (label: string | null) => void;
   sectionId?: string | null;
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
@@ -51,26 +55,35 @@ type Props = FeatureProps & {
 };
 type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
   | { kind: 'comment'; source: SelectionCommentSource; initialBody: string };
-type Draft = {
-  id: string; title: string; content: RichContent; plainText: string;
-  status: DocPage['status']; parentId: string | null; expectedVersion: number;
+type DocumentMetadata = Pick<DocPage, 'title' | 'status' | 'parentId'> & { labels: string[] };
+type Draft = DocumentMetadata & {
+  id: string; content: RichContent; plainText: string;
+  expectedVersion: number;
   dirty: boolean; editSequence: number;
   bodyDirty?: boolean;
-  baseMetadata?: { title: string; status: DocPage['status']; parentId: string | null };
+  baseMetadata?: DocumentMetadata;
 };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
-const draftFromPage = (page: DocPage): Draft => ({
-  id: page.id, title: page.title, content: page.content, plainText: page.plainText,
-  status: page.status, parentId: page.parentId, expectedVersion: page.version, dirty: false, editSequence: 0, bodyDirty: false,
-  baseMetadata: { title: page.title, status: page.status, parentId: page.parentId },
+const documentMetadata = (page: Pick<DocPage, 'title' | 'status' | 'parentId' | 'labels'>): DocumentMetadata => ({
+  title: page.title, status: page.status, parentId: page.parentId, labels: page.labels ?? [],
 });
+const sameLabels = (left: string[], right: string[]) => left.length === right.length && left.every((label, index) => label === right[index]);
+const sameMetadata = (left: DocumentMetadata, right: DocumentMetadata) => left.title === right.title && left.status === right.status
+  && left.parentId === right.parentId && sameLabels(left.labels, right.labels);
+const draftFromPage = (page: DocPage): Draft => {
+  const metadata = documentMetadata(page);
+  return {
+    id: page.id, content: page.content, plainText: page.plainText, expectedVersion: page.version,
+    dirty: false, editSequence: 0, bodyDirty: false, ...metadata, baseMetadata: metadata,
+  };
+};
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const actorRef = useRef(actorId);
@@ -153,6 +166,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
+  const liveDocument = liveState?.document;
+  const latestPage = selectedPage && liveDocument?.id === selectedPage.id && liveDocument.version > selectedPage.version ? liveDocument : selectedPage;
+  const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
+  const searchKey = documentLabelKey(search.trim());
+  const filtersActive = Boolean(searchKey || documentLabel);
+  const visible = useMemo(() => filterPages.filter(page => {
+    const labelKeys = page.labels?.map(documentLabelKey) ?? [];
+    return (!documentLabel || labelKeys.includes(documentLabel))
+      && (documentLabelKey(page.title).includes(searchKey) || labelKeys.some(key => key.includes(searchKey)));
+  }), [filterPages, searchKey, documentLabel]);
+  const labelOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const page of filterPages) {
+      for (const label of page.labels ?? []) {
+        const key = documentLabelKey(label);
+        if (!options.has(key)) options.set(key, label);
+      }
+    }
+    return new Map([...options].sort((a, b) => a[1].localeCompare(b[1], 'ko')));
+  }, [filterPages]);
+  const activeLabel = documentLabel && (labelOptions.get(documentLabel)
+    || draft?.labels.find(label => documentLabelKey(label) === documentLabel) || documentLabel);
 
   useEffect(() => { if (window.matchMedia('(max-width: 1180px)').matches) setSidebarOpen(false); }, []);
 
@@ -201,9 +236,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const receiveLiveDocument = useCallback((document: DocPage) => {
     const current = draftRef.current;
     if (!current || current.id !== document.id || current.expectedVersion > document.version) return;
-    const metadata = { title: document.title, status: document.status, parentId: document.parentId };
-    const baseUnchanged = current.baseMetadata && JSON.stringify(current.baseMetadata) === JSON.stringify(metadata);
-    const ownMatches = current.title === document.title && current.status === document.status && current.parentId === document.parentId;
+    const metadata = documentMetadata(document);
+    const baseUnchanged = current.baseMetadata && sameMetadata(current.baseMetadata, metadata);
+    const ownMatches = sameMetadata(current, metadata);
     if (current.dirty && !baseUnchanged && !ownMatches) { setConflict(true); return; }
     const next = current.dirty ? { ...current, expectedVersion: document.version } : { ...current, ...metadata, baseMetadata: metadata, expectedVersion: document.version };
     draftRef.current = next; setDraft(next);
@@ -272,7 +307,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const previous = draftRef.current;
     if (!previous || previous.id !== current.document.id) return;
     const next = { ...draftFromPage(current.document), ...(previous.dirty ? {
-      title: previous.title, status: previous.status, parentId: previous.parentId,
+      ...documentMetadata(previous),
       expectedVersion: previous.expectedVersion, baseMetadata: previous.baseMetadata,
       editSequence: previous.editSequence, dirty: true,
     } : {}) };
@@ -316,8 +351,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => { if (activeSession?.enabled && draft?.bodyDirty) { manualRecoveryRef.current = true; setManualRecovery(true); } }, [activeSession?.enabled, draft?.id, draft?.bodyDirty]);
 
   useEffect(() => {
-    if (!manualEditor || !selectedPage) return;
+    if (!manualEditor) return;
     const old = draftRef.current;
+    if (!selectedPage) {
+      if (old) {
+        rememberDraft(old);
+        draftRef.current = null;
+        setDraft(null);
+      }
+      return;
+    }
     const sameActor = actorRef.current === actorId;
     if (old?.id === selectedPage.id && old.dirty && sameActor) return;
     if (old?.id === selectedPage.id && sameActor && old.expectedVersion > selectedPage.version) return;
@@ -329,7 +372,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const cached = localStorage.getItem(cacheKey(actorId, selectedPage.id));
       if (cached) {
         const candidate = JSON.parse(cached) as Draft;
-        if (candidate.id === selectedPage.id && candidate.dirty && candidate.content?.type === 'doc' && Number.isInteger(candidate.expectedVersion)) next = { ...candidate, bodyDirty: candidate.bodyDirty ?? JSON.stringify(candidate.content) !== JSON.stringify(selectedPage.content) };
+        if (candidate.id === selectedPage.id && candidate.dirty && candidate.content?.type === 'doc' && Number.isInteger(candidate.expectedVersion)) {
+          const labels = normalizeDocumentLabels(candidate.labels) ?? next.labels;
+          const baseMetadata = candidate.baseMetadata && {
+            ...candidate.baseMetadata, labels: normalizeDocumentLabels(candidate.baseMetadata.labels) ?? next.labels,
+          };
+          next = {
+            ...candidate, labels, baseMetadata: baseMetadata ?? (candidate.expectedVersion === selectedPage.version ? next.baseMetadata : undefined),
+            bodyDirty: candidate.bodyDirty ?? JSON.stringify(candidate.content) !== JSON.stringify(selectedPage.content),
+          };
+        }
       }
     } catch { /* A malformed local draft must not prevent opening a saved document. */ }
     draftRef.current = next;
@@ -345,8 +397,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument, closeAnnotation]); // Deliberately preserve the local buffer on snapshot refresh.
 
   useEffect(() => {
-    if (!selectedDocumentId && scoped.length) onSelectDocument(scoped[0].id);
-  }, [selectedDocumentId, scoped, onSelectDocument]);
+    if (!selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
+  }, [selectedDocumentId, visible, onSelectDocument]);
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
@@ -399,17 +451,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       }
       const result = await api<DocPage>(`/documents/${captured.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': capturedActor }, body: JSON.stringify({
         expectedVersion: captured.expectedVersion, title: captured.title.trim() || '제목 없는 문서',
-        ...(!collaborative ? { content: captured.content, plainText: captured.plainText, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION } : {}),
+        ...(!collaborative && captured.bodyDirty ? { content: captured.content, plainText: captured.plainText, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION } : {}),
+        ...(!captured.baseMetadata || !sameLabels(captured.labels, captured.baseMetadata.labels) ? { labels: captured.labels } : {}),
         status: status || captured.status, parentId: captured.parentId,
       }) });
       const current = draftRef.current;
       if (current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
         const latest = collaborative && liveStateRef.current?.document.id === captured.id && liveStateRef.current.document.version > result.version ? liveStateRef.current.document : result;
-        const newerMetadata = latest.title !== result.title || latest.status !== result.status || latest.parentId !== result.parentId;
+        const savedMetadata = documentMetadata(result);
+        const newerMetadata = !sameMetadata(documentMetadata(latest), savedMetadata);
         const editedAgain = current.editSequence !== captured.editSequence;
         const next = !editedAgain ? { ...draftFromPage(latest), ...(collaborative ? { content: current.content, plainText: current.plainText } : {}) } : {
           ...current, expectedVersion: newerMetadata ? result.version : latest.version,
-          baseMetadata: { title: result.title, status: result.status, parentId: result.parentId },
+          baseMetadata: savedMetadata,
           ...(status && current.status === captured.status ? { status } : {}),
         };
         draftRef.current = next;
@@ -425,7 +479,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           const cached = stored ? JSON.parse(stored) as Draft : null;
           if (cached?.id === captured.id && cached.expectedVersion === captured.expectedVersion) {
             if (cached.editSequence === captured.editSequence) localStorage.removeItem(key);
-            else localStorage.setItem(key, JSON.stringify({ ...cached, expectedVersion: result.version }));
+            else localStorage.setItem(key, JSON.stringify({ ...cached, expectedVersion: result.version, baseMetadata: documentMetadata(result) }));
           }
         } catch { setStorageProblem(true); }
       }
@@ -618,7 +672,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     savingRef.current = true; setSaving(true);
     try {
       const source = data.documents.find(page => page.id === captured.id);
-      const result = await post<DocPage>('/documents', { title: `${captured.title || '제목 없는 문서'} (편집 사본)`, projectId: source?.projectId || null, parentId: source?.parentId || null, content: captured.content, status: 'draft' });
+      const result = await post<DocPage>('/documents', { title: `${captured.title || '제목 없는 문서'} (편집 사본)`, projectId: source?.projectId || null, parentId: source?.parentId || null, content: captured.content, status: 'draft', labels: captured.labels });
       await refresh();
       const current = draftRef.current;
       if (current?.id === captured.id && current.editSequence === captured.editSequence && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
@@ -789,20 +843,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const collectDescendants = (id: string) => { for (const child of data.documents.filter(page => page.parentId === id)) if (!descendants.has(child.id)) { descendants.add(child.id); collectDescendants(child.id); } };
   if (draft) collectDescendants(draft.id);
   const parentOptions = data.documents.filter(page => page.id !== draft?.id && !descendants.has(page.id) && page.projectId === selectedPage?.projectId);
-  const visible = scoped.filter(page => page.title.toLowerCase().includes(search.toLowerCase()));
   const tree = (pages: DocPage[], parentId: string | null = null, level = 0, visited = new Set<string>()): React.ReactNode => pages
-    .filter(page => search ? level === 0 : (page.parentId === parentId || (parentId === null && !pages.some(other => other.id === page.parentId))))
+    .filter(page => filtersActive ? level === 0 : (page.parentId === parentId || (parentId === null && !pages.some(other => other.id === page.parentId))))
     .map(page => {
       if (visited.has(page.id)) return null;
       const nextVisited = new Set(visited); nextVisited.add(page.id);
       const children = pages.some(other => other.parentId === page.id);
       return <div key={page.id}>
         <div className={`docs-tree-row ${draft?.id === page.id ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}>
-          <button type="button" className="docs-tree-toggle" aria-label={`${page.title} ${collapsed.has(page.id) ? '펼치기' : '접기'}`} disabled={!children || Boolean(search)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(page.id)) next.delete(page.id); else next.add(page.id); return next; })}>{children && !search ? collapsed.has(page.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}</button>
+          <button type="button" className="docs-tree-toggle" aria-label={`${page.title} ${collapsed.has(page.id) ? '펼치기' : '접기'}`} disabled={!children || filtersActive} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(page.id)) next.delete(page.id); else next.add(page.id); return next; })}>{children && !filtersActive ? collapsed.has(page.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}</button>
           <button type="button" className="docs-tree-link" onClick={() => selectDocument(page.id)}><span className="docs-page-icon">{page.icon || '📄'}</span><span>{page.title || '제목 없는 문서'}</span>{page.status === 'draft' && <span className="docs-draft-dot" title="초안" />}</button>
           <button type="button" className="docs-tree-add" title="하위 문서 만들기" aria-label={`${page.title} 하위 문서 만들기`} onClick={() => openNew(page.id)}><Plus size={13} /></button>
         </div>
-        {!search && !collapsed.has(page.id) && tree(pages, page.id, level + 1, nextVisited)}
+        {!filtersActive && !collapsed.has(page.id) && tree(pages, page.id, level + 1, nextVisited)}
       </div>;
     });
 
@@ -855,7 +908,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!liveMode && !manualRecovery && current?.id === documentId && selectedPage?.id === documentId
       && current.dirty && !current.bodyDirty && current.expectedVersion < selectedPage.version) {
       const base = current.baseMetadata;
-      if (base?.title === selectedPage.title && base.status === selectedPage.status && base.parentId === selectedPage.parentId) {
+      if (base && sameMetadata(base, documentMetadata(selectedPage))) {
         const next = { ...current, content: selectedPage.content, plainText: selectedPage.plainText, expectedVersion: selectedPage.version };
         draftRef.current = next;
         setDraft(next);
@@ -875,6 +928,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || documentAction)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
+        {onChangeDocumentLabel && <div className="docs-label-filters">
+          <select aria-label="문서 라벨 필터" value={documentLabel ?? ''} onChange={event => onChangeDocumentLabel(event.target.value || null)}>
+            <option value="">모든 라벨</option>
+            {documentLabel && !labelOptions.has(documentLabel) && <option value={documentLabel}>{activeLabel}</option>}
+            {[...labelOptions].map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+          </select>
+          {documentLabel && <button type="button" aria-label="라벨 필터 해제" title="라벨 필터 해제" onClick={() => onChangeDocumentLabel(null)}><X size={13} aria-hidden="true" /></button>}
+        </div>}
+        {filtersActive && <p role="status" className="docs-filter-count">{activeLabel && <>{activeLabel} · </>}문서 {visible.length}개</p>}
         <div className="docs-tree-content">
           <div className="docs-tree-group"><span>{currentProject?.name || '프로젝트 문서'}</span>
             <div className="docs-tree-group-actions">
@@ -883,7 +945,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             </div>
           </div>
           {tree(visible.filter(page => page.projectId !== null))}
-          {!visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">{search ? '검색 결과가 없어요.' : '첫 문서를 작성해보세요.'}</p>}
+          {!filtersActive && !visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">첫 문서를 작성해보세요.</p>}
           <div className="docs-tree-group docs-tree-common"><span>팀 공통 문서</span>
             <div className="docs-tree-group-actions">
               <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(null)} notify={notify} />
@@ -891,7 +953,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             </div>
           </div>
           {tree(visible.filter(page => page.projectId === null))}
-          {!visible.some(page => page.projectId === null) && <p className="docs-tree-empty">함께 참고하는 지식을 모아보세요.</p>}
+          {!filtersActive && !visible.some(page => page.projectId === null) && <p className="docs-tree-empty">함께 참고하는 지식을 모아보세요.</p>}
         </div>
         <button className="docs-template-shortcut" onClick={() => openNew('', 'meeting')}><FilePlus2 size={16} /><span>템플릿으로 시작하기</span><ChevronRight size={14} /></button>
       </aside>
@@ -904,23 +966,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
-              <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
+              <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
               <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
             </div>
           </div>
 
           {conflict && !manualRecovery && <div className="docs-notice docs-conflict" role="alert"><strong>다른 변경사항이 있어요.</strong><span>내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.</span><div><button onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
-          {showLatest && <div className="docs-latest-preview"><div><strong>서버 버전 {selectedPage.version} · {selectedPage.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div><pre>{selectedPage.plainText || contentText(selectedPage.content)}</pre></div>}
+          {showLatest && latestPage && <div className="docs-latest-preview"><div><strong>서버 버전 {latestPage.version} · {latestPage.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
+            {Boolean(draft.labels.length || latestPage.labels?.length) && <p className="docs-latest-labels">{latestPage.labels?.length ? <>라벨 · {latestPage.labels.join(', ')}</> : '라벨 없음'}</p>}
+            <pre>{latestPage.plainText || contentText(latestPage.content)}</pre>
+          </div>}
           {storageProblem && <div className="docs-notice" role="alert">브라우저 임시 저장 공간이 부족합니다. 이동하기 전에 저장하거나 JSON으로 내보내주세요.</div>}
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
-          {manualRecovery && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
+          {manualRecovery && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
 
           <div className="docs-paper-scroll">
             <div className="docs-paper">
               <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime(selectedPage.updatedAt)}</span></div>
               <input className="docs-title-input" disabled={restoring} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
               <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || '#78849a' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
+              <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring}
+                onChange={labels => updateDraft({ labels })} onFilter={onChangeDocumentLabel} />
 
               <div className="docs-editor-toolbar" role="toolbar" aria-label="문서 서식">
                 <select disabled={bodyReadOnly} aria-label="문단 서식" value={editor?.isActive('heading', { level: 1 }) ? 'h1' : editor?.isActive('heading', { level: 2 }) ? 'h2' : editor?.isActive('heading', { level: 3 }) ? 'h3' : 'p'} onChange={event => { if (event.target.value === 'p') editor?.chain().focus().setParagraph().run(); else editor?.chain().focus().toggleHeading({ level: Number(event.target.value.slice(1)) as 1 | 2 | 3 }).run(); }}><option value="p">본문</option><option value="h1">제목 1</option><option value="h2">제목 2</option><option value="h3">제목 3</option></select><span className="docs-toolbar-separator" />
@@ -981,7 +1048,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   event.preventDefault();
                   window.location.hash = link.hash;
                 }
-              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
+              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} labels={draft.labels} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
                 {!bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
                   <div className="docs-slash-caption" aria-hidden="true">블록 추가</div>
                   {matchingSlashCommands.map((command, index) => <button key={command.label} type="button" aria-current={index === slashIndex || undefined}
@@ -1046,7 +1113,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>파일을 첨부하고 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
           </div>
         </aside>}
-      </> : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
+      </> : filtersActive && !visible.length ? <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>조건에 맞는 문서가 없습니다.</h2></div>
+        : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}

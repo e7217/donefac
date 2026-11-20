@@ -13,6 +13,7 @@ import { WebSocket } from 'ws';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
+import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/document-labels.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
@@ -974,6 +975,87 @@ test('repositories skip colliding Jira and current keys for distinct tickets whi
   assert.deepEqual(live.data.runs, []);
   const links = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
   assert.deepEqual(links.map(link => [link.iid, link.issueId]), [[902, renamed.id]]);
+});
+
+test('Confluence imports only proven global document labels and preserves team labels during reviewed refresh', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
+  const page = (id: string, title: string, version: number) =>
+    object('Page', id, prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42')) +
+    object('BodyContent', `8${id}`, prop('body', '<![CDATA[<p>원본 본문</p>]]>') + ref('content', 'Page', id));
+  const label = (id: number, name: string, pageId: string, namespace?: string, owner = '') =>
+    object('Label', String(id), prop('name', name) + (namespace ? prop('namespace', namespace) : '') + owner) +
+    object('Labelling', `9${id}`, ref('content', 'Page', pageId) + ref('label', 'Label', String(id)));
+  const upload = (filename: string, rows: string[]) => f.upload(zip([{
+    path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${object('Space', '42', prop('key', 'LABELS') + prop('name', '팀 문서'))}${rows.join('')}</hibernate-generic>`),
+  }]), `${filename}.zip`, 'confluence', 'synthetic-confluence-labels');
+
+  const privateName = 'Private-Synthetic-Label';
+  const unknownName = 'Unknown-Synthetic-Label';
+  const scopedName = 'Owned-Synthetic-Label';
+  const extraLabels = Array.from({ length: MAX_DOCUMENT_LABELS - 1 }, (_, index) => `tag-${String(index + 1).padStart(2, '0')}`);
+  const initial = await upload('labelled-page', [
+    page('100', '원본 문서', 1),
+    label(201, 'Release', '100', 'global', prop('owner', '')),
+    label(202, ' release ', '100', 'global'),
+    label(203, privateName, '100', 'my', prop('owner', 'synthetic-owner')),
+    label(204, unknownName, '100'),
+    label(205, scopedName, '100', 'global', ref('owner', 'ConfluenceUserImpl', 'synthetic-owner')),
+    label(206, 'x'.repeat(MAX_DOCUMENT_LABEL_LENGTH + 1), '100', 'global'),
+    label(207, 'Excluded-Association', '100', 'global'),
+    label(208, 'Excluded-Option', '100', 'global'),
+    ...extraLabels.map((name, index) => label(300 + index, name, '100', 'global')),
+    label(401, 'Overflow-Synthetic-Label', '100', 'global'),
+  ]);
+  const configuration = await f.configuration(initial, 'LABELS');
+  configuration.excludedRecords = [`${initial.id}/relation:Labelling:9207`, `${initial.id}/option:208`];
+  const preview = await f.preview(configuration);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.deepEqual(preview.notices.filter(notice => notice.code.startsWith('CONFLUENCE_LABEL_'))
+    .map(notice => [notice.code, notice.requiresAcknowledgement]), [
+    ['CONFLUENCE_LABEL_SCOPE_ARCHIVED', true], ['CONFLUENCE_LABEL_VALUE_ARCHIVED', true],
+  ]);
+  for (const name of [privateName, unknownName, scopedName]) assert.equal(JSON.stringify(preview).includes(name), false);
+  const imported = await f.apply(preview);
+  assert.equal(imported.status, 201, JSON.stringify(imported.data));
+  const [projectId] = imported.data.import.projectIds;
+  const snapshot = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.filter(doc => doc.projectId === projectId);
+  const [original] = await snapshot();
+  assert.deepEqual(original.labels, ['Release', ...extraLabels]);
+
+  const archivePath = `/source-imports/${imported.data.import.id}/records`;
+  const archives = (await f.call<SourceRecordPage>(archivePath)).data.records;
+  const privateOption = archives.find(archive => archive.record.id === 'option:203');
+  assert.ok(privateOption);
+  const rawOption = (await f.call<SourceRecordArchive>(`${archivePath}/${privateOption.id}`)).data;
+  assert.equal(rawOption.record.title, privateName);
+  assert.equal(rawOption.record.metadata.namespace, 'my');
+  const privateRelation = archives.find(archive => archive.record.id === 'relation:Labelling:9203');
+  assert.ok(privateRelation);
+  const rawRelation = (await f.call<SourceRecordArchive>(`${archivePath}/${privateRelation.id}`)).data;
+  assert.deepEqual(rawRelation.record.references, [
+    { kind: 'page', sourceId: '100', relation: 'content' }, { kind: 'option', sourceId: '203', relation: 'label' },
+  ]);
+
+  const teamEdit = await f.call<DocPage>(`/documents/${original.id}`, 'PATCH', { expectedVersion: original.version, labels: ['팀 라벨'] });
+  assert.equal(teamEdit.status, 200, JSON.stringify(teamEdit.data));
+  const delta = await upload('labelled-page-append', [
+    page('100', '원본에서 바뀐 제목', 2), label(201, 'Release', '100', 'global'), label(501, 'Upstream-Only', '100', 'global'),
+    page('110', '추가한 문서', 1), label(502, 'Runbook', '110', 'global'),
+  ]);
+  const appendPreview = await f.preview({ ...await f.configuration(delta, 'LABELS'), appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(appendPreview.canApply, true, JSON.stringify(appendPreview.notices));
+  assert.equal(appendPreview.counts.documents, 1);
+  assert.equal(appendPreview.counts.updatedDocumentFields, 1);
+  const appended = await f.apply(appendPreview);
+  assert.equal(appended.status, 201, JSON.stringify(appended.data));
+  const documents = await snapshot();
+  assert.deepEqual(documents.map(doc => [doc.title, doc.labels]).sort(), [
+    ['원본에서 바뀐 제목', ['팀 라벨']], ['추가한 문서', ['Runbook']],
+  ]);
 });
 
 test('incremental Confluence imports reuse live parents and references while preserving edited and deleted pages', async t => {

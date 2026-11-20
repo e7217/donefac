@@ -18,6 +18,7 @@ import { downloadDocument } from './document-utils';
 export interface CollaborativeEditorProps {
   session: CollaborationSession;
   actorId: string;
+  labels: string[];
   onEditor: (editor: Editor | null) => void;
   onContent: (content: RichContent, plainText: string) => void;
   onDocument: (document: DocPage) => void;
@@ -28,7 +29,7 @@ export interface CollaborativeEditorProps {
 }
 
 export function CollaborativeEditor(props: CollaborativeEditorProps) {
-  const { session, actorId, onState, onDocument, onEditor, onSessionDisabled, onOpenCopy, notify } = props;
+  const { session, actorId, labels, onState, onDocument, onEditor, onSessionDisabled, onOpenCopy, notify } = props;
   const [client, setClient] = useState<CollaborationClient | null>(null);
   const [view, setView] = useState<CollaborationView | null>(null);
   const [restart, setRestart] = useState(0);
@@ -61,7 +62,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
 
   function downloadRecovery() {
     if (!client) return;
-    const payload = { ...client.exportPending(), title: session.document.title, content: editorRef.current?.getJSON() || null };
+    const payload = { ...client.exportPending(), title: session.document.title, content: editorRef.current?.getJSON() || null, labels };
     downloadDocument(`${session.document.title || 'document'}-공동편집-복구.json`, JSON.stringify(payload, null, 2), 'application/json');
   }
 
@@ -77,7 +78,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     if (!client || !editor || busy) return;
     setBusy(true);
     try {
-      const document = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify({ title: `${session.document.title} (공동 편집 복구 사본)`, projectId: session.document.projectId, parentId: null, content: editor.getJSON(), status: 'draft' }) });
+      const document = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify({ title: `${session.document.title} (공동 편집 복구 사본)`, projectId: session.document.projectId, parentId: null, content: editor.getJSON(), status: 'draft', labels }) });
       client.discardOwnPending();
       notify('이전 편집을 새 문서에 보관했습니다.', 'success');
       onOpenCopy(document.id);
