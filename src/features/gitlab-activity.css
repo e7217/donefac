@@ -17,6 +17,41 @@
   color: #3c6554;
 }
 
+.gitlab-activity-actions,
+.gitlab-activity-manual-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gitlab-activity-editor {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #dce8e1;
+  border-radius: 7px;
+  background: #f9fbfa;
+  min-width: 0;
+}
+
+.gitlab-activity-editor h4,
+.gitlab-activity-editor p {
+  margin: 0;
+}
+
+.gitlab-activity-editor .field {
+  width: 100%;
+  min-width: 0;
+}
+
+.gitlab-activity-hint {
+  color: #4d685b;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .gitlab-activity-list {
   display: grid;
   gap: 13px;
@@ -108,6 +143,22 @@ a.gitlab-activity-target:hover {
   overflow-wrap: anywhere;
 }
 
+.gitlab-activity-manual-label {
+  margin-top: 3px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #edf4ef;
+}
+
+.gitlab-activity-manual-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.gitlab-activity-manual-actions .btn {
+  font-size: 12px;
+}
+
 .gitlab-activity-issue {
   margin-top: 4px;
 }
@@ -143,6 +194,8 @@ a.gitlab-activity-target:hover {
 @media (max-width: 520px) {
   .gitlab-activity-target[href],
   .gitlab-activity-refresh,
+  .gitlab-activity-actions .btn,
+  .gitlab-activity-manual-actions .btn,
   .gitlab-activity-pages button {
     min-height: 44px;
   }

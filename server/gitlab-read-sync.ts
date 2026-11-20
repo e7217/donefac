@@ -1,7 +1,10 @@
+import { gitlabRepositoryUrl } from './gitlab-push.js';
+
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits';
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large';
 type Connection = { baseUrl: string; token?: string | null };
+type ManualObjectKind = 'merge_request' | 'pipeline';
 type RepositoryHistory = {
   project: GitlabReadObject;
   branches: GitlabReadObject[];
@@ -38,6 +41,10 @@ export class GitlabReadError extends Error {
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
   }
+}
+
+export class GitlabManualUrlError extends Error {
+  readonly status = 400;
 }
 
 function isReadObject(value: unknown): value is GitlabReadObject {
@@ -118,23 +125,99 @@ async function readRepositoryHistory(projectUrl: URL, projectId: number, headers
   };
 }
 
-export async function readGitlabSyncProject(
-  { baseUrl, token }: Connection, projectId: number, options: { signal?: AbortSignal; includeHistory?: boolean } = {},
-): Promise<{ mergeRequests: GitlabReadObject[]; pipelines: GitlabReadObject[]; history?: RepositoryHistory }> {
+function projectReadRequest({ baseUrl, token }: Connection, projectId: number, stage: GitlabReadStage) {
   let base: URL;
   try { base = new URL(baseUrl); }
-  catch { throw new GitlabReadError('merge-requests', 'network'); }
+  catch { throw new GitlabReadError(stage, 'network'); }
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || !Number.isSafeInteger(projectId) || projectId < 1) {
-    throw new GitlabReadError('merge-requests', 'network');
+    throw new GitlabReadError(stage, 'network');
   }
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers['PRIVATE-TOKEN'] = token;
-  const projectPath = `${base.pathname.replace(/\/+$/, '')}/api/v4/projects/${projectId}`;
   const projectUrl = new URL(base);
-  projectUrl.pathname = projectPath;
+  projectUrl.pathname = `${base.pathname.replace(/\/+$/, '')}/api/v4/projects/${projectId}`;
+  return { base, headers, projectUrl };
+}
+
+function canonicalPath(pathname: string): string | null {
+  try {
+    const path = pathname.replace(/\/$/, '');
+    if (!path) return '';
+    const segments = path.slice(1).split('/').map(segment => decodeURIComponent(segment));
+    if (segments.some(segment => !segment || segment === '.' || segment === '..' || /[\u0000-\u001f\u007f/\\]/u.test(segment))) return null;
+    return '/' + segments.map(segment => encodeURIComponent(segment)).join('/');
+  } catch { return null; }
+}
+
+function gitlabPage(raw: unknown, base: URL, allowSuffix: boolean) {
+  if (typeof raw !== 'string' || raw.length > 4000 || !raw.isWellFormed()) return null;
+  const text = raw.trim();
+  if (/[\u0000-\u0020\u007f\\]/u.test(text)) return null;
+  // Check the original path before URL parsing can resolve dot segments.
+  const input = /^https?:\/\/[^/?#@]+(\/[^?#]*)?(?:[?#]|$)/iu.exec(text);
+  if (!input?.[1]) return null;
+  const path = canonicalPath(input[1]);
+  const scope = canonicalPath(base.pathname.replace(/\/+$/, '') + '/');
+  if (!path || scope === null || !path.startsWith(`${scope}/`)) return null;
+  try {
+    const url = new URL(text);
+    if (url.origin !== base.origin || url.username || url.password || (!allowSuffix && (text.includes('?') || text.includes('#')))) return null;
+    return path;
+  } catch { return null; }
+}
+
+function manualPage(raw: unknown, base: URL, allowSuffix: boolean) {
+  const path = gitlabPage(raw, base, allowSuffix);
+  if (!path) return null;
+  const match = /^(.+)\/(merge_requests|pipelines)\/([1-9]\d*)$/u.exec(path);
+  if (!match || !Number.isSafeInteger(Number(match[3]))) return null;
+  const repositoryPath = match[1].replace(/\/-$/u, '');
+  const kind: ManualObjectKind = match[2] === 'merge_requests' ? 'merge_request' : 'pipeline';
+  return { repositoryPath, kind, id: Number(match[3]) };
+}
+
+export async function readGitlabManualObject(connection: Connection, projectId: number, rawUrl: unknown, signal?: AbortSignal): Promise<{
+  kind: ManualObjectKind;
+  object: GitlabReadObject;
+  webUrl: string;
+}> {
+  const { base, headers, projectUrl } = projectReadRequest(connection, projectId, 'project');
+  const page = manualPage(rawUrl, base, true);
+  if (!page) throw new GitlabManualUrlError('설정한 GitLab의 MR 또는 파이프라인 페이지 주소를 입력해 주세요.');
+
+  const project = await readJson(projectUrl, headers, 'project', signal);
+  if (!isReadObject(project) || project.id !== projectId) throw new GitlabReadError('project', 'invalid-response');
+  const repositoryPath = gitlabPage(project.web_url, base, false);
+  const namespace = project.path_with_namespace === undefined ? gitlabRepositoryUrl(connection.baseUrl, { web_url: project.web_url })
+    : gitlabRepositoryUrl(connection.baseUrl, { path_with_namespace: project.path_with_namespace });
+  if (!repositoryPath || !namespace || canonicalPath(namespace.pathname) !== repositoryPath) throw new GitlabReadError('project', 'invalid-response');
+  if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 MR 또는 파이프라인 주소를 입력해 주세요.');
+
+  const stage = page.kind === 'merge_request' ? 'merge-requests' : 'pipelines';
+  const collection = page.kind === 'merge_request' ? 'merge_requests' : 'pipelines';
+  const itemUrl = new URL(projectUrl);
+  itemUrl.pathname += `/${collection}/${page.id}`;
+  const object = await readJson(itemUrl, headers, stage, signal);
+  if (!isReadObject(object) || object.project_id !== projectId || typeof object.id !== 'number' ||
+      !Number.isSafeInteger(object.id) || object.id < 1 ||
+      (page.kind === 'merge_request' ? object.iid !== page.id || (object.target_project_id !== undefined && object.target_project_id !== projectId)
+        : object.id !== page.id)) throw new GitlabReadError(stage, 'invalid-response');
+
+  const verified = manualPage(object.web_url, base, false);
+  if (!verified || verified.repositoryPath !== page.repositoryPath || verified.kind !== page.kind || verified.id !== page.id) {
+    throw new GitlabReadError(stage, 'invalid-response');
+  }
+  const webUrl = new URL(`${repositoryPath}/-/${collection}/${page.id}`, base.origin).href;
+  return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+}
+
+export async function readGitlabSyncProject(
+  connection: Connection, projectId: number, options: { signal?: AbortSignal; includeHistory?: boolean } = {},
+): Promise<{ mergeRequests: GitlabReadObject[]; pipelines: GitlabReadObject[]; history?: RepositoryHistory }> {
+  const { projectUrl, headers } = projectReadRequest(connection, projectId, 'merge-requests');
   const history = options.includeHistory ? await readRepositoryHistory(projectUrl, projectId, headers, options.signal) : undefined;
-  const mergeRequestsUrl = new URL(base);
-  mergeRequestsUrl.pathname = `${projectPath}/merge_requests`;
+  const mergeRequestsUrl = new URL(projectUrl);
+  mergeRequestsUrl.pathname += '/merge_requests';
   const mergeRequests: GitlabReadObject[] = [];
   for (let page = 1; page <= MAX_MERGE_REQUEST_PAGES; page++) {
     mergeRequestsUrl.search = new URLSearchParams({ scope: 'all', per_page: String(MERGE_REQUEST_PAGE_SIZE), page: String(page) }).toString();
@@ -142,8 +225,8 @@ export async function readGitlabSyncProject(
     mergeRequests.push(...rows);
     if (rows.length < MERGE_REQUEST_PAGE_SIZE) break;
   }
-  const pipelinesUrl = new URL(base);
-  pipelinesUrl.pathname = `${projectPath}/pipelines`;
+  const pipelinesUrl = new URL(projectUrl);
+  pipelinesUrl.pathname += '/pipelines';
   pipelinesUrl.search = new URLSearchParams({ per_page: String(PIPELINE_PAGE_SIZE) }).toString();
   const pipelines = await readPage(pipelinesUrl, headers, 'pipelines', PIPELINE_PAGE_SIZE, options.signal);
   return { mergeRequests, pipelines, ...(history ? { history } : {}) };

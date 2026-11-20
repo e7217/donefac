@@ -1,7 +1,7 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, FileText, GitMerge, Link2, MessageSquare, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { ArrowRight, Check, ChevronRight, Clock3, FileText, Link2, MessageSquare, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -17,7 +17,7 @@ import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
-import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { IssueGitlabActivity } from './IssueGitlabActivity';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -28,6 +28,7 @@ import './issue-decision-source.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
 type IssueDependencyEditor = { otherRole: RelatedIssueDirection; dependency?: Dependency };
+type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
@@ -77,20 +78,31 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const [loadedVersion, setLoadedVersion] = useState(issue?.version);
   const dirty = Boolean(draft && baseDraft && JSON.stringify(editableIssue(draft, labels)) !== JSON.stringify(editableIssue(baseDraft, baseDraft.labels.join(', '))));
   const dirtyRef = useRef(false);
-  const childDraft = useRef<{dirty:boolean;pending:boolean;discard:()=>void;label?:string} | null>(null);
+  const childDraft = useRef<ChildDraft | null>(null);
+  const gitlabDraft = useRef<ChildDraft | null>(null);
+  const gitlabLinks = useMemo(() => data.gitlabLinks.filter(link => link.issueId === issueId), [data.gitlabLinks, issueId]);
   const trackChildDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
     childDraft.current = dirty || pending ? {dirty,pending,discard} : null;
   }, []);
   const trackRelationDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
     childDraft.current = dirty || pending ? { dirty, pending, discard, label: '업무 관계 입력' } : null;
   }, []);
+  const trackGitlabDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
+    gitlabDraft.current = dirty || pending ? { dirty, pending, discard, label: 'GitLab 연결 입력' } : null;
+  }, []);
   function switchTab(next: typeof tab) {
     if (next === tab) return;
     const editingReservations = tab === 'reservations';
-    const label = childDraft.current?.label;
-    if (childDraft.current?.pending) { notify(label ? '업무 관계 저장이 끝난 뒤 이동해 주세요.' : editingReservations ? '시간 배정 저장이 끝난 뒤 이동해 주세요.' : '작업 시간 저장이 끝난 뒤 이동해 주세요.', 'error'); return; }
-    if (childDraft.current?.dirty && !window.confirm(`작성 중인 ${label ?? (editingReservations ? '시간 배정 입력' : '작업 시간 기록')}을 버리고 이동할까요?`)) return;
-    childDraft.current?.discard();
+    const drafts = [childDraft.current, gitlabDraft.current];
+    const pending = drafts.find(value => value?.pending);
+    if (pending) {
+      const name = pending === gitlabDraft.current ? 'GitLab 연결' : pending.label ? '업무 관계' : editingReservations ? '시간 배정' : '작업 시간';
+      notify(`${name} 저장이 끝난 뒤 이동해 주세요.`, 'error');
+      return;
+    }
+    const changed = drafts.flatMap(value => value?.dirty ? [value.label ?? (editingReservations ? '시간 배정 입력' : '작업 시간 기록')] : []);
+    if (changed.length && !window.confirm(`작성 중인 ${changed.join('·')}을 버리고 이동할까요?`)) return;
+    for (const value of drafts) value?.discard();
     setTab(next);
   }
   useEffect(() => { dirtyRef.current = dirty || Boolean(commentBody.trim()); }, [dirty, commentBody]);
@@ -111,17 +123,20 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   useEffect(() => {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
-      const activeDraft = childDraft.current;
-      if (savingRef.current || activeDraft?.pending || dependencyBusyRef.current) {
+      const childDrafts = [childDraft.current, gitlabDraft.current];
+      if (savingRef.current || childDrafts.some(value => value?.pending) || dependencyBusyRef.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
-      } else if (dirtyRef.current || activeDraft?.dirty || dependencyDraftRef.current) {
-        const childName = dependencyDraftRef.current ? '업무 연결 입력' : activeDraft?.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록');
-        const message = activeDraft?.dirty || dependencyDraftRef.current ? `저장하지 않은 업무·댓글·${childName}을 버리고 이동할까요?`
+        return;
+      }
+      const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
+      if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
+      if (dirtyRef.current || childNames.length) {
+        const message = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
-          activeDraft?.discard();
+          for (const value of childDrafts) value?.discard();
           setDependencyEditor(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
@@ -130,7 +145,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       }
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current) return;
+      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
@@ -169,7 +184,6 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
   const availableDocuments = data.documents.filter(d => !linkedDocuments.some(l => l.documentId === d.id));
-  const gitlabLinks = data.gitlabLinks.filter(l => l.issueId === issueId);
   const activities = data.activities.filter(a => a.resourceId === issueId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const children = data.issues.filter(i => i.parentId === issueId).map(child => ({
     child, status: statusMeta(data, child.projectId, child.status),
@@ -203,6 +217,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
+    if (gitlabDraft.current?.pending) { notify('GitLab 연결 변경이 끝난 뒤 업무를 휴지통으로 옮겨 주세요.', 'error'); return; }
     if (!issue || savingRef.current || commenting || dependencyBusyRef.current || childDraft.current?.pending) return;
     savingRef.current = true; setSaving(true); setError('');
     try {
@@ -391,10 +406,8 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         <div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div>
       </section>
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
-      <section className="issue-related-section" aria-label="GitLab">
-        <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{gitlabLinks.length}</span></h3><GitlabActivityRefresh refresh={refresh} notify={notify} /></div>
-        {gitlabLinks.length ? <GitlabActivityList links={gitlabLinks} /> : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab을 연결한 뒤 브랜치 이름이나 커밋 메시지에 {issue.key}를 넣어 푸시하세요.</p>}
-      </section>
+      <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} links={gitlabLinks} refresh={refresh} notify={notify}
+        disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} />
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments">
         <h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>

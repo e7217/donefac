@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw } from 'lucide-react';
+import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
 import type { FeatureProps, GitlabLink } from '../../shared/types';
 import './gitlab-activity.css';
@@ -45,7 +45,7 @@ function activityTime(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0;
 }
 
-export function GitlabActivityRefresh({ refresh, notify }: Pick<FeatureProps, 'refresh' | 'notify'>) {
+export function GitlabActivityRefresh({ refresh, notify, disabled }: Pick<FeatureProps, 'refresh' | 'notify'> & { disabled?: boolean }) {
   const [busy, setBusy] = useState(false);
 
   async function reload() {
@@ -60,24 +60,29 @@ export function GitlabActivityRefresh({ refresh, notify }: Pick<FeatureProps, 'r
     }
   }
 
-  return <button className="btn btn-ghost gitlab-activity-refresh" type="button" aria-label="GitLab 활동 새로고침" disabled={busy} onClick={reload}>
+  return <button className="btn btn-ghost gitlab-activity-refresh" type="button" aria-label="GitLab 활동 새로고침" disabled={busy || disabled} onClick={reload}>
     <RefreshCw aria-hidden="true" size={15} />{busy ? '불러오는 중…' : '새로고침'}
   </button>;
 }
 
 type IssueContext = { keys: ReadonlyMap<string, string>; openIssue: FeatureProps['openIssue'] };
+type ManualLinkActions = {
+  disabled: boolean;
+  verify: (link: GitlabLink, trigger: HTMLButtonElement) => void;
+  unlink: (link: GitlabLink, trigger: HTMLButtonElement) => void;
+};
 
-export function GitlabActivityList({ links, issueContext, heading = 'h4' }: {
-  links: readonly GitlabLink[]; issueContext?: IssueContext; heading?: 'h3' | 'h4';
+export function GitlabActivityList({ links, issueContext, heading = 'h4', manualActions }: {
+  links: readonly GitlabLink[]; issueContext?: IssueContext; heading?: 'h3' | 'h4'; manualActions?: ManualLinkActions;
 }) {
   return <div className="gitlab-activity-list">{kinds.map(group => {
     const rows = links.filter(link => link.kind === group.kind).sort((a, b) => activityTime(b.updatedAt) - activityTime(a.updatedAt));
-    return rows.length > 0 && <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} heading={heading} />;
+    return rows.length > 0 && <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} heading={heading} manualActions={manualActions} />;
   })}</div>;
 }
 
-function ActivityGroup({ group, links, issueContext, heading: Heading }: {
-  group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; heading: 'h3' | 'h4';
+function ActivityGroup({ group, links, issueContext, heading: Heading, manualActions }: {
+  group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; heading: 'h3' | 'h4'; manualActions?: ManualLinkActions;
 }) {
   const [page, setPage] = useState(0);
   const pageCount = Math.ceil(links.length / PAGE_SIZE);
@@ -87,7 +92,7 @@ function ActivityGroup({ group, links, issueContext, heading: Heading }: {
 
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
-    <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext} />)}</ul>
+    <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext} manualActions={manualActions} />)}</ul>
     {pageCount > 1 && <nav className="gitlab-activity-pages" aria-label={`${group.label} 페이지 이동`}>
       <button className="btn btn-ghost" type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>이전</button>
       <span role="status">{currentPage + 1} / {pageCount} 페이지</span>
@@ -96,7 +101,7 @@ function ActivityGroup({ group, links, issueContext, heading: Heading }: {
   </section>;
 }
 
-function ActivityRow({ link, issueContext }: { link: GitlabLink; issueContext?: IssueContext }) {
+function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; issueContext?: IssueContext; manualActions?: ManualLinkActions }) {
   const url = gitlabActivityUrl(link.webUrl);
   const deleted = link.kind === 'branch' && link.state === 'deleted';
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
@@ -123,8 +128,19 @@ function ActivityRow({ link, issueContext }: { link: GitlabLink; issueContext?: 
       {link.kind === 'branch' && sha && <span className="gitlab-activity-detail">{deleted ? '삭제 전 HEAD' : '확인한 HEAD'} <code title={sha}>{sha.slice(0, 8)}</code></span>}
       {link.kind === 'commit' && branch && <span className="gitlab-activity-detail">{branch}</span>}
       {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
+      {link.manualLinkId && <span className="gitlab-activity-detail gitlab-activity-manual-label">수동 연결</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
     <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
+    {link.manualLinkId && manualActions && <div className="gitlab-activity-manual-actions">
+      <button className="btn btn-ghost" type="button" aria-label="수동 연결 다시 확인" title="수동 연결 다시 확인"
+        disabled={manualActions.disabled} onClick={event => manualActions.verify(link, event.currentTarget)}>
+        <RefreshCw size={14} aria-hidden="true" />다시 확인
+      </button>
+      <button className="btn btn-ghost" type="button" aria-label="수동 연결 해제" title="수동 연결 해제"
+        disabled={manualActions.disabled} onClick={event => manualActions.unlink(link, event.currentTarget)}>
+        <Unlink2 size={14} aria-hidden="true" />연결 해제
+      </button>
+    </div>}
   </li>;
 }

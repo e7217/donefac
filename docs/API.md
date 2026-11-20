@@ -291,6 +291,14 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 `GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
 
+### GitLab 수동 연결
+
+브라우저의 `POST /api/issues/:id/gitlab-links`에 `{repositoryId,url,expectedSettingsVersion}`을 보낸다. 저장한 `GET /api/integrations/gitlab` 설정의 `version`과 허용 저장소 ID를 사용한다. MR 주소의 번호는 프로젝트의 MR IID이며, 파이프라인 주소는 GitLab 파이프라인 ID를 사용한다. 서버는 저장한 GitLab 주소의 읽기 API에서 프로젝트와 해당 항목을 대조하고 정규 페이지 주소를 저장한다. 복사한 주소에 포함된 쿼리와 프래그먼트는 제거한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
+응답은 저장한 `GitlabLink`다. 새 수동 연결은 `201`이며 같은 항목을 다시 확인하면 같은 ID의 `200`을 받는다. 조회 중 연결 설정이 바뀌거나 최신 인증 이벤트와 응답이 충돌하면 `409`를 반환할 수 있다. 해당 항목의 인증 웹훅과 동기화는 상태를 갱신하며, 티켓 키가 확인된 경우에 기존 자동 연결 규칙을 적용한다.
+
+수동 연결을 해제하려면 `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…`에 현재 행의 `manualLinkId`를 보낸다. 자체 백업 형식 52는 활성·휴지통 수동 연결을 저장하며 복원한 연결에는 새 `manualLinkId`를 부여한다.
+
 ## 상태별 담당자 자동 배정
 
 프로젝트의 **설정 → 상태별 담당자 자동 배정**에서 사용한다. 관리 경로는 브라우저용 `/api`에 있다. 기존 업무의 `/api/v1` 수정 요청으로 상태가 실제로 바뀌면 같은 배정 규칙을 적용한다.

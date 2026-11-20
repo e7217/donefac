@@ -1495,6 +1495,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.originalJiraKey !== undefined)))) {
       fail('GitLab 연결의 Jira 원본 키를 포함한 백업은 schemaVersion 35가 필요합니다.');
     }
+    if (data.schemaVersion < 52 && (data.gitlabLinks.some((link:GitlabLink) => link.manualLinkId !== undefined) ||
+        importedTrash.some(entry => entry.gitlabLinks.some(link => link.manualLinkId !== undefined)))) {
+      fail('GitLab 수동 연결을 포함한 백업은 schemaVersion 52가 필요합니다.');
+    }
     const importedDependencies=data.dependencies as Dependency[];
     const archivedDependencies=importedTrash.flatMap(entry=>entry.dependencies);
     if(data.schemaVersion<21&&(importedDependencies.some(value=>value.type!=='FS')||archivedDependencies.some(value=>value.type!=='FS'))){
@@ -1680,7 +1684,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentPublication.replaceRestored(importedPublications);
       for(const a of data.activities){get('users',a.actorId);store.put('activities',a);}
       for(const a of data.attachments){attachmentTarget(a.resourceType,a.resourceId);get('users',a.authorId);if(!validTimestamp(a.createdAt))fail('첨부파일 작성 시간을 확인해 주세요.');store.put('attachments',a);}
-      for(const l of data.gitlabLinks){get('issues',l.issueId);store.put('gitlab_links',l);}
+      for(const link of data.gitlabLinks as GitlabLink[]){
+        get('issues',link.issueId);
+        store.put('gitlab_links',link.manualLinkId?{...link,manualLinkId:uid()}:link);
+      }
       const nextNumbers=new Map(previousSequences);
       const reserve=(projectId:string,key:string)=>{
         const number=Number(key.match(/-(\d+)$/)?.[1]??0);

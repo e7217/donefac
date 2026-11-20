@@ -188,7 +188,7 @@ export class TrashService {
     this.store.withMutationContext({origin: 'import', actorId: null}, () => restore('comments', archive.comments));
     restore('revisions', archive.revisions);
     restore('attachments', archive.attachments);
-    restore('gitlab_links', archive.gitlabLinks);
+    restore('gitlab_links', archive.gitlabLinks.map(link => link.manualLinkId ? { ...link, manualLinkId: randomUUID() } : link));
     const insert = this.store.db.prepare('INSERT INTO attachment_versions(id,attachment_id,json) VALUES(?,?,?)');
     for (const value of archive.attachmentVersions) insert.run(value.id, value.attachmentId, JSON.stringify(value));
   }

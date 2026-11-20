@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type RequestListener } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { GitlabReadError, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
+import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
 
 async function upstream(t: TestContext, listener: RequestListener) {
   const server = createServer(listener);
@@ -213,4 +213,121 @@ test('GitLab read cancels an in-flight response without exposing the abort reaso
   await entered;
   controller.abort(new Error('synthetic-abort-reason'));
   await checked;
+});
+
+test('direct GitLab reads verify nested project URLs and use the distinct MR and pipeline identifiers', async t => {
+  const requests: string[] = [];
+  const token = 'synthetic-manual-inspection';
+  const projectApiPath = '/gitlab/api/v4/projects/42';
+  const origin = await upstream(t, (request, response) => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], token);
+    requests.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === projectApiPath) {
+      response.end(JSON.stringify({ id: 42, path_with_namespace: 'team/subgroup/repo', web_url: repository }));
+    } else if (request.url === `${projectApiPath}/merge_requests/8`) {
+      response.end(JSON.stringify({ id: 831, project_id: 42, target_project_id: 42, iid: 8, web_url: mergeRequest }));
+    } else if (request.url === `${projectApiPath}/pipelines/764`) {
+      response.end(JSON.stringify({ id: 764, project_id: 42, iid: 5, web_url: `${repository}/pipelines/764` }));
+    } else response.writeHead(404).end();
+  });
+  const repository = `${origin}/gitlab/team/subgroup/repo`;
+  const mergeRequest = `${repository}/-/merge_requests/8`;
+  const pipeline = `${repository}/-/pipelines/764`;
+  const connection = { baseUrl: `${origin}/gitlab/`, token };
+
+  assert.deepEqual(await readGitlabManualObject(connection, 42, ` ${mergeRequest}/?diff_id=64#note_1 `), {
+    kind: 'merge_request', webUrl: mergeRequest,
+    object: { id: 831, project_id: 42, target_project_id: 42, iid: 8, web_url: mergeRequest },
+  });
+  assert.deepEqual(await readGitlabManualObject(connection, 42, `${repository}/pipelines/764#jobs`), {
+    kind: 'pipeline', webUrl: pipeline,
+    object: { id: 764, project_id: 42, iid: 5, web_url: pipeline },
+  });
+  assert.deepEqual(requests, [projectApiPath, `${projectApiPath}/merge_requests/8`, projectApiPath, `${projectApiPath}/pipelines/764`]);
+});
+
+test('foreign and malformed GitLab URLs cause no reads and a different repository stops after the configured project read', async t => {
+  const requests: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    requests.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ id: 42, web_url: `${origin}/gitlab/team/subgroup/repo` }));
+  });
+  const connection = { baseUrl: `${origin}/gitlab` };
+  const wrongAddresses = [
+    `${origin}/gitlab-other/team/subgroup/repo/-/merge_requests/8`,
+    `${origin}/gitlab/team/subgroup/repo/-/issues/8`,
+    `${origin}/gitlab/team/subgroup/repo/-/pipelines/9007199254740992`,
+    `${origin}/gitlab/team/subgroup/repo/-/pipelines/0008`,
+    `${origin}/gitlab/team/subgroup/re%2Fpo/-/merge_requests/8`,
+    `${origin}/gitlab/team/subgroup/repo/%2e/-/merge_requests/8`,
+    `${origin}/gitlab/team/subgroup/repo/%XY/-/merge_requests/8`,
+    `${origin}/gitlab/team/subgroup/repo\\elsewhere/-/merge_requests/8`,
+    `${origin.replace('://', '://user@')}/gitlab/team/subgroup/repo/-/merge_requests/8`,
+    `${origin.replace('://', '://@')}/gitlab/team/subgroup/repo/-/merge_requests/8`,
+    'https://example.invalid/gitlab/team/subgroup/repo/-/merge_requests/8',
+  ];
+  for (const url of wrongAddresses) {
+    await assert.rejects(readGitlabManualObject(connection, 42, url), GitlabManualUrlError);
+  }
+  assert.deepEqual(requests, []);
+  await assert.rejects(readGitlabManualObject(connection, 42, `${origin}/gitlab/other/repo/-/merge_requests/8`), GitlabManualUrlError);
+  assert.deepEqual(requests, ['/gitlab/api/v4/projects/42']);
+});
+
+test('direct GitLab reads require consistent project, object and returned web identities', async t => {
+  let projectFields: Record<string, unknown>;
+  let objectFields: Record<string, unknown>;
+  const requests: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    requests.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify(request.url === '/api/v4/projects/42' ? projectFields : objectFields));
+  });
+  const connection = { baseUrl: origin };
+  const repository = `${origin}/team/repo`;
+  const mergeRequest = `${repository}/-/merge_requests/8`;
+  const pipeline = `${repository}/-/pipelines/764`;
+  const goodProject = { id: 42, web_url: repository, path_with_namespace: 'team/repo' };
+  const goodMr = { id: 30, project_id: 42, iid: 8, web_url: mergeRequest };
+  for (const details of [{ id: 43 }, { path_with_namespace: 'different/repo' }, { web_url: `${repository}/elsewhere/..` }]) {
+    projectFields = { ...goodProject, ...details };
+    await assert.rejects(readGitlabManualObject(connection, 42, mergeRequest), (error: unknown) =>
+      error instanceof GitlabReadError && error.stage === 'project' && error.code === 'invalid-response');
+  }
+  assert.deepEqual(requests, Array(3).fill('/api/v4/projects/42'));
+  projectFields = goodProject;
+  for (const details of [
+    { project_id: 43 }, { target_project_id: 43 }, { iid: 9 }, { id: 0 }, { id: '30' },
+    { web_url: `${repository}/-/merge_requests/9` }, { web_url: `${mergeRequest}?private_token=example` },
+    { web_url: `${origin}/other/repo/-/merge_requests/8` }, { web_url: 'https://example.invalid/team/repo/-/merge_requests/8' },
+  ]) {
+    objectFields = { ...goodMr, ...details };
+    await assert.rejects(readGitlabManualObject(connection, 42, mergeRequest), (error: unknown) =>
+      error instanceof GitlabReadError && error.stage === 'merge-requests' && error.code === 'invalid-response');
+  }
+  objectFields = { id: 5, iid: 764, project_id: 42, web_url: pipeline };
+  await assert.rejects(readGitlabManualObject(connection, 42, pipeline), (error: unknown) =>
+    error instanceof GitlabReadError && error.stage === 'pipelines' && error.code === 'invalid-response');
+  assert.equal(requests.at(-1), '/api/v4/projects/42/pipelines/764');
+});
+
+test('direct GitLab reads never follow a redirect or expose its body and location', async t => {
+  let redirected = 0;
+  const token = 'synthetic-direct-read-token';
+  const destination = await upstream(t, (_request, response) => {
+    redirected++;
+    response.end('{}');
+  });
+  const origin = await upstream(t, (request, response) => {
+    if (request.url === '/api/v4/projects/42') {
+      response.end(JSON.stringify({ id: 42, web_url: `${origin}/team/repo` }));
+    } else response.writeHead(302, { Location: `${destination}/${token}` }).end(token);
+  });
+  await assert.rejects(readGitlabManualObject({ baseUrl: origin, token }, 42, `${origin}/team/repo/-/merge_requests/8`), (error: unknown) =>
+    error instanceof GitlabReadError && error.stage === 'merge-requests' && error.httpStatus === 302 &&
+    !error.message.includes(destination) && !error.message.includes(token));
+  assert.equal(redirected, 0);
 });
