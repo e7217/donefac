@@ -276,12 +276,14 @@ function ProjectGantt(props: GanttProps) {
   async function undo() {
     if (!undoId) return; markBusy(true);
     try {
-      const result = await post<{ updated: Issue[]; warnings?: string[]; plan?:PlanningItem }>('/schedule/undo', { undoId });
+      const result = await post<{ updated: Issue[]; warnings?: string[]; plan?:PlanningItem; dependencyChanges?:number }>('/schedule/undo', { undoId });
       setUndoId(null); setScheduleWarnings(result.warnings || []);
       await refresh();
       const date = result.plan && (result.plan.startDate ?? result.plan.targetDate ?? result.plan.endDate);
       if (date && result.plan?.id === selectedPlanningId && outside(date)) showDate(date);
-      notify(result.plan ? '계획과 연결 업무의 일정 변경을 되돌렸습니다.' : '마지막 일정 변경을 되돌렸습니다.');
+      if (result.plan) notify('계획과 연결 업무의 일정 변경을 되돌렸습니다.');
+      else if (result.dependencyChanges) notify(result.updated.length ? '일정과 업무 연결 변경을 되돌렸습니다.' : '업무 연결 변경을 되돌렸습니다.');
+      else notify('마지막 일정 변경을 되돌렸습니다.');
     }
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
@@ -492,7 +494,10 @@ function ProjectGantt(props: GanttProps) {
         setScheduleWarnings(result.warnings);
         await refresh();
         setPasteOpen(false);
-        notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);
+        const changes = [];
+        if (result.updated.length) changes.push(`업무 일정 ${result.updated.length}건`);
+        if (result.dependencyChanges) changes.push(`선후행 연결 ${result.dependencyChanges}건`);
+        notify(`${changes.join(' · ')}을 변경했습니다.`);
       }}
     />}
     {linkEditor && <DependencyModal key={linkEditor.dependency?.id ?? draftEpoch} issues={projectIssues} dependency={linkEditor.dependency} busy={busy}

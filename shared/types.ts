@@ -601,16 +601,26 @@ export interface ProjectScheduleAnalysis {
   partial: boolean;
 }
 export interface SchedulePasteDiagnostic { line: number | null; key?: string; message: string }
+export interface SchedulePasteDependencyChange {
+  line: number;
+  predecessorKey: string;
+  predecessorTitle: string;
+  successorKey: string;
+  successorTitle: string;
+  before: Pick<Dependency, 'type' | 'lagDays'> | null;
+  after: Pick<Dependency, 'type' | 'lagDays'> | null;
+}
 export interface SchedulePastePreview {
   projectId: string;
   previewId: string | null;
   expiresAt: string | null;
   changes: ScheduleChange[];
+  dependencyChanges?: SchedulePasteDependencyChange[];
   warnings: string[];
   errors: SchedulePasteDiagnostic[];
   unchanged: number;
 }
-export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; warnings: string[] }
+export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; warnings: string[]; dependencyChanges?: number }
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {
   previewId: string | null;

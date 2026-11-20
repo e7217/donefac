@@ -246,7 +246,8 @@
 }
 
 .schedule-paste-change-table tbody th small,
-.schedule-paste-date small {
+.schedule-paste-date small,
+.schedule-paste-dependency-rule small {
   display: block;
   font-size: 0.8125rem;
   font-weight: 400;
@@ -270,17 +271,59 @@
   font-weight: 500;
 }
 
-.schedule-paste-date.is-changed {
+.schedule-paste-date.is-changed,
+.schedule-paste-dependency-rule.is-changed {
   color: #146c5c;
 }
 
 .schedule-paste-date.is-removed,
-.schedule-paste-date.is-removed small {
+.schedule-paste-date.is-removed small,
+.schedule-paste-dependency-rule.is-removed,
+.schedule-paste-dependency-rule.is-removed small {
   color: #9a4747;
 }
 
 .schedule-paste-date.is-unchanged {
   color: #62766b;
+}
+
+.schedule-paste-change-table + .schedule-paste-dependency-table {
+  margin-top: 1.25rem;
+}
+
+.schedule-paste-dependency-table table {
+  table-layout: fixed;
+}
+
+.schedule-paste-dependency-table thead th:first-child {
+  width: 42%;
+}
+
+.schedule-paste-dependency-table th,
+.schedule-paste-dependency-table td,
+.schedule-paste-dependency-table thead th {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.schedule-paste-dependency-table tbody th {
+  min-width: 0;
+}
+
+.schedule-paste-dependency-arrow {
+  display: block;
+  margin: 0.35rem 0;
+  color: #526d5d;
+}
+
+.schedule-paste-dependency-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.schedule-paste-dependency-rule strong {
+  font-weight: 500;
 }
 
 .schedule-paste-dialog > footer {

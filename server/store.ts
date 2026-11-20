@@ -44,6 +44,19 @@ export class Store {
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_inbox(id TEXT PRIMARY KEY,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS schedule_undos(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schedule_dependency_removals(
+        predecessor_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        successor_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+        undo_id TEXT NOT NULL REFERENCES schedule_undos(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+        PRIMARY KEY(predecessor_id, successor_id)
+      );
+      CREATE INDEX IF NOT EXISTS schedule_dependency_removals_by_successor ON schedule_dependency_removals(successor_id);
+      CREATE INDEX IF NOT EXISTS schedule_dependency_removals_by_undo ON schedule_dependency_removals(undo_id);
+      -- Recreating a pair invalidates its earlier removal even if the new link is later deleted.
+      CREATE TRIGGER IF NOT EXISTS clear_schedule_dependency_removal_on_insert AFTER INSERT ON dependencies
+      BEGIN
+        DELETE FROM schedule_dependency_removals WHERE predecessor_id=NEW.predecessor_id AND successor_id=NEW.successor_id;
+      END;
       CREATE TABLE IF NOT EXISTS issue_sequences(project_id TEXT PRIMARY KEY REFERENCES projects(id),next_number INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS issues_project ON issues(project_id);
       CREATE INDEX IF NOT EXISTS documents_parent ON documents(parent_id);

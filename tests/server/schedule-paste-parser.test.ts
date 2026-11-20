@@ -43,6 +43,66 @@ test('header aliases allow either date column and explicitly headed unrelated co
   }
 });
 
+test('dependency-only and mixed date sheets preserve blank fields and normalize relationship choices', () => {
+  for (const header of ['선행 업무', 'predecessor', 'Predecessor Key']) {
+    assert.deepEqual(parseSchedulePaste(`업무 키\t${header}\n p-2 \t p-1 `), {
+      rows: [{ line: 2, key: 'P-2', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-1' } }],
+      errors: [],
+    });
+  }
+  assert.deepEqual(parseSchedulePaste([
+    'key,start date,종료일,predecessor key,dependency type,근무일 간격',
+    ' p-2 ,2026-11-19,,p-1, ss ,-3650',
+    'p-3,,-,p-2,ff,+3650',
+    'p-4,,,p-3, SF ,',
+    'p-5,,,p-4,,-0',
+    'p-6,,,p-5,-,',
+    'p-7,,2026-11-20,,,',
+    'p-8,,,p-7,fs,0',
+  ].join('\n')), {
+    rows: [
+      { line: 2, key: 'P-2', startDate: '2026-11-19', endDate: undefined, dependency: { predecessorKey: 'P-1', type: 'SS', lagDays: -3650 } },
+      { line: 3, key: 'P-3', startDate: undefined, endDate: null, dependency: { predecessorKey: 'P-2', type: 'FF', lagDays: 3650 } },
+      { line: 4, key: 'P-4', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-3', type: 'SF' } },
+      { line: 5, key: 'P-5', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-4', lagDays: 0 } },
+      { line: 6, key: 'P-6', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-5', type: '-' } },
+      { line: 7, key: 'P-7', startDate: undefined, endDate: '2026-11-20' },
+      { line: 8, key: 'P-8', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-7', type: 'FS', lagDays: 0 } },
+    ],
+    errors: [],
+  });
+});
+
+test('relationship diagnostics preserve physical rows and reject fields without a predecessor', () => {
+  const result = parseSchedulePaste([
+    'key,startDate,선행 업무,연결 유형,lag days',
+    'p-2,,,FS,',
+    'p-3,,,,0',
+    'p-4,,p-1,FS+1,',
+    'p-5,,p-1,-,1',
+    'p-6,,p-1,,3651',
+    'p-7,,p-1,,-3651',
+    'p-8,,p-1,,1.0',
+    'p-9,,p-1,,1e2',
+    'p-10,,"p-\n1",,',
+    'p-11,,p-1,,1',
+    'P-11,,p-2,,1',
+  ].join('\n'));
+  assert.deepEqual(result.errors.map(error => error.line), [2, 3, 4, 5, 6, 7, 8, 9, 10, 13]);
+  assert.match(result.errors[0].message, /선행 업무 키를 지정/);
+  assert.match(result.errors[1].message, /선행 업무 키를 지정/);
+  assert.match(result.errors[2].message, /연결 유형/);
+  assert.match(result.errors[3].message, /간격을 비워/);
+  for (const error of result.errors.slice(4, 8)) assert.match(error.message, /정수/);
+  assert.match(result.errors[8].message, /제어 문자/);
+  assert.match(result.errors[9].message, /12번째 줄/);
+  assert.deepEqual(result.rows, [
+    { line: 12, key: 'P-11', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'P-1', lagDays: 1 } },
+  ]);
+  assert.match(parseSchedulePaste('key,startDate,dependency type\np-1,2026-11-19,FS').errors[0].message, /선행 업무 키를 지정/);
+  assert.match(parseSchedulePaste('key,predecessor,선행 업무\np-2,p-1,p-1').errors[0].message, /선행 업무 헤더가 중복/);
+});
+
 test('missing, empty, duplicate or ambiguous headers produce errors without guessing', () => {
   for (const input of [
     'P-1\t2026-11-19',

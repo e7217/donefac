@@ -195,7 +195,7 @@ Date boundaries use the requested IANA zone. Reports expose current status and d
 
 ## Spreadsheet schedule paste
 
-Paste resolves headed CSV or TSV against the current project's unique ticket keys. A blank date leaves the stored date in place. A hyphen explicitly clears it. A successful preview stores normalized changes and a read guard for referenced and directly linked tickets, incident dependencies, workflow, field schema and calendar. The apply transaction checks that guard and uses the existing schedule mutation, audit and undo paths. The same transaction stores the idempotent response. Proposal and receipt records expire and are cleared on native restore. The [paste API](../docs/API.md#스프레드시트-일정-붙여넣기) documents sizes and retention.
+Paste resolves headed CSV or TSV against the current project's unique ticket keys. A blank date leaves the stored date in place. A hyphen clears it. A row can also add, update, or remove the connection between its successor key and a specified predecessor key. The server checks the projected graph for cycles when the paste adds a relationship. A successful preview stores normalized changes and a read guard for referenced and directly linked tickets, incident dependencies, workflow, field schema and calendar. The apply transaction checks that guard and revalidates the graph. It commits dates, connections, audit entries, the shared undo record and the idempotent response together. Undo checks for changed connections and cycles before restoring. Native restore clears proposals, receipts and undo records. The [paste API](../docs/API.md#스프레드시트-일정-붙여넣기) documents sizes and retention.
 
 
 ## Actual work time

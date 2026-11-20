@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
-import type { FeatureProps, SchedulePasteApplyResult, SchedulePastePreview } from '../../shared/types';
+import { ArrowDown, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
+import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
+import type { FeatureProps, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './schedule-paste.css';
 
@@ -19,6 +20,8 @@ const DRAFT_ID = 'schedule-paste';
 const PAGE_SIZE = 50;
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '일정 붙여넣기 요청을 완료하지 못했습니다.';
+const hasChanges = (result: SchedulePastePreview) =>
+  result.changes.length > 0 || Boolean(result.dependencyChanges?.length);
 
 export function SchedulePasteDialog(props: SchedulePasteDialogProps) {
   return <ProjectPasteDialog key={props.projectId} {...props} />;
@@ -56,7 +59,7 @@ function ProjectPasteDialog({
       approved &&
       review.text === text &&
       review.result.previewId &&
-      review.result.changes.length &&
+      hasChanges(review.result) &&
       !review.result.errors.length &&
       Number.isFinite(expiry) &&
       !expired &&
@@ -184,7 +187,7 @@ function ProjectPasteDialog({
       setClock(Date.now());
       if (!result.errors.length) {
         setReview(next);
-        setApproved(Boolean(result.previewId && result.changes.length));
+        setApproved(Boolean(result.previewId && hasChanges(result)));
       }
     } catch (cause) {
       if (mounted.current && !controller.signal.aborted) {
@@ -268,6 +271,7 @@ function ProjectPasteDialog({
   }
 
   const result = review?.result;
+  const dependencyChanges = result?.dependencyChanges ?? [];
   const rejected = latest?.result.errors.length ? latest.result : null;
   return (
     <div className="schedule-paste-overlay">
@@ -287,7 +291,7 @@ function ProjectPasteDialog({
               일정 붙여넣기
             </h2>
             <p id="schedule-paste-description">
-              현재 프로젝트의 업무 키와 날짜를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.
+              현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.
             </p>
           </div>
           <button
@@ -317,22 +321,31 @@ function ProjectPasteDialog({
               rows={8}
             />
             <p id="schedule-paste-help">
-              <strong>빈 칸은 기존 값을 유지</strong>하고,{' '}
-              <strong>
-                <code>-</code>는 해당 날짜를 삭제
-              </strong>
-              합니다. 날짜는 YYYY-MM-DD로 입력하세요.
+              날짜는 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
+              빈 칸은 기존 날짜를 유지합니다.
             </p>
             <details className="schedule-paste-examples">
               <summary>입력 예시 보기</summary>
               <p>스프레드시트에서 헤더를 포함해 복사한 표는 탭으로 구분됩니다.</p>
               <pre aria-label="TSV 일정 예시">
-                {'업무 키\t시작일\t종료일\nPROJ-123\t2026-12-01\t2026-12-05\nPROJ-124\t\t-'}
+                {'업무 키\t시작일\t종료일\t선행 업무\nPROJ-123\t2026-12-01\t2026-12-04\t\nPROJ-124\t2026-12-07\t2026-12-08\tPROJ-123'}
               </pre>
               <p>쉼표로 구분한 CSV도 사용할 수 있습니다.</p>
               <pre aria-label="CSV 일정 예시">
                 {'key,startDate,endDate\nPROJ-123,2026-12-01,2026-12-05\nPROJ-124,,-'}
               </pre>
+              <p>
+                업무 연결만 붙여넣을 때는 날짜 열을 생략할 수 있습니다. 업무 키는 후행 업무를 가리키며,
+                같은 행의 선행 업무에는 업무 키를 하나 입력합니다.
+              </p>
+              <pre aria-label="선행 업무 연결 예시">
+                {'업무 키\t선행 업무\t연결 유형\t근무일 간격\nPROJ-124\tPROJ-123\tSS\t2\nPROJ-125\tPROJ-123\t-\t'}
+              </pre>
+              <p>
+                유형은 FS·SS·FF·SF를 지원합니다. 유형과 간격이 비어 있으면 기존 값을 유지하고, 새 연결은
+                FS·0근무일을 사용합니다. 선행 업무를 비워두면 연결을 유지합니다. 연결을 삭제하려면 해당
+                선행 업무를 지정하고 연결 유형에 <code>-</code>를 입력하세요.
+              </p>
             </details>
             <button className="btn btn-primary" type="submit" disabled={!text.trim()}>
               <RefreshCw size={16} />
@@ -367,8 +380,8 @@ function ProjectPasteDialog({
           )}
           {applied && (
             <p className="schedule-paste-success" role="status">
-              {applied.updated.length}개 업무의 일정을 적용했습니다. 적용 후 경고와 되돌리기는 간트에서
-              확인할 수 있습니다.
+              날짜 {applied.updated.length}건과 업무 연결 {applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.
+              적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
           )}
           {rejected && (
@@ -401,7 +414,7 @@ function ProjectPasteDialog({
               <div className="schedule-paste-review-heading">
                 <div>
                   <h3>
-                    {result.changes.length}개 업무 변경 · 유지 {result.unchanged}개
+                    날짜 {result.changes.length}건 · 업무 연결 {dependencyChanges.length}건 · 유지 {result.unchanged}행
                   </h3>
                   {result.expiresAt && (
                     <p>검토 유효 시간 {new Date(result.expiresAt).toLocaleTimeString('ko-KR')}까지</p>
@@ -427,21 +440,22 @@ function ProjectPasteDialog({
                   </span>
                 )}
               </div>
-              {!validReview && result.changes.length > 0 && !applied && !pending && !retryApply && (
+              {!validReview && hasChanges(result) && !applied && !pending && !retryApply && (
                 <p className="schedule-paste-stale">
                   이전 검토 결과입니다. 현재 입력·업무 상태로 미리보기를 새로 만들어야 적용할 수
                   있습니다.
                 </p>
               )}
-              {!result.changes.length && (
+              {!hasChanges(result) && (
                 <p className="schedule-paste-noop">
-                  변경할 일정이 없습니다. 빈 칸과 현재 날짜가 같은 값은 기존 일정을 유지합니다.
+                  변경할 날짜나 업무 연결이 없습니다.
                 </p>
               )}
               {result.warnings.length > 0 && (
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
               {result.changes.length > 0 && <ChangeTable changes={result.changes} />}
+              {dependencyChanges.length > 0 && <DependencyChangeTable changes={dependencyChanges} />}
             </section>
           )}
         </div>
@@ -452,7 +466,7 @@ function ProjectPasteDialog({
               ? '적용 후 간트에서 되돌리기를 사용할 수 있습니다.'
               : retryApply
                 ? '적용 여부가 확인되지 않았습니다. 같은 요청의 결과를 확인하세요.'
-                : '적용 전에는 업무 날짜가 바뀌지 않습니다.'}
+                : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
           </span>
           <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>
             닫기
@@ -544,6 +558,62 @@ function ChangeTable({ changes }: { changes: SchedulePastePreview['changes'] }) 
         <Pagination label="일정 변경" offset={start} total={changes.length} onChange={setOffset} />
       )}
     </div>
+  );
+}
+
+function DependencyChangeTable({ changes }: { changes: SchedulePasteDependencyChange[] }) {
+  const [offset, setOffset] = useState(0);
+  const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
+  return (
+    <div className="schedule-paste-change-table schedule-paste-dependency-table">
+      <table aria-label="붙여넣기 업무 연결 변경 목록">
+        <thead>
+          <tr>
+            <th scope="col">선행 → 후행 업무</th>
+            <th scope="col">현재 연결</th>
+            <th scope="col">변경할 연결</th>
+          </tr>
+        </thead>
+        <tbody>
+          {changes.slice(start, start + PAGE_SIZE).map((change) => (
+            <tr key={change.line}>
+              <th scope="row">
+                <small>{change.predecessorKey}</small>
+                <strong>{change.predecessorTitle}</strong>
+                <ArrowDown className="schedule-paste-dependency-arrow" aria-hidden="true" size={14} />
+                <small>{change.successorKey}</small>
+                <strong>{change.successorTitle}</strong>
+              </th>
+              <td><DependencyRule rule={change.before} /></td>
+              <td>
+                <DependencyRule rule={change.after}
+                  action={!change.after ? '삭제' : !change.before ? '추가' : '변경'} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {changes.length > PAGE_SIZE && (
+        <Pagination label="업무 연결 변경" offset={start} total={changes.length} onChange={setOffset} />
+      )}
+    </div>
+  );
+}
+
+function DependencyRule({ rule, action }: {
+  rule: SchedulePasteDependencyChange['before'];
+  action?: '추가' | '변경' | '삭제';
+}) {
+  return (
+    <span className={`schedule-paste-dependency-rule${action ? rule ? ' is-changed' : ' is-removed' : ''}`}>
+      {rule ? (
+        <>
+          <strong>{rule.type} · {DEPENDENCY_LABELS[rule.type]}</strong>
+          <span>{rule.lagDays > 0 ? '+' : ''}{rule.lagDays}근무일</span>
+        </>
+      ) : <strong>연결 없음</strong>}
+      {action && <small>{action}</small>}
+    </span>
   );
 }
 

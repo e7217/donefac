@@ -1,5 +1,6 @@
 import { isCalendarDate } from '../shared/calendar.js';
-import type { SchedulePasteDiagnostic } from '../shared/types.js';
+import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../shared/schedule-dependencies.js';
+import type { DependencyType, SchedulePasteDiagnostic } from '../shared/types.js';
 
 export const SCHEDULE_PASTE_MAX_ROWS = 500;
 export const SCHEDULE_PASTE_MAX_BYTES = 128 * 1024;
@@ -9,6 +10,7 @@ export interface SchedulePasteRow {
   key: string;
   startDate: string | null | undefined;
   endDate: string | null | undefined;
+  dependency?: { predecessorKey: string; type?: DependencyType | '-'; lagDays?: number };
 }
 
 interface DelimitedRecord {
@@ -27,6 +29,9 @@ interface Header {
   keyIndex: number;
   startIndex: number | undefined;
   endIndex: number | undefined;
+  predecessorIndex: number | undefined;
+  typeIndex: number | undefined;
+  lagIndex: number | undefined;
 }
 
 interface Candidate {
@@ -36,15 +41,27 @@ interface Candidate {
   recognized: number;
 }
 
-type Column = 'key' | 'start' | 'end';
+const columnLabels = {
+  key: '업무 키',
+  start: '시작일',
+  end: '종료일',
+  predecessor: '선행 업무',
+  dependencyType: '연결 유형',
+  lag: '근무일 간격',
+};
+type Column = keyof typeof columnLabels;
 
 const columnAliases = new Map<string, Column>([
   ['업무키', 'key'], ['티켓', 'key'], ['issuekey', 'key'], ['key', 'key'],
   ['시작일', 'start'], ['startdate', 'start'],
   ['종료일', 'end'], ['enddate', 'end'],
+  ['선행업무', 'predecessor'], ['predecessor', 'predecessor'], ['predecessorkey', 'predecessor'],
+  ['연결유형', 'dependencyType'], ['dependencytype', 'dependencyType'],
+  ['근무일간격', 'lag'], ['lagdays', 'lag'],
 ]);
 
 const blankRecord = (record: DelimitedRecord) => record.cells.every(cell => !cell.trim());
+const requiredHeader = '업무 키와 시작일·종료일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
 
 /** Strict quoting avoids shifting an issue's dates into another physical row. */
 function readDelimited(text: string, delimiter: '\t' | ','): DelimitedText {
@@ -126,7 +143,7 @@ function inspectHeader(parsed: DelimitedText): Candidate {
   const errors: SchedulePasteDiagnostic[] = [];
   const candidate: Candidate = { parsed, errors, recognized: 0 };
   if (recordIndex < 0) {
-    errors.push(parsed.error ?? { line: null, message: '업무 키와 시작일 또는 종료일 헤더가 필요합니다.' });
+    errors.push(parsed.error ?? { line: null, message: requiredHeader });
     return candidate;
   }
 
@@ -143,20 +160,20 @@ function inspectHeader(parsed: DelimitedText): Candidate {
     if (!column) continue;
     candidate.recognized++;
     if (columns.has(column)) {
-      const name = column === 'key' ? '업무 키' : column === 'start' ? '시작일' : '종료일';
-      errors.push({ line: record.line, message: `${name} 헤더가 중복되었습니다. 같은 의미의 열은 하나만 사용해 주세요.` });
+      errors.push({ line: record.line, message: `${columnLabels[column]} 헤더가 중복되었습니다. 같은 의미의 열은 하나만 사용해 주세요.` });
     } else {
       columns.set(column, index);
     }
   }
   if (!columns.has('key')) errors.push({ line: record.line, message: '업무 키 헤더(업무 키, 티켓, issue key, key)가 필요합니다.' });
-  if (!columns.has('start') && !columns.has('end')) {
-    errors.push({ line: record.line, message: '시작일 또는 종료일 헤더가 하나 이상 필요합니다.' });
+  if (!columns.has('start') && !columns.has('end') && !columns.has('predecessor')) {
+    errors.push({ line: record.line, message: requiredHeader });
   }
   if (!errors.length) {
     candidate.header = {
       recordIndex, record, keyIndex: columns.get('key')!,
       startIndex: columns.get('start'), endIndex: columns.get('end'),
+      predecessorIndex: columns.get('predecessor'), typeIndex: columns.get('dependencyType'), lagIndex: columns.get('lag'),
     };
   }
   return candidate;
@@ -167,6 +184,34 @@ function readDate(cell: string | undefined): string | null | undefined {
   const value = cell.trim();
   if (value === '-') return null;
   return isCalendarDate(value) ? value : undefined;
+}
+
+const normalizedKey = (cell: string | undefined) => cell?.trim().toUpperCase() ?? '';
+const validKey = (key: string) => Boolean(key && key.length <= 200 && !/[\u0000-\u001f\u007f]/.test(key));
+
+function readDependency(row: DelimitedRecord, header: Header): SchedulePasteRow['dependency'] | string {
+  const cell = (index: number | undefined) => index === undefined ? undefined : row.cells[index];
+  const predecessorKey = normalizedKey(cell(header.predecessorIndex));
+  const type = cell(header.typeIndex)?.trim().toUpperCase() ?? '';
+  const lag = cell(header.lagIndex)?.trim() ?? '';
+  if (!predecessorKey) {
+    return type || lag ? '연결 유형이나 근무일 간격을 입력하려면 선행 업무 키를 지정해 주세요.' : undefined;
+  }
+  if (!validKey(predecessorKey)) return '선행 업무 키는 제어 문자가 없는 1~200자여야 합니다.';
+  if (type !== '' && type !== '-' && !isDependencyType(type)) {
+    return '연결 유형은 FS, SS, FF, SF 또는 -(연결 해제)만 사용할 수 있습니다.';
+  }
+  if (type === '-' && lag) return '연결을 해제할 때는 근무일 간격을 비워 주세요.';
+
+  const lagDays = lag ? Number(lag) : undefined;
+  if (lag && (!/^[+-]?\d+$/.test(lag) || !isDependencyLag(lagDays))) {
+    return `근무일 간격은 -${MAX_DEPENDENCY_LAG_DAYS}~${MAX_DEPENDENCY_LAG_DAYS} 사이의 정수여야 합니다.`;
+  }
+  return {
+    predecessorKey,
+    ...(type ? { type } : {}),
+    ...(lagDays !== undefined ? { lagDays: lagDays || 0 } : {}),
+  };
 }
 
 /** No mutation is safe while errors exist, even when some rows parsed successfully. */
@@ -205,8 +250,8 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
       errors.push({ line: row.line, message: `열 수가 헤더(${record.cells.length}개)와 다릅니다. 빈 날짜 셀도 구분자를 유지해 주세요.` });
       continue;
     }
-    const key = row.cells[keyIndex].trim().toUpperCase();
-    if (!key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) {
+    const key = normalizedKey(row.cells[keyIndex]);
+    if (!validKey(key)) {
       errors.push({ line: row.line, message: '업무 키는 제어 문자가 없는 1~200자여야 합니다.' });
       continue;
     }
@@ -226,11 +271,14 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
         validDates = false;
       }
     }
-    if (validDates) {
+    const dependency = readDependency(row, header!);
+    if (typeof dependency === 'string') errors.push({ line: row.line, key, message: dependency });
+    if (validDates && typeof dependency !== 'string') {
       rows.push({
         line: row.line, key,
         startDate: readDate(startIndex === undefined ? undefined : row.cells[startIndex]),
         endDate: readDate(endIndex === undefined ? undefined : row.cells[endIndex]),
+        ...(dependency ? { dependency } : {}),
       });
     }
   }
