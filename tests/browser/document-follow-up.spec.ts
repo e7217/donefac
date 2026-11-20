@@ -413,3 +413,167 @@ test('공동 편집에서 문장이 바뀌면 기존 업무에 연결하기 전�
     await cleanupDecision(request, source.id, issueTitle);
   }
 });
+
+test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문을 함께 확인한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const snapshot = await workspace(request);
+  const [documentProject, issueProject] = snapshot.projects;
+  const [initialAssignee, nextAssignee] = snapshot.users;
+  const suffix = randomUUID().slice(0, 8);
+  const originalTitle = `공통 회의록 ${suffix}`;
+  const originalText = '승인 전에 시험 기준을 기록하기로 결정했다.';
+  const latestText = '개정 회의록은 다른 확인 방법을 정리한다.';
+  const created: Issue[] = [];
+  let document: DocPage | undefined;
+
+  async function createIssue(title: string, fields: Partial<Issue> = {}) {
+    const response = await request.post('/api/issues', { data: {
+      projectId: issueProject.id, title: `${title} ${suffix}`, ...fields,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const decisionIssue = await createIssue('결정 근거 연결 업무', { assigneeId: initialAssignee.id, status: 'in_progress', dueDate: '2027-05-08', endDate: '2027-05-13' });
+    const ordinaryIssue = await createIssue('계획 날짜만 있는 일반 연결', { endDate: '2027-05-24' });
+    const bodyOnlyIssue = await createIssue('본문에서만 참조한 업무', { projectId: documentProject.id });
+    document = await createDecision(request, null, originalTitle, { type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: originalText }] },
+      { type: 'issueReference', attrs: { issueId: bodyOnlyIssue.id, label: bodyOnlyIssue.title } },
+    ] });
+    const documentId = document.id;
+    const decision = await request.post(`/api/documents/${documentId}/decision-links`, { data: {
+      requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: decisionIssue.id,
+      sourceSelection: { from: 1, to: originalText.length + 1, text: originalText },
+    } });
+    expect(decision.status(), await decision.text()).toBe(201);
+    const { link: decisionLink } = await decision.json() as DocumentIssueLinkResult;
+    const ordinaryLink = await request.post('/api/resource-links', { data: {
+      documentId, issueId: ordinaryIssue.id, kind: '관련 업무',
+    } });
+    expect(ordinaryLink.status(), await ordinaryLink.text()).toBe(201);
+    const followUp = await request.post(`/api/documents/${documentId}/follow-up-issues`, { data: {
+      requestId: randomUUID(), expectedDocumentVersion: document.version,
+      issue: { projectId: documentProject.id, title: `취소한 후속 업무 ${suffix}`, status: 'cancelled' },
+    } });
+    expect(followUp.status(), await followUp.text()).toBe(201);
+    const { issue: closedIssue } = await followUp.json() as DocumentFollowUpResult;
+    created.push(closedIssue);
+
+    const edited = await request.patch(`/api/documents/${documentId}`, { data: {
+      expectedVersion: document.version,
+      content: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: latestText }] },
+        { type: 'issueReference', attrs: { issueId: bodyOnlyIssue.id, label: bodyOnlyIssue.title } },
+      ] },
+    } });
+    expect(edited.ok(), await edited.text()).toBe(true);
+
+    const revisionPrefix = `/api/documents/${documentId}/include-revisions/`;
+    const revisionPath = `${revisionPrefix}${decisionLink.documentSource!.revisionId}`;
+    const revisionRequests: string[] = [];
+    page.on('request', request => {
+      const pathname = new URL(request.url()).pathname;
+      if (pathname.startsWith(revisionPrefix)) revisionRequests.push(pathname);
+    });
+    await openDecision(page, document, documentProject.id);
+    await expect(page.locator('.docs-prose')).toContainText(latestText);
+    const draftTitle = `${originalTitle} 편집 중`;
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await title.fill(draftTitle);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    await page.getByRole('button', { name: '연결', exact: true }).click();
+    const panel = page.getByRole('region', { name: '연결된 업무', exact: true });
+    const cards = panel.locator('.docs-linked-issue');
+    const card = (issue: Issue) => cards.filter({ hasText: issue.title });
+    const filters = panel.getByLabel('연결된 업무 상태', { exact: true });
+    const onlyEvidence = panel.getByRole('checkbox', { name: '결정 근거가 있는 업무만', exact: true });
+    await expect(cards).toHaveCount(3);
+    await expect(cards.nth(0)).toContainText(decisionIssue.title);
+    await expect(cards.nth(1)).toContainText(ordinaryIssue.title);
+    await expect(cards.nth(2)).toContainText(closedIssue.title);
+    await expect(card(bodyOnlyIssue)).toHaveCount(0);
+    const inlineReferences = page.getByRole('heading', { name: '본문의 업무 참조', exact: true }).locator('..');
+    await expect(inlineReferences.getByRole('button', { name: new RegExp(bodyOnlyIssue.title) })).toBeVisible();
+    await expect(filters.getByRole('option', { name: '전체 3개', exact: true })).toHaveCount(1);
+    await expect(filters.getByRole('option', { name: '미완료 2개', exact: true })).toHaveCount(1);
+    await expect(filters.getByRole('option', { name: '종료 1개', exact: true })).toHaveCount(1);
+    await expect(card(decisionIssue)).toContainText(issueProject.name);
+    await expect(card(decisionIssue)).toContainText(initialAssignee.name);
+    await expect(card(decisionIssue)).toContainText('진행 중');
+    await expect(card(decisionIssue)).toContainText('목표 마감일');
+    await expect(card(decisionIssue).locator('time')).toHaveAttribute('datetime', decisionIssue.dueDate!);
+    await expect(card(ordinaryIssue)).toContainText('계획 종료일');
+    await expect(card(ordinaryIssue).locator('time')).toHaveAttribute('datetime', ordinaryIssue.endDate!);
+    await expect(card(closedIssue)).toContainText('후속 업무');
+    await expect(card(closedIssue)).toContainText('기한 없음');
+
+    await filters.selectOption('open');
+    await expect(cards).toHaveCount(2);
+    await expect(card(closedIssue)).toHaveCount(0);
+    await filters.selectOption('closed');
+    await expect(cards).toHaveCount(1);
+    await expect(card(closedIssue)).toBeVisible();
+    await onlyEvidence.check();
+    await expect(cards).toHaveCount(0);
+    await filters.selectOption('all');
+    await expect(cards).toHaveCount(1);
+    await expect(card(decisionIssue)).toBeVisible();
+    const evidence = panel.getByRole('region', { name: `${decisionIssue.key} 결정 근거`, exact: true });
+    await expect(evidence.locator('blockquote')).toHaveText(originalText);
+    expect(revisionRequests).toEqual([]);
+    const originalResponse = page.waitForResponse(response => new URL(response.url()).pathname === revisionPath);
+    await evidence.getByRole('button', { name: '원문 저장본 열기', exact: true }).click();
+    const original = await originalResponse;
+    expect(original.ok(), await original.text()).toBe(true);
+    expect((await original.json() as DocRevision).version).toBe(document.version);
+    const reader = evidence.getByRole('region', { name: `결정 근거 원문 ${originalTitle}`, exact: true });
+    await expect(reader).toContainText(originalText);
+    await expect(reader).not.toContainText(latestText);
+    await expect(reader.locator('[contenteditable=true]')).toHaveCount(0);
+    expect(revisionRequests).toEqual([revisionPath]);
+    await evidence.getByRole('button', { name: '원문 저장본 접기', exact: true }).click();
+
+    await card(decisionIssue).click();
+    const ticket = page.getByRole('dialog', { name: decisionIssue.title, exact: true });
+    await expect(ticket).toBeVisible();
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(ticket).toHaveCount(0);
+    await expect(card(decisionIssue)).toBeFocused();
+    await expect(title).toHaveValue(draftTitle);
+
+    const updated = await request.patch(`/api/issues/${decisionIssue.id}`, { data: {
+      expectedVersion: decisionIssue.version, status: 'done', assigneeId: nextAssignee.id, dueDate: '2027-06-03',
+    } });
+    expect(updated.ok(), await updated.text()).toBe(true);
+    await panel.getByRole('button', { name: '연결된 업무 새로고침', exact: true }).click();
+    await expect(card(decisionIssue)).toContainText('완료');
+    await expect(card(decisionIssue)).toContainText(nextAssignee.name);
+    await expect(card(decisionIssue).locator('time')).toHaveAttribute('datetime', '2027-06-03');
+    await filters.selectOption('open');
+    await expect(cards).toHaveCount(0);
+    await filters.selectOption('closed');
+    await expect(card(decisionIssue)).toBeVisible();
+    await onlyEvidence.uncheck();
+    await expect(cards).toHaveCount(2);
+    await expect(card(closedIssue)).toBeVisible();
+    await expect(title).toHaveValue(draftTitle);
+    await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+    expect((await workspace(request)).documents.find(item => item.id === documentId)?.title).toBe(originalTitle);
+  } finally {
+    const resources = [
+      ...(document ? [`documents/${document.id}`] : []),
+      ...created.map(issue => `issues/${issue.id}`),
+    ];
+    for (const resource of resources) {
+      const deleted = await request.delete(`/api/${resource}`);
+      if (deleted.ok()) {
+        const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+        if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+  }
+});

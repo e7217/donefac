@@ -32,9 +32,9 @@ import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
+import { DocumentLinkedWork } from './DocumentLinkedWork';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
 import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type FeatureProps, type RichContent } from '../../shared/types';
-import { statusMeta } from '../../shared/workflow-helpers';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
@@ -951,8 +951,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const outgoingDocuments = [...new Map(references.filter(reference => reference.type === 'document').map(reference => [JSON.stringify([reference.id, reference.kind, reference.revisionId]), reference])).values()];
   const inlineIssues = [...new Map(references.filter(reference => reference.type === 'issue').map(reference => [reference.id, reference])).values()];
   const backlinks = data.documents.filter(page => page.id !== draft?.id && contentReferences(page.content).some(reference => reference.type === 'document' && reference.id === draft?.id));
-  const linkedIssues = data.resourceLinks.filter(link => link.documentId === draft?.id).map(link => data.issues.find(issue => issue.id === link.issueId)).filter(issue => issue !== undefined);
-  const candidateIssues = data.issues.filter(issue => !linkedIssues.some(linked => linked.id === issue.id) && `${issue.key} ${issue.title}`.toLowerCase().includes(issueSearch.toLowerCase())).slice(0, 6);
+  const linkedIssueIds = new Set(data.resourceLinks.filter(link => link.documentId === draft?.id).map(link => link.issueId));
+  const candidateIssues = data.issues.filter(issue => !linkedIssueIds.has(issue.id) && `${issue.key} ${issue.title}`.toLowerCase().includes(issueSearch.toLowerCase())).slice(0, 6);
   const descendants = new Set<string>();
   const collectDescendants = (id: string) => { for (const child of data.documents.filter(page => page.parentId === id)) if (!descendants.has(child.id)) { descendants.add(child.id); collectDescendants(child.id); } };
   if (draft) collectDescendants(draft.id);
@@ -1216,20 +1216,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               })}
               <form className="docs-comment-form" onSubmit={submitComment}><textarea className="field" value={commentBody} onChange={event => updateCommentBody(event.target.value)} placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} /><button type="submit" className="btn btn-primary" disabled={!commentBody.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button></form>
             </>}
-            {sideTab === 'links' && <><div className="docs-panel-heading"><h3>연결된 업무</h3><p>문서의 맥락을 실제 업무와 연결하세요.</p>
-              <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button></div>{!linkedIssues.length && <div className="docs-panel-empty"><Link2 size={25} /><strong>연결된 업무가 없어요</strong><span>관련 업무를 검색해 연결할 수 있어요.</span></div>}
-              {linkedIssues.map(issue => {
-                const status = statusMeta(data, issue.projectId, issue.status);
-                const assignee = data.users.find(user => user.id === issue.assigneeId);
-                return <button key={issue.id} type="button" className="docs-linked-issue" onClick={() => openIssue(issue.id)}>
-                  <span className="docs-linked-issue-key">{issue.key}<ChevronRight size={12} aria-hidden="true" /></span>
-                  <strong>{issue.title}</strong>
-                  <span className="docs-linked-issue-meta">
-                    <span className="docs-linked-issue-status"><i style={{ backgroundColor: status.color }} aria-hidden="true" />{status.label}</span>
-                    <span>{assignee?.name || '담당자 미지정'}</span>
-                  </span>
-                </button>;
-              })}
+            {sideTab === 'links' && <>
+              <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue}
+                refresh={refresh} notify={notify} issueDrawerOpen={issueDrawerOpen}>
+                <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>
+              </DocumentLinkedWork>
               <label className="docs-issue-search"><Search size={14} /><input value={issueSearch} onChange={event => setIssueSearch(event.target.value)} placeholder="업무 번호 또는 제목 검색" aria-label="연결할 업무 검색" /></label>{issueSearch && <div className="docs-issue-results">{candidateIssues.length ? candidateIssues.map(issue => <button key={issue.id} onClick={() => void linkIssue(issue.id)} disabled={linkBusy}><span>{issue.key}</span><strong>{issue.title}</strong><Plus size={14} /></button>) : <p className="docs-panel-muted">연결할 수 있는 업무가 없습니다.</p>}</div>}<div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={JSON.stringify([reference.id, reference.kind, reference.revisionId])} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.revisionId ? '고정 버전 포함' : reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && (reference.revisionId ? ' · 원본 열기 불가' : ' · 찾을 수 없음')}</small><strong>{(reference.revisionId ? reference.label : page?.title) || reference.label || reference.id}</strong></button>; })}</div><div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div><div className="docs-reference-list"><h3>본문의 업무 참조</h3>{!inlineIssues.length && <p>본문에 삽입한 업무 참조가 없습니다.</p>}{inlineIssues.map(reference => { const issue = data.issues.find(value => value.id === reference.id); return <button key={reference.id} disabled={!issue} onClick={() => issue && openIssue(issue.id)}><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div></>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>파일을 첨부하고 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
