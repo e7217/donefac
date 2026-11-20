@@ -11,6 +11,7 @@ import { Store } from '../../server/store.js';
 import type { PreparedMigration } from '../../server/migration-contracts.js';
 import { AttachmentVersionsService } from '../../server/attachment-versions.js';
 import { SourcePreservationError, SourcePreservationService, type SourcePreservationContext } from '../../server/source-preservation.js';
+import { WorklogService } from '../../server/worklogs.js';
 
 const now = '2026-11-19T00:00:00.000Z', old = '2020-01-02T03:04:05.000Z';
 const isError = (status = 400) => (error: unknown) => error instanceof SourcePreservationError && error.status === status;
@@ -148,6 +149,77 @@ test('Jira custom field checkpoints round-trip and require a linked Jira issue a
     assert.equal(receipt.configuration.appendTo?.refreshCustomFields, true);
     assert.deepEqual(f.service.record(id, newer.sourceRecords[0].id).jiraCustomFieldHashes, newer.sourceRecords[0].jiraCustomFieldHashes);
     assert.deepEqual(read().jiraCustomFieldHashes, hashes);
+  } finally { f.close(); }
+});
+
+test('Jira supplemental history validates immutable source anchors and finds deleted linked records', () => {
+  const f = fixture(); try {
+    const issue = f.prepared.issues[0], [pkg] = f.prepared.sourceImport.packages;
+    const owner = { ownerType: 'issue', ownerId: issue.id, targetProjectId: issue.projectId } as const;
+    f.originalIssue.record.containerId = 'P-1';
+    const oldWorklog = f.archive('history', 'worklog:701', owner);
+    oldWorklog.record.containerId = '100';
+    oldWorklog.record.metadata.kind = 'worklog';
+    oldWorklog.record.references = [{ kind: 'issue', sourceId: 'OLD-100', relation: 'worklogOf' }];
+    f.prepared.sourceRecords.push(oldWorklog);
+    persist(f);
+    const worklogs = new WorklogService(f.store);
+    const migrated = { id: randomUUID(), issueId: issue.id, projectId: issue.projectId, issueKey: issue.key, issueTitle: issue.title,
+      authorId: 'mapped', workDate: '2020-01-02', minutes: 2, durationSeconds: 120, note: '', version: 1, createdAt: old, updatedAt: old };
+    worklogs.persistMigrated([{ ...migrated, sourceRecordId: oldWorklog.id }], f.prepared.sourceRecords);
+    f.store.db.prepare('UPDATE worklogs SET deleted_at=? WHERE id=?').run(now, migrated.id);
+    f.store.db.prepare('DELETE FROM comments WHERE id=?').run('comment-a');
+    const instance = pkg.source.instanceKey;
+    assert.deepEqual(f.service.jiraIssueOrigins(instance, ['OLD-100'], 'alias').map(row => ({ ...row })), [
+      { alias: 'OLD-100', issueId: issue.id, projectId: issue.projectId, sourceProjectId: 'P-1', archiveId: f.originalIssue.id },
+    ]);
+    assert.deepEqual(f.service.jiraKnownHistory(instance, { comment: ['old-comment'], worklog: ['worklog:701'] }).map(value => value.sourceId),
+      ['old-comment', 'worklog:701']);
+
+    const next = structuredClone(f.prepared);
+    const id = randomUUID(), commentId = randomUUID();
+    const sourceImport = next.sourceImport;
+    next.sourceImport = { ...sourceImport, id, counts: {}, projectIds: [issue.projectId], packages: [pkg],
+      configuration: { ...sourceImport.configuration, projects: [], packageIds: [pkg.stagingId], sourceBaseUrls: {},
+        appendTo: { projectId: issue.projectId, statuses: {}, issueTypes: {}, fields: {}, refreshHistory: true } } };
+    next.issues = [];
+    next.attachmentVersions = [];
+    next.issueRelations = [];
+    next.jiraHistoryOwners = [issue.id];
+    const comment = f.archive('comment', '702', { ...owner, sourceImportId: id, targetType: 'comment', targetId: commentId, jiraHistoryAppend: true });
+    comment.record.containerId = '100';
+    comment.record.references = [{ kind: 'issue', sourceId: 'OLD-100', relation: 'commentOn' }];
+    const worklog = f.archive('history', 'worklog:703', { ...owner, sourceImportId: id, jiraHistoryAppend: true });
+    worklog.record.containerId = '100';
+    worklog.record.metadata.kind = 'worklog';
+    worklog.record.references = [{ kind: 'issue', sourceId: 'OLD-100', relation: 'worklogOf' }];
+    next.sourceRecords = [comment, worklog];
+    next.comments = [{ id: commentId, resourceType: 'issue', resourceId: issue.id, authorId: 'mapped', body: '다음 원본 댓글', createdAt: old }];
+    next.worklogs = [{ ...migrated, id: randomUUID(), sourceRecordId: worklog.id }];
+    f.store.put('comments', next.comments[0]);
+    const wrong = structuredClone(next);
+    wrong.sourceRecords[0].record.references[0].sourceId = 'unknown-issue';
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(wrong)), isError());
+    assert.equal(f.service.hasImport(id), false);
+    f.store.transaction(() => { worklogs.persistMigrated(next.worklogs, next.sourceRecords); f.service.persistPrepared(next); });
+    f.store.transaction(() => f.service.persistPrepared(next));
+    const saved = data(f);
+    assert.deepEqual(f.service.validateImport(saved, f.context()), saved);
+    f.store.db.prepare('DELETE FROM worklogs WHERE id=?').run(next.worklogs[0].id);
+    assert.deepEqual(f.service.jiraKnownHistory(instance, { comment: [], worklog: ['worklog:703'] }).map(value => value.archiveId), [worklog.id]);
+
+    const change = (edit: (value: typeof saved) => void) => {
+      const forged = structuredClone(saved);
+      for (const receipt of forged.imports) delete receipt.integrity;
+      edit(forged);
+      assert.throws(() => f.service.validateImport(forged, f.context()), isError());
+    };
+    const changedComment = (value: typeof saved) => value.records.find(record => record.id === comment.id)!;
+    change(value => { delete value.imports.find(receipt => receipt.id === id)!.configuration.appendTo?.refreshHistory; });
+    change(value => { changedComment(value).record.metadata.visibility = { type: 'role', value: 'Secret' }; });
+    change(value => { const row = changedComment(value); row.record.id = 'comment:old-comment'; row.record.sourceId = 'old-comment'; });
+    change(value => { value.records.find(record => record.id === f.originalIssue.id)!.record.containerId = 'different-project'; });
+    change(value => { changedComment(value).record.references[0].sourceId = 'unknown-issue'; });
   } finally { f.close(); }
 });
 

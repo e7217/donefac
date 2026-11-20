@@ -11,6 +11,7 @@ import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPa
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
+import { jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
 import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
@@ -27,7 +28,9 @@ const MAX_REFRESH_BYTES = 64 * MiB;
 const MAX_REUSED_FILE_BYTES = 256 * MiB;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 type JiraArchiveRow = { id: string; json: string; importId: string };
-type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
+type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & {
+  instanceKey: string; sourceProjectId: string; originalSourceProjectId: string;
+};
 type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourceSpaceId' | 'sourceSpaceKey'> & { instanceKey: string };
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
@@ -108,12 +111,13 @@ export class MigrationService {
       WHERE product=? AND source_instance=? AND kind='project' AND source_alias=? AND target_type='project'`)
       .get(product, instanceKey, sourceId) as { id: string; importId: string } | undefined;
   }
-  private appendDestination(packages: MigrationPackage[], options: MigrationOptions): AppendDestination | undefined {
+  private appendDestination(packages: MigrationPackage[], options: MigrationOptions, allowSparseHistory = false): AppendDestination | undefined {
     const instanceKey = this.sourceInstance(packages, 'jira');
     if (!instanceKey) return;
     const issueContainers = options.containers.filter(container => container.issueCount > 0);
-    const sourceProjectId = issueContainers[0]?.sourceProjectId;
+    const sourceProjectId = issueContainers[0]?.sourceProjectId ?? (allowSparseHistory ? this.sparseJiraProject(packages, instanceKey) : undefined);
     if (!sourceProjectId || sourceProjectId === '__unassigned__' || issueContainers.some(container => container.sourceProjectId !== sourceProjectId)) return;
+    let originalSourceProjectId = sourceProjectId;
     let projectId = this.projectBinding('jira', instanceKey, sourceProjectId)?.id;
     if (!projectId) {
       const officialKeys = new Set<string>();
@@ -134,16 +138,26 @@ export class MigrationService {
         .all(instanceKey, key, key) as { sourceId: string; id: string }[];
       if (previous.length !== 1 || (sourceProjectId === key ? !jiraNumericId.test(previous[0].sourceId) : previous[0].sourceId !== key)) return;
       projectId = previous[0].id;
+      originalSourceProjectId = previous[0].sourceId;
     }
     const project = this.store.get<Project>('projects', projectId);
     if (!project) return;
     const workflow = this.store.get<ProjectWorkflow>('workflows', project.id) || defaultWorkflow(project.id, project.createdAt);
     const schema = this.store.get<ProjectIssueSchema>('issue_schemas', project.id) || defaultIssueSchema(project.id, project.createdAt);
-    return { project, workflow, schema, instanceKey, sourceProjectId };
+    return { project, workflow, schema, instanceKey, sourceProjectId, originalSourceProjectId };
+  }
+  private sparseJiraProject(packages: MigrationPackage[], instanceKey: string): string | undefined {
+    const aliases = new Set<string>();
+    for (const { dataset } of packages) for (const row of dataset.records) {
+      if (jiraHistorySourceKey(row)) for (const alias of jiraHistoryOwnerAliases(row) ?? []) aliases.add(alias);
+    }
+    const origins = this.sources.jiraIssueOrigins(instanceKey, [...aliases], 'alias');
+    const projects = new Set(origins.map(row => row.sourceProjectId));
+    return projects.size === 1 ? [...projects][0] : undefined;
   }
   private appendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false): MigrationAppendContext | undefined {
     if (!configuration.appendTo) return;
-    const destination = this.appendDestination(packages, buildMigrationOptions(packages));
+    const destination = this.appendDestination(packages, buildMigrationOptions(packages), configuration.appendTo.refreshHistory);
     if (!destination || destination.project.id !== configuration.appendTo.projectId) {
       return fail(applying ? 409 : 400, applying ? changedAppend : invalidAppend);
     }
@@ -159,7 +173,44 @@ export class MigrationService {
     const refreshIssues = configuration.appendTo.refreshExisting || configuration.appendTo.refreshCustomFields
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, project.id, instanceKey, digest)
       : undefined;
-    return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues, ...(refreshIssues ? { refreshIssues } : {}) };
+    const history = configuration.appendTo.refreshHistory ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
+    return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues,
+      ...(refreshIssues ? { refreshIssues } : {}), ...history };
+  }
+  private jiraHistoryContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
+    { project, instanceKey, sourceProjectId, originalSourceProjectId }: AppendDestination, digest: ReturnType<typeof createHash>):
+    Pick<MigrationAppendContext, 'historyIssues' | 'knownHistory'> {
+    const excluded = new Set(configuration.excludedRecords);
+    const live = new Map(knownIssues.filter(issue => issue.projectId === project.id).map(issue => [issue.alias, issue.issueId]));
+    const selected = { comment: new Set<string>(), worklog: new Set<string>() };
+    const candidates = new Set<string>();
+    const addCandidate = (alias: string) => { const issueId = live.get(alias); if (issueId) candidates.add(issueId); };
+    for (const { summary, dataset } of packages) {
+      const aliases = new Set<string>();
+      for (const row of dataset.records) {
+        if (excluded.has(`${summary.id}/${row.id}`)) continue;
+        const source = jiraHistorySourceKey(row);
+        if (!source) continue;
+        selected[source.kind].add(source.sourceId);
+        for (const alias of jiraHistoryOwnerAliases(row) ?? []) { aliases.add(alias); addCandidate(alias); }
+      }
+      for (const row of dataset.records) {
+        if (row.kind !== 'issue' || excluded.has(`${summary.id}/${row.id}`)) continue;
+        const issueAliases = typeof row.metadata.key === 'string' ? [row.sourceId, row.metadata.key] : [row.sourceId];
+        if (issueAliases.some(alias => aliases.has(alias))) issueAliases.forEach(addCandidate);
+      }
+    }
+    const sourceProjects = new Set([sourceProjectId, originalSourceProjectId]);
+    const origins = this.sources.jiraIssueOrigins(instanceKey, [...candidates], 'issue').filter(origin =>
+      origin.projectId === project.id && sourceProjects.has(origin.sourceProjectId));
+    const owners = JSON.stringify([...new Set(origins.map(origin => origin.issueId))]);
+    const historyIssues = this.store.db.prepare(`SELECT id, project_id AS projectId, json_extract(json,'$.key') AS key,
+      json_extract(json,'$.title') AS title FROM issues WHERE project_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`)
+      .all(project.id, owners) as NonNullable<MigrationAppendContext['historyIssues']>;
+    const known = this.sources.jiraKnownHistory(instanceKey, { comment: [...selected.comment], worklog: [...selected.worklog] });
+    // An unrelated local change to a ticket title is not a history conflict.
+    digest.update('\njira-history\n').update(JSON.stringify([origins, historyIssues.map(issue => issue.id), known]));
+    return { historyIssues, knownHistory: known.map(({ kind, sourceId, issueId }) => ({ kind, sourceId, issueId })) };
   }
   private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'], projectId: string, instanceKey: string, digest: ReturnType<typeof createHash>): MigrationJiraRefreshCandidate[] {
     const refreshCustomFields = configuration.appendTo?.refreshCustomFields === true;
@@ -736,7 +787,7 @@ export class MigrationService {
       if (Object.keys(req.query).some(key => key !== 'packageId')) fail(400, '원본 패키지 조회 조건을 확인해 주세요.');
       const packages = this.loadPackages(this.packageIds(req.query.packageId), true);
       const options = buildMigrationOptions(packages);
-      const destination = this.appendDestination(packages, options);
+      const destination = this.appendDestination(packages, options, true);
       if (destination) {
         const { project, workflow, schema, instanceKey, sourceProjectId } = destination;
         options.appendTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceProjectId,

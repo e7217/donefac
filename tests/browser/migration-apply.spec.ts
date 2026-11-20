@@ -336,6 +336,129 @@ test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 
   }
 });
 
+test('360px에서 기존 Jira 업무에 새 댓글과 작업 시간 기록을 한 번씩 추가한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `JHR${id}`, targetKey = `THR${id}`, instance = `jira-history-${id}`;
+  const teamTitle = `팀에서 편집한 업무 ${id}`, teamComment = 'Teamspace에서 남긴 댓글', teamWorklog = 'Teamspace에서 남긴 작업 시간';
+  const originalComment = '처음 이관한 원본 댓글', newComment = '새로 내보낸 원본 댓글', rejectedComment = '같은 원본 ID로 변경한 댓글';
+  const originalAuthor = { name: `history-worker-${id}`, displayName: `원본 작성자 ${id}` };
+  const exportJira = (next: boolean) => Buffer.from(JSON.stringify({ issues: [{ id: '200', key: `${sourceKey}-1`, fields: {
+    project: { id: '2040', key: sourceKey, name: `Jira 원본 프로젝트 ${id}` },
+    summary: next ? '두 번째 Jira 원본 제목' : '처음 이관한 Jira 업무',
+    created: '2021-01-01T00:00:00Z', updated: next ? '2021-01-04T00:00:00Z' : '2021-01-02T00:00:00Z',
+    status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+    comment: { comments: [
+      { id: '610', author: originalAuthor, created: '2021-01-02T00:00:00Z', body: next ? rejectedComment : originalComment },
+      ...(next ? [{ id: '611', author: originalAuthor, created: '2021-01-04T00:00:00Z', body: newComment }] : []),
+    ] },
+    worklog: { worklogs: next ? [{ id: '710', author: originalAuthor, started: '2021-01-04T09:00:00+0900',
+      timeSpentSeconds: 91, comment: '새 원본 작업 메모' }] : [] },
+  } }] }));
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const initial = await upload(request, `jira-history-original-${id}.json`, exportJira(false), instance);
+    staged.push(initial);
+    const { import: first } = await importIntoProject(request, initial, targetKey, `기존 Jira 이관 프로젝트 ${id}`);
+    const [projectId] = first.projectIds;
+    const initialWorkspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const imported = initialWorkspace.issues.find(issue => issue.projectId === projectId)!;
+    const savedResponse = await request.patch(`/api/issues/${imported.id}`, { data: { expectedVersion: imported.version, title: teamTitle } });
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const saved = await savedResponse.json() as Issue;
+    const commentResponse = await request.post('/api/comments', { data: { resourceType: 'issue', resourceId: saved.id, body: teamComment } });
+    expect(commentResponse.status(), await commentResponse.text()).toBe(201);
+    const worklogResponse = await request.post(`/api/issues/${saved.id}/worklogs`, { data: {
+      requestId: randomUUID(), workDate: '2021-01-03', minutes: 1, note: teamWorklog,
+    } });
+    expect(worklogResponse.status(), await worklogResponse.text()).toBe(201);
+
+    const next = await upload(request, `jira-history-next-${id}.json`, exportJira(true), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append');
+    const history = settings.getByRole('checkbox', { name: '기존 Jira 업무에 댓글과 작업 시간 기록 추가', exact: true });
+    const standard = settings.getByRole('checkbox', { name: '기존 Jira 업무 변경분 반영', exact: true });
+    for (const option of [history, standard]) await expect(option).not.toBeChecked();
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await history.check();
+    await mode.selectOption('new');
+    await mode.selectOption('append');
+    await expect(history).toBeChecked();
+    await expect(standard).not.toBeChecked();
+    const unmapped = await preview(page, settings);
+    expect(unmapped.canApply).toBe(false);
+    expect(unmapped.counts).toMatchObject({ newJiraComments: 0, newJiraWorklogs: 0 });
+    const currentActor = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
+    const mappedAuthor = initialWorkspace.users.find(user => user.id !== currentActor)!;
+    expect(mappedAuthor).toBeTruthy();
+    const mapAuthor = async () => {
+      await settings.getByText('사용자 매핑', { exact: true }).click();
+      await settings.getByLabel(`사용자 매핑 ${originalAuthor.displayName}`, { exact: true }).selectOption(mappedAuthor.id);
+    };
+    await mapAuthor();
+
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendTo).toMatchObject({ projectId, refreshHistory: true });
+    expect(plan.configuration.appendTo?.refreshExisting).toBeUndefined();
+    expect(plan.counts).toMatchObject({ issues: 0, newJiraComments: 1, newJiraWorklogs: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const countLabels = ['기존 업무의 새 댓글 1', '기존 업무의 새 작업 시간 기록 1'];
+    for (const label of countLabels) await expect(review.getByText(label, { exact: true })).toBeVisible();
+    const bounds = await review.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('기존 업무에 새 댓글 1건 추가');
+      expect(dialog.message()).toContain('기존 업무에 새 작업 시간 기록 1건 추가');
+      await dialog.accept();
+    });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
+    for (const label of countLabels) await expect(receipt.getByText(label, { exact: true })).toBeVisible();
+    const after = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    expect(after.issues.filter(issue => issue.projectId === projectId)).toEqual([saved]);
+
+    await selectPackage(settings, next.filename);
+    await mode.selectOption('append');
+    await history.check();
+    await mapAuthor();
+    const repeated = await preview(page, settings);
+    expect(repeated.canApply, JSON.stringify(repeated.notices)).toBe(false);
+    expect(repeated.counts).toMatchObject({ issues: 0, newJiraComments: 0, newJiraWorklogs: 0 });
+    await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+
+    page.once('dialog', dialog => dialog.accept());
+    await page.goto(`/#/${projectId}/issues?issue=${saved.id}`);
+    const drawer = page.getByRole('dialog', { name: teamTitle, exact: true });
+    const comments = drawer.locator('.issue-comment p');
+    await expect(comments).toHaveCount(3);
+    for (const comment of [originalComment, teamComment, newComment]) await expect(comments.filter({ hasText: comment })).toHaveCount(1);
+    await expect(comments.filter({ hasText: rejectedComment })).toHaveCount(0);
+    await expect(drawer.locator('.issue-comment').filter({ hasText: newComment }).getByText(mappedAuthor.name, { exact: true })).toBeVisible();
+    await drawer.getByRole('button', { name: '작업 시간', exact: true }).click();
+    const worklogs = drawer.getByRole('region', { name: '업무 작업 기록', exact: true });
+    await expect(worklogs.getByLabel('업무 총 작업 시간')).toHaveText('2분 31초');
+    const worklogList = worklogs.getByLabel('작업 기록 목록', { exact: true });
+    await expect(worklogList.getByText(teamWorklog, { exact: true })).toBeVisible();
+    const originalWorklog = worklogList.getByRole('listitem').filter({ hasText: '새 원본 작업 메모' });
+    await expect(originalWorklog.getByText(`${mappedAuthor.name} · Jira 이관`, { exact: true })).toBeVisible();
+    await expect(worklogList.getByText('Jira 이관')).toHaveCount(1);
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집한 부모 문서의 참조를 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

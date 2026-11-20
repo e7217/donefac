@@ -6,13 +6,14 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
-import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migration-worklog.js';
+import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
+import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -224,6 +225,7 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
 
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
+type JiraHistoryIssue=Pick<Issue,'id'|'projectId'|'key'|'title'>;
 type JiraCustomFieldOption = MigrationOptions['fields'][number];
 type JiraCustomFieldReview = NonNullable<JiraMigrationIssueReview['customFields']>[number];
 interface JiraCustomFieldConversion {
@@ -279,6 +281,8 @@ class Planner{
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
+  private jiraHistoryOwners = new Map<string, JiraHistoryIssue>();
+  private knownJiraHistory = new Set<string>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
   private missingHistoryPrimaryNotices: { message: string; entry?: Entry }[] = [];
@@ -347,9 +351,19 @@ class Planner{
     // Use it for references within the plan without creating a new source binding.
     for (const [alias, issue] of retainedAliases) if (!this.boundIssues.has(alias)) this.boundIssues.set(alias, issue);
     const retainedIssues = this.retainedEntries.size;
+    if (mapping.refreshHistory === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
+      this.knownJiraHistory.add(JSON.stringify([kind, sourceId]));
+    }
     for (const entry of this.entries) {
       if (entry.row.kind === 'issue' || entry.row.kind === 'relation' || this.excluded.has(entry.key)) continue;
       const owner = this.ownerEntry(entry);
+      if (mapping.refreshHistory === true && entry.pkg.dataset.source.product === 'jira' && jiraHistoryKind(entry.row)) {
+        const identity = jiraHistorySourceKey(entry.row);
+        if (!owner || identity && this.knownJiraHistory.has(JSON.stringify([identity.kind, identity.sourceId]))) {
+          this.retainedEntries.add(entry.key);
+          continue;
+        }
+      }
       if (owner ? this.retainedEntries.has(owner.key) : this.hasRetainedOwner(entry)) this.retainedEntries.add(entry.key);
     }
     this.result.preview.counts.retainedIssues = retainedIssues;
@@ -953,7 +967,7 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   initializeOriginBases(): void {
     const suppliedBases = this.configuration.sourceBaseUrls;
     const packages = this.input.packages;
@@ -1059,7 +1073,8 @@ class Planner{
       if (recordKey && (this.excluded.has(recordKey) || this.retainedEntries.has(recordKey))) continue;
       if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
       const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
-      if (diagnostic.code === 'NO_PRIMARY_CONTENT' && this.result.appendPages && config.appendPagesTo?.refreshHistory === true) {
+      if (diagnostic.code === 'NO_PRIMARY_CONTENT' && (this.result.appendPages && config.appendPagesTo?.refreshHistory === true ||
+          this.result.append && config.appendTo?.refreshHistory === true && pkg.dataset.source.format === 'jira-backup-xml')) {
         this.missingHistoryPrimaryNotices.push({ message: diagnostic.message, entry });
       } else this.notice(`SOURCE_${diagnostic.code}`, diagnostic.message, 'error', entry);
     }
@@ -1069,7 +1084,7 @@ class Planner{
   }
   restricted(entry:Entry):boolean{
     const row=entry.row,metadata=row.metadata;
-    if(entry.pkg.dataset.source.product==='jira'&&isRestrictedJiraWorklog(row))return true;
+    if(entry.pkg.dataset.source.product==='jira'&&isRestrictedJiraHistory(row))return true;
     if((row.kind==='page'||row.kind==='comment')&&(metadata.restricted===true||metadata.hasRestrictions===true||Array.isArray(metadata.restrictions)&&metadata.restrictions.length>0||Array.isArray(metadata.permissions)&&metadata.permissions.length>0))return true;
     if(row.kind==='comment'){if(string(metadata.level)||string(metadata.rolelevel)||string(metadata.groupLevel)||string(metadata.roleLevel))return true;const visibility=object(metadata.visibility);if(Object.keys(visibility).length)return true;if(Array.isArray(metadata.visibility)&&metadata.visibility.some(value=>{const property=object(value);return property.key==='sd.public.comment'&&['true',true].includes(object(property.value).internal as string|boolean);}))return true;}
     if(row.kind==='issue'){const security=scalar(sourceField(row,'security','Security Level','Issue Security Level'));if(security!==undefined&&security!==null&&security!==false&&(typeof security==='object'?Object.keys(object(security)).some(key=>!!object(security)[key]):!!string(security)))return true;}
@@ -2059,12 +2074,127 @@ class Planner{
         if (converted.plainText.trim().length<=2000) note=converted.plainText.trim();
         else this.notice('WORKLOG_NOTE_ARCHIVED','작업 메모가 2,000자를 초과합니다. 작업 시간은 적용하고 전체 메모는 원본에 보관합니다.','warning',entry,true);
       }
-      this.result.worklogs.push({
-        id:randomUUID(),issueId:issue.id,projectId:issue.projectId,issueKey:issue.key,issueTitle:issue.title,
-        authorId,workDate:parsed.workDate,minutes:parsed.durationSeconds/60,durationSeconds:parsed.durationSeconds,
-        note,version:1,createdAt:this.input.now,updatedAt:this.input.now,sourceRecordId:this.archiveIds.get(entry.key)!,
-      });
+      this.addJiraWorklog(entry, issue, authorId, parsed, note);
     }
+  }
+  private addJiraWorklog(entry: Entry, issue: JiraHistoryIssue, authorId: string, parsed: ParsedJiraWorklog, note: string): void {
+    this.result.worklogs.push({
+      id: randomUUID(), issueId: issue.id, projectId: issue.projectId, issueKey: issue.key, issueTitle: issue.title,
+      authorId, workDate: parsed.workDate, minutes: parsed.durationSeconds / 60, durationSeconds: parsed.durationSeconds,
+      note, version: 1, createdAt: this.input.now, updatedAt: this.input.now, sourceRecordId: this.archiveIds.get(entry.key)!,
+    });
+  }
+  private resolveJiraHistoryOwner(entry: Entry, issues: ReadonlyMap<string, JiraHistoryIssue>, durable: ReadonlyMap<string, string>, blocked: ReadonlySet<string>,
+    sourceErrors: ReadonlySet<string>): JiraHistoryIssue | undefined {
+    if (sourceErrors.has(entry.key) || this.restricted(entry)) return undefined;
+    const aliases = jiraHistoryOwnerAliases(entry.row);
+    if (!aliases) return undefined;
+    const [ownerId, ...others] = aliases.map(alias => this.originalIssue(alias)?.id);
+    if (!ownerId || blocked.has(ownerId) || others.some(id => id !== ownerId)) return undefined;
+    for (const alias of aliases) {
+      const packageRows = (this.referenceIndex.get(JSON.stringify(['issue', 'id', alias])) ?? [])
+        .filter(issue => issue.pkg.summary.id === entry.pkg.summary.id);
+      if (packageRows.length > 1) return undefined;
+      const [row] = packageRows;
+      if (row && (!this.retainedEntries.has(row.key) || !row.row.containerId)) return undefined;
+      // A temporary alias can use its own export's Issue row as proof. A child in a
+      // different package needs an earlier durable binding for the supplied alias.
+      const matches = [durable.get(alias), ...(row ? [durable.get(row.row.sourceId), durable.get(string(row.row.metadata.key))] : [])]
+        .filter((target): target is string => target !== undefined);
+      if (!matches.length || matches.some(target => target !== ownerId)) return undefined;
+    }
+    return issues.get(ownerId);
+  }
+  private createJiraHistory(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshHistory !== true) return;
+    const issues = new Map(append.historyIssues?.filter(issue => issue.projectId === append.project.id).map(issue => [issue.id, issue]));
+    const durable = new Map(append.knownIssues.filter(issue => issue.projectId === append.project.id).map(issue => [issue.alias, issue.issueId]));
+    const blocked = new Set<string>();
+    const sourceErrors = new Set(this.input.packages.flatMap(({ summary, dataset }) => dataset.diagnostics
+      .filter(diagnostic => diagnostic.severity === 'error' && diagnostic.recordId)
+      .map(diagnostic => `${summary.id}/${diagnostic.recordId}`)));
+    const groups = new Map<string, { kind: 'comment' | 'worklog'; entries: Entry[] }>();
+    let rawOnly = 0;
+    for (const entry of this.entries) {
+      if (entry.pkg.dataset.source.product !== 'jira') continue;
+      const { row } = entry;
+      if (row.kind === 'issue' && (this.excluded.has(entry.key) || sourceErrors.has(entry.key) || isRestrictedJiraHistoryOwner(row) || this.restricted(entry))) {
+        for (const alias of [row.sourceId, string(row.metadata.key)]) {
+          const issueId = this.originalIssue(alias)?.id;
+          if (issueId) blocked.add(issueId);
+        }
+      }
+      if (this.excluded.has(entry.key) || !jiraHistoryKind(row)) continue;
+      const source = jiraHistorySourceKey(row);
+      if (!source) {
+        if (this.retainedEntries.has(entry.key)) rawOnly++;
+        continue;
+      }
+      const key = JSON.stringify([source.kind, source.sourceId]);
+      if (this.knownJiraHistory.has(key)) continue;
+      const group = groups.get(key) ?? { kind: source.kind, entries: [] };
+      group.entries.push(entry);
+      groups.set(key, group);
+    }
+    let newJiraComments = 0, newJiraWorklogs = 0;
+    for (const { kind, entries } of groups.values()) {
+      const retained = entries.filter(entry => this.retainedEntries.has(entry.key));
+      if (entries.length > 1 && retained.length !== entries.length) {
+        for (const entry of entries) this.retainedEntries.add(entry.key);
+        rawOnly += entries.length;
+        continue;
+      }
+      if (!retained.length) continue;
+      const [entry, ...duplicates] = retained;
+      const owner = this.resolveJiraHistoryOwner(entry, issues, durable, blocked, sourceErrors);
+      const authorId = this.mappedAuthor(entry);
+      const raw = duplicates.length ? JSON.stringify(entry.row) : null;
+      if (!owner || !authorId || duplicates.some(duplicate =>
+        JSON.stringify(duplicate.row) !== raw || this.mappedAuthor(duplicate) !== authorId ||
+        this.resolveJiraHistoryOwner(duplicate, issues, durable, blocked, sourceErrors)?.id !== owner.id)) {
+        rawOnly += retained.length;
+        continue;
+      }
+      const { row } = entry;
+      if (kind === 'comment') {
+        const createdAt = sourceTimestamp(row.createdAt, this.configuration.timezone);
+        const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+        if (!createdAt || !converted.plainText.trim() || converted.plainText.length > 20_000 ||
+            converted.diagnostics.some(diagnostic => diagnostic.severity === 'error')) {
+          rawOnly++;
+          continue;
+        }
+        if (row.createdAt && jiraEnglishDate(row.createdAt)?.century) this.notice('DATE_TWO_DIGIT_CENTURY',
+          'Jira 두 자리 연도를 2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.', 'warning', entry, true);
+        if (row.textFormat !== 'plain') this.notice('COMMENT_FORMAT_PLAIN_TEXT',
+          '댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.', 'warning', entry, true);
+        const id = randomUUID();
+        this.result.comments.push({ id, resourceType: 'issue', resourceId: owner.id, authorId, body: converted.plainText, createdAt });
+        this.bindings.set(entry.key, { type: 'comment', id, projectId: owner.projectId });
+        newJiraComments++;
+      } else {
+        const parsed = parseJiraWorklog(row, this.configuration.timezone);
+        if ('code' in parsed) {
+          this.notice(parsed.code, parsed.message, 'warning', entry, true);
+          rawOnly++;
+          continue;
+        }
+        let note = '';
+        if (row.text && row.text !== 'null') {
+          const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+          const body = converted.plainText.trim();
+          if (body.length <= 2000 && !converted.diagnostics.some(diagnostic => diagnostic.severity === 'error')) note = body;
+          else this.notice('WORKLOG_NOTE_ARCHIVED', '작업 시간은 적용하고 변환할 수 없는 메모는 원본으로 보관합니다.', 'warning', entry, true);
+        }
+        this.addJiraWorklog(entry, owner, authorId, parsed, note);
+        newJiraWorklogs++;
+      }
+      this.jiraHistoryOwners.set(entry.key, owner);
+    }
+    if (rawOnly) this.notice('JIRA_HISTORY_RAW_ONLY', `업무 연결, 원본 ID, 접근 범위, 작성자, 날짜 또는 본문을 확인할 수 없는 댓글·작업 시간 ${rawOnly}건은 원본으로 보관합니다.`, 'warning', undefined, true);
+    this.result.jiraHistoryOwners = [...new Set([...this.jiraHistoryOwners.values()].map(issue => issue.id))];
+    Object.assign(this.result.preview.counts, { newJiraComments, newJiraWorklogs, retainedRecords: this.retainedEntries.size });
   }
   archive():void{
     for (const entry of this.entries) {
@@ -2075,7 +2205,9 @@ class Planner{
         : pageCheckpoint ? { type: 'document' as const, id: pageCheckpoint.document.id, projectId: pageCheckpoint.document.projectId }
         : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
-      const owner = issueCheckpoint || pageCheckpoint ? binding : this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
+      const jiraHistoryOwner = this.jiraHistoryOwners.get(entry.key);
+      const owner = issueCheckpoint || pageCheckpoint ? binding : jiraHistoryOwner ? { type: 'issue' as const, id: jiraHistoryOwner.id, projectId: jiraHistoryOwner.projectId } :
+        this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
         (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
@@ -2092,6 +2224,7 @@ class Planner{
         targetType: binding?.type ?? null, targetId: binding?.id ?? null, targetProjectId: binding?.projectId ?? owner?.projectId ?? null,
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
+        ...(jiraHistoryOwner ? { jiraHistoryAppend: true } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
         ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
@@ -2126,7 +2259,7 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
-    if (!this.result.confluenceHistoryOwners?.length) for (const { message, entry } of this.missingHistoryPrimaryNotices) {
+    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length) for (const { message, entry } of this.missingHistoryPrimaryNotices) {
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
     }
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
@@ -2152,8 +2285,10 @@ class Planner{
         ...(sourceUrl ? { sourceUrl } : {}),
       });
     }
-    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {
+    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendTo?.refreshHistory) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무·댓글·작업 시간이나 기존 업무 변경분이 없습니다.', 'error');
+      } else if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
       }
       else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');

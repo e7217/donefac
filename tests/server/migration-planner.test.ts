@@ -22,6 +22,93 @@ test('options are stable opaque IDs scoped by package and include an explicit ed
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
 });
 
+test('Jira history append verifies owner aliases, preserves stable source IDs, and accepts proven sparse backups', () => {
+  const baseline = buildMigrationPlan(input([jira()]));
+  const [first, second] = baseline.issues;
+  const [project] = baseline.projects;
+  const [workflow] = baseline.workflows;
+  const [schema] = baseline.issueSchemas;
+  const identity = record('identity', 'alice', { title: '기존 작성자' });
+  const retained = issue('300', { metadata: { key: 'OLD-1' } });
+  const restricted = issue('2', { metadata: { key: 'OLD-2', fields: { security: [{ id: 'private' }] } } });
+  const comment = (id: string, owner = '300', extra: Partial<LegacyRecord> = {}) => record('comment', id, {
+    containerId: owner, authorId: 'alice', createdAt: created, textFormat: 'plain', text: `원본 댓글 ${id}`,
+    references: [{ kind: 'issue', sourceId: owner, relation: 'commentOn' }], ...extra,
+  });
+  const worklog = (id: string, owner = '300', extra: Partial<LegacyRecord> = {}) => record('history', `worklog:${id}`, {
+    containerId: owner, authorId: 'alice', createdAt: created, textFormat: 'plain', text: '원본 작업 메모',
+    metadata: { kind: 'worklog', started: created, timeSpentSeconds: 61 },
+    references: [{ kind: 'issue', sourceId: owner, relation: 'worklogOf' }], ...extra,
+  });
+  const source = (id: string, rows: LegacyRecord[], diagnostics: LegacyDataset['diagnostics'] = []) => {
+    const result = pkg(id, 'jira', rows, diagnostics);
+    result.dataset.source.instanceKey = 'same-jira';
+    return result;
+  };
+  const plan = (packages: MigrationPackage[], enabled = true) => {
+    const request = input(packages);
+    request.configuration.datePolicy = 'import-time';
+    for (const option of buildMigrationOptions(packages).identities) {
+      request.configuration.users[option.id] = option.sourceValue === 'alice' ? actor.id : null;
+    }
+    request.configuration.appendTo = { projectId: project.id, statuses: {}, issueTypes: {}, fields: {}, ...(enabled ? { refreshHistory: true } : {}) };
+    request.append = { project, workflow, schema, nextIssueNumber: 3, token: 'jira-history',
+      knownIssues: [{ alias: '1', issueId: first.id, projectId: project.id }, { alias: 'OLD-1', issueId: first.id, projectId: project.id },
+        { alias: '2', issueId: second.id, projectId: project.id }, { alias: 'OLD-2', issueId: second.id, projectId: project.id },
+        { alias: 'gone', issueId: 'purged-issue-id', projectId: null }],
+      historyIssues: [first, second],
+      knownHistory: [{ kind: 'comment', sourceId: '201', issueId: 'different-old-issue' },
+        { kind: 'worklog', sourceId: 'worklog:501', issueId: first.id }],
+    };
+    return buildMigrationPlan(request);
+  };
+
+  const newComment = comment('200', '300', { references: [{ kind: 'issue', sourceId: 'OLD-1', relation: 'commentOn' }] });
+  const newWorklog = worklog('500');
+  const rows = [identity, retained, restricted, newComment, newWorklog, comment('201'), worklog('501'),
+    comment('csv:300:comment:2'), worklog('300:0'), comment('202', '300', { metadata: { internal: true } }),
+    comment('203', '300', { metadata: { visibility: [], properties: [{ key: 'sd.public.comment', value: { internal: true } }] } }),
+    comment('204', '300', { createdAt: null }), comment('205', '300', { authorId: null }), comment('206', '2'),
+    comment('207', 'gone'), comment('208', '300', { references: [{ kind: 'issue', sourceId: '2', relation: 'commentOn' }] }),
+    comment('209', '300', { metadata: { properties: { 'sd.public.comment': { internal: true } } } }),
+    comment('210', '300', { metadata: { properties: [{ key: 'sd.public.comment', value: '{"internal":true}' }] } }),
+    worklog('502', '300', { metadata: { kind: 'worklog', started: created, timeSpentSeconds: 58, roleLevel: 'private' } }),
+  ];
+  const initial = source('jira-first-history', rows);
+  const overlap = source('jira-overlap-history', [identity, retained, newComment]);
+  const added = plan([initial, overlap]);
+  assert.equal(added.preview.canApply, true, JSON.stringify(added.preview.notices));
+  assert.deepEqual(added.jiraHistoryOwners, [first.id]);
+  assert.equal(added.preview.counts.issues, 0);
+  assert.equal(added.preview.counts.newJiraComments, 1);
+  assert.equal(added.preview.counts.newJiraWorklogs, 1);
+  assert.deepEqual(added.comments.map(({ resourceId, authorId, createdAt, body }) => ({ resourceId, authorId, createdAt, body })),
+    [{ resourceId: first.id, authorId: actor.id, createdAt: created, body: '원본 댓글 200' }]);
+  assert.equal(added.worklogs[0].issueId, first.id);
+  assert.equal(added.worklogs[0].issueKey, first.key);
+  assert.equal(added.worklogs[0].durationSeconds, 61);
+  assert.equal(added.worklogs[0].note, '원본 작업 메모');
+  assert.ok(added.preview.requiredAcknowledgements.includes('JIRA_HISTORY_RAW_ONLY'));
+  const supplemental = added.sourceRecords.filter(row => row.jiraHistoryAppend);
+  assert.deepEqual(supplemental.map(row => row.record.sourceId).sort(), ['200', 'worklog:500']);
+  assert.ok(supplemental.every(row => row.ownerType === 'issue' && row.ownerId === first.id && row.targetProjectId === project.id));
+  assert.equal(supplemental.find(row => row.record.kind === 'comment')?.targetId, added.comments[0].id);
+  assert.equal(supplemental.find(row => row.record.kind === 'history')?.id, added.worklogs[0].sourceRecordId);
+  assert.equal(added.sourceRecords.filter(row => row.record.sourceId === '200' && row.targetType === null).length, 1);
+  assert.equal(plan([initial], false).preview.canApply, false);
+
+  const noPrimary = [{ id: 'no-primary', severity: 'error' as const, code: 'NO_PRIMARY_CONTENT', message: '업무 원문 없음', recordId: null, path: null }];
+  const sparse = plan([source('jira-sparse', [identity, comment('211', 'OLD-1')], noPrimary)]);
+  assert.equal(sparse.preview.canApply, true, JSON.stringify(sparse.preview.notices));
+  assert.equal(sparse.comments[0].resourceId, first.id);
+  const crossPackageAlias = plan([initial, source('jira-sparse-temporary-alias', [identity, comment('213', '300')], noPrimary)]);
+  assert.equal(crossPackageAlias.preview.counts.newJiraComments, 1);
+  assert.equal(crossPackageAlias.sourceRecords.find(row => row.record.sourceId === '213')?.targetId, null);
+  const unverified = plan([source('jira-sparse-unknown', [identity, comment('212', 'unknown-owner')], noPrimary)]);
+  assert.equal(unverified.preview.canApply, false);
+  assert.ok(notices(unverified).has('SOURCE_NO_PRIMARY_CONTENT'));
+});
+
 test('Jira refresh clears explicit blank CSV fields while protecting malformed values and source-unchanged mappings', () => {
   const snapshot = (id: string, extension: 'json' | 'csv', data: string): MigrationPackage => {
     const filename = `issues.${extension}`;

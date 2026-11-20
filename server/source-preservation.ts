@@ -3,6 +3,7 @@ import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
+import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import type { Store } from './store.js';
 
@@ -42,8 +43,9 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
   const append = object(raw, '기존 프로젝트 추가 설정');
   const refresh = Object.hasOwn(append, 'refreshExisting');
   const custom = Object.hasOwn(append, 'refreshCustomFields');
-  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) || (refresh && append.refreshExisting !== true) ||
-      (custom && append.refreshCustomFields !== true)) {
+  const history = Object.hasOwn(append, 'refreshHistory');
+  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) || (refresh && append.refreshExisting !== true) ||
+      (custom && append.refreshCustomFields !== true) || (history && append.refreshHistory !== true)) {
     fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
   }
   return {
@@ -53,6 +55,7 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     fields: mapping(append.fields, value => nullable(value, '추가 대상 필드', 200)),
     ...(refresh ? { refreshExisting: true } : {}),
     ...(custom ? { refreshCustomFields: true } : {}),
+    ...(history ? { refreshHistory: true } : {}),
   };
 }
 export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
@@ -279,6 +282,17 @@ function confluenceArchiveKey(record: SourceRecordArchive, kind = record.record.
 }
 interface EarlierAttachments { versions: AttachmentVersion[]; records: SourceRecordArchive[] }
 interface AppliedConfluenceHistory { owners: Set<string>; commentIds: Set<string>; revisionIds: Set<string> }
+interface AppliedJiraHistory {
+  owners: Set<string>;
+  comments: Map<string, string>;
+  worklogs: Map<string, string>;
+}
+interface JiraIssueOrigin { alias: string; issueId: string; projectId: string; sourceProjectId: string; archiveId: string }
+interface JiraHistoryArchive { kind: 'comment' | 'worklog'; sourceId: string; issueId: string; archiveId: string }
+function jiraIssueAliases(record: LegacyRecord): string[] {
+  const key = record.metadata.key;
+  return typeof key === 'string' && key !== record.sourceId ? [record.sourceId, key] : [record.sourceId];
+}
 type Binding = { product: string; instance: string; kind: string; alias: string; type: string; id: string; importId: string };
 interface ArchiveSqlRow {
   id: string;
@@ -318,6 +332,8 @@ export class SourcePreservationService {
       CREATE INDEX IF NOT EXISTS source_records_author ON source_records(import_id,product,source_instance,kind,source_id);
       CREATE INDEX IF NOT EXISTS source_records_confluence_history
         ON source_records(source_instance,kind,source_id) WHERE product='confluence';
+      CREATE INDEX IF NOT EXISTS source_records_jira_history
+        ON source_records(source_instance,kind,source_id) WHERE product='jira';
       CREATE TABLE IF NOT EXISTS attachment_versions(id TEXT PRIMARY KEY,attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS attachment_versions_attachment ON attachment_versions(attachment_id);
       CREATE UNIQUE INDEX IF NOT EXISTS attachment_versions_local_revision
@@ -351,13 +367,44 @@ export class SourcePreservationService {
   }
 
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
+  jiraIssueOrigins(instanceKey: string, selected: string[], by: 'alias' | 'issue'): JiraIssueOrigin[] {
+    if (!selected.length) return [];
+    const selector = by === 'alias' ? 'binding.source_alias' : 'binding.target_id';
+    return this.store.db.prepare(`SELECT binding.source_alias AS alias, binding.target_id AS issueId,
+      project.target_id AS projectId, project.source_alias AS sourceProjectId, snapshot.id AS archiveId
+      FROM source_bindings AS binding
+      JOIN source_records AS snapshot ON snapshot.import_id=binding.import_id AND snapshot.product=binding.product
+        AND snapshot.source_instance=binding.source_instance AND snapshot.kind='issue' AND snapshot.target_type='issue'
+        AND snapshot.target_id=binding.target_id AND snapshot.owner_type='issue' AND snapshot.owner_id=binding.target_id
+        AND (snapshot.source_id=binding.source_alias OR json_extract(snapshot.json,'$.record.metadata.key')=binding.source_alias)
+      JOIN source_bindings AS project ON project.product=binding.product AND project.source_instance=binding.source_instance
+        AND project.kind='project' AND project.target_type='project' AND project.source_alias=json_extract(snapshot.json,'$.record.containerId')
+        AND project.target_id=json_extract(snapshot.json,'$.targetProjectId')
+      WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
+        AND ${selector} IN (SELECT value FROM json_each(?))
+      ORDER BY binding.source_alias,snapshot.id`).all(instanceKey, JSON.stringify(selected)) as unknown as JiraIssueOrigin[];
+  }
+  jiraKnownHistory(instanceKey: string, selected: Record<'comment' | 'worklog', string[]>): JiraHistoryArchive[] {
+    if (!selected.comment.length && !selected.worklog.length) return [];
+    const legacyWorklogs = selected.worklog.length && this.store.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='worklogs'").get()
+      ? "OR EXISTS (SELECT 1 FROM worklogs WHERE json_extract(worklogs.json,'$.sourceRecordId')=history.id AND worklogs.issue_id=history.owner_id)" : '';
+    return this.store.db.prepare(`SELECT id AS archiveId, owner_id AS issueId, source_id AS sourceId, 'comment' AS kind
+      FROM source_records WHERE product='jira' AND source_instance=? AND kind='comment' AND target_type='comment'
+        AND owner_type='issue' AND source_id IN (SELECT value FROM json_each(?))
+      UNION ALL
+      SELECT id AS archiveId, owner_id AS issueId, source_id AS sourceId, 'worklog' AS kind
+      FROM source_records AS history WHERE product='jira' AND source_instance=? AND kind='history' AND owner_type='issue'
+        AND source_id IN (SELECT value FROM json_each(?)) AND json_extract(history.json,'$.record.metadata.kind')='worklog'
+        AND (json_type(history.json,'$.jiraHistoryAppend')='true' ${legacyWorklogs})
+      ORDER BY kind,sourceId,archiveId`).all(instanceKey, JSON.stringify(selected.comment), instanceKey, JSON.stringify(selected.worklog)) as unknown as JiraHistoryArchive[];
+  }
   hasLocalAttachmentVersion(id: string): boolean {
     return Boolean(this.store.db.prepare(`SELECT 1 FROM attachment_versions WHERE id=? AND id<>attachment_id
       AND json_type(json,'$.localRevision')='integer' AND json_extract(json,'$.localRevision')>=2`).get(id));
   }
   versionsForAttachments(ids: string[]): AttachmentVersion[] { const result: AttachmentVersion[] = []; for (const id of new Set(ids)) result.push(...(this.store.db.prepare('SELECT json FROM attachment_versions WHERE attachment_id=? ORDER BY rowid').all(id) as { json: string }[]).map(row => JSON.parse(row.json) as AttachmentVersion)); return result; }
   validateImport(input: { imports: unknown; records: unknown; versions: unknown; relations: unknown }, context: SourcePreservationContext,
-    earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory): SourcePreservationData {
+    earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory, appliedJiraHistory?: AppliedJiraHistory): SourcePreservationData {
     const users = new Set(context.users.map(value => value.id)), imports = list(input.imports, '이관 영수증', 10000).map(value => parseImport(value, users)), byImport = unique(imports, '이관 영수증');
     const datasets = new Map<string, ReturnType<typeof emptyDataset>>(), packages = new Map(imports.map(value => [value.id, new Map(value.packages.map(pkg => [stable([pkg.sha256, pkg.source]), pkg]))]));
     const records = list(input.records, '보존 원본').map(raw => {
@@ -382,9 +429,17 @@ export class SourcePreservationService {
         ? parseFieldHashes(value.confluencePageFieldHashes, confluencePageFields, 'Confluence 문서 필드 기준') : undefined;
       if (confluencePageFieldHashes && (source.product !== 'confluence' || record.kind !== 'page' || targetType !== 'document' ||
           ownerType !== 'document' || ownerId !== targetId || !targetProjectId)) fail(400, 'Confluence 문서 필드 기준의 원본과 연결 대상을 확인해 주세요.');
+      const jiraHistory = Object.hasOwn(value, 'jiraHistoryAppend') ? jiraHistorySourceKey(record) : null;
+      if (Object.hasOwn(value, 'jiraHistoryAppend') && (value.jiraHistoryAppend !== true || source.product !== 'jira' ||
+          !owner.configuration.appendTo?.refreshHistory || owner.configuration.appendTo.projectId !== targetProjectId ||
+          ownerType !== 'issue' || !ownerId || value.excluded === true || !jiraHistory || isRestrictedJiraHistory(record) ||
+          targetType !== (jiraHistory.kind === 'comment' ? 'comment' : null))) {
+        fail(400, 'Jira 댓글·작업 시간 원본의 적용 설정과 대상을 확인해 주세요.');
+      }
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
+        ...(jiraHistory ? { jiraHistoryAppend: true } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
@@ -433,9 +488,126 @@ export class SourcePreservationService {
     this.validateConfluenceAttachmentRoots(versions, records, earlier);
     this.validateTargets(records, context, byVersion);
     this.validateConfluenceHistory(imports, records, context.revisions, appliedHistory);
+    this.validateJiraHistory(imports, records, appliedJiraHistory);
     const issues = new Map(context.issues.map(value => [value.id, value]));
     const relations = list(input.relations, '업무 관계').map(raw => { const value = object(raw, '업무 관계'), sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200), targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200); if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) fail(400, '업무 관계는 현재 존재하는 서로 다른 업무를 연결해야 합니다.'); return { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId, type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) }; });
     unique(relations, '업무 관계'); this.bindings(records); return { imports, records, versions, relations };
+  }
+  private validateJiraHistory(imports: SourceImport[], records: SourceRecordArchive[], applied?: AppliedJiraHistory): void {
+    const marked = records.filter(record => record.jiraHistoryAppend);
+    if (!marked.length && !applied?.comments.size && !applied?.worklogs.size) return;
+    const receipts = new Map(imports.map(receipt => [receipt.id, receipt]));
+    const jira = records.filter(record => record.source.product === 'jira');
+    const sourceIdentity = (record: SourceRecordArchive) => stable([record.source.instanceKey, record.record.kind, record.record.sourceId]);
+    const issueKey = (record: SourceRecordArchive, alias: string) => stable([record.sourceImportId, record.packageSha256, record.source.instanceKey, alias]);
+    const projectKey = (instance: string, projectId: string) => stable([instance, projectId]);
+    const catalogKey = (instance: string, projectId: string, alias: string) => stable([instance, projectId, alias]);
+    const rawIssues = new Map<string, SourceRecordArchive[]>();
+    const projectSources = new Map<string, Map<string, Set<string>>>();
+    const anchors = new Map<string, SourceRecordArchive[]>();
+    const linkedCounts = new Map<string, number>();
+    const addProject = (record: SourceRecordArchive) => {
+      const origin = projectKey(record.source.instanceKey, record.targetProjectId!);
+      const projects = projectSources.get(origin) ?? new Map<string, Set<string>>();
+      const current = projects.get(record.record.sourceId) ?? new Set<string>();
+      for (const name of [record.record.metadata.key, record.record.metadata.pkey]) if (typeof name === 'string' && /^[A-Z][A-Z0-9_]*$/.test(name)) current.add(name);
+      projects.set(record.record.sourceId, current);
+      projectSources.set(origin, projects);
+    };
+    for (const record of jira) {
+      if (record.record.kind === 'project' && record.targetType === 'project' && record.targetProjectId === record.targetId) addProject(record);
+      if (record.record.kind === 'issue') for (const alias of jiraIssueAliases(record.record)) {
+        const key = issueKey(record, alias), raw = rawIssues.get(key) ?? [];
+        raw.push(record);
+        rawIssues.set(key, raw);
+        if (!applied && record.targetType === 'issue' && record.ownerType === 'issue' && record.ownerId === record.targetId && record.targetProjectId && record.record.containerId) {
+          const scope = catalogKey(record.source.instanceKey, record.targetProjectId, alias), archived = anchors.get(scope) ?? [];
+          archived.push(record);
+          anchors.set(scope, archived);
+        }
+      }
+      if (record.targetType === 'comment' || record.jiraHistoryAppend) {
+        const identity = sourceIdentity(record);
+        linkedCounts.set(identity, (linkedCounts.get(identity) ?? 0) + 1);
+      }
+    }
+    const archivedProjectScopes = new Set<string>();
+    const projectArchive = this.store.db.prepare(`SELECT json FROM source_records WHERE product='jira' AND source_instance=?
+      AND kind='project' AND target_type='project' AND target_id=?`);
+    const markedCommentIds = new Set<string>(), verifiedWorklogSources = new Set<string>();
+    const alreadyStored = new Map<string, Set<string>>();
+    if (applied) {
+      const selectedByInstance = new Map<string, { comment: string[]; worklog: string[]; aliases: Set<string> }>();
+      const incomingRecordIds = new Set(marked.map(record => record.id));
+      for (const history of marked) {
+        const instance = history.source.instanceKey, { kind, sourceId } = jiraHistorySourceKey(history.record)!;
+        const selected = selectedByInstance.get(instance) ?? { comment: [], worklog: [], aliases: new Set<string>() };
+        selected[kind].push(sourceId);
+        for (const alias of jiraHistoryOwnerAliases(history.record) ?? []) {
+          selected.aliases.add(alias);
+          for (const owner of rawIssues.get(issueKey(history, alias)) ?? []) {
+            for (const candidate of jiraIssueAliases(owner.record)) selected.aliases.add(candidate);
+          }
+        }
+        selectedByInstance.set(instance, selected);
+      }
+      for (const [instance, selected] of selectedByInstance) {
+        alreadyStored.set(instance, new Set(this.jiraKnownHistory(instance, selected).filter(value => !incomingRecordIds.has(value.archiveId))
+          .map(value => stable([value.kind, value.sourceId]))));
+        const snapshots = new Map<string, SourceRecordArchive>();
+        for (const origin of this.jiraIssueOrigins(instance, [...selected.aliases], 'alias')) {
+          let archive = snapshots.get(origin.archiveId);
+          if (!archive) {
+            archive = this.store.get<SourceRecordArchive>('source_records', origin.archiveId);
+            if (archive) snapshots.set(origin.archiveId, archive);
+          }
+          if (!archive) continue;
+          const key = catalogKey(instance, origin.projectId, origin.alias), earlier = anchors.get(key) ?? [];
+          earlier.push(archive);
+          anchors.set(key, earlier);
+        }
+      }
+    }
+    const invalid = () => fail(400, 'Jira 댓글·작업 시간의 이전 원본 업무 및 프로젝트 연결을 확인해 주세요.');
+    for (const history of marked) {
+      const { kind, sourceId } = jiraHistorySourceKey(history.record)!;
+      const instance = history.source.instanceKey, projectId = history.targetProjectId!;
+      if (applied && (!applied.owners.has(history.ownerId!) || alreadyStored.get(instance)?.has(stable([kind, sourceId])))) invalid();
+      if (linkedCounts.get(sourceIdentity(history)) !== 1) invalid();
+      const scope = projectKey(instance, projectId);
+      if (applied && !archivedProjectScopes.has(scope)) {
+        for (const row of projectArchive.all(instance, projectId) as { json: string }[]) addProject(JSON.parse(row.json) as SourceRecordArchive);
+        archivedProjectScopes.add(scope);
+      }
+      const projects = projectSources.get(scope);
+      const sameProject = (a: string, b: string) => {
+        if (a === b) return true;
+        if (/^\d+$/.test(a) === /^\d+$/.test(b)) return false;
+        const [numeric, key] = /^\d+$/.test(a) ? [a, b] : [b, a];
+        return projects?.get(numeric)?.has(key) === true && projects.has(key);
+      };
+      const aliases = jiraHistoryOwnerAliases(history.record);
+      const receipt = receipts.get(history.sourceImportId)!;
+      const earlier = (alias: string) => (anchors.get(catalogKey(instance, projectId, alias)) ?? []).filter(archive =>
+        archive.sourceImportId !== history.sourceImportId && (applied || Date.parse(receipts.get(archive.sourceImportId)!.createdAt) <= Date.parse(receipt.createdAt)) &&
+        archive.record.containerId && projects?.has(archive.record.containerId) && !isRestrictedJiraHistoryOwner(archive.record));
+      if (!aliases || !aliases.every(alias => {
+        const supplied = rawIssues.get(issueKey(history, alias)) ?? [];
+        if (supplied.length > 1 || supplied.some(row => row.excluded || !row.record.containerId || isRestrictedJiraHistoryOwner(row.record))) return false;
+        const direct = earlier(alias);
+        const owners = [...direct, ...supplied.flatMap(row => jiraIssueAliases(row.record).flatMap(earlier))];
+        return owners.length > 0 && owners.every(owner => owner.targetId === history.ownerId &&
+          supplied.every(row => sameProject(owner.record.containerId!, row.record.containerId!)));
+      })) invalid();
+      if (kind === 'comment') {
+        if (markedCommentIds.has(history.targetId!) || applied && applied.comments.get(history.targetId!) !== history.ownerId) invalid();
+        markedCommentIds.add(history.targetId!);
+      } else {
+        if (applied && applied.worklogs.get(history.id) !== history.ownerId) invalid();
+        verifiedWorklogSources.add(history.id);
+      }
+    }
+    if (applied && (markedCommentIds.size !== applied.comments.size || verifiedWorklogSources.size !== applied.worklogs.size)) invalid();
   }
   confluenceArchivedRecord(archive: SourceRecordArchive, kind: ConfluenceArchiveKind, sourceId: string): LegacyRecord | undefined {
     const rows = this.store.db.prepare(`SELECT json FROM source_records WHERE import_id=? AND product='confluence' AND source_instance=?
@@ -647,7 +819,12 @@ export class SourcePreservationService {
     const owners = new Set(prepared.confluenceHistoryOwners);
     const appliedHistory = { owners, commentIds: new Set(prepared.comments.filter(comment => owners.has(comment.resourceId)).map(comment => comment.id)),
       revisionIds: new Set(prepared.revisions.filter(revision => revision.confluenceSourceVersion !== undefined).map(revision => revision.id)) };
-    const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations }, context, earlier, appliedHistory);
+    const jiraOwners = new Set(prepared.jiraHistoryOwners);
+    const appliedJiraHistory = { owners: jiraOwners,
+      comments: new Map(prepared.comments.filter(comment => jiraOwners.has(comment.resourceId)).map(comment => [comment.id, comment.resourceId])),
+      worklogs: new Map((prepared.worklogs ?? []).filter(worklog => jiraOwners.has(worklog.issueId)).map(worklog => [worklog.sourceRecordId!, worklog.issueId])) };
+    const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations },
+      context, earlier, appliedHistory, appliedJiraHistory);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');

@@ -148,6 +148,7 @@ export interface MigrationAppendConfiguration {
   fields: Record<string, string | null>;
   refreshExisting?: true;
   refreshCustomFields?: true;
+  refreshHistory?: true;
 }
 export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
@@ -223,6 +224,7 @@ export interface SourceRecordArchive {
   excluded?:true;
   jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
   jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
+  jiraHistoryAppend?: true;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }

@@ -507,6 +507,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     persistCanonical(value, req) {
       const refreshedIssues = prepareJiraRefreshes(value);
       const refreshedDocuments = prepareConfluenceRefreshes(value);
+      const importedWorklogs = value.worklogs ?? [];
+      const issueHistoryOwners = new Set(value.jiraHistoryOwners ?? []);
+      const newJiraComments = value.comments.filter(comment => issueHistoryOwners.has(comment.resourceId)).length;
+      const newJiraWorklogs = importedWorklogs.filter(worklog => issueHistoryOwners.has(worklog.issueId)).length;
+      const hasJiraHistory = newJiraComments > 0 || newJiraWorklogs > 0;
       const attachmentOwners = new Set(value.confluenceAttachmentOwners ?? []);
       const newConfluenceAttachments = value.attachments.filter(file => attachmentOwners.has(file.resourceId)).length;
       const newConfluenceVersions = value.attachmentVersions.filter(version => version.sourceRevision !== undefined).length;
@@ -527,7 +532,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
             [...historyOwners].some(id => store.get<DocPage>('documents', id)?.projectId !== projectId))) {
           fail('댓글과 이력을 추가할 기존 Confluence 문서를 확인해 주세요.', 409);
         }
-        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length ||
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length || importedWorklogs.length ||
             (!value.documents.length && !refreshedDocuments.length && !newConfluenceAttachments && !newConfluenceVersions && !hasConfluenceHistory) ||
             value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
             value.revisions.some(revision => store.get('revisions', revision.id) || (newDocumentIds.has(revision.documentId)
@@ -551,12 +556,25 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       } else if (value.append) {
         const { projectId, startIssueNumber } = value.append;
         const project = get<Project>('projects', projectId);
+        const newIssueIds = new Set(value.issues.map(issue => issue.id));
+        const historyRecords = value.sourceRecords.filter(record => record.jiraHistoryAppend === true);
+        const commentTargets = new Map(historyRecords.filter(record => record.targetType === 'comment').map(record => [record.targetId, record.ownerId]));
+        const worklogSources = new Map(historyRecords.filter(record => record.record.kind === 'history').map(record => [record.id, record.ownerId]));
+        if (issueHistoryOwners.size && (value.preview.configuration.appendTo?.refreshHistory !== true ||
+            [...issueHistoryOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
+          fail('댓글과 작업 시간을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
+        }
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
-        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length ||
-            (!value.issues.length && !refreshedIssues.length) ||
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || value.revisions.length ||
+            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory) ||
             !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
-              issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id))) {
+              issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id)) ||
+            value.comments.some(comment => comment.resourceType !== 'issue' || store.get('comments', comment.id) ||
+              (!newIssueIds.has(comment.resourceId) && (!issueHistoryOwners.has(comment.resourceId) || commentTargets.get(comment.id) !== comment.resourceId))) ||
+            importedWorklogs.some(worklog => worklog.projectId !== projectId || (!newIssueIds.has(worklog.issueId) &&
+              (!issueHistoryOwners.has(worklog.issueId) || worklogSources.get(worklog.sourceRecordId ?? '') !== worklog.issueId))) ||
+            value.attachments.some(file => file.resourceType !== 'issue' || !newIssueIds.has(file.resourceId))) {
           fail('기존 프로젝트에 추가할 업무의 범위나 번호가 올바르지 않습니다.',409);
         }
         if (value.issues.length) store.db.prepare(`INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id)
@@ -587,7 +605,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         revision(document, actor(req), 'Confluence 원본 변경분 반영');
         activity(req, 'document', document.id, 'Confluence 원본 변경분 반영', document.title);
       }
-      worklogs.persistMigrated(value.worklogs??[],value.sourceRecords);
+      const worklogRows = importedWorklogs.map(worklog => {
+        if (!issueHistoryOwners.has(worklog.issueId)) return worklog;
+        const { key, title } = get<Issue>('issues', worklog.issueId);
+        return { ...worklog, issueKey: key, issueTitle: title };
+      });
+      worklogs.persistMigrated(worklogRows, value.sourceRecords);
       for (const comment of value.comments) store.put('comments', comment);
       for (const revision of value.revisions) store.put('revisions', revision);
       for (const attachment of value.attachments) store.put('attachments', attachment);
@@ -603,10 +626,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length || hasJiraHistory ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
+      if (newJiraComments) details.push(`기존 업무에 원본 댓글 ${newJiraComments}개 추가`);
+      if (newJiraWorklogs) details.push(`기존 업무에 원본 작업 시간 ${newJiraWorklogs}개 추가`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
       if (newConfluenceAttachments) details.push(`기존 문서에 첨부 ${newConfluenceAttachments}개 추가`);
       if (newConfluenceVersions) details.push(`기존 첨부에 버전 ${newConfluenceVersions}개 추가`);
@@ -1354,6 +1379,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshCustomFields!==undefined))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraCustomFieldHashes')))
     ))fail('Jira 사용자 정의 필드의 변경분 설정과 비교 기준에는 schemaVersion 43 백업이 필요합니다.');
+    if(data.schemaVersion<44&&(
+      (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshHistory!==undefined))||
+      (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraHistoryAppend')))
+    ))fail('기존 Jira 업무의 댓글과 작업 시간 이관에는 schemaVersion 44 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

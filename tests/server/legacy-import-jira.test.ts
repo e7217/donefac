@@ -98,6 +98,20 @@ test('Importers JSON is explicitly identified and preserves authored history, co
   assert.equal(find(data,'identity:alice').title,'원본 Alice');assert.equal(find(data,'issue:10').createdAt,'P-3D');assert.equal(find(data,'field:named:점수').metadata.fieldType,'float');assert.equal(data.records.filter(item=>item.kind==='comment').length,1);assert.equal(data.records.filter(item=>item.kind==='history').length,1);assert.ok(data.records.some(item=>item.kind==='relation'&&item.title==='sub-task-link'));assert.ok(codes(data).has('JSON_IMPORTERS_DIALECT'));assert.ok(!codes(data).has('JSON_REST_DIALECT'));assert.ok(codes(data).has('DATE_TIMEZONE_UNRESOLVED'));
 });
 
+test('Jira history parsing keeps explicit restriction properties and identifies generated fallback IDs', () => {
+  const data = parse('rest.json', JSON.stringify({ issues: [{ id: '10', key: 'OLD-1', fields: {
+    summary: '업무', comment: { comments: [{ id: '90', body: '내부 Jira 서비스 댓글', visibility: {},
+      properties: [{ key: 'sd.public.comment', value: { internal: true } }] }, { body: 'ID 없는 댓글' }] },
+    worklog: { worklogs: [{ comment: 'ID 없는 작업 시간', timeSpentSeconds: 80 }] },
+  } }] }));
+  assert.deepEqual(find(data, 'comment:90').metadata.properties, [{ key: 'sd.public.comment', value: { internal: true } }]);
+  assert.equal(find(data, 'comment:json:10:comment:1').metadata.syntheticId, true);
+  assert.equal(find(data, 'history:worklog:10:0').metadata.syntheticId, true);
+  const xml = parse('entities.xml', '<entity-engine-xml><Issue id="10" summary="업무"/>' +
+    '<Action id="91" issue="10" type="comment" grouplevel="private-team" body="팀 제한"/></entity-engine-xml>');
+  assert.equal(find(xml, 'comment:91').metadata.grouplevel, 'private-team');
+});
+
 test('duplicate source IDs, malformed CSV/JSON/XML and unsupported input cannot silently look successful',()=>{
   assert.throws(()=>parse('entities.xml','<entity-engine-xml><Issue id="1" summary="A"/><Issue id="1" summary="B"/></entity-engine-xml>'));
   assert.throws(()=>parse('bad.csv','Issue key,Summary\nOLD-1,"unterminated'));

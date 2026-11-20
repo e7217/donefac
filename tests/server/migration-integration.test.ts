@@ -15,7 +15,7 @@ import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -409,6 +409,126 @@ test('Jira custom field refresh survives a legacy restore and advances independe
   assert.equal(afterCombined.version, beforeCombined.version + 1);
   assert.equal(afterCombined.description, '함께 적용한 설명');
   assert.equal(afterCombined.customFields?.[score], 8);
+});
+
+test('Jira history append preserves local and deleted records and restores exact source seconds from backup', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const source = 'synthetic-jira-history';
+  const author = { accountId: 'source-author', displayName: 'Jira 원본 작성자' };
+  const date = '2020-08-01T00:00:00Z';
+  const comment = (id: string | undefined, body: string) => ({ id, body, author, created: date });
+  const worklog = (id: string | undefined, note: string, seconds: number) => ({ id, comment: note, author, started: date, timeSpentSeconds: seconds });
+  const upload = (name: string, summary: string, comments: object[], worklogs: object[]) => f.upload(Buffer.from(JSON.stringify({ issues: [{ id: '100', key: 'OLD-1', fields: {
+    project: { id: '42', key: 'OLD', name: '이전 Jira' }, summary, created: date, updated: date,
+    issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' }, comment: { comments }, worklog: { worklogs },
+  } }] })), `${name}.json`, 'jira', source);
+  const original = await upload('jira-history-initial', '최초 제목', [comment('300', '삭제할 원본 댓글'), comment('301', '계속 남길 원본 댓글')],
+    [worklog('400', '삭제할 원본 시간', 61), worklog('401', '수정할 원본 시간', 73)]);
+  const initial = await f.apply(await f.preview(await f.configuration(original, 'JHIST')));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  const ticket = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.projectId === projectId)!;
+  const { id, version } = await ticket();
+  const worklogsPath = `/issues/${id}/worklogs`;
+  const readWorklogs = () => f.call<IssueWorklogPage>(worklogsPath).then(result => result.data);
+  const readComments = () => f.call<Comment[]>(`/comments?resourceType=issue&resourceId=${id}`).then(result => result.data);
+  const removedComment = (await readComments()).find(row => row.body === '삭제할 원본 댓글')!;
+  const removed = await f.call<{trashItemId: string}>(`/comments/${removedComment.id}`, 'DELETE', undefined, removedComment.authorId);
+  assert.equal(removed.status, 200);
+  assert.equal((await f.call(`/trash/items/${removed.data.trashItemId}`, 'DELETE', undefined, removedComment.authorId)).status, 200);
+  const beforeWorklogs = (await readWorklogs()).entries;
+  const removedWorklog = beforeWorklogs.find(row => row.note === '삭제할 원본 시간')!;
+  const correctedWorklog = beforeWorklogs.find(row => row.note === '수정할 원본 시간')!;
+  assert.equal((await f.call(`${worklogsPath}/${removedWorklog.id}`, 'DELETE', { expectedVersion: removedWorklog.version }, 'user-jun')).status, 200);
+  const corrected = await f.call<WorklogEntry>(`${worklogsPath}/${correctedWorklog.id}`, 'PATCH', {
+    expectedVersion: correctedWorklog.version, note: '팀에서 수정한 작업 메모',
+  }, 'user-jun');
+  assert.equal(corrected.status, 200, JSON.stringify(corrected.data));
+  const localWorklog = await f.call<WorklogEntry>(worklogsPath, 'POST', { requestId: randomUUID(), workDate: '2020-08-02', minutes: 12, note: '팀 수동 작업 시간' });
+  assert.equal(localWorklog.status, 201);
+  const localComment = await f.call<Comment>('/comments', 'POST', { resourceType: 'issue', resourceId: id, body: '팀 수동 댓글' });
+  assert.equal(localComment.status, 201);
+  const expectedComments = await readComments();
+  const expectedTimes = await readWorklogs();
+
+  const delta = await upload('jira-history-delta', 'Jira에서 바꾼 제목', [
+    comment('300', '삭제된 원본 댓글'), comment('301', '기존 원본 댓글 변경'), comment('310', '추가할 원본 댓글'),
+    comment(undefined, '안정적인 ID가 없는 원본 댓글'), { ...comment('311', '팀 제한 원본 댓글'), visibility: {},
+      properties: [{ key: 'sd.public.comment', value: { internal: true } }] },
+    { ...comment('312', '작성자가 없는 원본 댓글'), author: null },
+  ], [worklog('400', '삭제된 원본 시간', 111), worklog('401', '기존 원본 메모 변경', 121), worklog('410', '추가할 원본 작업 시간', 91),
+    worklog(undefined, '안정적인 ID가 없는 원본 시간', 83), { ...worklog('411', '팀 제한 원본 시간', 71), groupLevel: 'private' }]);
+  async function historySettings(pkg: LegacyPackageSummary): Promise<MigrationConfiguration> {
+    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    const target = options.appendTarget;
+    assert.equal(target?.projectId, projectId);
+    return { ...options.defaultConfiguration,
+      users: Object.fromEntries(options.identities.map(identity => [identity.id, 'user-jun'])),
+      appendTo: { projectId, refreshHistory: true,
+        statuses: Object.fromEntries(options.statuses.map(option => [option.id, target!.statuses.find(status => status.label === option.label)!.id])),
+        issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target!.issueTypes.find(type => type.name === option.label)!.id])),
+        fields: {},
+      },
+    };
+  }
+  const config = await historySettings(delta);
+  const defaultOnly = structuredClone(config);
+  delete defaultOnly.appendTo?.refreshHistory;
+  assert.equal((await f.preview(defaultOnly)).canApply, false);
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.issues, 0);
+  assert.equal(plan.counts.newJiraComments, 1);
+  assert.equal(plan.counts.newJiraWorklogs, 1);
+  const stale = await f.preview(config);
+  const edit = await f.call<Issue>(`/issues/${id}`, 'PATCH', { expectedVersion: version, title: '검토 중 팀에서 편집한 제목' });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+  f.db.exec(`CREATE TRIGGER fail_jira_history_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Jira history receipt failure'); END;`);
+  try { assert.equal((await f.apply(plan)).status, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_jira_history_receipt'); }
+  assert.deepEqual(await readComments(), expectedComments);
+  assert.deepEqual(await readWorklogs(), expectedTimes);
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal((await f.apply(plan)).data.duplicate, true);
+  assert.equal((await f.apply(stale)).status, 409);
+  assert.deepEqual(await ticket(), edit.data);
+  const comments = await readComments();
+  const addedComment = comments.find(row => row.body === '추가할 원본 댓글')!;
+  assert.equal(addedComment.authorId, 'user-jun');
+  assert.deepEqual(comments.filter(row => row.id !== addedComment.id), expectedComments);
+  const times = await readWorklogs();
+  const addedTime = times.entries.find(row => row.note === '추가할 원본 작업 시간')!;
+  assert.equal(addedTime.authorId, 'user-jun');
+  assert.equal(addedTime.durationSeconds, 91);
+  assert.equal(addedTime.issueTitle, edit.data.title);
+  assert.equal(times.totalMinutes, (12 * 60 + 73 + 91) / 60);
+  assert.deepEqual(times.entries.filter(row => row.id !== addedTime.id), expectedTimes.entries);
+  assert.equal((await f.preview(config)).canApply, false);
+
+  type Backup = WorkspaceSnapshot & {schemaVersion: number; sourceRecords: SourceRecordArchive[]};
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.deepEqual(backup.sourceRecords.filter(row => row.jiraHistoryAppend).map(row => row.record.sourceId).sort(), ['310', 'worklog:410']);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 43 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  assert.deepEqual(await readComments(), comments);
+  assert.deepEqual((await readWorklogs()).entries.map(row => row.id), times.entries.map(row => row.id));
+  assert.equal((await f.preview(config)).canApply, false);
+
+  const sparseXml = '<entity-engine-xml><Action id="320" issue="100" author="source-author" type="comment" ' +
+    'created="2020-08-03T00:00:00Z" body="티켓 객체가 빠진 추가 댓글"/>' +
+    '<Worklog id="420" issue="100" author="source-author" startdate="2020-08-03T00:00:00Z" timeworked="97" body="티켓 객체가 빠진 작업 시간"/>' +
+    '</entity-engine-xml>';
+  const sparse = await f.upload(Buffer.from(sparseXml), 'jira-sparse-history.xml', 'jira', source);
+  const sparsePlan = await f.preview(await historySettings(sparse));
+  assert.equal(sparsePlan.canApply, true, JSON.stringify(sparsePlan.notices));
+  assert.equal(sparsePlan.counts.newJiraComments, 1);
+  assert.equal(sparsePlan.counts.newJiraWorklogs, 1);
+  assert.equal((await f.apply(sparsePlan)).status, 201);
+  assert.equal((await readWorklogs()).entries.find(row => row.note === '티켓 객체가 빠진 작업 시간')?.durationSeconds, 97);
 });
 
 const gitlabPath = '/integrations/gitlab';

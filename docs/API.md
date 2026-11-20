@@ -362,6 +362,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 미리보기의 `issueRefresh[].customFields`는 현재 필드 이름·현재 값·원본 값·반영 여부를 반환한다. `updatedCustomFields`와 `conflictingCustomFields`에서 반영하고 보존할 필드 수를 확인한다. 같은 티켓의 기본 필드 및 사용자 정의 필드는 하나의 검증된 편집으로 저장된다. 형식 43 자체 백업은 기본 필드와 독립적으로 다음 비교에 사용할 사용자 정의 필드의 기준을 보존한다.
 
+### 기존 Jira 업무에 댓글과 작업 시간 추가
+
+`appendTo.refreshHistory: true`를 지정하면 같은 원본 인스턴스와 프로젝트의 기존 티켓에 새 댓글과 작업 시간 기록을 추가한다. 안정적인 원본 ID, 이전 이관으로 증명되는 대상, 팀원 작성자 매핑과 실제 시각을 확인한다. 작업 시간은 초 단위 원본과 작업일을 유지한다. 이전에 저장한 기록의 원본 ID는 팀에서 기록을 삭제한 뒤에도 중복 방지에 사용한다.
+
+작업 시간·댓글만 있는 관리자 내보내기에서도 기존 원본 연결로 한 프로젝트를 확인할 수 있다. CSV의 위치 기반 댓글, ID 또는 작성자를 확인할 수 없는 기록과 접근이 제한된 기록은 원문으로 보관한다. 미리보기와 영수증의 `newJiraComments`, `newJiraWorklogs`에서 기존 티켓에 추가할 수를 확인한다. 기본 필드와 사용자 정의 필드 변경분 옵션을 함께 선택할 수 있다. 형식 44 자체 백업은 추가 설정과 원본 연결을 보존한다.
+
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
 선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.
