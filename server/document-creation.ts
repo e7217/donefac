@@ -40,7 +40,8 @@ export class DocumentCreationService {
     )`);
   }
 
-  create(actorId: string, input: Record<string, unknown>, persist: () => DocPage): { document: DocPage; duplicate: boolean } {
+  create(actorId: string, input: Record<string, unknown>, persist: () => DocPage,
+    operation?: 'delivery-blocker-draft'): { document: DocPage; duplicate: boolean } {
     if (!Object.hasOwn(input, 'requestId')) return { document: this.store.transaction(persist), duplicate: false };
     const requestId = input.requestId;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
@@ -48,7 +49,10 @@ export class DocumentCreationService {
     }
     const id = requestId.toLowerCase();
     let fingerprint: string;
-    try { fingerprint = creationRequestFingerprint(input); }
+    try {
+      const digest = creationRequestFingerprint(input);
+      fingerprint = operation ? `${operation}:${digest}` : digest;
+    }
     catch { throw new DocumentCreationError(400, '문서 생성 입력 형식을 확인해 주세요.', 'invalid_request_body'); }
 
     return this.store.transaction(() => {

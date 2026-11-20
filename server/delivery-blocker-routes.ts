@@ -1,12 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import {
-  DELIVERY_BLOCKER_REASONS, type DeliveryBlockerReason, type DeliveryBlockerReport, type DeliveryBlockerRow,
-  type Dependency, type GitlabLink, type Issue, type IssueRelation, type ProjectWorkflow, type SavedView, type User,
+  DELIVERY_BLOCKER_REASONS, type DeliveryBlockerDraftResult, type DeliveryBlockerReason, type DeliveryBlockerReport,
+  type DeliveryBlockerRow, type Dependency, type DocPage, type GitlabLink, type Issue, type IssueRelation,
+  type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
 } from '../shared/types.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
 import type { CalendarService } from './calendars.js';
 import { buildDeliveryBlockers } from './delivery-blockers.js';
+import { buildDeliveryBlockerDraftContent } from './delivery-blocker-draft-content.js';
+import type { DocumentCreationService } from './document-creation.js';
 import type { IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
 
@@ -15,16 +18,21 @@ const TARGET_LIMIT = 10_000;
 const CONNECTION_LIMIT = 50_000;
 const GITLAB_LIMIT = 100_000;
 const parameters = new Set(['savedViewId', 'reason', 'offset', 'revision']);
+const draftFields = new Set(['savedViewId', 'reason', 'revision', 'title', 'requestId']);
 type Selection = { savedViewId: string | null; reason: DeliveryBlockerReason | null; offset: number; revision: string | null };
+type DocumentCapture = Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>;
 type Sources = {
   store: Store;
   schemas: IssueSchemaService;
   calendars: CalendarService;
   projectScope: (request: Request) => readonly string[] | null;
+  actor: (request: Request) => string;
+  documentCreation: DocumentCreationService;
+  createDocument: (request: Request, capture: DocumentCapture, content: RichContent, issueIds: string[]) => DocPage;
 };
 
 class DeliveryBlockerQueryError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly details?: { reason: 'stale_report' }) { super(message); }
 }
 
 function selectionFor(query: Request['query']): Selection {
@@ -113,7 +121,7 @@ function reportFor(
   const savedView = view ? { id: view.id, name: view.name, version: view.version } : null;
   const revision = createHash('sha256').update(JSON.stringify([projectId, savedView, selection.reason, counts, rows])).digest('hex');
   if (selection.revision && selection.revision !== revision) {
-    throw new DeliveryBlockerQueryError(409, '조회 이후 진행 차단 내용이 바뀌었습니다. 첫 페이지부터 다시 조회해 주세요.');
+    throw new DeliveryBlockerQueryError(409, '조회 이후 진행 차단 내용이 바뀌었습니다. 첫 페이지부터 다시 조회해 주세요.', { reason: 'stale_report' });
   }
   const selectedRows = rows.filter(row => matchesReason(row, selection.reason));
   return {
@@ -123,9 +131,36 @@ function reportFor(
   };
 }
 
+function createDraft(req: Request, projectId: string, sources: Sources): DeliveryBlockerDraftResult {
+  const { savedViewId, reason, revision, title: inputTitle, requestId } = req.body;
+  if (Object.keys(req.body).some(field => !draftFields.has(field)) || Object.keys(req.query).length) {
+    throw new DeliveryBlockerQueryError(400, '진행 차단 회의 초안의 입력을 확인해 주세요.');
+  }
+  const title = typeof inputTitle === 'string' ? inputTitle.trim() : '';
+  if (!title || title.length > 200) throw new DeliveryBlockerQueryError(400, '회의 초안 제목을 1~200자로 입력해 주세요.');
+  const selection = selectionFor({ savedViewId, reason, revision });
+  if (!selection.revision) throw new DeliveryBlockerQueryError(400, '조회한 진행 차단 보고서의 버전이 필요합니다.');
+  const actorId = sources.actor(req);
+  return sources.documentCreation.create(actorId, {
+    requestId, projectId, title, savedViewId: selection.savedViewId, reason: selection.reason, revision: selection.revision,
+  }, () => {
+    const report = reportFor(projectId, selection, sources.projectScope(req), sources);
+    if (!report.total) throw new DeliveryBlockerQueryError(422, '회의 초안에 담을 차단 업무가 없습니다.');
+    const filters = new URLSearchParams();
+    if (selection.savedViewId) filters.set('savedView', selection.savedViewId);
+    if (selection.reason) filters.set('reason', selection.reason);
+    const href = `#/${encodeURIComponent(projectId)}/reports/blockers${filters.size ? `?${filters}` : ''}`;
+    const { content, issueIds } = buildDeliveryBlockerDraftContent(report, href);
+    return sources.createDocument(req, {
+      documentId: randomUUID(), projectId, title, actorId, createdAt: report.generatedAt,
+    }, content, issueIds);
+  }, 'delivery-blocker-draft');
+}
+
 export function registerDeliveryBlockerRoutes(app: Express, sources: Sources) {
   sources.store.db.exec('CREATE INDEX IF NOT EXISTS dependencies_by_successor ON dependencies(successor_id)');
-  app.get('/api/projects/:projectId/delivery-blockers', (req, res) => {
+  const path = '/api/projects/:projectId/delivery-blockers';
+  app.get(path, (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
       const projectId = String(req.params.projectId);
@@ -135,7 +170,17 @@ export function registerDeliveryBlockerRoutes(app: Express, sources: Sources) {
       res.json(report);
     } catch (error) {
       if (!(error instanceof DeliveryBlockerQueryError)) throw error;
-      res.status(error.status).json({ error: error.message });
+      res.status(error.status).json({ error: error.message, details: error.details });
+    }
+  });
+  app.post(`${path}/meeting-draft`, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const draft = createDraft(req, String(req.params.projectId), sources);
+      res.status(draft.duplicate ? 200 : 201).json(draft);
+    } catch (error) {
+      if (!(error instanceof DeliveryBlockerQueryError)) throw error;
+      res.status(error.status).json({ error: error.message, details: error.details });
     }
   });
 }

@@ -80,6 +80,14 @@ export interface ReportOpenStatusIssue {
 }
 export const DELIVERY_BLOCKER_REASONS = ['issue_block', 'schedule_conflict', 'gitlab'] as const;
 export type DeliveryBlockerReason = typeof DELIVERY_BLOCKER_REASONS[number];
+export interface DeliveryBlockerDraftScope {
+  savedViewId?: string;
+  reason?: DeliveryBlockerReason;
+}
+export interface DeliveryBlockerDraftResult {
+  document: DocPage;
+  duplicate: boolean;
+}
 
 export interface DeliveryBlockerIssue extends Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'status' | 'assigneeId' | 'version'> {
   statusLabel: string;

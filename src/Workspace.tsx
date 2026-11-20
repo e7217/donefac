@@ -2,8 +2,8 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
-import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
-import { isTeamOverviewIssueMetric } from '../shared/types';
+import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import { DELIVERY_BLOCKER_REASONS, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -13,6 +13,7 @@ import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
+import { isRelationId } from '../shared/issue-relations';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import { Issues } from './features/Issues';
@@ -51,6 +52,7 @@ type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
+  blockerScope?: DeliveryBlockerDraftScope | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
   documentLabel?: string | null;
@@ -59,11 +61,16 @@ type WorkspaceRoute = {
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 function routeHash(route: WorkspaceRoute) {
-  const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? route.reportId :
+  const reportDetail = route.blockerScope ? 'blockers' : route.reportId;
+  const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? reportDetail :
     (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
   const query = new URLSearchParams();
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt') && route.savedViewId) query.set('savedView', route.savedViewId);
+  if (route.view === 'reports' && route.blockerScope) {
+    if (route.blockerScope.savedViewId) query.set('savedView', route.blockerScope.savedViewId);
+    if (route.blockerScope.reason) query.set('reason', route.blockerScope.reason);
+  }
   if (route.view === 'gantt' && route.ganttFocusIssueId) {
     query.set('focusIssue', route.ganttFocusIssueId);
     if (route.ganttFocusDate) query.set('focusDate', route.ganttFocusDate);
@@ -95,9 +102,12 @@ function hasSameDocumentContext(previous: WorkspaceRoute, next: WorkspaceRoute):
 function hasDocumentIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'documents' && route.documentId && route.issueId);
 }
+function sameBlockerScope(a?: DeliveryBlockerDraftScope | null, b?: DeliveryBlockerDraftScope | null): boolean {
+  return Boolean(a) === Boolean(b) && a?.savedViewId === b?.savedViewId && a?.reason === b?.reason;
+}
 function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'reports' && next.view === 'reports' && previous.projectId === next.projectId &&
-    (previous.reportId ?? null) === (next.reportId ?? null);
+    (previous.reportId ?? null) === (next.reportId ?? null) && sameBlockerScope(previous.blockerScope, next.blockerScope);
 }
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next);
@@ -147,6 +157,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const documentPreviewId = issueId && requestedDocumentPreview &&
     canPreviewIssueDocument(snapshot, issueId, requestedDocumentPreview) ? requestedDocumentPreview : null;
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
+  const blockerView = parameters.get('savedView');
+  const blockerReason = DELIVERY_BLOCKER_REASONS.find(reason => reason === parameters.get('reason'));
+  const blockerScope = view === 'reports' && projectId === parts[0] && parts[2] === 'blockers' ? {
+    ...(isRelationId(blockerView) ? { savedViewId: blockerView } : {}),
+    ...(blockerReason ? { reason: blockerReason } : {}),
+  } : null;
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
@@ -173,7 +189,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
     issueMetric, issueOffset,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentLabel, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentLabel, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -188,6 +204,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [documentLabel, setDocumentLabel] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+  const [blockerScope, setBlockerScope] = useState<DeliveryBlockerDraftScope | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
@@ -286,6 +303,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setBlockerScope(previousScope => sameBlockerScope(previousScope, route.blockerScope) ? previousScope : route.blockerScope ?? null);
     setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
@@ -359,6 +377,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       projectId:view === 'teamoverview' || view === 'reports' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
+      blockerScope:view === 'reports' ? current?.blockerScope : null,
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
       ganttFocusDate:sameProject ? ganttFocusDate : null,
       publicationTab, issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
@@ -531,7 +550,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
-        {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
+        {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {
             const current = acceptedRouteRef.current;

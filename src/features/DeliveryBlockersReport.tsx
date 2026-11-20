@@ -1,19 +1,22 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { FileText, RefreshCw } from 'lucide-react';
 import {
-  DELIVERY_BLOCKER_REASONS, PRIORITY, type DeliveryBlockerIssue, type DeliveryBlockerReason,
+  DELIVERY_BLOCKER_REASONS, PRIORITY, type DeliveryBlockerDraftScope, type DeliveryBlockerIssue, type DeliveryBlockerReason,
   type DeliveryBlockerReport, type DeliveryBlockerRow, type FeatureProps,
 } from '../../shared/types';
 import { SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
 import { api, ApiError } from '../lib/api';
 import { dependencyLabel } from './schedule-utils';
+import { DeliveryBlockerMeetingDraftDialog } from './DeliveryBlockerMeetingDraftDialog';
 import './delivery-blockers-report.css';
 
 type Scope = { savedViewId: string; reason: DeliveryBlockerReason | '' };
-type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'refresh'>;
-const ALL: Scope = { savedViewId: '', reason: '' };
+type LoadOptions = { offset?: number; revision?: string; openDraft?: boolean };
+type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'openDocument' | 'refresh'> & {
+  initialScope?: DeliveryBlockerDraftScope;
+};
 const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
   issue_block: '수동 차단',
   schedule_conflict: '간트 일정 충돌',
@@ -22,9 +25,11 @@ const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
 const numberLabel = (value: number) => value.toLocaleString('ko-KR');
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : '진행 차단 보고서를 불러오지 못했습니다.';
 
-export function DeliveryBlockersReport({ data, projectId, actorId, notify, openIssue, refresh }: Props) {
-  const [scope, setScope] = useState(ALL);
+export function DeliveryBlockersReport({ data, projectId, actorId, notify, openIssue, openDocument, refresh, initialScope }: Props) {
+  const [initial] = useState<Scope>(() => ({ savedViewId: initialScope?.savedViewId ?? '', reason: initialScope?.reason ?? '' }));
+  const [scope, setScope] = useState(initial);
   const [page, setPage] = useState<DeliveryBlockerReport | null>(null);
+  const [draftReport, setDraftReport] = useState<DeliveryBlockerReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -37,7 +42,7 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
     .sort((left, right) => left.name.localeCompare(right.name, 'ko'));
   const unavailableView = scope.savedViewId && !views.some(view => view.id === scope.savedViewId);
 
-  const load = useCallback(async (next: Scope, offset = 0, revision?: string) => {
+  const load = useCallback(async (next: Scope, { offset = 0, revision, openDraft = false }: LoadOptions = {}) => {
     reportRequest.current?.abort();
     const controller = new AbortController();
     reportRequest.current = controller;
@@ -47,6 +52,7 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
     setLoading(true);
     setError('');
     setNotice('');
+    let stale = false;
     function requestPage(position?: { offset: number; revision: string }) {
       const params = new URLSearchParams();
       if (next.savedViewId) params.set('savedViewId', next.savedViewId);
@@ -64,32 +70,41 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
         result = await requestPage(revision ? { offset, revision } : undefined);
       } catch (cause) {
         if (controller.signal.aborted || !revision || !(cause instanceof ApiError) || cause.status !== 409) throw cause;
-        setPage(null);
+        stale = true;
+        if (!openDraft) setPage(null);
         result = await requestPage();
         if (!controller.signal.aborted) setNotice('업무 변경을 반영해 첫 페이지를 다시 불러왔습니다.');
       }
       if (!controller.signal.aborted) {
-        focusResults.current = Boolean(revision);
-        setPage(result);
+        if (!openDraft || stale) {
+          focusResults.current = Boolean(revision) && !openDraft;
+          setPage(result);
+        }
+        if (openDraft && result.total) setDraftReport(result);
+        return result;
       }
     } catch (cause) {
-      if (!controller.signal.aborted) setError(errorMessage(cause));
+      if (!controller.signal.aborted) {
+        if (stale) setPage(null);
+        setError(errorMessage(cause));
+      }
     } finally {
       if (!controller.signal.aborted) {
         reportRequest.current = null;
         setLoading(false);
       }
     }
+    return null;
   }, [actorId, projectId]);
 
   useEffect(() => {
-    const timer = setTimeout(() => void load(ALL), 0);
+    const timer = setTimeout(() => void load(initial), 0);
     return () => {
       clearTimeout(timer);
       reportRequest.current?.abort();
       issueRequest.current = null;
     };
-  }, [load]);
+  }, [initial, load]);
 
   useEffect(() => {
     if (!page || !focusResults.current) return;
@@ -105,7 +120,13 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
 
   function changePage(offset: number) {
     if (!page || loading || offset < 0 || offset >= page.total) return;
-    void load(scope, offset, page.revision);
+    void load(scope, { offset, revision: page.revision });
+  }
+
+  function beginDraft() {
+    if (loading || !page?.total || reportRequest.current) return;
+    if (page.offset) void load(scope, { revision: page.revision, openDraft: true });
+    else setDraftReport(page);
   }
 
   async function open(issue: DeliveryBlockerIssue) {
@@ -174,7 +195,12 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
       <section className="delivery-blockers-results" aria-labelledby="delivery-blockers-results-heading">
         <header>
           <h3 id="delivery-blockers-results-heading" ref={resultsHeading} tabIndex={-1}>차단된 업무</h3>
-          <span>{page.reason ? REASON_LABELS[page.reason] : '전체 원인'} · {numberLabel(page.total)}개</span>
+          <div className="delivery-blockers-results-actions">
+            <span>{page.reason ? REASON_LABELS[page.reason] : '전체 원인'} · {numberLabel(page.total)}개</span>
+            <button className="btn" type="button" aria-disabled={loading || !page.total} onClick={beginDraft}>
+              <FileText size={15} aria-hidden="true" />회의 초안 만들기
+            </button>
+          </div>
         </header>
         {page.items.length > 0 ? <ol className="delivery-blockers-list" role="list" aria-label="차단된 업무 목록">
           {page.items.map(row => <li key={row.issue.id}><BlockerCard row={row} linkBusy={loading || Boolean(openingIssue)} open={open} /></li>)}
@@ -188,6 +214,10 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
         </nav>}
       </section>
     </div>}
+    {draftReport && <DeliveryBlockerMeetingDraftDialog report={draftReport} actorId={actorId} refresh={refresh} notify={notify} openDocument={openDocument}
+      reasonLabel={draftReport.reason ? REASON_LABELS[draftReport.reason] : '전체 원인'}
+      reloadReport={() => load({ savedViewId: draftReport.savedView?.id ?? '', reason: draftReport.reason ?? '' })}
+      onClose={() => setDraftReport(null)} />}
   </div>;
 }
 

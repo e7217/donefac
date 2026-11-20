@@ -78,6 +78,8 @@ curl --fail-with-body \
 
 응답의 `limit`은 20이다. 다음 페이지에는 `offset`과 이전 응답의 `revision`을 보낸다. 그동안 결과가 바뀌어 `409`를 받으면 `offset`과 `revision`을 생략하고 첫 페이지부터 읽는다. 프로젝트 제한 키는 양쪽 프로젝트를 읽을 수 있는 업무 관계만 보고서의 건수와 근거에 포함한다. GitLab 근거는 이미 저장된 상태를 사용한다.
 
+브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 보고서가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
+
 ## 담당자 작업량
 
 업무 생성·수정의 `plannedEffortMinutes`에는 0~1,000,000 정수 분 또는 `null`을 보낸다. 포인트 필드 `estimate`와 별도이다. `GET /projects/:id/workload?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`로 최대 180일을 양끝 날짜 포함으로 조회한다. 응답의 `rows`에는 팀원별 일자와 `scheduledMinutes`, `availableMinutes`, 업무별 `allocations`가 있다. `incomplete`에는 배분에 필요한 정보가 부족한 업무와 이유를 반환한다.

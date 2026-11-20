@@ -1156,7 +1156,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 const href = event.target.closest('a[href]')?.getAttribute('href');
-                if (href && /^#\/[^/?#]+\/reports\/[0-9a-f-]{36}$/i.test(href)) {
+                if (href && /^#\/[^/?#]+\/reports\/(?:[0-9a-f-]{36}|blockers(?:\?[^#]*)?)$/i.test(href)) {
                   event.preventDefault();
                   window.location.hash = href;
                   return;

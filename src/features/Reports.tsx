@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { BarChart3, CalendarDays, FileText, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
 import type {
+  DeliveryBlockerDraftScope,
   FeatureProps,
   ProjectReport,
   ReportDay,
@@ -22,7 +23,7 @@ import { DeliveryBlockersReport } from './DeliveryBlockersReport';
 import { reportDuration, StatusDurationReport } from './ReportStatusDuration';
 import './reports.css';
 
-type Props = FeatureProps & { snapshotId?: string | null };
+type Props = FeatureProps & { snapshotId?: string | null; initialBlockerScope?: DeliveryBlockerDraftScope | null };
 const CATEGORIES: StatusCategory[] = ['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'];
 const META: Record<StatusCategory, { label: string; color: string }> = {
   backlog: { label: '백로그', color: '#8a98a7' },
@@ -87,7 +88,7 @@ function remember(cache: Map<string, ReportSnapshot>, value: ReportSnapshot) {
 }
 
 export function Reports(props: Props) {
-  return <ProjectReports key={`${props.projectId}:${props.actorId}`} {...props} />;
+  return <ProjectReports key={JSON.stringify([props.projectId, props.actorId, props.initialBlockerScope ?? null])} {...props} />;
 }
 function ProjectReports(props: Props) {
   const { data, projectId, actorId, notify } = props;
@@ -105,7 +106,7 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : 'live'),
+  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
   const [creating, setCreating] = useState(false),
@@ -551,7 +552,7 @@ function ProjectReports(props: Props) {
         </section>
       ) : view === 'blockers' ? (
         <section role="tabpanel" id="report-blockers-panel" aria-labelledby="report-blockers-tab">
-          <DeliveryBlockersReport {...props} />
+          <DeliveryBlockersReport {...props} initialScope={props.initialBlockerScope ?? undefined} />
         </section>
       ) : (
         <section role="tabpanel" id="report-saved-panel" aria-labelledby="report-saved-tab">

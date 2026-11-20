@@ -74,7 +74,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -710,20 +710,28 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   worklogs.registerRoutes(app,{actor,activity});
   timeReservations.registerRoutes(app,{actor,activity});
   registerFieldBreakdownRoutes(app,store,issueSchemas);
-  registerDeliveryBlockerRoutes(app, { store, schemas: issueSchemas, calendars, projectScope: req => apiKeys.projectScope(req) });
+  function createReportDocument(
+    req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>,
+    content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' = '주간 보고서',
+  ): DocPage {
+    const document = validateDocument({
+      id: capture.documentId, projectId: capture.projectId, parentId: null, title: capture.title, content, plainText: '',
+      icon: '📊', status: 'draft', version: 1, authorId: capture.actorId, createdAt: capture.createdAt, updatedAt: capture.createdAt,
+    });
+    store.put('documents', document);
+    revision(document, capture.actorId, '보고서에서 작성');
+    activity(req, 'document', document.id, kind === '주간 보고서' ? '주간 문서 생성' : '진행 차단 문서 생성', document.title);
+    for (const issueId of issueIds) store.put('resource_links', { id: uid(), issueId, documentId: document.id, kind });
+    notifyDocumentCreated(document);
+    return document;
+  }
+  registerDeliveryBlockerRoutes(app, {
+    store, schemas: issueSchemas, calendars, actor, documentCreation, projectScope: req => apiKeys.projectScope(req),
+    createDocument: (req, capture, content, issueIds) => createReportDocument(req, capture, content, issueIds, '진행 차단 회의'),
+  });
   reports.registerRoutes(app,{
     actor,
-    createDocument(req,snapshot,content,issueIds) {
-      const document=validateDocument({
-        id:snapshot.documentId,projectId:snapshot.projectId,parentId:null,title:snapshot.title,content,plainText:'',
-        icon:'📊',status:'draft',version:1,authorId:snapshot.actorId,createdAt:snapshot.createdAt,updatedAt:snapshot.createdAt,
-      });
-      store.put('documents',document);
-      revision(document,snapshot.actorId,'보고서에서 작성');
-      activity(req,'document',document.id,'주간 문서 생성',document.title);
-      for (const issueId of issueIds) store.put('resource_links',{id:uid(),issueId,documentId:document.id,kind:'주간 보고서'});
-      notifyDocumentCreated(document);
-    },
+    createDocument: createReportDocument,
   });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>validateIssue(proposed,before)});
