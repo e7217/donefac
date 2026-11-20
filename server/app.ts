@@ -956,6 +956,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.status(result.duplicate?200:201).json(result);
   });
+  app.post('/api/documents/:id/decision-links', (req, res) => {
+    const actorId = actor(req);
+    const result = documentFollowUp.linkExisting({ documentId: String(req.params.id), actorId, body: req.body }, {
+      checkVersion,
+      onLinked: (issue, document) => { activity(req, 'issue', issue.id, '문서 결정 근거 연결', document.title); },
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);
@@ -1483,7 +1491,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const validateDecisionLink = (link: ResourceLink, live: boolean) => {
       if (!link || typeof link !== 'object' || !Object.hasOwn(link,'documentSource')) return;
       if (data.schemaVersion < 36) fail('문서 결정 근거를 포함한 백업은 schemaVersion 36이 필요합니다.');
-      if (link.kind !== '후속 업무') fail('문서 결정 근거는 문서에서 만든 후속 업무에 연결해야 합니다.');
+      if (data.schemaVersion < 48 && link.kind !== '후속 업무') fail('기존 업무에 연결한 문서 결정 근거를 포함한 백업은 schemaVersion 48이 필요합니다.');
       validateDocumentDecisionSource(link.documentSource, link.documentId, revisionsById, live || importedDocumentIds.has(link.documentId));
     };
     for (const link of data.resourceLinks as ResourceLink[]) validateDecisionLink(link, true);
@@ -1628,7 +1636,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
-    if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message});
+    if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});

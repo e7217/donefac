@@ -22,7 +22,8 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
-import { DocumentSelectionFollowUp } from './DocumentSelectionFollowUp';
+import { DocumentSelectionActions } from './DocumentSelectionActions';
+import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
 import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
@@ -41,6 +42,7 @@ type Props = FeatureProps & {
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
 };
+type DocumentIssueAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource };
 type Draft = {
   id: string; title: string; content: RichContent; plainText: string;
   status: DocPage['status']; parentId: string | null; expectedVersion: number;
@@ -112,12 +114,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const editorWrap = useRef<HTMLDivElement>(null);
   const [issueSearch, setIssueSearch] = useState('');
   const [linkBusy, setLinkBusy] = useState(false);
-  const [followUpSource, setFollowUpSource] = useState<FollowUpSource | null>(null);
-  const followUpOpener = useRef<HTMLButtonElement>(null);
-  const closeFollowUp = useCallback(() => {
-    const opener = followUpOpener.current;
-    setFollowUpSource(null);
-    followUpOpener.current = null;
+  const [issueAction, setIssueAction] = useState<DocumentIssueAction | null>(null);
+  const issueActionOpener = useRef<HTMLButtonElement>(null);
+  const closeIssueAction = useCallback(() => {
+    const opener = issueActionOpener.current;
+    setIssueAction(null);
+    issueActionOpener.current = null;
     requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
   }, []);
   const [referencesRefreshing, setReferencesRefreshing] = useState(false);
@@ -475,7 +477,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function selectDocument(id: string) {
     if (id === selectedDocumentId) return;
-    if (followUpSource) {
+    if (issueAction) {
       if (window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) onSelectDocument(id);
       return;
     }
@@ -771,15 +773,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     selectionUnavailable = '최신 저장본을 확인한 뒤 선택한 내용을 연결할 수 있습니다.';
   }
   function openFollowUp(page: DocPage, opener: HTMLButtonElement, sourceSelection?: DocumentSourceSelection) {
-    followUpOpener.current = opener;
-    setFollowUpSource({ id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection });
+    issueActionOpener.current = opener;
+    setIssueAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
+  }
+  function openDecisionLink(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
+    issueActionOpener.current = opener;
+    setIssueAction({ kind: 'link', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueBlock={bodyReadOnly ? undefined : openIssueBlock}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || followUpSource)}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || issueAction)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         <div className="docs-tree-content">
@@ -857,8 +863,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('접기 블록 모두 펼치기', <ChevronRight size={15} />, () => unfoldDetails(editor))}
                 {editor?.isActive('details') && button('접기 블록 해제', <Unlink size={15} />, () => unwrapDetails(editor))}
                 {button('파일 첨부', <Paperclip size={15} />, () => { setSidebarOpen(true); setSideTab('attachments'); })}
-                <DocumentSelectionFollowUp key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable}
-                  onOpen={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }} />
+                <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable}
+                  onCreate={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }}
+                  onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }} />
               </div>
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
@@ -922,8 +929,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </> : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
-    {followUpSource && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
-      sourceDocument={followUpSource} onClose={closeFollowUp} />}
+    {issueAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
+      sourceDocument={issueAction.source} onClose={closeIssueAction} />}
+    {issueAction?.kind === 'link' && <DocumentDecisionLinkDialog source={issueAction.source} data={data} actorId={actorId}
+      refresh={refresh} notify={notify} onClose={closeIssueAction} />}
     {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} onClose={closePublication} notify={notify} refreshDocument={refresh} />}

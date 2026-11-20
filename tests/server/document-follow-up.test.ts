@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, DocPage, DocRevision, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DocPage, DocRevision, DocumentSourceSelection, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const commonTarget = 'project-team';
@@ -27,6 +27,7 @@ type Backup = WorkspaceSnapshot & {
   trashEntries: { id: string; resourceId: string; resourceLinks: ResourceLink[] }[];
 };
 const pathFor = (documentId: string) => `/documents/${documentId}/follow-up-issues`;
+const decisionPathFor = (documentId: string) => `/documents/${documentId}/decision-links`;
 
 async function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-follow-up-'));
@@ -64,6 +65,12 @@ async function fixture(t: TestContext) {
 
 function followUp(document: DocPage, target: string, title: string): FollowUpInput {
   return { requestId: randomUUID(), expectedDocumentVersion: document.version, issue: { projectId: target, title } };
+}
+
+function decisionLink(document: DocPage, issue: Issue, sourceSelection: DocumentSourceSelection = {
+  from: 1, to: document.plainText.length + 1, text: document.plainText,
+}) {
+  return { requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id, sourceSelection };
 }
 
 test('project documents enforce their project and common documents link to the explicit target without changing the document', async t => {
@@ -220,7 +227,7 @@ test('the selected decision is bound to its exact stored source through edits, r
     assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), liveState);
   }
   await call('/import', 'POST', { data: { ...activeBackup, schemaVersion: 35 } }, 400);
-  await call('/import', 'POST', { data: activeBackup });
+  await call('/import', 'POST', { data: { ...activeBackup, schemaVersion: 47 } });
   assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.find(link => link.id === storedLink.id), created.link);
   assert.deepEqual(await call<DocRevision>(revisionPath), original);
 
@@ -236,7 +243,7 @@ test('the selected decision is bound to its exact stored source through edits, r
     ...storedContext, revisionId: wrongOwner.id,
   };
   await call('/import', 'POST', { data: invalidArchive }, 400);
-  await call('/import', 'POST', { data: archivedBackup });
+  await call('/import', 'POST', { data: { ...archivedBackup, schemaVersion: 47 } });
   assert.deepEqual(await call<DocRevision>(revisionPath), original);
   await call(`/trash/${archived.trashEntryId}/restore`, 'POST', {});
   assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.find(link => link.id === storedLink.id), created.link);
@@ -280,4 +287,158 @@ test('a missing source snapshot is recorded in the same transaction as its decis
   assert.deepEqual(stored.content, doc.content);
   assert.deepEqual(created.link.documentSource, { ...sourceSelection, revisionId: stored.id });
   assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).documents.find(page => page.id === doc.id), doc);
+});
+
+test('attaching a decision to an existing cross-project issue preserves the whole-document relation and the two resources', async t => {
+  const { call } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '설계 결정 회의록', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId: commonTarget, title: '이미 등록한 합성 업무', description: '기존 업무 설명' }, 201);
+  const ordinary = await call<ResourceLink>('/resource-links', 'POST', { issueId: issue.id, documentId: doc.id, kind: '설계 참고' }, 201);
+  const path = decisionPathFor(doc.id);
+  const input = decisionLink(doc, issue, { from: 1, to: '합성 결정'.length + 1, text: '합성 결정' });
+  const [initialRevision] = await call<DocRevision[]>(`/documents/${doc.id}/revisions`);
+  const before = await call<WorkspaceSnapshot>('/workspace');
+
+  await call(decisionPathFor('missing-document'), 'POST', input, 404);
+  await call(path, 'POST', { ...input, issueId: 'missing-issue' }, 404);
+  await call(path, 'POST', { ...input, requestId: 'invalid' }, 400);
+  await call(path, 'POST', { ...input, expectedDocumentVersion: doc.version + 1 }, 409);
+  await call(path, 'POST', { ...input, sourceSelection: { ...input.sourceSelection, text: '선택 내용 위조' } }, 409);
+  await call(path, 'POST', { ...input, sourceSelection: { ...input.sourceSelection, from: input.sourceSelection.to } }, 400);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+  assert.deepEqual(await call<DocRevision[]>(`/documents/${doc.id}/revisions`), [initialRevision]);
+
+  const attached = await call<Created>(path, 'POST', input, 201);
+  assert.deepEqual(attached, {
+    issue,
+    link: { ...ordinary, documentSource: { ...input.sourceSelection, revisionId: initialRevision.id } },
+    duplicate: false,
+  });
+  const saved = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(saved.issues, before.issues);
+  assert.deepEqual(saved.documents, before.documents);
+  assert.deepEqual(saved.resourceLinks.filter(link => link.documentId === doc.id), [attached.link]);
+  const priorActivityIds = new Set(before.activities.map(activity => activity.id));
+  const [entry, ...unexpected] = saved.activities.filter(activity => !priorActivityIds.has(activity.id));
+  assert.ok(entry);
+  assert.deepEqual(unexpected, []);
+  assert.equal(entry.resourceId, issue.id);
+  assert.equal(entry.resourceType, 'issue');
+  assert.equal(entry.actorId, actorId);
+
+  const repeat = await call<Created>(path, 'POST', { ...input, requestId: randomUUID() });
+  assert.deepEqual(repeat, { ...attached, duplicate: true });
+  await call(path, 'POST', decisionLink(doc, issue, { from: 1 + '합성 '.length, to: doc.plainText.length + 1, text: '결정 원문' }), 409);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), saved);
+  assert.deepEqual(await call<DocRevision[]>(`/documents/${doc.id}/revisions`), [initialRevision]);
+});
+
+test('an existing-issue decision receipt survives document edits and restart and cannot resurrect an unlinked relation', async t => {
+  const { call, restart } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '결정 연결 재시도', content }, 201);
+  const otherDoc = await call<DocPage>('/documents', 'POST', { projectId, title: '같은 선택이 있는 다른 문서', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId, title: '결정 내용을 연결할 업무' }, 201);
+  const otherIssue = await call<Issue>('/issues', 'POST', { projectId, title: '다른 업무' }, 201);
+  const input = decisionLink(doc, issue);
+  const path = decisionPathFor(doc.id);
+  const attached = await call<Created>(path, 'POST', input, 201);
+  assert.equal(attached.duplicate, false);
+  assert.equal(attached.link.issueId, issue.id);
+  assert.equal(attached.link.documentId, doc.id);
+  assert.ok(attached.link.documentSource);
+
+  const edited = await call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, title: '문서 수정 후 재시도' });
+  await restart();
+  assert.deepEqual(await call<Created>(path, 'POST', input), { ...attached, duplicate: true });
+  await call(path, 'POST', input, 409, { 'X-Actor-Id': 'user-min' });
+  await call(decisionPathFor(otherDoc.id), 'POST', input, 409);
+  await call(path, 'POST', { ...input, issueId: otherIssue.id }, 409);
+  await call(path, 'POST', { ...input, expectedDocumentVersion: edited.version }, 409);
+  await call(path, 'POST', { ...input, requestId: randomUUID() }, 409);
+
+  await call(`/resource-links/${attached.link.id}`, 'DELETE');
+  await call(path, 'POST', input, 409);
+  assert.equal((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.some(link => link.documentId === doc.id), false);
+  const reattached = await call<Created>(path, 'POST', decisionLink(edited, issue), 201);
+  assert.notEqual(reattached.link.id, attached.link.id);
+  await call(path, 'POST', input, 409);
+  assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.filter(link => link.documentId === doc.id), [reattached.link]);
+});
+
+test('failure at an existing-issue receipt rolls back its source snapshot, relation upgrade and activity', async t => {
+  const { call, directory } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '결정 저장 합성 문서', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId, title: '이미 연결한 업무' }, 201);
+  const ordinary = await call<ResourceLink>('/resource-links', 'POST', { issueId: issue.id, documentId: doc.id, kind: '기존 참고' }, 201);
+  const input = decisionLink(doc, issue);
+  const path = decisionPathFor(doc.id);
+  const revisionsPath = `/documents/${doc.id}/revisions`;
+  const before = await call<WorkspaceSnapshot>('/workspace');
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    // A saved collaboration version may exist before its corresponding checkpoint.
+    observer.prepare('DELETE FROM revisions WHERE document_id=?').run(doc.id);
+    observer.exec("CREATE TRIGGER fail_decision_link_receipt BEFORE INSERT ON document_decision_link_requests BEGIN SELECT RAISE(ABORT, 'synthetic decision receipt failure'); END");
+    await call(path, 'POST', input, 500);
+    assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+    assert.deepEqual(await call<DocRevision[]>(revisionsPath), []);
+  } finally {
+    observer.exec('DROP TRIGGER IF EXISTS fail_decision_link_receipt');
+    observer.close();
+  }
+
+  const attached = await call<Created>(path, 'POST', input, 201);
+  const [revision] = await call<DocRevision[]>(revisionsPath);
+  assert.equal(revision.version, doc.version);
+  assert.deepEqual(revision.content, doc.content);
+  assert.deepEqual(attached.issue, issue);
+  assert.deepEqual(attached.link, { ...ordinary, documentSource: { ...input.sourceSelection, revisionId: revision.id } });
+  const saved = await call<WorkspaceSnapshot>('/workspace');
+  assert.equal(saved.activities.filter(activity => !before.activities.some(old => old.id === activity.id)).length, 1);
+});
+
+test('an existing-issue decision link preserves its exact source in live and trashed native backups', async t => {
+  const { call } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '결정 당시 원문', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId, title: '결정 근거를 보관할 기존 업무' }, 201);
+  const otherIssue = await call<Issue>('/issues', 'POST', { projectId, title: '결정 근거에 새로 연결할 업무' }, 201);
+  const ordinary = await call<ResourceLink>('/resource-links', 'POST', { issueId: issue.id, documentId: doc.id, kind: '설계 참고' }, 201);
+  const input = decisionLink(doc, issue);
+  const path = decisionPathFor(doc.id);
+  const attached = await call<Created>(path, 'POST', input, 201);
+  assert.equal(attached.link.id, ordinary.id);
+  const fresh = await call<Created>(path, 'POST', decisionLink(doc, otherIssue), 201);
+  const links = [attached.link, fresh.link];
+  const revisionPath = `/documents/${doc.id}/include-revisions/${attached.link.documentSource!.revisionId}`;
+  const original = await call<DocRevision>(revisionPath);
+  assert.equal(original.title, doc.title);
+  assert.equal(original.plainText, input.sourceSelection.text);
+  await call<DocPage>(`/documents/${doc.id}`, 'PATCH', {
+    expectedVersion: doc.version, title: '새로 정리한 문서', content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '갱신한 결정 내용' }] }] },
+  });
+
+  const liveBackup = await call<Backup>('/export');
+  assert.equal(liveBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.deepEqual(liveBackup.resourceLinks.filter(link => link.documentId === doc.id), links);
+  const oldLive = await call<{ error: string }>('/import', 'POST', { data: { ...liveBackup, schemaVersion: 47 } }, 400);
+  assert.match(oldLive.error, /schemaVersion 48/);
+  await call('/import', 'POST', { data: liveBackup });
+  await call(path, 'POST', input, 409);
+  const restored = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(restored.resourceLinks.filter(link => link.documentId === doc.id), links);
+  assert.deepEqual(await call<DocRevision>(revisionPath), original);
+  const current = restored.documents.find(document => document.id === doc.id);
+  assert.ok(current);
+
+  const trash = await call<{ trashEntryId: string }>(`/documents/${doc.id}`, 'DELETE', { expectedVersion: current.version });
+  const trashedBackup = await call<Backup>('/export');
+  assert.equal(trashedBackup.resourceLinks.some(link => link.documentId === doc.id), false);
+  assert.deepEqual(trashedBackup.trashEntries.find(entry => entry.id === trash.trashEntryId)?.resourceLinks, links);
+  const oldTrash = await call<{ error: string }>('/import', 'POST', { data: { ...trashedBackup, schemaVersion: 47 } }, 400);
+  assert.match(oldTrash.error, /schemaVersion 48/);
+  await call('/import', 'POST', { data: trashedBackup });
+  assert.deepEqual(await call<DocRevision>(revisionPath), original);
+  await call(`/trash/${trash.trashEntryId}/restore`, 'POST', {});
+  assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.filter(link => link.documentId === doc.id), links);
+  assert.deepEqual(await call<DocRevision>(revisionPath), original);
 });

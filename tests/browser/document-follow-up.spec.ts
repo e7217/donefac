@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import type { DocPage, DocRevision, DocumentFollowUpResult, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import type { CollaborationSession } from '../../shared/collaboration';
+import type { DocPage, DocRevision, DocumentFollowUpResult, DocumentIssueLinkResult, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
@@ -40,6 +41,20 @@ async function openFollowUp(page: Page) {
   const dialog = page.getByRole('dialog', { name: '후속 업무 만들기', exact: true });
   await expect(dialog).toBeVisible();
   return dialog;
+}
+
+async function selectFirstParagraph(editor: Locator, from: number, to: number) {
+  await editor.evaluate((element, rangeOffsets) => {
+    const text = element.querySelector(':scope > p')?.firstChild;
+    const selection = element.ownerDocument.getSelection();
+    if (!text || !selection) throw new Error('Expected selection in the saved paragraph');
+    element.focus();
+    const range = element.ownerDocument.createRange();
+    range.setStart(text, rangeOffsets.from);
+    range.setEnd(text, rangeOffsets.to);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, { from, to });
 }
 
 test('360px 문서에서 후속 업무 응답을 잃어도 같은 요청으로 확인하고 초안을 유지한다', async ({ page, request }) => {
@@ -229,5 +244,172 @@ test('360px 문서에서 고른 본문을 후속 업무에 첨부하고 최초 �
     await expect(evidence.getByRole('button', { name: '원문 저장본 접기', exact: true })).toBeVisible();
   } finally {
     await cleanupDecision(request, document.id, issueTitle);
+  }
+});
+
+test('기존 티켓에 결정 근거를 추가하고 응답 유실 뒤 같은 연결과 원문을 복구한다', async ({ page, context, request }) => {
+  test.setTimeout(85_000);
+  const { projects: [documentProject, issueProject] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const title = `결정 회의록 ${suffix}`;
+  const issueTitle = `기존 작업 ${suffix}`;
+  const prefix = '배포 회의 결정. ';
+  const quote = '작업 전 계측 기준을 합의한다.';
+  const trailing = ' 담당자는 작업 전에 확인한다.';
+  const body = `${prefix}${quote}${trailing}`;
+  const source = await createDecision(request, documentProject.id, title, {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: body }] }],
+  });
+  const attempts: Record<string, unknown>[] = [];
+  let issuePage: Page | undefined;
+  try {
+    const created = await request.post('/api/issues', { data: {
+      projectId: issueProject.id, title: issueTitle, description: '이미 담당자가 검토 중인 작업',
+    } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    const plainResponse = await request.post('/api/resource-links', { data: { issueId: issue.id, documentId: source.id, kind: '설계 참고' } });
+    expect(plainResponse.status(), await plainResponse.text()).toBe(201);
+    const plain = await plainResponse.json() as ResourceLink;
+    const [original] = await (await request.get(`/api/documents/${source.id}/revisions`)).json() as DocRevision[];
+    await openDecision(page, source, documentProject.id);
+    const action = page.getByRole('button', { name: '선택한 본문을 기존 업무에 연결', exact: true });
+    await expect(action).toBeDisabled();
+    const documentTitle = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    const draftTitle = `${title} 미저장 제목`;
+    await documentTitle.fill(draftTitle);
+    const editor = page.locator('.docs-prose');
+    await selectFirstParagraph(editor, prefix.length, prefix.length + quote.length);
+    await expect(action).toBeEnabled();
+    await action.click();
+
+    const dialog = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    await expect(dialog.locator('blockquote')).toHaveText(quote);
+    await dialog.getByRole('combobox', { name: '프로젝트', exact: true }).selectOption(issueProject.id);
+    await dialog.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
+    await dialog.getByRole('radio', { name: new RegExp(`${issue.key}.*${issueTitle}`) }).check();
+
+    const path = `/api/documents/${source.id}/decision-links`;
+    await page.route(`**${path}`, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postDataJSON() as Record<string, unknown>);
+      if (attempts.length === 1) {
+        expect((await route.fetch()).status()).toBe(201);
+        await route.abort('failed');
+      } else await route.continue();
+    });
+    await dialog.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+    const retry = dialog.getByRole('button', { name: '연결 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    const recovery = page.waitForResponse(response => response.url().endsWith(path) && response.request().method() === 'POST');
+    await retry.click();
+    const response = await recovery;
+    expect(response.status(), await response.text()).toBe(200);
+    const result = await response.json() as DocumentIssueLinkResult;
+    const sourceSelection = { from: 1 + prefix.length, to: 1 + prefix.length + quote.length, text: quote };
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ issueId: issue.id, expectedDocumentVersion: source.version, sourceSelection });
+    expect(attempts[1]).toEqual(attempts[0]);
+    expect(result).toEqual({ issue, duplicate: true, link: { ...plain, documentSource: { ...sourceSelection, revisionId: original.id } } });
+    await expect(dialog).toHaveCount(0);
+    await expect(documentTitle).toHaveValue(draftTitle);
+    await expect(editor).toContainText(body);
+    await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+    expect((await workspace(request)).resourceLinks.filter(link => link.documentId === source.id)).toEqual([result.link]);
+
+    const edited = await request.patch(`/api/documents/${source.id}`, { data: {
+      expectedVersion: source.version, content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '회의록 개정 내용' }] }] },
+    } });
+    expect(edited.ok(), await edited.text()).toBe(true);
+    issuePage = await context.newPage();
+    await issuePage.goto(`/#/${issueProject.id}/issues?issue=${issue.id}`);
+    const panel = issuePage.getByRole('dialog', { name: issueTitle, exact: true });
+    const evidence = panel.getByRole('region', { name: '결정 근거', exact: true });
+    await expect(evidence.locator('blockquote')).toHaveText(quote);
+    await evidence.getByRole('button', { name: '원문 저장본 열기', exact: true }).click();
+    const saved = evidence.getByRole('region', { name: `결정 근거 원문 ${title}`, exact: true });
+    await expect(saved).toContainText(body);
+    await expect(saved).not.toContainText('회의록 개정 내용');
+  } finally {
+    if (issuePage) await issuePage.close();
+    await cleanupDecision(request, source.id, issueTitle);
+  }
+});
+
+test('공동 편집에서 문장이 바뀌면 기존 업무에 연결하기 전에 최신 원문을 다시 선택한다', async ({ page, context, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const oldText = '처음 검토한 배포 조건';
+  const currentText = '공동 편집에서 합의한 배포 조건';
+  const title = `공동 편집 결정 ${suffix}`;
+  const issueTitle = `공동 편집의 기존 작업 ${suffix}`;
+  const source = await createDecision(request, project.id, title, {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: oldText }] }],
+  });
+  const peer = await context.newPage();
+  try {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: issueTitle } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    const enabled = await request.post(`/api/documents/${source.id}/collaboration/enable`, { data: { expectedVersion: source.version } });
+    expect(enabled.ok(), await enabled.text()).toBe(true);
+    const session = await enabled.json() as CollaborationSession;
+    await openDecision(page, source, project.id);
+    await openDecision(peer, source, project.id);
+    const editor = page.locator('.docs-live-prose');
+    const peerEditor = peer.locator('.docs-live-prose');
+    await expect(editor).toHaveText(oldText);
+    await expect(peerEditor).toHaveText(oldText);
+    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+
+    const action = page.getByRole('button', { name: '선택한 본문을 기존 업무에 연결', exact: true });
+    const dialog = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    const submit = dialog.getByRole('button', { name: '선택한 업무에 연결', exact: true });
+    async function chooseIssue() {
+      await action.click();
+      await dialog.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
+      await dialog.getByRole('radio', { name: `${issue.key} ${issueTitle}`, exact: true }).check();
+    }
+    await selectFirstParagraph(editor, 0, oldText.length);
+    await chooseIssue();
+    await expect(dialog.locator('blockquote')).toHaveText(oldText);
+
+    await selectFirstParagraph(peerEditor, 0, oldText.length);
+    await peer.keyboard.insertText(currentText);
+    await expect(page.locator('.docs-live-prose')).toHaveText(currentText);
+    await expect.poll(async () => (await workspace(request)).documents.find(item => item.id === source.id)?.version ?? 0).toBeGreaterThan(session.document.version);
+    const path = `/api/documents/${source.id}/decision-links`;
+    const linked = () => page.waitForResponse(response => response.url().endsWith(path) && response.request().method() === 'POST');
+    const failure = linked();
+    await submit.click();
+    expect((await failure).status()).toBe(409);
+    await expect(dialog.getByRole('alert')).toContainText('본문을 다시 선택해 주세요');
+    await expect(submit).toBeDisabled();
+    expect((await workspace(request)).resourceLinks.some(link => link.documentId === source.id)).toBe(false);
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+
+    await selectFirstParagraph(editor, 0, currentText.length);
+    await chooseIssue();
+    await expect(dialog.locator('blockquote')).toHaveText(currentText);
+    const success = linked();
+    await submit.click();
+    const response = await success;
+    expect(response.status(), await response.text()).toBe(201);
+    const saved = await response.json() as DocumentIssueLinkResult;
+    expect(saved.link.documentSource).toMatchObject({ text: currentText, from: 1, to: currentText.length + 1 });
+    const revision = await request.get(`/api/documents/${source.id}/include-revisions/${saved.link.documentSource!.revisionId}`);
+    expect(revision.ok(), await revision.text()).toBe(true);
+    expect((await revision.json() as DocRevision).plainText).toBe(currentText);
+    await expect(dialog).toHaveCount(0);
+  } finally {
+    await peer.close();
+    await cleanupDecision(request, source.id, issueTitle);
   }
 });

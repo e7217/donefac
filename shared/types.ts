@@ -567,7 +567,8 @@ export interface Dependency { id: string; predecessorId: string; successorId: st
 export interface DocumentSourceSelection { from: number; to: number; text: string }
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
-export interface DocumentFollowUpResult { issue: Issue; link: ResourceLink; duplicate: boolean }
+export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; duplicate: boolean }
+export type DocumentFollowUpResult = DocumentIssueLinkResult;
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface AttachmentHead extends Attachment { currentVersionId: string; versionCount: number; hasVersionHistory: boolean }

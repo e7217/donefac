@@ -3,7 +3,7 @@
 import { useId } from 'react';
 import { TextSelection } from '@tiptap/pm/state';
 import { useEditorState, type Editor } from '@tiptap/react';
-import { ListPlus } from 'lucide-react';
+import { Link2, ListPlus } from 'lucide-react';
 import { DOCUMENT_SELECTION_TEXT_LIMIT, documentSelectionText } from '../../shared/document-selection';
 import type { DocumentSourceSelection } from '../../shared/types';
 
@@ -16,10 +16,13 @@ function readSelection(editor: Editor | null): { state: 'empty' | 'invalid' } | 
   return text === null ? { state: 'invalid' } : { state: 'ready', range: { from, to, text } };
 }
 
-export function DocumentSelectionFollowUp({ editor, unavailable, onOpen }: {
+type OpenSelection = (range: DocumentSourceSelection, opener: HTMLButtonElement) => void;
+
+export function DocumentSelectionActions({ editor, unavailable, onCreate, onLink }: {
   editor: Editor | null;
   unavailable: string | null;
-  onOpen: (range: DocumentSourceSelection, opener: HTMLButtonElement) => void;
+  onCreate: OpenSelection;
+  onLink: OpenSelection;
 }) {
   const hintId = useId();
   const selection = useEditorState({ editor, selector: ({ editor: instance }) => readSelection(instance) });
@@ -27,13 +30,15 @@ export function DocumentSelectionFollowUp({ editor, unavailable, onOpen }: {
     : selection?.state === 'ready' ? unavailable : null;
 
   return <>
-    <button type="button" className="btn docs-selection-follow-up" disabled={selection?.state !== 'ready' || Boolean(unavailable)}
-      aria-describedby={hint ? hintId : undefined} onMouseDown={event => event.preventDefault()} onClick={event => {
+    {[
+      { label: '선택한 본문으로 후속 업무 만들기', Icon: ListPlus, open: onCreate },
+      { label: '선택한 본문을 기존 업무에 연결', Icon: Link2, open: onLink },
+    ].map(({ label, Icon, open }) => <button key={label} type="button" className="btn docs-selection-action"
+      disabled={selection?.state !== 'ready' || Boolean(unavailable)} aria-describedby={hint ? hintId : undefined}
+      onMouseDown={event => event.preventDefault()} onClick={event => {
         const current = readSelection(editor);
-        if (current.state === 'ready' && !unavailable) onOpen(current.range, event.currentTarget);
-      }}>
-      <ListPlus size={15} aria-hidden="true" />선택한 본문으로 후속 업무 만들기
-    </button>
-    {hint && <span id={hintId} className="docs-selection-follow-up-hint" role="status">{hint}</span>}
+        if (current.state === 'ready' && !unavailable) open(current.range, event.currentTarget);
+      }}><Icon size={15} aria-hidden="true" />{label}</button>)}
+    {hint && <span id={hintId} className="docs-selection-action-hint" role="status">{hint}</span>}
   </>;
 }
