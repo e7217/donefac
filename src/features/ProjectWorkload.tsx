@@ -11,6 +11,7 @@ import { errorMessage } from './schedule-utils';
 import { WorkloadCapacityEditor } from './WorkloadCapacityEditor';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import { WorkloadLevelDialog } from './WorkloadLevelDialog';
+import { WorkloadOverloadList } from './WorkloadOverloadList';
 import './project-workload.css';
 
 const PAGE_DAYS = 14;
@@ -23,6 +24,7 @@ export const WORKLOAD_INCOMPLETE_REASONS: Record<WorkloadIncompleteReason, strin
 };
 
 type WorkloadRange = { startDate: string; endDate: string };
+type LevelSelection = WorkloadRange & { initialUserId?: string };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
 export type WorkloadSelection = { userId: string; date: string };
 type WorkloadProps = FeatureProps & WorkloadRange & {
@@ -50,6 +52,10 @@ const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
 const weekday = (value: string) => weekdays[new Date(`${value}T00:00:00Z`).getUTCDay()];
 const displayMinutes = formatWorklogMinutes;
 
+export function focusWorkloadButton(...buttons: (HTMLButtonElement | null)[]) {
+  buttons.find(button => button?.isConnected && !button.disabled)?.focus();
+}
+
 export function ProjectWorkload(props: WorkloadProps) {
   return <WorkloadPanel key={`${props.projectId}:${props.actorId}`} {...props} />;
 }
@@ -59,12 +65,16 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
   const input = useWorkloadInput(data, projectId, startDate, endDate);
   const [localCapacity, setLocalCapacity] = useState<ProjectWorkloadCapacity | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [levelOpen, setLevelOpen] = useState(false);
+  const [levelSelection, setLevelSelection] = useState<LevelSelection | null>(null);
   const [pageStart, setPageStart] = useState<string | null>(null);
   const [selected, setSelected] = useState<WorkloadSelection | null>(null);
   const [missingPage, setMissingPage] = useState(0);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const levelButton = useRef<HTMLButtonElement>(null);
+  const levelOpener = useRef<HTMLButtonElement>(null);
+  const detailSection = useRef<HTMLElement>(null);
+  const detailCloseButton = useRef<HTMLButtonElement>(null);
+  const detailOpener = useRef<HTMLButtonElement>(null);
   const capacity = localCapacity && localCapacity.version > input.capacity.version ? localCapacity : input.capacity;
   const result = useMemo(() => {
     try { return { workload: calculateProjectWorkload({ ...input, capacity }), error: '' }; }
@@ -79,19 +89,50 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
   const focusedDay = selected && days.some(day => day.date === selected.date) && focusedRow?.days.find(day => day.date === selected.date);
   const incomplete = workload?.incomplete ?? [];
   const missingOffset = Math.min(missingPage, Math.max(0, Math.ceil(incomplete.length / INPUT_PAGE) - 1)) * INPUT_PAGE;
+  const levelDisabled = !actorId || editorOpen || scheduleBusy || Boolean(levelSelection);
 
   function movePage(amount: number) {
     const start = Math.min(calendarDay(endDate), Math.max(calendarDay(startDate), calendarDay(startDate) + first + amount));
     setPageStart(calendarDate(start));
     setSelected(null);
+    detailOpener.current = null;
+  }
+  function selectDay(selection: WorkloadSelection | null, opener: HTMLButtonElement) {
+    detailOpener.current = selection ? opener : null;
+    setSelected(selection);
+  }
+  function selectOverload(selection: WorkloadSelection, opener: HTMLButtonElement) {
+    if (!days.some(day => day.date === selection.date)) {
+      const startDay = calendarDay(startDate);
+      const page = Math.floor((calendarDay(selection.date) - startDay) / PAGE_DAYS);
+      setPageStart(calendarDate(startDay + page * PAGE_DAYS));
+    }
+    selectDay(selection, opener);
+    requestAnimationFrame(() => {
+      detailSection.current?.focus({ preventScroll: true });
+      detailSection.current?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function closeDetails() {
+    const opener = detailOpener.current;
+    detailOpener.current = null;
+    setSelected(null);
+    requestAnimationFrame(() => focusWorkloadButton(opener, levelButton.current, settingsButton.current));
   }
   function closeEditor() {
     setEditorOpen(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
   }
+  function openLevel(opener: HTMLButtonElement, initialUserId?: string) {
+    if (onBeforeLevel && !onBeforeLevel()) return;
+    levelOpener.current = opener;
+    setLevelSelection({ initialUserId, startDate, endDate });
+  }
   function closeLevel() {
-    setLevelOpen(false);
-    requestAnimationFrame(() => (levelButton.current ?? settingsButton.current)?.focus());
+    const opener = levelOpener.current;
+    levelOpener.current = null;
+    setLevelSelection(null);
+    requestAnimationFrame(() => focusWorkloadButton(opener, detailCloseButton.current, levelButton.current, settingsButton.current));
   }
 
   return <section className="project-workload card" aria-label="담당자별 업무량">
@@ -99,8 +140,7 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
       <div><h2><BarChart3 size={17} />담당자별 업무량</h2><p>프로젝트의 완료·취소 전 업무에 입력한 계획 시간을 근무일에 나누어 표시합니다.</p></div>
       <div className="workload-heading-actions">
         {Boolean(workload?.overloadedCells) && onScheduleApplied && <button ref={levelButton} className="btn" type="button"
-          aria-haspopup="dialog" disabled={!actorId || editorOpen || scheduleBusy || levelOpen}
-          onClick={() => { if (!onBeforeLevel || onBeforeLevel()) setLevelOpen(true); }}>
+          aria-haspopup="dialog" disabled={levelDisabled} onClick={event => openLevel(event.currentTarget)}>
           <CalendarClock size={15} aria-hidden="true" />과부하 일정 조정
         </button>}
         <button ref={settingsButton} className="btn" type="button" onClick={() => setEditorOpen(true)} disabled={editorOpen} aria-expanded={editorOpen}>
@@ -108,7 +148,8 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
         </button>
       </div>
     </header>
-    {levelOpen && onScheduleApplied && <WorkloadLevelDialog projectId={projectId} actorId={actorId} startDate={startDate} endDate={endDate}
+    {levelSelection && onScheduleApplied && <WorkloadLevelDialog projectId={projectId} actorId={actorId}
+      startDate={levelSelection.startDate} endDate={levelSelection.endDate} initialUserId={levelSelection.initialUserId}
       projectName={data.projects.find(project => project.id === projectId)?.name ?? projectId}
       availableUserIds={workload?.rows.filter(row => row.overloadedDays > 0).map(row => row.userId) ?? []}
       selectedIssueIds={levelIssueIds} users={usersById} issues={issuesById}
@@ -123,6 +164,7 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
         <div className={workload.overloadedCells ? 'has-overload' : ''}><small>초과한 담당자·일</small><strong>{workload.overloadedCells.toLocaleString('ko-KR')}</strong></div>
         <div><small>입력 확인</small><strong>{incomplete.length.toLocaleString('ko-KR')}개</strong></div>
       </div>
+      <WorkloadOverloadList rows={workload.rows} users={usersById} selected={selected} onSelect={selectOverload} />
       {days.length > 0 && <>
         <div className="workload-period">
           <small>{startDate} ~ {endDate} · 하루 기본 {displayMinutes(capacity.defaultDailyMinutes)}</small>
@@ -130,17 +172,28 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
             <button className="btn btn-ghost" aria-label="이전 업무량 기간" disabled={first === 0} type="button" onClick={() => movePage(-PAGE_DAYS)}><ArrowLeft size={15} /></button>
             <input className="field" type="date" aria-label="업무량 시작일" min={startDate} max={endDate} value={days[0].date} onChange={event => {
               const date = event.target.value;
-              if (isCalendarDate(date) && date >= startDate && date <= endDate) { setPageStart(date); setSelected(null); }
+              if (isCalendarDate(date) && date >= startDate && date <= endDate) {
+                setPageStart(date);
+                setSelected(null);
+                detailOpener.current = null;
+              }
             }} />
             <button className="btn btn-ghost" aria-label="다음 업무량 기간" disabled={first + PAGE_DAYS >= workload.days.length} type="button" onClick={() => movePage(PAGE_DAYS)}><ArrowRight size={15} /></button>
           </div>
         </div>
-        <WorkloadTable days={days} rows={workload.rows} first={first} users={usersById} selected={selected} onSelect={setSelected} />
+        <WorkloadTable days={days} rows={workload.rows} first={first} users={usersById} selected={selected} onSelect={selectDay} />
       </>}
-      {selected && focusedDay && <section className="workload-detail" aria-label="날짜별 업무 배분">
+      {selected && focusedDay && <section ref={detailSection} tabIndex={-1} className="workload-detail" aria-label="날짜별 업무 배분">
         <div className="workload-section-heading">
           <div><h3>{usersById.get(selected.userId)?.name} · {selected.date}</h3><p>계획 {displayMinutes(focusedDay.scheduledMinutes)} · 가용 {displayMinutes(focusedDay.availableMinutes)}</p></div>
-          <button className="issue-icon-button" type="button" aria-label="업무 배분 닫기" onClick={() => setSelected(null)}><X size={16} /></button>
+          <div className="workload-detail-actions">
+            {focusedDay.scheduledMinutes > focusedDay.availableMinutes && onScheduleApplied &&
+              <button className="btn" type="button" aria-haspopup="dialog" disabled={levelDisabled}
+                onClick={event => openLevel(event.currentTarget, selected.userId)}>
+                <CalendarClock size={15} aria-hidden="true" />이 담당자 일정 조정
+              </button>}
+            <button ref={detailCloseButton} className="issue-icon-button" type="button" aria-label="업무 배분 닫기" onClick={closeDetails}><X size={16} /></button>
+          </div>
         </div>
         {focusedDay.allocations.length === 0 && <p className="workload-empty">배분된 작업 시간이 없습니다.</p>}
         <ul className="workload-items">
@@ -174,7 +227,7 @@ export function WorkloadTable({ days, rows, first = 0, users, selected, onSelect
   first?: number;
   users: ReadonlyMap<string, User>;
   selected: WorkloadSelection | null;
-  onSelect: (selection: WorkloadSelection | null) => void;
+  onSelect: (selection: WorkloadSelection | null, opener: HTMLButtonElement) => void;
 }) {
   const cellDescription = useId();
   return <div className="workload-scroll" role="region" aria-label="업무량 표 가로 스크롤" tabIndex={0}>
@@ -195,7 +248,7 @@ export function WorkloadTable({ days, rows, first = 0, users, selected, onSelect
               <button type="button" className={`workload-cell${overload ? ' is-overloaded' : ''}`} aria-pressed={isSelected} aria-label={label}
                 aria-describedby={`${descriptionId}-planned ${descriptionId}-available`}
                 data-scheduled-minutes={day.scheduledMinutes} data-available-minutes={day.availableMinutes}
-                onClick={() => onSelect(isSelected ? null : { userId: row.userId, date: day.date })}>
+                onClick={event => onSelect(isSelected ? null : { userId: row.userId, date: day.date }, event.currentTarget)}>
                 <strong id={`${descriptionId}-planned`}>{displayMinutes(day.scheduledMinutes)}</strong><small id={`${descriptionId}-available`}>{overload ? '초과 · ' : ''}가용 {displayMinutes(day.availableMinutes)}</small>
               </button>
             </td>;

@@ -17,13 +17,13 @@ type Receipt = ScheduleApplyResult | { applied: false };
 type TeamScope = {
   projectIds: string[];
   projects: ReadonlyMap<string, Project>;
-  initialUserId?: string;
 };
 
 type Props = {
   actorId: string;
   startDate: string;
   endDate: string;
+  initialUserId?: string;
   availableUserIds: string[];
   users: ReadonlyMap<string, User>;
   issues: ReadonlyMap<string, Issue>;
@@ -41,14 +41,13 @@ function isApplyResult(value: Receipt | null): value is ScheduleApplyResult {
   return Boolean(value && typeof value === 'object' && 'undoId' in value && typeof value.undoId === 'string' && value.undoId && Array.isArray(value.updated));
 }
 
-export function WorkloadLevelDialog({ projectId, projectName, team, actorId, startDate, endDate, availableUserIds,
+export function WorkloadLevelDialog({ projectId, projectName, team, actorId, startDate, endDate, initialUserId = '', availableUserIds,
   selectedIssueIds, users, issues, onDraftChange, onClose, onApplied }: Props) {
   const titleId = useId();
   const descriptionId = `${titleId}-description`;
   const dialog = useRef<HTMLDialogElement>(null);
   const assigneeInput = useRef<HTMLSelectElement>(null);
   const request = useRef<AbortController | null>(null);
-  const initialUserId = team?.initialUserId ?? '';
   const [userId, setUserId] = useState(initialUserId);
   const [selectedIds] = useState(() => selectedIssueIds ?? []);
   const [selectedOnly, setSelectedOnly] = useState(false);

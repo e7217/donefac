@@ -7,9 +7,10 @@ import { defaultTeamWorkloadCapacity } from '../../shared/team-workload-capacity
 import type { FeatureProps, TeamWorkloadCapacity, TeamWorkloadResult } from '../../shared/types';
 import { api } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
-import { WORKLOAD_INCOMPLETE_REASONS, WorkloadIssueLink, WorkloadTable, type WorkloadSelection } from './ProjectWorkload';
+import { focusWorkloadButton, WORKLOAD_INCOMPLETE_REASONS, WorkloadIssueLink, WorkloadTable, type WorkloadSelection } from './ProjectWorkload';
 import { WorkloadCapacityEditor } from './WorkloadCapacityEditor';
 import { WorkloadLevelDialog } from './WorkloadLevelDialog';
+import { WorkloadOverloadList } from './WorkloadOverloadList';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import { errorMessage } from './schedule-utils';
 import './project-workload.css';
@@ -70,6 +71,10 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
   const [received, setReceived] = useState<LoadResponse | null>(null);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const levelButton = useRef<HTMLButtonElement>(null);
+  const levelOpener = useRef<HTMLButtonElement>(null);
+  const detailSection = useRef<HTMLElement>(null);
+  const detailCloseButton = useRef<HTMLButtonElement>(null);
+  const detailOpener = useRef<HTMLButtonElement>(null);
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
   const usersById = useMemo(() => new Map(data.users.map(user => [user.id, user])), [data.users]);
   const issuesById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
@@ -110,10 +115,29 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
     ? availabilitySource(capacity, focusedUser.id, focusedDay.date, focusedCalendarDay.working) : '';
   const overloaded = rows.reduce((total, row) => total + row.overloadedDays, 0);
   const projectTitle = (id: string) => projectsById.get(id)?.name ?? '프로젝트 정보가 갱신되었습니다';
+  const levelDisabled = !actorId || !chosenProjects.length || !data.users.length || editorOpen || scheduleBusy || Boolean(levelSelection);
 
   function clearSelection() {
     setSelected(null);
     setMissingPage(0);
+    detailOpener.current = null;
+  }
+  function selectDay(selection: WorkloadSelection | null, opener: HTMLButtonElement) {
+    detailOpener.current = selection ? opener : null;
+    setSelected(selection);
+  }
+  function selectOverload(selection: WorkloadSelection, opener: HTMLButtonElement) {
+    selectDay(selection, opener);
+    requestAnimationFrame(() => {
+      detailSection.current?.focus({ preventScroll: true });
+      detailSection.current?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function closeDetails() {
+    const opener = detailOpener.current;
+    detailOpener.current = null;
+    setSelected(null);
+    requestAnimationFrame(() => focusWorkloadButton(opener, levelButton.current, settingsButton.current));
   }
   function changePeriod(date: string) {
     if (!isCalendarDate(date)) return;
@@ -131,13 +155,16 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
     setEditorOpen(false);
     requestAnimationFrame(() => settingsButton.current?.focus());
   }
-  function openLevel() {
+  function openLevel(opener: HTMLButtonElement, initialUserId = member?.id) {
     if (onBeforeLevel && !onBeforeLevel()) return;
-    setLevelSelection({ projectIds: chosenProjects.map(project => project.id), startDate, endDate, initialUserId: member?.id });
+    levelOpener.current = opener;
+    setLevelSelection({ projectIds: chosenProjects.map(project => project.id), startDate, endDate, initialUserId });
   }
   function closeLevel() {
+    const opener = levelOpener.current;
+    levelOpener.current = null;
     setLevelSelection(null);
-    requestAnimationFrame(() => (levelButton.current ?? settingsButton.current)?.focus());
+    requestAnimationFrame(() => focusWorkloadButton(opener, detailCloseButton.current, levelButton.current, settingsButton.current));
   }
   function updateCapacity(value: TeamWorkloadCapacity) {
     setLocalCapacity({ source: data, value });
@@ -158,7 +185,7 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
       <div><h2><Layers3 size={17} />프로젝트 간 작업량</h2><p>업무의 계획 시간은 각 프로젝트의 근무일에 나눕니다. 가용 시간은 팀원 한 명당 하루에 한 번 계산합니다.</p></div>
       <div className="workload-heading-actions">
         {onScheduleApplied && <button ref={levelButton} className="btn" type="button" aria-haspopup="dialog"
-          disabled={!actorId || !chosenProjects.length || !data.users.length || editorOpen || scheduleBusy || Boolean(levelSelection)} onClick={openLevel}>
+          disabled={levelDisabled} onClick={event => openLevel(event.currentTarget)}>
           <CalendarClock size={15} aria-hidden="true" />프로젝트 간 과부하 조정
         </button>}
         <button ref={settingsButton} className="btn" type="button" aria-expanded={editorOpen} disabled={editorOpen} onClick={() => setEditorOpen(true)}>
@@ -167,8 +194,8 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
       </div>
     </header>
     {levelSelection && onScheduleApplied && <WorkloadLevelDialog actorId={actorId}
-      startDate={levelSelection.startDate} endDate={levelSelection.endDate}
-      team={{ projectIds: levelSelection.projectIds, initialUserId: levelSelection.initialUserId, projects: projectsById }}
+      startDate={levelSelection.startDate} endDate={levelSelection.endDate} initialUserId={levelSelection.initialUserId}
+      team={{ projectIds: levelSelection.projectIds, projects: projectsById }}
       availableUserIds={data.users.map(user => user.id)} users={usersById} issues={issuesById}
       onDraftChange={onDraftChange} onClose={closeLevel} onApplied={onScheduleApplied} />}
     {editorOpen && <WorkloadCapacityEditor route={CAPACITY_ROUTE} users={data.users} current={capacity} defaultDate={startDate}
@@ -223,11 +250,19 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
         <div className={overloaded ? 'has-overload' : ''}><small>초과한 담당자·일</small><strong>{overloaded.toLocaleString('ko-KR')}</strong></div>
         <div><small>입력 확인</small><strong>{incomplete.length.toLocaleString('ko-KR')}개</strong></div>
       </div>
-      <WorkloadTable days={workload.days} rows={rows} users={usersById} selected={selected} onSelect={setSelected} />
-      {focusedUser && focusedDay && <section className="workload-detail" aria-label="프로젝트별 업무 배분">
+      <WorkloadOverloadList rows={rows} users={usersById} selected={selected} onSelect={selectOverload} />
+      <WorkloadTable days={workload.days} rows={rows} users={usersById} selected={selected} onSelect={selectDay} />
+      {focusedUser && focusedDay && <section ref={detailSection} tabIndex={-1} className="workload-detail" aria-label="프로젝트별 업무 배분">
         <div className="workload-section-heading">
           <div><h3>{focusedUser.name} · {focusedDay.date}</h3><p>계획 {formatWorklogMinutes(focusedDay.scheduledMinutes)} · 가용 {formatWorklogMinutes(focusedDay.availableMinutes)}{source ? ` · ${source}` : ''}</p></div>
-          <button className="issue-icon-button" type="button" aria-label="업무 배분 닫기" onClick={() => setSelected(null)}><X size={16} /></button>
+          <div className="workload-detail-actions">
+            {focusedDay.scheduledMinutes > focusedDay.availableMinutes && onScheduleApplied &&
+              <button className="btn" type="button" aria-haspopup="dialog" disabled={levelDisabled}
+                onClick={event => openLevel(event.currentTarget, focusedUser.id)}>
+                <CalendarClock size={15} aria-hidden="true" />이 담당자 일정 조정
+              </button>}
+            <button ref={detailCloseButton} className="issue-icon-button" type="button" aria-label="업무 배분 닫기" onClick={closeDetails}><X size={16} /></button>
+          </div>
         </div>
         {cellGroups.length === 0 && <p className="workload-empty">배분된 작업 시간이 없습니다.</p>}
         {cellGroups.map(([id, allocations]) => <div className="team-workload-breakdown" key={id}>

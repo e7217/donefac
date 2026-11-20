@@ -1,0 +1,58 @@
+.workload-overload-list {
+  min-width: 0;
+  margin: 10px 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.workload-overload-count {
+  color: var(--workload-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.workload-overload-list > ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 275px), 1fr));
+  gap: 5px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workload-overload-entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workload-overload-entry time {
+  color: var(--workload-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.workload-overload-entry strong { overflow-wrap: anywhere; }
+.workload-overload-entry > span { color: var(--workload-alert); }
+.workload-overload-entry:hover { border-color: var(--accent); }
+.workload-overload-entry[aria-pressed='true'] { background: var(--workload-alert-tint); border-color: var(--accent); }
+.workload-overload-list > .workload-page-actions .btn { min-height: 44px; }
+.workload-overload-entry:focus-visible,
+.workload-overload-list > .workload-page-actions .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+@media (max-width: 400px) {
+  .workload-overload-entry { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; }
+  .workload-overload-entry time { grid-column: 1 / -1; font-size: 11px; }
+}
