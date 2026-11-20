@@ -1,17 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { AlertCircle, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
 import type { CustomFieldValue, Dependency, FeatureProps, Issue, PlanningItem, PlanningKind, Project, SchedulePreview, User } from '../../shared/types';
-import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
+import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
 import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, dependencyScheduleWarning, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
+import { renderGanttExport } from '../../shared/gantt-export';
+import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { ApiError, patch, post, remove } from '../lib/api';
+import { downloadText } from '../lib/download';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
-import { issueSearchText, projectIssueSchema, requiredFieldLabels } from '../../shared/issue-schema';
+import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
@@ -259,7 +262,8 @@ function ProjectGantt(props: GanttProps) {
   }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
-  const hasProject = data.projects.some(project => project.id === projectId);
+  const project = data.projects.find(value => value.id === projectId);
+  const hasProject = Boolean(project);
   const sharedViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [data.savedViews, projectId]);
   const { sharedView, matchSharedView } = useMemo(() => {
@@ -290,10 +294,10 @@ function ProjectGantt(props: GanttProps) {
   }
   function chartRows(text: string, hideTerminal: boolean, scope?: PlanningItem) {
     const rows = sharedViewRows(locallyVisibleIssues(text, hideTerminal, scope));
-    return focusedIssue && focusDateEndpoint && !rows.some(issue => issue.id === focusedIssue.id)
-      ? [focusedIssue, ...rows] : rows;
+    const pinnedIssue = focusedIssue && focusDateEndpoint && !rows.some(issue => issue.id === focusedIssue.id) ? focusedIssue : undefined;
+    return { rows: pinnedIssue ? [pinnedIssue, ...rows] : rows, pinnedIssue };
   }
-  const issues = chartRows(query, hideDone, planningScope);
+  const { rows: issues, pinnedIssue } = chartRows(query, hideDone, planningScope);
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
   const milestones = useMemo(() => (data.milestones || []).filter(value => value.projectId === projectId), [data.milestones, projectId]);
   const historicalIssues = planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
@@ -419,17 +423,62 @@ function ProjectGantt(props: GanttProps) {
   });
   const todayPosition = (dayNumber(todayDate()) - range.start) * dayWidth;
   const chartRowCount = planningRows.length + issues.length + historicalIssues.length + milestones.length + historicalMilestones.length;
+  const exportDisabled = sharedViewUnavailable || chartRowCount === 0;
+  function downloadGantt() {
+    if (exportDisabled) return;
+    const filters: string[] = [];
+    if (sharedView) {
+      const { query: savedQuery, status, type, assigneeId, fieldFilter } = sharedView.filters;
+      filters.push(`공유 보기 · ${sharedView.name}`);
+      if (savedQuery) filters.push(`공유 보기 검색 · ${savedQuery}`);
+      if (status !== 'all') {
+        const label = projectStatuses(data, projectId).find(value => value.id === status)?.label;
+        filters.push(`상태 · ${label ?? '현재 상태 없음'}`);
+      }
+      if (type !== 'all') {
+        const label = projectIssueTypes(data, projectId, { includeArchived: true }).find(value => value.id === type)?.name;
+        filters.push(`유형 · ${label ?? '현재 유형 없음'}`);
+      }
+      if (assigneeId !== 'all') {
+        const name = assigneeId === 'none' ? '미지정' : data.users.find(value => value.id === assigneeId)?.name;
+        filters.push(`담당자 · ${name ?? '현재 담당자 없음'}`);
+      }
+      if (fieldFilter?.rules.length) filters.push(`사용자 정의 필드 조건 ${fieldFilter.rules.length}개`);
+      filters.push(...sharedPlanningLabels);
+      if (sharedGitlabFilter) filters.push(ISSUE_GITLAB_FILTER_LABELS[sharedGitlabFilter]);
+    }
+    if (query) filters.push(`업무 검색 · ${query}`);
+    if (hideDone) filters.push('완료 업무 숨기기');
+    if (planningScope) filters.push(`연결된 업무만 · ${PLAN_LABELS[planningScope.kind]} ${planningScope.name}`);
+    if (pinnedIssue) filters.push(`업무 위치로 추가 표시 · ${pinnedIssue.key}`);
+    const visibleDependencies = dependencies.map(({ dependency }) => dependency);
+    const visibleDependencyIds = new Set(visibleDependencies.map(dependency => dependency.id));
+    const report = buildGanttExportReport({
+      title: project ? `${project.key} · ${project.name} 간트` : '전체 프로젝트 간트',
+      capturedAt: new Date().toISOString(),
+      range: { startDate: isoDay(range.start), endDate: isoDay(range.end) },
+      today: todayDate(),
+      nonworkingDates: ticks.filter(tick => !calendarMath.isWorking(tick.iso)).map(tick => tick.iso),
+      filters,
+      data: { projects: data.projects, users: data.users, workflows: data.workflows, issueSchemas: data.issueSchemas },
+      issues, planningRows, milestones, baseline, historicalIssues, historicalMilestones,
+      dependencies: visibleDependencies,
+      findings: hasProject ? new Map(findings.filter(({ dependency }) => visibleDependencyIds.has(dependency.id))
+        .map(({ dependency, check }) => [dependency.id, check])) : undefined,
+    });
+    downloadText(`teamspace-gantt-${project?.key ?? 'all'}.html`, renderGanttExport(report), 'text/html;charset=utf-8');
+  }
   function canHideRows(nextIssues: Issue[]) {
     const visibleIds = new Set(nextIssues.map(issue => issue.id));
     const hidesDatePickerDraft = activeDatePicker?.firstDate && !visibleIds.has(activeDatePicker.issue.id);
     return (!hidesDatePickerDraft && ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6)))) || canLeave();
   }
   function changeVisibility(nextQuery: string, nextHideDone: boolean) {
-    if (!canHideRows(chartRows(nextQuery, nextHideDone, planningScope))) return;
+    if (!canHideRows(chartRows(nextQuery, nextHideDone, planningScope).rows)) return;
     setQuery(nextQuery); setHideDone(nextHideDone);
   }
   function setPlanningFilter(only: boolean) {
-    if (canHideRows(chartRows(query, hideDone, only ? selectedPlan : undefined))) setLinkedOnly(only);
+    if (canHideRows(chartRows(query, hideDone, only ? selectedPlan : undefined).rows)) setLinkedOnly(only);
   }
   function scrollToDate(date: number, start: number, behavior: ScrollBehavior = 'auto') {
     const offset = (date - start) * dayWidth;
@@ -875,6 +924,11 @@ function ProjectGantt(props: GanttProps) {
         setWindowStart(null);
         scrollToDate(dayNumber(overlapAnchor), defaultRangeStart);
       }}>보기 기간으로 이동</button>}
+      <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled} title="저장된 일정으로 내려받기"
+        onPointerDown={event => {
+          // Keep the date field focused to preserve its unsaved input.
+          if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
+        }} onClick={downloadGantt}><ArrowDownToLine size={15} aria-hidden="true" />간트 HTML 내려받기</button>
       <small>최대 {MAX_TIMELINE_DAYS}일 표시 · 범위 밖 기록은 행의 날짜로 이동하세요.</small>
     </div>
     {workloadView === 'project' && <ProjectWorkload key={draftEpoch} {...props} startDate={isoDay(range.start)} endDate={isoDay(range.end)}
@@ -1274,7 +1328,8 @@ function DateCells({ issue, onSave, onReview, disabled, onDraftChange }: {
   function accept(saved: Issue) { setSource(saved); setStart(saved.startDate || ''); setEnd(saved.endDate || ''); }
   function reset() { if (!pendingRef.current) accept(issue); }
   async function commit(nextFocus: EventTarget | null) {
-    if (disabled || pendingRef.current || !dirty || (nextFocus instanceof HTMLElement && nextFocus.dataset.scheduleOwner === issue.id)) return;
+    if (disabled || pendingRef.current || !dirty || (nextFocus instanceof HTMLElement &&
+      (nextFocus.dataset.scheduleOwner === issue.id || nextFocus.dataset.ganttExport))) return;
     pendingRef.current = true; setPending(true); onDraftChange(`dates:${issue.id}`, dirty, true);
     try { const saved = await onSave(source, start || null, end || null); if (saved) accept(saved); }
     finally { pendingRef.current = false; setPending(false); }
