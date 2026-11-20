@@ -41,6 +41,7 @@ const csvSnapshotFields = new Map<string, JiraMigrationIssueField>([
 class Context{
   dataset:LegacyDataset;byId=new Map<string,LegacyRecord>();fileNames=new Map<string,string[]>();
   readonly scheduleDates=new JiraDateProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
+  readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
   ensure(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord|undefined{const sourceId=str(id);if(!sourceId)return undefined;return this.byId.get(`${kind}:${sourceId}`)||this.put(kind,sourceId,value);}
@@ -83,7 +84,112 @@ class Context{
       ? '첨부 ID에 대응하는 파일이 여러 개여서 선택하지 않았습니다.' : '첨부 메타데이터는 보존했지만 패키지 안의 파일 바이트를 찾지 못했습니다.', item.id);
     return item;
   }
-  finish():LegacyDataset{this.scheduleDates.apply();const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;}
+  finish():LegacyDataset{
+    this.scheduleDates.apply();
+    for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
+    const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;
+  }
+}
+
+const versionFieldId = 'builtin:versions';
+const versionOptionId = (id: string) => `${versionFieldId}:${id}`;
+function versionIdentifier(value: unknown): string {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/.test(value) ? value : '';
+}
+function versionFlag(value: unknown): boolean | undefined {
+  if (value === true || /^(?:true|yes|y|1)$/i.test(str(value))) return true;
+  if (value === false || /^(?:false|no|n|0)$/i.test(str(value))) return false;
+}
+type VersionDeclaration = { id: string; project: string; title: string; description: string; source: ObjectValue };
+function declareVersion(context: Context, version: VersionDeclaration, path: string): void {
+  const { id, project, title, description, source } = version;
+  const sourceId = versionOptionId(id);
+  const metadata: Record<string, LegacyValue> = { id };
+  if (project) metadata.project = project;
+  for (const key of ['released', 'archived'] as const) {
+    const value = versionFlag(source[key]);
+    if (value !== undefined) metadata[key] = value;
+    else if (str(source[key]).trim()) metadata[key] = str(source[key]);
+  }
+  for (const [key, alias] of [['startdate', 'startDate'], ['releasedate', 'releaseDate']] as const) {
+    const value = str(source[key] ?? source[alias]);
+    if (value.trim()) metadata[key] = value;
+  }
+  const before = context.byId.get(`option:${sourceId}`);
+  if (!before) {
+    context.field(versionFieldId, 'Versions', 'jira-builtin');
+    context.ensure('option', sourceId, { title: title.trim() ? title : id, containerId: versionFieldId,
+      text: description, textFormat: description ? 'plain' : 'none',
+      metadata: { ...metadata, ...(!title.trim() && { jiraVersionNameMissing: true }) },
+      references: [...ref('field', versionFieldId, 'field'), ...ref('project', project, 'project')] });
+    return;
+  }
+  const conflicting = title.trim() && before.title.trim() !== title.trim() && !before.metadata.jiraVersionNameMissing ||
+    description && before.text && before.text !== description ||
+    Object.entries(metadata).some(([key, value]) => Object.hasOwn(before.metadata, key) && before.metadata[key] !== value);
+  if (conflicting) {
+    before.metadata.jiraVersionAmbiguous = true;
+    context.warn('JIRA_VERSION_DEFINITION_AMBIGUOUS', '같은 원본 버전 ID의 정의가 서로 달라 릴리스 변환을 보류합니다.', before.id, path);
+    return;
+  }
+  if (title.trim() && before.metadata.jiraVersionNameMissing) {
+    before.title = title;
+    delete before.metadata.jiraVersionNameMissing;
+  }
+  if (description && !before.text) {
+    before.text = description;
+    before.textFormat = 'plain';
+  }
+  if (project && !before.metadata.project) before.references.push(...ref('project', project, 'project'));
+  Object.assign(before.metadata, metadata);
+}
+function unresolvedFixVersion(context: Context, issue: LegacyRecord, path: string): void {
+  issue.metadata.jiraFixVersionUnresolved = true;
+  context.warn('JIRA_FIX_VERSION_UNRESOLVED', 'Jira 수정 버전의 원본 ID 또는 프로젝트를 확인할 수 없어 대상 릴리스 연결을 보류합니다.', issue.id, path);
+}
+function recordFixVersion(context: Context, issue: LegacyRecord, id?: string): void {
+  const values = context.fixVersionIds.get(issue) ?? new Set<string>();
+  if (id && !values.has(id)) {
+    values.add(id);
+    issue.references.push(...ref('option', versionOptionId(id), 'fixVersion'));
+  }
+  context.fixVersionIds.set(issue, values);
+}
+
+function readJsonFixVersions(context: Context, issue: LegacyRecord, fields: ObjectValue, path: string, importers: boolean): void {
+  const provided = ['fixVersions', ...(importers ? ['fixedVersions'] : [])].filter(key => Object.hasOwn(fields, key));
+  if (!provided.length) return;
+  let observedIds: Set<string> | undefined;
+  for (const key of provided) {
+    const values = fields[key];
+    if (!Array.isArray(values)) {
+      unresolvedFixVersion(context, issue, path);
+      continue;
+    }
+    recordFixVersion(context, issue);
+    const ids = new Set<string>();
+    for (const raw of values) {
+      const version = obj(raw);
+      const id = versionIdentifier(version.id);
+      const explicitProject = version.projectId ?? obj(version.project).id ?? obj(version.project).key ??
+        (typeof version.project === 'string' || typeof version.project === 'number' ? version.project : undefined);
+      const project = explicitProject === undefined ? versionIdentifier(issue.containerId) : versionIdentifier(explicitProject);
+      if (id && project) declareVersion(context, { id, project,
+        title: typeof version.name === 'string' ? version.name : '',
+        description: typeof version.description === 'string' ? version.description : '', source: version }, path);
+      if (!id || !project || issue.containerId !== project) unresolvedFixVersion(context, issue, path);
+      if (id) {
+        ids.add(id);
+        recordFixVersion(context, issue, id);
+      }
+    }
+    const previousIds = observedIds;
+    if (previousIds && (previousIds.size !== ids.size || [...ids].some(id => !previousIds.has(id)))) {
+      unresolvedFixVersion(context, issue, path);
+    }
+    observedIds = ids;
+  }
 }
 
 function csvRows(source:string,delimiter:string):string[][]{
@@ -110,6 +216,7 @@ function parseCsv(context:Context,path:string,source:string):void{
   const customHeaders = [...new Set(headers.filter(name => /^Custom field\s*\(/i.test(name)))];
   const customFieldIds = customHeaders.map(name => `csv:${name}`);
   for (const name of customHeaders) context.field(`csv:${name}`, name, 'csv-unspecified');
+  const fixVersionColumns = headers.flatMap((header, index) => /^Fix Version\/s$/i.test(header) ? [index] : []);
   const dateColumns = headers.flatMap((header, column) => {
     const role = jiraScheduleDateRole(/^Custom field \(([^()]+)\)$/i.exec(header)?.[1] ?? '');
     if (!role) return [];
@@ -126,6 +233,8 @@ function parseCsv(context:Context,path:string,source:string):void{
       else if(/^Attachment$/i.test(name)){const parts=value.split(';'),uri=parts.at(-1)||'',filename=parts.length>=4?parts.slice(2,-1).join(';'):uri.split('/').at(-1)||value;context.attachment(`csv:${id}:attachment:${column}`,id,{name:filename,uri,attacher:parts.length>=4?parts[1]:'',created:parts.length>=4?parts[0]:''});}
       else{const previous=Object.hasOwn(fields,name)?fields[name]:undefined;Object.defineProperty(fields,name,{value:previous===undefined?value:Array.isArray(previous)?[...previous,value]:[previous,value],enumerable:true,writable:true,configurable:true});if(/^(?:Status|Priority|Issue Type|Resolution|Component\/s|Fix Version\/s|Affects Version\/s)$/i.test(name)){const fieldId=`csv:${name}`;context.field(fieldId,name,'csv-label-only');const optionId=context.option(fieldId,value);item.references.push(...ref('option',optionId,name));}}
     }
+    if (fixVersionColumns.some(column => row[column]?.trim())) unresolvedFixVersion(context, item, path);
+    else if (fixVersionColumns.length && row.length === headers.length) recordFixVersion(context, item);
     if (row.length === headers.length) {
       for (const { role, sourceId, column } of dateColumns) {
         const value = row[column];
@@ -158,6 +267,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   const jiraScheduleFields = Object.fromEntries(scheduleValues.filter(name=>Object.hasOwn(fields,name) &&
     (fields[name] === null || typeof fields[name] === 'string' || typeof fields[name] === 'number')).map(name=>[name,jsonValue(fields[name])]));
   if (Object.keys(jiraScheduleFields).length) item.metadata.jiraScheduleFields = jiraScheduleFields;
+  readJsonFixVersions(context, item, fields, path, importers);
   for (const { role, sourceId } of dateFields) {
     if (Object.hasOwn(fields, sourceId)) context.scheduleDates.observe(item, role, sourceId, fields[sourceId], path, true);
   }
@@ -225,7 +335,23 @@ function parseJson(context:Context,path:string,source:string):void{
   if(Array.isArray(root.projects)){
     context.warn('JSON_IMPORTERS_DIALECT','Jira Importers 입력 JSON을 분석했습니다. Jira 전체 내보내기와 동일한 형식은 아닙니다.',null,path,'info');
     for(const user of list(root.users))context.identity(user);
-    for(const raw of root.projects){const project=obj(raw),id=str(project.id||project.key||project.name);if(!id){context.warn('PROJECT_ID_MISSING','JSON 프로젝트에 원본 식별자가 없습니다.',null,path,'error');continue;}context.ensure('project',id,{title:str(project.name)||id,text:str(project.description),textFormat:'plain',metadata:selected(project,['key','type'])});for(const kind of ['versions','components'])for(const rawOption of list(project[kind])){const option=typeof rawOption==='string'?{name:rawOption}:obj(rawOption);context.field(`builtin:${kind}`,kind,'jira-builtin');context.option(`builtin:${kind}`,option);}const issues=list(project.issues||project['work items']);for(let index=0;index<issues.length;index++)issueJson(context,obj(issues[index]),id,path,index,true);}
+    for (const raw of root.projects) {
+      const project=obj(raw),id=str(project.id||project.key||project.name);
+      if (!id) { context.warn('PROJECT_ID_MISSING','JSON 프로젝트에 원본 식별자가 없습니다.',null,path,'error'); continue; }
+      context.ensure('project',id,{title:str(project.name)||id,text:str(project.description),textFormat:'plain',metadata:selected(project,['key','type'])});
+      for (const kind of ['versions','components']) for (const rawOption of list(project[kind])) {
+        const option: ObjectValue = typeof rawOption === 'string' ? { name: rawOption } : obj(rawOption);
+        const versionId = kind === 'versions' ? versionIdentifier(option.id) : '';
+        if (versionId) {
+          declareVersion(context, { id: versionId, project: id, title: str(option.name), description: str(option.description), source: option }, path);
+        } else {
+          context.field(`builtin:${kind}`,kind,'jira-builtin');
+          context.option(`builtin:${kind}`,option);
+        }
+      }
+      const issues = list(project.issues || project['work items']);
+      for (let index = 0; index < issues.length; index++) issueJson(context, obj(issues[index]), id, path, index, true);
+    }
     for(let index=0;index<list(root.links).length;index++){const link=obj(list(root.links)[index]),id=str(link.id)||`json:relation:${path}:${index}`;context.put('relation',id,{title:str(link.name)||'업무 연결',metadata:{name:str(link.name)},references:[...ref('issue',link.sourceId,'source'),...ref('issue',link.destinationId,'target')]});}
   }else if(Array.isArray(root.issues)){
     context.warn('JSON_REST_DIALECT','Jira REST 검색 응답 JSON을 분석했습니다. 별도 페이지·첨부 바이트는 자동 조회하지 않습니다.',null,path,'info');
@@ -256,6 +382,14 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (assignee && (assigneeId || !text(assignee))) jiraSnapshotFields.push('assigneeId');
     const item=context.put('issue',id,{title:get('summary')||get('title'),containerId:projectId||null,parentId:parentId||null,authorId,createdAt:context.date(get('created'),`issue:${id}`),updatedAt:context.date(get('updated'),`issue:${id}`),text:get('description'),textFormat:'plain',metadata:{key,dialect:'rss-search-xml',descriptionFormat:'search-rendered-html',originalUrl:context.url(get('link')),jiraSnapshotFields,fields},references:[...ref('project',projectId,'project'),...ref('identity',authorId,'reporter'),...ref('identity',assigneeId,'assignee'),...ref('issue',parentId,'parent')]});
     for(const name of ['type','status','priority','resolution','security','due','resolved','environment','version','fixVersion','component','labels']){const matches=children(node,name);if(!matches.length)continue;const normalized=name==='type'?'issuetype':name,fieldId=`builtin:${normalized}`;fields[normalized]=matches.map(value=>({id:value.attributes.id||null,text:text(value)}));if(['type','status','priority','resolution'].includes(name)){context.field(fieldId,normalized,'jira-builtin');for(const value of matches){const option=context.option(fieldId,{id:value.attributes.id||text(value),name:text(value)});item.references.push(...ref('option',option,normalized));}}}
+    for (const value of children(node, 'fixVersion')) {
+      const versionId = versionIdentifier(value.attributes.id);
+      const versionProject = versionIdentifier(project?.attributes.id ?? project?.attributes.key);
+      if (versionId && versionProject && !value.children.length) {
+        declareVersion(context, { id: versionId, project: versionProject, title: text(value), description: '', source: value.attributes }, path);
+        recordFixVersion(context, item, versionId);
+      } else unresolvedFixVersion(context, item, path);
+    }
     const labelElements = children(node,'labels');
     if (labelElements.length && labelElements.every(container=>container.children.every(label=>label.name==='label') && !container.text.trim())) {
       item.metadata.jiraSnapshotLabels = labelElements.flatMap(container=>children(container,'label').map(label=>text(label)));
@@ -336,8 +470,28 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     else if(name==='RemoteIssueLink'){handled.add(name);const url=context.url(v.url),author=resolveActor(v.author);const references=ref('issue',v.issueid||v.issue,'source');if(url){const pageId=new URL(url).searchParams.get('pageId');if(pageId)references.push(...ref('page',pageId,'externalDocument'));}context.put('relation',`remote:${str(v.id)}`,{title:str(v.title)||'외부 연결',authorId:author,containerId:str(v.issueid||v.issue)||null,metadata:{url,relationship:str(v.relationship),globalId:str(v.globalid)},references});}
     else if(name==='Worklog'){handled.add(name);const author=resolveActor(v.author);context.put('history',`worklog:${str(v.id)}`,{title:'작업 시간 기록',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created),updatedAt:context.date(v.updated),text:str(v.body),textFormat:'plain',metadata:{kind:'worklog',...selected(v,['started','startDate','startdate','timeworked','timeSpentSeconds','timeSpent','role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','visibility','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'])},references:[...ref('issue',v.issue,'worklogOf'),...ref('identity',author,'author')]});}
     else if(name==='Label'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`);if(issue){const fields=issue.metadata.fields as Record<string,LegacyValue>;fields.labels=[...(Array.isArray(fields.labels)?fields.labels:[]),str(v.label)];}else context.warn('LABEL_ISSUE_MISSING','라벨의 이슈가 없습니다.',null,path);}
-    else if(['Version','ProjectVersion','Component'].includes(name)){handled.add(name);const fieldId=`builtin:${name==='Component'?'components':'versions'}`;context.field(fieldId,name,'jira-builtin');context.ensure('option',`${fieldId}:${str(v.id)}`,{title:str(v.vname||v.cname||v.name)||str(v.id),containerId:fieldId,text:str(v.description),textFormat:'plain',metadata:selected(v,['id','project','released','archived','startdate','releasedate']),references:[...ref('field',fieldId,'field'),...ref('project',v.project,'project')]});}
-    else if(name==='NodeAssociation'){handled.add(name);const destination=str(v.sinkNodeId||v.destNodeId),source=str(v.sourceNodeId),kind=str(v.sinkNodeEntity||v.destNodeEntity);context.put('relation',`association:${source}:${kind}:${destination}:${str(v.associationType)}`,{title:str(v.associationType)||'항목 연결',metadata:selected(v,['sourceNodeEntity','sinkNodeEntity','destNodeEntity','associationType']),references:[...ref('issue',source,'source'),...ref('option',kind==='Component'?`builtin:components:${destination}`:kind==='Version'?`builtin:versions:${destination}`:destination,'target')]});}
+    else if (name === 'Version' || name === 'ProjectVersion') {
+      handled.add(name);
+      const id = versionIdentifier(v.id);
+      if (id) declareVersion(context, { id, project: versionIdentifier(v.project), title: str(v.vname || v.name),
+        description: str(v.description), source: v }, path);
+      else context.warn('JIRA_VERSION_ID_MISSING', 'Jira 버전의 원본 ID를 확인할 수 없어 릴리스 변환을 보류합니다.', null, path);
+    }
+    else if (name === 'Component') {handled.add(name);const fieldId='builtin:components';context.field(fieldId,name,'jira-builtin');context.ensure('option',`${fieldId}:${str(v.id)}`,{title:str(v.cname||v.name)||str(v.id),containerId:fieldId,text:str(v.description),textFormat:'plain',metadata:selected(v,['id','project','released','archived','startdate','releasedate']),references:[...ref('field',fieldId,'field'),...ref('project',v.project,'project')]});}
+    else if (name === 'NodeAssociation') {
+      handled.add(name);
+      const destination=str(v.sinkNodeId||v.destNodeId), source=str(v.sourceNodeId), kind=str(v.sinkNodeEntity||v.destNodeEntity);
+      const isVersion = kind === 'Version' || kind === 'ProjectVersion';
+      context.put('relation',`association:${source}:${kind}:${destination}:${str(v.associationType)}`,{title:str(v.associationType)||'항목 연결',metadata:selected(v,['sourceNodeEntity','sinkNodeEntity','destNodeEntity','associationType']),references:[...ref('issue',source,'source'),...ref('option',kind==='Component'?`builtin:components:${destination}`:isVersion?versionOptionId(destination):destination,'target')]});
+      const issue = context.byId.get(`issue:${source}`);
+      if (issue && v.associationType === 'IssueFixVersion') {
+        const id = versionIdentifier(destination);
+        const unambiguousTarget = (!v.sinkNodeId || !v.destNodeId || v.sinkNodeId === v.destNodeId) &&
+          (!v.sinkNodeEntity || !v.destNodeEntity || v.sinkNodeEntity === v.destNodeEntity);
+        if (v.sourceNodeEntity === 'Issue' && isVersion && id && unambiguousTarget) recordFixVersion(context, issue, id);
+        else unresolvedFixVersion(context, issue, path);
+      }
+    }
   }
   for(const{name}of values)if(!handled.has(name))context.unsupported(name);
   if(context.dataset.unsupported.length)context.warn('UNSUPPORTED_ADMIN_ENTITIES','지원하지 않는 관리자/플러그인 객체는 종류와 개수만 기록했습니다. 자격 증명·시스템 설정의 원시 속성은 미리보기에 복사하지 않았습니다.',null,path);

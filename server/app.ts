@@ -235,7 +235,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
-  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean;allowArchivedSchema?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     if(typeof i.description!=='string'||i.description.length>200000)fail('설명을 확인해 주세요.');
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -633,6 +633,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const schema of schemas) store.put('issue_schemas', schema);
         for (const workflow of importedWorkflows) store.put('workflows', workflow);
       }
+      const releaseProjects = value.appendPages ? [] : value.append ? [value.append.projectId] : value.projects.map(project => project.id);
+      const releases = planning.persistMigratedJiraReleases(value.planningItems ?? [], new Set(releaseProjects));
+      const historicalReleases = new Set(releases.filter(item => item.status === 'archived').map(item => item.id));
+      for (const item of releases) activity(req, 'planning', item.id, 'Jira 릴리스 이관', item.name);
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
       for (const document of value.documents) store.put('documents', document);
@@ -640,7 +644,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const firstDocument = value.documents[0];
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       validateDocumentLabelListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
-      for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {checkFields:false,allowArchivedSchema:true}));
+      for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {
+        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalReleases,
+      }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       for (const { before, after, fields } of refreshedIssues) {
         store.put('issues', after);

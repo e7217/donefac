@@ -75,6 +75,21 @@ export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable
   return { projectId: string(append.projectId, '문서를 추가할 프로젝트', 200), ...(refresh ? { refreshExisting: true } : {}),
     ...(attachments ? { refreshAttachments: true } : {}), ...(history ? { refreshHistory: true } : {}) };
 }
+export function parseJiraReleaseSelections(raw: unknown, packageIds: readonly string[]): Record<string, string | null> {
+  const entries = Object.entries(object(raw, 'Jira 릴리스 매핑'));
+  if (entries.length > 10_000) fail(400, 'Jira 릴리스 선택은 10,000개까지 보관할 수 있습니다.');
+  const packages = new Set(packageIds);
+  return Object.fromEntries(entries.map(([key, value]) => {
+    const recordId = string(key, 'Jira 릴리스 매핑 업무', 1200);
+    const boundary = recordId.indexOf('/');
+    const recordKind = '/issue:';
+    if (boundary < 1 || !packages.has(recordId.slice(0, boundary)) || !recordId.startsWith(recordKind, boundary) ||
+        !recordId.slice(boundary + recordKind.length).trim()) {
+      fail(400, '선택한 패키지의 Jira 업무에 릴리스를 지정해 주세요.');
+    }
+    return [recordId, nullable(value, 'Jira 원본 릴리스 ID')];
+  }));
+}
 function configuration(raw: unknown, users: Set<string>): MigrationConfiguration {
   const value = object(raw, '이관 설정');
   const packageIds = list(value.packageIds, '설정 패키지', 20).map(id => string(id, '패키지 ID', 200)); if (new Set(packageIds).size !== packageIds.length) fail(400, '설정 패키지가 중복되었습니다.');
@@ -91,9 +106,11 @@ function configuration(raw: unknown, users: Set<string>): MigrationConfiguration
   const excludedRecords = list(value.excludedRecords, '제외 원본', 100000).map(value => string(value, '제외 원본', 1200)); if (new Set(excludedRecords).size !== excludedRecords.length) fail(400, '제외 원본이 중복되었습니다.');
   const appendTo = Object.hasOwn(value, 'appendTo') ? parseMigrationAppendConfiguration(value.appendTo) : undefined;
   const appendPagesTo = Object.hasOwn(value, 'appendPagesTo') ? parseMigrationPageAppendConfiguration(value.appendPagesTo) : undefined;
+  const jiraReleaseSelections = Object.hasOwn(value, 'jiraReleaseSelections') ? parseJiraReleaseSelections(value.jiraReleaseSelections, packageIds) : undefined;
   if (appendTo && appendPagesTo) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
   return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy,
-    excludedRecords, ...(appendTo ? { appendTo } : {}), ...(appendPagesTo ? { appendPagesTo } : {}) };
+    excludedRecords, ...(appendTo ? { appendTo } : {}), ...(appendPagesTo ? { appendPagesTo } : {}),
+    ...(jiraReleaseSelections ? { jiraReleaseSelections } : {}) };
 }
 
 const jiraIssueFields = new Set(JIRA_MIGRATION_ISSUE_FIELDS);

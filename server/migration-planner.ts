@@ -15,6 +15,7 @@ import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,M
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
+import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
@@ -1072,7 +1073,62 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  private createJiraReleases(): void {
+    const choices = this.configuration.jiraReleaseSelections;
+    const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
+      const entry = this.entryByKey.get(key);
+      if (!entry || entry.row.kind !== 'issue' || entry.pkg.dataset.source.product !== 'jira') {
+        this.notice('JIRA_RELEASE_SELECTION_INVALID', '대표 릴리스 선택의 Jira 원본 업무를 찾을 수 없습니다.', 'error');
+        return false;
+      }
+      return !this.skip(entry);
+    }));
+    if (choices) this.configuration.jiraReleaseSelections = selections;
+    const catalog: Parameters<typeof planJiraReleases>[0]['catalog'][number][] = [];
+    const administratorLinks = new Map<string, string[]>();
+    for (const entry of this.entries) {
+      const { pkg, row, key } = entry;
+      if (pkg.dataset.source.product !== 'jira') continue;
+      const association = !this.excluded.has(key) && jiraAdministratorFixAssociation(row);
+      if (association) {
+        const issueKey = `${pkg.summary.id}/issue:${association.issueId}`;
+        const versions = administratorLinks.get(issueKey) ?? [];
+        versions.push(association.versionId);
+        administratorLinks.set(issueKey, versions);
+      }
+      if (!jiraReleaseVersionId(row)) continue;
+      const sourceProjectId = string(row.metadata.project) || row.references.find(ref => ref.kind === 'project' && ref.relation === 'project')?.sourceId;
+      if (!sourceProjectId) continue;
+      const target = this.projectsByContainer.get(optionId(pkg.summary.id, 'container', sourceProjectId));
+      if (!target) continue;
+      const sourceProject = this.sourceEntry(entry, 'project', sourceProjectId);
+      catalog.push({ record: row, recordId: key, sourceProjectId, instanceKey: pkg.dataset.source.instanceKey,
+        projectId: target.id, excluded: this.excluded.has(key) || Boolean(sourceProject && this.excluded.has(sourceProject.key)) });
+    }
+    const issues = this.result.issues.flatMap(issue => {
+      const entry = this.primaryById.get(issue.id);
+      if (!entry || entry.pkg.dataset.source.product !== 'jira') return [];
+      return [{ issue, record: entry.row, recordId: entry.key, sourceProjectId: entry.container, projectId: issue.projectId,
+        instanceKey: entry.pkg.dataset.source.instanceKey,
+        ...(entry.pkg.dataset.source.format === 'jira-backup-xml' ? { administratorIds: administratorLinks.get(entry.key) ?? [] } : {}) }];
+    });
+    if (!issues.length && !catalog.length) return;
+    const { planningItems, choices: releaseChoices, links, unassigned } = planJiraReleases({
+      catalog, issues, selections, existing: this.input.append?.planningItems ?? [], append: Boolean(this.input.append),
+      now: this.input.now, calendarDate: value => sourceCalendarDate(value, this.configuration.timezone),
+      notice: value => this.notice(value.code, value.message, value.severity, this.entryByKey.get(value.recordId), value.severity === 'warning'),
+    });
+    if (planningItems.length > 20_000) {
+      this.notice('JIRA_RELEASE_LIMIT', '한 번에 이관할 수 있는 릴리스 20,000개를 초과했습니다.', 'error');
+    }
+    if (planningItems.length) this.result.planningItems = planningItems;
+    if (releaseChoices.length) this.result.preview.jiraReleaseChoices = releaseChoices;
+    if (planningItems.length || links || unassigned) {
+      Object.assign(this.result.preview.counts, { jiraReleases: planningItems.length, jiraReleaseLinks: links, jiraReleaseUnassigned: unassigned });
+      if (this.result.append && this.input.append?.planningToken) this.result.append.planningToken = this.input.append.planningToken;
+    }
+  }
   initializeOriginBases(): void {
     const suppliedBases = this.configuration.sourceBaseUrls;
     const packages = this.input.packages;

@@ -65,6 +65,7 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
     issues: [{ id: 'issue-1', assigneeId: 'team-1', description: 'never-emit-issue-description' }],
     documents: [{ id: 'document-1', authorId: swappedAuthors ? 'team-2' : 'team-1', content: { text: 'never-emit-document-body' } }],
     workflows: [], issueSchemas: [], dependencies: [], resourceLinks: [{ id: 'res-link', documentId: 'document-1', issueId: 'issue-1' }],
+    planningItems: [{ id: 'plan-1', kind: 'release', name: 'never-emit-private-release', targetDate: '2026-01-01' }],
   };
   return { packages, receipt, observations, workspace };
 }
@@ -89,6 +90,7 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.receipts[0].attachmentCounts.verified, 1);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.equal(before.workspace.counts.documents, 1);
+  assert.equal(before.workspace.counts.planningItems, 1);
   assert.doesNotMatch(JSON.stringify(before), /never-emit|\/private\//);
   assert.deepEqual(compareMigrationEvidence(before, after), {
     status: 'verified', matches: true, changedReceiptIds: [], workspaceMatches: true, packagesMatch: true,
@@ -97,6 +99,11 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.deepEqual(compareMigrationEvidence(before, changed), {
     status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: false, packagesMatch: true,
   });
+  const differentRelease = sample({ notices: [info] });
+  differentRelease.workspace.planningItems[0].targetDate = '2026-01-02';
+  const releaseComparison = compareMigrationEvidence(before, await evidence(differentRelease));
+  assert.equal(releaseComparison.workspaceMatches, false);
+  assert.equal(releaseComparison.status, 'failed');
 });
 
 test('migration rehearsal reports applied warnings by receipt even when the cold restore matches', async () => {

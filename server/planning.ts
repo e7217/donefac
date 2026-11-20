@@ -35,6 +35,7 @@ function blankItem(projectId:string,kind:PlanningKind,label:string,timestamp:str
   return{id:randomUUID(),projectId,kind,name:label,description:'',status:'planned',ownerId:null,startDate:null,endDate:null,targetDate:null,version:1,createdAt:timestamp,updatedAt:timestamp};
 }
 type PlanFields=Pick<Issue,'cycle'|'module'|'release'|'cycleId'|'moduleId'|'releaseId'>;
+const jiraImportedReleaseId = /^jira_release_[a-f0-9]{64}$/;
 type Hooks = {
   actor: (request: Request) => string;
   activity: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => unknown;
@@ -98,12 +99,13 @@ export class PlanningService{
     return result;
   }
   /** Mutates both IDs and derived labels so every issue write has one canonical reference. */
-  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowArchived?:boolean}={}):void{
+  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowArchived?:boolean | ReadonlySet<string>}={}):void{
     const items=this.all();
     for(const kind of kinds){const {idField,labelField}=planningFields(kind),id=issue[idField];if(id===undefined||id===null){(issue as any)[idField]=null;(issue as any)[labelField]=null;continue;}
       if(typeof id!=='string')fail(`${PLANNING_META[kind].label} ID가 올바르지 않습니다.`);
       const item=items.find(item=>item.id===id);if(!item||item.projectId!==issue.projectId||item.kind!==kind)fail(`${PLANNING_META[kind].label}의 프로젝트·종류·ID가 올바르지 않습니다.`);
-      if(item.status==='archived'&&!options.allowArchived&&previous?.[idField]!==id)fail('보관된 계획 항목에 새 업무를 배정할 수 없습니다.',422);
+      const allowed = options.allowArchived === true || Boolean(options.allowArchived && options.allowArchived.has(id));
+      if(item.status==='archived'&&!allowed&&previous?.[idField]!==id)fail('보관된 계획 항목에 새 업무를 배정할 수 없습니다.',422);
       (issue as any)[labelField]=item.name;
     }
   }
@@ -130,6 +132,29 @@ export class PlanningService{
   replaceImported(items:PlanningItem[],previousVersions=new Map(this.all().map(item=>[item.id,item.version]))):void{
     this.store.db.exec('DELETE FROM planning_items');
     for(const item of items){const old=previousVersions.get(item.id);this.put({...item,version:old===undefined?item.version:Math.max(old,item.version)+1});}
+  }
+  /** Writes the reviewed Jira releases before issue references are validated in the same transaction. */
+  persistMigratedJiraReleases(items: PlanningItem[], projectIds: ReadonlySet<string>): PlanningItem[] {
+    if (!this.store.db.isTransaction) fail('Jira 릴리스 이관에는 적용 트랜잭션이 필요합니다.', 500);
+    if (!Array.isArray(items) || items.length > 20_000) fail('이관할 Jira 릴리스 목록을 확인해 주세요.', 409);
+    if (!items.length) return [];
+    const projects = this.store.all<Project>('projects'), users = this.store.all<User>('users');
+    const existing = this.all();
+    const ids = new Set(existing.map(item => item.id));
+    const names = new Set(existing.map(item => key(item.projectId, item.kind, item.name)));
+    const releases = items.map(value => {
+      const item = parseItem(value, projects, users);
+      const nameKey = key(item.projectId, item.kind, item.name);
+      if (item.kind !== 'release' || !jiraImportedReleaseId.test(item.id) || !projectIds.has(item.projectId) || item.version !== 1 ||
+          ids.has(item.id) || names.has(nameKey)) {
+        fail('이관할 Jira 릴리스의 대상 범위 또는 이름이 변경되었습니다. 새 미리보기를 만들어 주세요.', 409);
+      }
+      ids.add(item.id);
+      names.add(nameKey);
+      return item;
+    });
+    for (const item of releases) this.put(item);
+    return releases;
   }
   /** The combined schedule apply/undo transaction owns this date-only write. */
   writeScheduleDates(id:string,expectedVersion:number,dates:PlanScheduleDates):PlanningItem{

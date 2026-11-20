@@ -5,7 +5,7 @@ const sha = /^[a-f0-9]{64}$/;
 const sourceFormats = new Set(['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json', 'confluence-xml']);
 const recordStatuses = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
 const attachmentStatuses = ['verified', 'missing', 'corrupt', 'unbound', 'excluded', 'unreadable'];
-const workspaceSections = ['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas', 'dependencies', 'resourceLinks'];
+const workspaceSections = ['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas', 'dependencies', 'resourceLinks', 'planningItems'];
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const count = value => Number.isSafeInteger(value) && value >= 0;

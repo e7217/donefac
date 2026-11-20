@@ -30,8 +30,10 @@ function makePreview(overrides: Partial<MigrationPreview> = {}): MigrationPrevie
     samples: [{ recordId, targetType: 'issue', title: 'never-emit-title', plainText: 'never-emit-body', sourceUrl: privateUrl }],
     issueRefresh: [{ issueId: 'never-emit-issue-id', key: 'never-emit-key', sourceKey: 'never-emit-source-key',
       fields: [{ field: 'title', current: 'never-emit-current-title', incoming: 'never-emit-incoming-title', decision: 'conflict' }] }],
+    jiraReleaseChoices: [{ recordId, sourceKey: 'never-emit-release-issue', title: 'never-emit-release-title',
+      selected: 'never-emit-version-id', candidates: [{ sourceId: 'never-emit-version-id', name: 'never-emit-version-name' }] }],
     counts: { sourceRecords: 4, issues: 1, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1,
-      conflictingFields: 1, worklogs: -1, 'never-emit-unknown-count-key': 42 },
+      conflictingFields: 1, jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0, worklogs: -1, 'never-emit-unknown-count-key': 42 },
     notices: [
       { severity: 'warning', code: 'RECORDS_EXCLUDED', message: 'never-emit-exclusion', recordId, requiresAcknowledgement: true },
       { severity: 'error', code: 'RESTRICTED_CONTENT', message: 'never-emit-restriction', recordId, requiresAcknowledgement: false },
@@ -52,7 +54,8 @@ test('migration preflight exports the selected package and counts without copyin
     mode: 'new', status: 'blocked',
     packages: [{ id: packageId, product: 'jira', format: 'jira-json', size: 4000, sha256: jira.sha256, errors: 1, warnings: 2 }],
     missingPackageSummaryCount: 0,
-    counts: { sourceRecords: 4, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1, issues: 1, conflictingFields: 1 },
+    counts: { sourceRecords: 4, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1, issues: 1, conflictingFields: 1,
+      jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0 },
     diagnostics: [
       { severity: 'error', code: 'RESTRICTED_CONTENT', count: 1 },
       { severity: 'warning', code: 'RECORDS_EXCLUDED', count: 2 },

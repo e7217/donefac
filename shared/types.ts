@@ -218,6 +218,7 @@ export interface MigrationConfiguration {
   users:Record<string,string|null>;statuses:Record<string,StatusCategory>;issueTypes:Record<string,string|null>;
   fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
+  jiraReleaseSelections?: Record<string, string | null>;
   appendTo?: MigrationAppendConfiguration;
   appendPagesTo?: MigrationPageAppendConfiguration;
 }
@@ -229,6 +230,10 @@ export interface MigrationPreview {
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
+  jiraReleaseChoices?: {
+    recordId: string; sourceKey: string; title: string;
+    candidates: { sourceId: string; name: string }[]; selected: string | null;
+  }[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;

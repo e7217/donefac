@@ -1,4 +1,4 @@
-import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
+import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,PlanningItem,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
@@ -45,6 +45,8 @@ export interface MigrationAppendContext {
   schema: ProjectIssueSchema;
   nextIssueNumber: number;
   token: string;
+  planningItems?: PlanningItem[];
+  planningToken?: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
   refreshIssues?: MigrationJiraRefreshCandidate[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
@@ -75,11 +77,12 @@ export interface MigrationFileCopy { fileId:string;packageId:string;path:string;
 export interface PreparedMigration {
   preview:MigrationPreview;sourceImport:SourceImport;sourceRecords:SourceRecordArchive[];
   projects:Project[];workflows:ProjectWorkflow[];issueSchemas:ProjectIssueSchema[];
+  planningItems?: PlanningItem[];
   issues:Issue[];documents:DocPage[];comments:Comment[];revisions:DocRevision[];worklogs:WorklogEntry[];
   attachments:Attachment[];attachmentVersions:AttachmentVersion[];fileCopies:MigrationFileCopy[];
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
-  append?: { projectId: string; token: string; startIssueNumber: number };
+  append?: { projectId: string; token: string; startIssueNumber: number; planningToken?: string };
   appendPages?: { projectId: string; token: string; sectionInventory?: boolean; labelListInventory?: true };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
