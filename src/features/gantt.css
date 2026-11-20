@@ -139,6 +139,37 @@
   padding-inline: 8px;
 }
 
+.gantt-issue-focus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 0 0 12px;
+  padding: 5px 10px;
+  border-left: 3px solid #24786c;
+  background: #eef7f4;
+  color: #204e45;
+  font-size: 13px;
+}
+
+.gantt-issue-focus[data-missing] {
+  border-color: #ad7545;
+  background: #fdf5ea;
+  color: #664628;
+}
+
+.gantt-issue-focus p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.gantt-feature .gantt-row[data-focused-issue] > .gantt-left,
+.gantt-feature .gantt-row[data-focused-issue] > .gantt-row-timeline {
+  background-color: #e7f4ef;
+  box-shadow: inset 0 2px #57a293, inset 0 -2px #57a293;
+}
+
 @media (max-width: 900px) {
   .gantt-feature .gantt-left { position: relative; left: auto; }
 }

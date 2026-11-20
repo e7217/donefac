@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
 import type { CustomFieldValue, Dependency, FeatureProps, Issue, PlanningItem, PlanningKind, Project, SchedulePreview, User } from '../../shared/types';
 import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
@@ -44,6 +44,10 @@ type GanttProps = FeatureProps & {
   onOpenPlanning?: (id: string) => void;
   ganttViewId?: string | null;
   onChangeGanttView?: (id: string | null) => boolean;
+  focusIssueId?: string | null;
+  issueFocusActivation?: number;
+  issueOverlayOpen?: boolean;
+  onClearIssueFocus?: () => boolean;
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type DependencyEditor = { dependency?: Dependency; prefill?: DependencyPrefill; opener: HTMLButtonElement };
@@ -63,12 +67,34 @@ const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
 const windowForDate = (date: string) => isoDay(clampWindowStart(dayNumber(date) - 7));
 
+function scrollTimelineDate(scroll: HTMLDivElement, offset: number, behavior: ScrollBehavior = 'auto') {
+  const header = scroll.querySelector('.gantt-left-header');
+  if (!header) return;
+  const pinned = getComputedStyle(header).position === 'sticky';
+  scroll.scrollTo({ left: Math.max(0, offset + (pinned ? -72 : LEFT_WIDTH - 44)), behavior });
+}
+
+function focusGanttDate(chart: Element | null, issueId: string, edge: 'start' | 'end', block: ScrollLogicalPosition = 'center') {
+  const input = chart?.querySelector<HTMLInputElement>(`input[data-schedule-owner="${CSS.escape(issueId)}"][data-schedule-edge="${edge}"]`);
+  if (!input || input.disabled) return;
+  input.focus({ preventScroll: true });
+  input.scrollIntoView({ block, inline: 'nearest' });
+}
+
+function focusDateFromControl(control: HTMLButtonElement, issue: Issue, edge: 'start' | 'end' = issue.startDate ? 'end' : 'start') {
+  focusGanttDate(control.closest('.gantt-feature'), issue.id, edge);
+}
+
 export function Gantt(props: GanttProps) {
   return <ProjectGantt key={`${props.projectId}:${props.actorId}:${props.initialPlanningId ?? ''}`} {...props} />;
 }
 
 function ProjectGantt(props: GanttProps) {
-  const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView } = props;
+  const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView,
+    focusIssueId, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus } = props;
+  const focusedIssue = focusIssueId ? data.issues.find(issue => issue.id === focusIssueId && issue.projectId === projectId) : undefined;
+  const focusedDate = focusedIssue?.startDate || focusedIssue?.endDate;
+  const focusRequest = focusIssueId ? JSON.stringify([focusIssueId, issueFocusActivation]) : null;
   const projectPlans = useMemo(() => (data.planningItems ?? []).filter(item => item.projectId === projectId), [data.planningItems, projectId]);
   const initialPlan = projectPlans.find(item => item.id === initialPlanningId);
   const [planningExpanded, setPlanningExpanded] = useState(Boolean(initialPlan));
@@ -100,10 +126,22 @@ function ProjectGantt(props: GanttProps) {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
+  const [previousFocusRequest, setPreviousFocusRequest] = useState(focusRequest);
   const [windowStart, setWindowStart] = useState<string | null>(() => {
-    const date = initialPlan && (initialPlan.startDate || initialPlan.targetDate || initialPlan.endDate);
+    const date = focusedDate || (initialPlan && (initialPlan.startDate || initialPlan.targetDate || initialPlan.endDate));
     return date ? windowForDate(date) : null;
   });
+  if (previousFocusRequest !== focusRequest) {
+    setPreviousFocusRequest(focusRequest);
+    if (focusedIssue) {
+      setQuery('');
+      setHideDone(false);
+      setLinkedOnly(false);
+      setLinkPicker(null);
+      setDrag(null);
+      setWindowStart(focusedDate ? windowForDate(focusedDate) : null);
+    }
+  }
   if (selectionViewId !== ganttViewId) {
     setSelectionViewId(ganttViewId);
     if (selected.size) setSelected(new Set());
@@ -111,6 +149,7 @@ function ProjectGantt(props: GanttProps) {
     if (autoOpen) setAutoOpen(false);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
+  const handledFocusRequest = useRef<string | null>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
@@ -238,6 +277,26 @@ function ProjectGantt(props: GanttProps) {
   const range = { start: rangeStart, end: rangeStart + rangeDays - 1, days: rangeDays };
   const dayWidth = zoom === 'day' ? 32 : zoom === 'week' ? 15 : 6;
   const timelineWidth = range.days * dayWidth;
+  useLayoutEffect(() => {
+    if (handledFocusRequest.current === focusRequest) return;
+    const frame = requestAnimationFrame(() => {
+      handledFocusRequest.current = focusRequest;
+      const scroll = scrollRef.current;
+      const row = scroll?.querySelector<HTMLDivElement>('[data-focused-issue="true"]');
+      if (!focusedIssue || !scroll || !row) return;
+
+      const { id, startDate, endDate } = focusedIssue;
+      if (!issueOverlayOpen) scroll.scrollIntoView({ block: 'start', inline: 'nearest' });
+      scroll.scrollTop = row.offsetTop - HEADER_HEIGHT;
+      if (startDate && endDate) {
+        scrollTimelineDate(scroll, (dayNumber(startDate) - range.start) * dayWidth);
+        if (!issueOverlayOpen) row.querySelector<HTMLButtonElement>('.gantt-bar')?.focus({ preventScroll: true });
+      } else if (!issueOverlayOpen) {
+        focusGanttDate(scroll, id, startDate ? 'end' : 'start', 'nearest');
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [dayWidth, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
   const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope ? issues : [];
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
@@ -280,10 +339,7 @@ function ProjectGantt(props: GanttProps) {
     const offset = (date - start) * dayWidth;
     requestAnimationFrame(() => {
       const scroll = scrollRef.current;
-      const header = scroll?.querySelector('.gantt-left-header');
-      if (!scroll || !header) return;
-      const pinned = getComputedStyle(header).position === 'sticky';
-      scroll.scrollTo({ left: Math.max(0, offset + (pinned ? -72 : LEFT_WIDTH - 44)), behavior });
+      if (scroll) scrollTimelineDate(scroll, offset, behavior);
     });
   }
   function showDate(date: string) {
@@ -477,18 +533,11 @@ function ProjectGantt(props: GanttProps) {
     if (drag.mode === 'end') delta = Math.max(delta, -duration);
     setDrag({ ...drag, delta });
   }
-  function focusDate(issue: Issue, edge: 'start' | 'end') {
-    const input = document.querySelector<HTMLInputElement>(`.gantt-scroll input[data-schedule-owner="${CSS.escape(issue.id)}"][data-schedule-edge="${edge}"]`);
-    if (!input || input.disabled) return;
-    input.focus({ preventScroll: true });
-    input.scrollIntoView({ block: 'center', inline: 'nearest' });
-  }
-  function focusMissingDate(issue: Issue) { focusDate(issue, issue.startDate ? 'end' : 'start'); }
-  function finishDrag() {
+  function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
     if (current.delta) { if (current.mode === 'move') void requestPreview([current.issue.id], current.delta, false); else previewResize(current.issue, current.mode, current.delta); }
     else if (current.mode === 'move') openIssue(current.issue.id);
-    else focusDate(current.issue, current.mode);
+    else focusDateFromControl(event.currentTarget, current.issue, current.mode);
   }
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
@@ -527,6 +576,12 @@ function ProjectGantt(props: GanttProps) {
     {sharedViewUnavailable && <div className="gantt-shared-view-warning">
       <p role="status">이 프로젝트에서 공유 보기를 열 수 없습니다.</p>
       {onChangeGanttView && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => onChangeGanttView(null)}>공유 보기 해제</button>}
+    </div>}
+    {focusIssueId && <div className="gantt-issue-focus" data-missing={!focusedIssue || undefined}>
+      <p role="status">{focusedIssue ? <><strong>{focusedIssue.key}</strong> {focusedIssue.title}</> : '이 프로젝트에서 대상 업무를 찾을 수 없습니다.'}</p>
+      {onClearIssueFocus && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => {
+        if (onClearIssueFocus()) scrollRef.current?.focus({ preventScroll: true });
+      }}>업무 위치 해제</button>}
     </div>}
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       <button ref={analysisTrigger} className="btn" type="button" aria-expanded={analysisOpen} aria-controls={analysisOpen ? ANALYSIS_PANEL_ID : undefined} disabled={!hasProject} onClick={() => setAnalysisOpen(open => !open)}>
@@ -635,7 +690,8 @@ function ProjectGantt(props: GanttProps) {
         const startPosition = start !== null && start >= range.start && start <= range.end ? (start - range.start) * dayWidth + BAR_EDGE_INSET : null;
         const endPosition = end !== null && end >= range.start && end <= range.end ? (end - range.start + 1) * dayWidth - BAR_EDGE_INSET : null;
         const barClass = `gantt-bar ${dragging ? 'is-dragging' : ''} ${status.category === 'done' ? 'is-done' : ''}`;
-        return <div data-issue-id={issue.id} className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
+        const isFocused = focusedIssue?.id === issue.id;
+        return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
             <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
             <div className="gantt-issue-cell">
@@ -656,11 +712,11 @@ function ProjectGantt(props: GanttProps) {
           {visibleSchedule ? <div className={`gantt-task-range ${dragging ? 'is-dragging' : ''}`} style={{ left: (visibleStart - range.start) * dayWidth + BAR_EDGE_INSET, width: (visibleEnd - visibleStart + 1) * dayWidth - 2 * BAR_EDGE_INSET, '--bar-color': status.color } as CSSProperties}>
             {linkPicker ? <span className={`${barClass} gantt-link-bar`} data-analysis-critical={critical || undefined} aria-hidden="true"><span>{zoom !== 'month' && issue.title}</span></span>
               : <button className={barClass} disabled={busy} data-analysis-critical={critical || undefined} aria-label={`${issue.key} 일정 이동`} aria-describedby={critical ? 'gantt-editing-help gantt-analysis-critical-help' : 'gantt-editing-help'} title={`${issue.key}: ${issue.startDate} ~ ${issue.endDate} · 끌어서 이동, 선택해서 상세 보기`} onPointerDown={event => beginDrag(event, issue, 'move')} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={() => setDrag(null)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openIssue(issue.id); } }}><span>{zoom !== 'month' && issue.title}</span></button>}
-            {!linkPicker && (['start', 'end'] as const).filter(edge => edge === 'start' ? !outside(isoDay(start! + startOffset)) : !outside(isoDay(end! + endOffset))).map(edge => <button key={edge} type="button" className={`gantt-resize-handle is-${edge}`} aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'} 조정`} aria-describedby="gantt-editing-help" title={`${edge === 'start' ? '시작일' : '종료일'} 조정 · 드래그 또는 좌우 방향키 · Enter로 날짜 입력`} disabled={busy} onPointerDown={event => beginDrag(event, issue, edge)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={() => setDrag(null)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); previewResize(issue, edge, event.key === 'ArrowRight' ? 1 : -1); } }} onClick={event => { if (event.detail === 0) focusDate(issue, edge); }}><span /></button>)}
+            {!linkPicker && (['start', 'end'] as const).filter(edge => edge === 'start' ? !outside(isoDay(start! + startOffset)) : !outside(isoDay(end! + endOffset))).map(edge => <button key={edge} type="button" className={`gantt-resize-handle is-${edge}`} aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'} 조정`} aria-describedby="gantt-editing-help" title={`${edge === 'start' ? '시작일' : '종료일'} 조정 · 드래그 또는 좌우 방향키 · Enter로 날짜 입력`} disabled={busy} onPointerDown={event => beginDrag(event, issue, edge)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={() => setDrag(null)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); previewResize(issue, edge, event.key === 'ArrowRight' ? 1 : -1); } }} onClick={event => { if (event.detail === 0) focusDateFromControl(event.currentTarget, issue, edge); }}><span /></button>)}
             {dragging && offset !== 0 && <small className="gantt-drag-label">{drag.mode === 'move' ? `${offset > 0 ? '+' : ''}${offset}일` : `${moveDate(issue.startDate!, startOffset)} ~ ${moveDate(issue.endDate!, endOffset)}`}</small>}
           </div> : hasSchedule ? <button className="gantt-jump-date" onClick={() => showDate(issue.startDate!)}>{issue.startDate} — {issue.endDate} · 일정으로 이동 →</button> : !linkPicker && <button
             type="button" className="gantt-no-schedule gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
-            disabled={busy} onClick={() => focusMissingDate(issue)}><Plus size={12} aria-hidden="true" />날짜 입력</button>}
+            disabled={busy} onClick={event => focusDateFromControl(event.currentTarget, issue)}><Plus size={12} aria-hidden="true" />날짜 입력</button>}
           {linkPicker && <GanttLinkEndpoints issueKey={issue.key} step={linkStep} startPosition={startPosition} endPosition={endPosition}
             timelineWidth={timelineWidth} disabled={!canPickRow} onPick={endpoint => pickLink(issue.id, endpoint, true)} />}
         </div></div>;
@@ -677,7 +733,7 @@ function ProjectGantt(props: GanttProps) {
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row">
       <button type="button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
-        disabled={busy || Boolean(linkPicker)} onClick={() => focusMissingDate(issue)}>날짜 입력</button>
+        disabled={busy || Boolean(linkPicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
       <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>
     </div>) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
       <section className="gantt-bottom-card" aria-label="업무 연결 목록">

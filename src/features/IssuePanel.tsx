@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, FileText, Link2, MessageSquare, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, Clock3, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -29,17 +29,18 @@ import './issue-decision-source.css';
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
 type IssueDependencyEditor = { otherRole: RelatedIssueDirection; dependency?: Dependency };
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
+type IssuePanelProps = FeatureProps & { issueId: string; onClose: () => void; onOpenIssueSchedule: (id: string) => boolean };
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
-export function IssuePanel(props: FeatureProps & { issueId: string; onClose: () => void }) {
+export function IssuePanel(props: IssuePanelProps) {
   return <IssuePanelContent key={`${props.issueId}:${props.actorId}`} {...props} />;
 }
 
-function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () => void }) {
-  const { data, issueId, onClose, refresh, notify, openIssue, openDocument } = props;
+function IssuePanelContent(props: IssuePanelProps) {
+  const { data, issueId, onClose, onOpenIssueSchedule, refresh, notify, openIssue, openDocument } = props;
   const issue = data.issues.find(i => i.id === issueId);
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
@@ -321,6 +322,8 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
           <label className="issue-form-label">담당자<select aria-label="담당자" className="field" value={draft.assigneeId || ''} onChange={e => update('assigneeId', e.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label className="issue-form-label">시작일<input aria-label="시작일" type="date" className="field" value={draft.startDate || ''} onChange={e => update('startDate', e.target.value || null)} /></label>
           <label className="issue-form-label">종료일<input aria-label="종료일" type="date" className="field" value={draft.endDate || ''} onChange={e => update('endDate', e.target.value || null)} /></label>
+          <div className="issue-grid-wide"><button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
+            onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button></div>
           <label className="issue-form-label">목표 마감일<input aria-label="목표 마감일" type="date" className="field" value={draft.dueDate || ''} onChange={e => update('dueDate', e.target.value || null)} /></label>
           <label className="issue-form-label">예상 소요 (포인트)<input aria-label="예상 소요 (포인트)" className="field" type="number" min="0" step="0.5" placeholder="미정" value={draft.estimate ?? ''} onChange={e => update('estimate', e.target.value === '' ? null : Number(e.target.value))} /></label>
           <label className="issue-form-label">계획 작업 시간 (분)<input aria-label="계획 작업 시간 (분)" className="field" type="number" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} placeholder="미정" value={draft.plannedEffortMinutes ?? ''} onChange={e => update('plannedEffortMinutes', e.target.value === '' ? null : Number(e.target.value))} /></label>
