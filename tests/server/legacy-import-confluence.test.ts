@@ -19,6 +19,81 @@ const refHas=(row:LegacyRecord,kind:string,sourceId:string,relation:string)=>row
 const page=(id:string,title:string,extra='')=>object('Page',id,p('title',title)+p('version','1')+p('contentStatus','current')+r('space','Space','42')+extra);
 const space=object('Space','42',p('key','TEAM')+p('name','합성 공간'));
 
+test('complete label evidence needs an explicit, resolved and consistent collection on the current Page', () => {
+  const labelling = (id: string, pageId: string, labelId: string) =>
+    object('Labelling', id, r('content', 'Page', pageId) + r('label', 'Label', labelId));
+  const data = parseConfluence(files([
+    space,
+    page('100', 'Only a reverse reference'),
+    page('101', 'Explicit empty labels', list('labels', 'Label', [])),
+    page('102', 'Explicit empty labellings', list('labellings', 'Labelling', [])),
+    page('103', 'Complete associations', list('labellings', 'Labelling', ['203'])),
+    page('104', 'Both complete projections', list('labels', 'Label', ['500']) + list('labellings', 'Labelling', ['204'])),
+    page('105', 'Missing Label object', list('labels', 'Label', ['599'])),
+    page('106', 'Missing association object', list('labellings', 'Labelling', ['299'])),
+    page('107', 'Unresolved reverse relationship', list('labels', 'Label', [])),
+    page('108', 'Association belongs elsewhere', list('labellings', 'Labelling', ['204'])),
+    page('109', 'Two declarations disagree', list('labels', 'Label', ['500', '501']) + list('labellings', 'Labelling', ['209'])),
+    page('110', 'Untrusted collection marker', '<collection name="labels" partial="true"/>'),
+    page('111', 'Conflicting reverse owners', list('labels', 'Label', [])),
+    page('112', 'Conflicting alternate reverse owner', list('labels', 'Label', [])),
+    page('113', 'Reverse relationship lacks a matching owner class', list('labels', 'Label', [])),
+    page('114', 'Unlisted association', list('labellings', 'Labelling', ['214'])),
+    page('115', 'Empty declaration contradicts an association', list('labels', 'Label', [])),
+    object('Page', '116', p('title', 'Draft page') + p('contentStatus', 'draft') + list('labels', 'Label', [])),
+    object('Page', '999', p('title', 'Historical page') + p('contentStatus', 'historical') + list('labels', 'Label', [])),
+    object('Label', '500', p('name', 'public') + p('namespace', 'global')),
+    object('Label', '501', p('name', 'another') + p('namespace', 'global')),
+    labelling('200', '100', '500'), labelling('203', '103', '500'), labelling('204', '104', '500'), labelling('209', '109', '500'),
+    labelling('214', '114', '500'), labelling('314', '114', '500'), labelling('215', '115', '500'),
+    object('Labelling', '207', r('content', 'Page', '107')),
+    object('Labelling', '211', r('content', 'Page', '111') + r('contentEntity', 'Page', '112') + r('label', 'Label', '500')),
+    object('ContentLabel', '213', r('contentEntity', 'ContentEntityObject', '113') + r('label', 'Label', '500')),
+  ]), 'confluence-label-snapshots');
+
+  assert.deepEqual(data.records.filter(row => row.metadata.labelSetComplete === true).map(row => row.sourceId), ['101', '102', '103', '104']);
+  assert.deepEqual(find(data, 'page', '100').metadata.labels, ['public']);
+  assert.deepEqual(find(data, 'page', '103').metadata.labels, ['public']);
+  assert.deepEqual(find(data, 'page', '109').metadata.labels, ['public', 'another']);
+  assert.deepEqual(find(data, 'page', '115').metadata.labels, ['public']);
+  assert.equal(find(data, 'page', '102').metadata.labels, undefined);
+  assert.ok(data.diagnostics.some(item => item.code === 'CONFLUENCE_LABEL_MISSING' && item.recordId === 'page:105'));
+  assert.ok(data.diagnostics.some(item => item.code === 'CONFLUENCE_LABEL_RELATION_UNRESOLVED' && item.recordId === 'relation:Labelling:207'));
+});
+
+test('partial label evidence retains independently confirmed IDs separately from the legacy projection', () => {
+  const data = parseConfluence(files([
+    space,
+    page('100', 'Partial direct collection', `<collection name="labels" partial="true">
+      <element class="Label"><id name="id">501</id></element>
+      <element class="Label"><id name="key">502</id></element>
+      <element class="Label"><id name="id">599</id></element>
+    </collection>`),
+    page('101', 'Matching relation alongside a disputed relation'),
+    page('102', 'Disputed alternate owner'),
+    page('103', 'Malformed association ID'),
+    page('104', 'Malformed label object ID', list('labels', 'Label', ['503'])),
+    page('105', 'Explicit empty collection', list('labels', 'Label', [])),
+    object('Page', '106', p('title', 'Draft') + p('contentStatus', 'draft') + list('labels', 'Label', ['501'])),
+    object('Label', '501', p('name', 'confirmed') + p('namespace', 'global')),
+    object('Label', '502', p('name', 'unproven') + p('namespace', 'global')),
+    `<object class="Label"><id name="key">503</id>${p('name', 'invalid-id')}${p('namespace', 'global')}</object>`,
+    object('Labelling', '201', r('content', 'Page', '101') + r('label', 'Label', '501')),
+    object('Labelling', '202', r('content', 'Page', '101') + r('contentEntity', 'Page', '102') + r('label', 'Label', '502')),
+    `<object class="Labelling"><id name="key">203</id>${r('content', 'Page', '103')}${r('label', 'Label', '502')}</object>`,
+  ]), 'confluence-confirmed-labels');
+
+  assert.deepEqual(data.records.filter(row => row.metadata.confirmedLabelIds).map(row => [row.sourceId, row.metadata.confirmedLabelIds]), [
+    ['100', ['501']], ['101', ['501']],
+  ]);
+  assert.deepEqual(data.records.filter(row => row.metadata.labelSetComplete).map(row => row.sourceId), ['105']);
+  assert.deepEqual(find(data, 'page', '100').metadata.labels, ['confirmed', 'unproven']);
+  assert.deepEqual(find(data, 'page', '101').metadata.labels, ['confirmed', 'unproven']);
+  assert.deepEqual(find(data, 'page', '103').metadata.labels, ['unproven']);
+  assert.deepEqual(find(data, 'page', '104').metadata.labels, ['invalid-id']);
+  assert.deepEqual(find(data, 'page', '106').metadata.labels, ['confirmed']);
+});
+
 test('6.x entities preserve exact storage, original versions, identities, labels, references and restrictions',()=>{
   const raw=' \r\n<p>본문 &amp; 링크</p>\r<ac:link><ri:page ri:content-title="대상" ri:space-key="TEAM"/></ac:link><ac:structured-macro ac:name="include"><ac:parameter ac:name="">TEAM:대상</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">NE25-42</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="vendor-private"><ac:parameter ac:name="secret">kept-only-in-raw-body</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="vendor-private"/><ac:plain-text-body><![CDATA[끝 & 그대로]]></ac:plain-text-body>  ';
   const historical='\n<p>이전 <strong>본문</strong></p>\r\n';

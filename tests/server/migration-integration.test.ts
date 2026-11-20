@@ -983,9 +983,9 @@ test('Confluence imports only proven global document labels and preserves team l
   const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
   const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
   const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
-  const page = (id: string, title: string, version: number) =>
-    object('Page', id, prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42')) +
-    object('BodyContent', `8${id}`, prop('body', '<![CDATA[<p>원본 본문</p>]]>') + ref('content', 'Page', id));
+  const page = (id: string, title: string, version: number, extras = '', body = '원본 본문') =>
+    object('Page', id, prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42') + extras) +
+    object('BodyContent', `8${id}`, prop('body', `<![CDATA[<p>${body}</p>]]>`) + ref('content', 'Page', id));
   const label = (id: number, name: string, pageId: string, namespace?: string, owner = '') =>
     object('Label', String(id), prop('name', name) + (namespace ? prop('namespace', namespace) : '') + owner) +
     object('Labelling', `9${id}`, ref('content', 'Page', pageId) + ref('label', 'Label', String(id)));
@@ -1009,6 +1009,7 @@ test('Confluence imports only proven global document labels and preserves team l
     label(208, 'Excluded-Option', '100', 'global'),
     ...extraLabels.map((name, index) => label(300 + index, name, '100', 'global')),
     label(401, 'Overflow-Synthetic-Label', '100', 'global'),
+    page('120', '부분 내보내기 문서', 1), label(503, 'Keep-On-Partial', '120', 'global'),
   ]);
   const configuration = await f.configuration(initial, 'LABELS');
   configuration.excludedRecords = [`${initial.id}/relation:Labelling:9207`, `${initial.id}/option:208`];
@@ -1023,7 +1024,7 @@ test('Confluence imports only proven global document labels and preserves team l
   assert.equal(imported.status, 201, JSON.stringify(imported.data));
   const [projectId] = imported.data.import.projectIds;
   const snapshot = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.filter(doc => doc.projectId === projectId);
-  const [original] = await snapshot();
+  const original = (await snapshot()).find(doc => doc.title === '원본 문서')!;
   assert.deepEqual(original.labels, ['Release', ...extraLabels]);
 
   const archivePath = `/source-imports/${imported.data.import.id}/records`;
@@ -1045,17 +1046,124 @@ test('Confluence imports only proven global document labels and preserves team l
   const delta = await upload('labelled-page-append', [
     page('100', '원본에서 바뀐 제목', 2), label(201, 'Release', '100', 'global'), label(501, 'Upstream-Only', '100', 'global'),
     page('110', '추가한 문서', 1), label(502, 'Runbook', '110', 'global'),
+    page('120', '부분 내보내기 문서', 2), label(504, 'New-On-Partial', '120', 'global'),
+    object('Label', '505', prop('name', 'Wrong-Owner') + prop('namespace', 'global')),
+    object('Labelling', '9505', ref('content', 'Page', '120') + ref('contentEntity', 'Page', '110') + ref('label', 'Label', '505')),
   ]);
   const appendPreview = await f.preview({ ...await f.configuration(delta, 'LABELS'), appendPagesTo: { projectId, refreshExisting: true } });
   assert.equal(appendPreview.canApply, true, JSON.stringify(appendPreview.notices));
   assert.equal(appendPreview.counts.documents, 1);
-  assert.equal(appendPreview.counts.updatedDocumentFields, 1);
+  assert.equal(appendPreview.counts.updatedDocumentFields, 2);
+  const field = appendPreview.documentRefresh?.find(row => row.sourceId === '100')?.fields.find(row => row.field === 'labels');
+  assert.equal(field?.decision, 'conflict');
+  assert.equal(field?.current, '팀 라벨');
+  assert.ok(field?.incoming.includes('Upstream-Only'));
   const appended = await f.apply(appendPreview);
   assert.equal(appended.status, 201, JSON.stringify(appended.data));
   const documents = await snapshot();
   assert.deepEqual(documents.map(doc => [doc.title, doc.labels]).sort(), [
-    ['원본에서 바뀐 제목', ['팀 라벨']], ['추가한 문서', ['Runbook']],
+    ['부분 내보내기 문서', ['Keep-On-Partial', 'New-On-Partial']], ['원본에서 바뀐 제목', ['팀 라벨']], ['추가한 문서', ['Runbook']],
   ]);
+
+  for (const [version, body] of [[1, '원본 본문'], [2, '같은 버전인데 본문이 다름']] as const) {
+    const unproven = await upload(`unproven-label-removal-${version}`, [page('120', '부분 내보내기 문서', version, '<collection name="labels"/>', body)]);
+    const rejected = await f.preview({ ...await f.configuration(unproven, 'LABELS'), appendPagesTo: { projectId, refreshExisting: true } });
+    assert.equal(rejected.canApply, false);
+    assert.equal(rejected.counts.updatedDocumentFields, 0);
+    assert.ok(rejected.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_SOURCE_NOT_NEWER'));
+  }
+});
+
+test('Confluence label-only refresh keeps active collaborators and restores the label comparison baseline', async t => {
+  const f = await fixture(), copy = await fixture();
+  const sockets = new Set<WebSocket>();
+  t.after(async () => {
+    for (const socket of sockets) socket.terminate();
+    await Promise.all([f.close(), copy.close()]);
+  });
+  f.attachCollaboration();
+  async function upload(target: MigrationFixture, version: number, label: string | null) {
+    const collection = label === null ? '<collection name="labels" class="java.util.HashSet"/>' :
+      '<collection name="labels" class="java.util.HashSet"><element class="Label"><id name="id">201</id></element></collection>';
+    const labelObject = label === null ? '' : `<object class="Label"><id name="id">201</id>
+      <property name="name">${label}</property><property name="namespace">global</property></object>`;
+    return target.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+      <object class="Space"><id name="id">42</id><property name="key">LIVE</property><property name="name">팀 문서</property></object>
+      <object class="Page"><id name="id">100</id><property name="title">원본 문서</property><property name="version">${version}</property>
+        <property name="space" class="Space"><id name="id">42</id></property>${collection}</object>
+      <object class="BodyContent"><id name="id">101</id><property name="content" class="Page"><id name="id">100</id></property>
+        <property name="body"><![CDATA[<p>변경하지 않은 원본 본문</p>]]></property></object>${labelObject}</hibernate-generic>`) }]),
+    `labels-version-${version}.zip`, 'confluence', 'synthetic-confluence-live-labels');
+  }
+  const original = await upload(f, 1, 'original');
+  const imported = await f.apply(await f.preview(await f.configuration(original, 'LIVE')));
+  assert.equal(imported.status, 201, JSON.stringify(imported.data));
+  const [projectId] = imported.data.import.projectIds;
+  const document = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(value => value.projectId === projectId)!;
+  assert.deepEqual(document.labels, ['original']);
+  const path = `/documents/${document.id}`;
+  const local = await f.call<DocPage>(path, 'PATCH', {
+    expectedVersion: document.version,
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '팀이 편집한 본문' }] }] },
+  });
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+  const enabled = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: local.data.version });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.data));
+  const socket = new WebSocket(`${f.base.replace('http:', 'ws:')}/collaboration?${new URLSearchParams({ documentId: document.id, actorId: 'user-min' })}`);
+  sockets.add(socket);
+  await once(socket, 'open', { signal: AbortSignal.timeout(6000) });
+  const ready = once(socket, 'message', { signal: AbortSignal.timeout(6000) });
+  socket.send(JSON.stringify({ type: 'hello', epoch: enabled.data.epoch, schemaVersion: COLLABORATION_SCHEMA }));
+  assert.equal((JSON.parse(String((await ready)[0])) as CollaborationServerMessage).type, 'welcome');
+
+  async function configuration(target: MigrationFixture, pack: LegacyPackageSummary) {
+    return { ...await target.configuration(pack, 'LIVE'), appendPagesTo: { projectId, refreshExisting: true } } as const;
+  }
+  const config = await configuration(f, await upload(f, 2, 'updated'));
+  const stale = await f.preview(config);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  assert.deepEqual(stale.documentRefresh?.[0]?.fields.map(({ field, decision }) => [field, decision]), [['labels', 'apply']]);
+  const edited = await f.call<DocPage>(path, 'PATCH', { expectedVersion: enabled.data.document.version, icon: 'book' });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  assert.equal((await f.apply(stale)).status, 409);
+  const preview = await f.preview(config);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  const metadata = once(socket, 'message', { signal: AbortSignal.timeout(6000) });
+  const [result, [bytes]] = await Promise.all([f.apply(preview), metadata]);
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  const message = JSON.parse(String(bytes)) as CollaborationServerMessage;
+  assert.equal(message.type, 'update');
+  assert.equal(message.epoch, enabled.data.epoch);
+  assert.deepEqual(message.document.labels, ['updated']);
+  assert.deepEqual(message.document.content, enabled.data.document.content);
+  assert.equal(message.document.icon, edited.data.icon);
+  assert.equal(message.document.version, edited.data.version + 1);
+  assert.equal(socket.readyState, WebSocket.OPEN);
+  assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document, message.document);
+  assert.equal((await f.apply(preview)).data.duplicate, true);
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; revisions: DocRevision[] };
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, 61);
+  const archive = backup.sourceRecords.find(row => row.sourceImportId === result.data.import.id && row.targetId === document.id);
+  assert.match(archive?.confluencePageFieldHashes?.labels ?? '', /^[a-f\d]{64}$/);
+  const version = backup.revisions.find(item => item.documentId === document.id && item.version === message.document.version);
+  assert.deepEqual(version?.content, enabled.data.document.content);
+  const old = await copy.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 60 } });
+  assert.equal(old.status, 400);
+  assert.match(old.data.error, /schemaVersion 61/);
+  const restored = await copy.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.deepEqual((await copy.call<CollaborationSession>(`${path}/collaboration`)).data.document.labels, ['updated']);
+
+  const empty = await copy.preview(await configuration(copy, await upload(copy, 3, null)));
+  assert.equal(empty.canApply, true, JSON.stringify(empty.notices));
+  assert.deepEqual(empty.documentRefresh?.[0]?.fields.map(({ field, decision }) => [field, decision]), [['labels', 'apply']]);
+  const cleared = await copy.apply(empty);
+  assert.equal(cleared.status, 201, JSON.stringify(cleared.data));
+  const current = (await copy.call<CollaborationSession>(`${path}/collaboration`)).data.document;
+  assert.equal(Object.hasOwn(current, 'labels'), false);
+  assert.deepEqual(current.content, enabled.data.document.content);
 });
 
 test('incremental Confluence imports reuse live parents and references while preserving edited and deleted pages', async t => {
@@ -2837,7 +2945,10 @@ test('retained source verification distinguishes archival loss from deleted live
   const oldBackup = structuredClone(backup.data);
   oldBackup.schemaVersion = 32;
   for (const original of oldBackup.sourceImports) delete original.integrity;
-  for (const original of oldBackup.sourceRecords) delete original.excluded;
+  for (const original of oldBackup.sourceRecords) {
+    delete original.excluded;
+    delete original.confluencePageFieldHashes;
+  }
   const loadedOld = await legacy.call('/import', 'POST', { data: oldBackup });
   assert.equal(loadedOld.status, 200, JSON.stringify(loadedOld.data));
   const countsOnly = await audit(legacy);

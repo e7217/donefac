@@ -497,6 +497,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if (!fields.length || fields.some(field => !confluenceRefreshFields.has(field))) {
         return fail('Confluence에서 반영할 문서 필드를 확인해 주세요.', 409);
       }
+      if (Object.hasOwn(update.changes, 'labels')) {
+        const labels = normalizeDocumentLabels(update.changes.labels);
+        if (!labels || JSON.stringify(labels) !== JSON.stringify(update.changes.labels)) {
+          return fail('Confluence에서 반영할 문서 라벨을 확인해 주세요.', 409);
+        }
+      }
       const bodyChanged = Object.hasOwn(update.changes, 'content');
       if (bodyChanged && collaboration.hasReadyEditors(before.id)) {
         return fail(`‘${before.title}’에서 공동 편집 중입니다. 참여자가 나간 뒤 문서 변경분을 다시 검토해 주세요.`, 409);
@@ -656,7 +662,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         activity(req, 'issue', after.id, 'Jira 원본 변경분 반영', fields.join(', '));
       }
       for (const { after, bodyChanged } of refreshedDocuments) {
-        const document = bodyChanged ? collaboration.replaceBody(after) : after;
+        const document = bodyChanged ? collaboration.replaceBody(after) : collaboration.deriveSnapshot(after);
+        if (!bodyChanged && document !== after) store.put('documents', document);
         revision(document, actor(req), 'Confluence 원본 변경분 반영');
         activity(req, 'document', document.id, 'Confluence 원본 변경분 반영', document.title);
       }
@@ -1659,6 +1666,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
+    if (data.schemaVersion < 61 && importedSources.records.some(row => row.confluencePageFieldHashes?.labels !== undefined)) {
+      fail('Confluence 문서 라벨의 비교 기준을 포함한 백업은 schemaVersion 61이 필요합니다.');
+    }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
     const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);
     if (data.schemaVersion < 51 && importedTeamspaceRelations.length) fail('직접 만든 업무 관계를 포함한 백업은 schemaVersion 51이 필요합니다.');

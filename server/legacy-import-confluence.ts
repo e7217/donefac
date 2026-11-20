@@ -144,8 +144,37 @@ function attachBodies(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
   for(const [key,row]of rows){const type=key.slice(0,key.indexOf(':'));if(CONTENT_TYPES.has(type)&&type!=='Attachment'&&!owners.has(key))diagnostic(data,{severity:'warning',code:'CONFLUENCE_BODY_MISSING',message:'콘텐츠의 BodyContent 객체가 패키지에 없습니다.',recordId:row.id,path});}
 }
 
+const labelAssociationTypes = new Set(['Labelling', 'ContentLabel']);
+
+function exactNamedId(id: LegacyXmlNode | undefined): string {
+  return id?.name === 'id' && id.attributes.name === 'id' && Object.keys(id.attributes).length === 1 && !id.children.length ? id.text.trim() : '';
+}
+
+function exactLabelObjectId(node: LegacyXmlNode): string {
+  const ids = node.children.filter(item => item.name === 'id');
+  return ids.length === 1 ? exactNamedId(ids[0]) : '';
+}
+
+function exactLabelReferenceId(node: LegacyXmlNode | undefined): string {
+  if (!node || node.text.trim() || node.children.length !== 1) return '';
+  if (Object.keys(node.attributes).some(name => name !== 'class' && name !== 'package' && name !== 'name')) return '';
+  return exactNamedId(node.children[0]);
+}
+
+function labelCollectionKeys(node: LegacyXmlNode, resolve: (element: LegacyXmlNode) => string): { keys: Set<string>; complete: boolean } {
+  let complete = !node.text.trim() && Object.keys(node.attributes).every(name => name === 'class' || name === 'name');
+  const keys = new Set<string>();
+  for (const element of node.children) {
+    const key = element.name === 'element' ? resolve(element) : '';
+    if (!key || keys.has(key)) complete = false;
+    if (key) keys.add(key);
+  }
+  return { keys, complete };
+}
+
 function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map<string,LegacyRecord>,objects:Map<string,XmlObject>,path:string):void{
   const labels=new Map<string,LegacyRecord>();
+  const exactLabelObjects = new Set<string>();
   for (const item of byType.get('Label') ?? []) {
     const owner = property(item.node, 'owner');
     const row = record('option', item.id, {
@@ -157,10 +186,80 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     });
     addRecord(data, row);
     labels.set(item.id, row);
+    if (exactLabelObjectId(item.node) === item.id) exactLabelObjects.add(item.id);
   }
-  const apply=(owner:LegacyRecord,labelId:string)=>{addReference(owner,'option',labelId,'label');const label=labels.get(labelId);if(label){const values=Array.isArray(owner.metadata.labels)?owner.metadata.labels:[];if(!values.includes(label.title))values.push(label.title);owner.metadata.labels=values;}else diagnostic(data,{severity:'warning',code:'CONFLUENCE_LABEL_MISSING',message:'레이블 관계의 원본 Label 객체가 없습니다.',recordId:owner.id,path});};
-  for(const item of [...(byType.get('Labelling')??[]),...(byType.get('ContentLabel')??[])]){const contentNode=property(item.node,'content')??property(item.node,'contentEntity'),ownerId=idOf(contentNode),ownerType=contentNode?objectClass(contentNode)||'Page':'Page',labelId=ref(item.node,'label');const owner=rows.get(`${ownerType}:${ownerId}`);if(owner&&labelId)apply(owner,labelId);else diagnostic(data,{severity:'warning',code:'CONFLUENCE_LABEL_RELATION_UNRESOLVED',message:'레이블과 콘텐츠의 연결을 확정할 수 없습니다.',recordId:`relation:${item.type}:${item.id}`,path});}
-  for(const [key,row]of rows){const object=objects.get(key);if(!object)continue;for(const element of collection(object.node,'labels')?.children??[]){if(objectClass(element)==='Label')apply(row,idOf(element));}}
+  const apply = (owner: LegacyRecord, labelId: string) => {
+    addReference(owner, 'option', labelId, 'label');
+    const label = labels.get(labelId);
+    if (label) {
+      const values = Array.isArray(owner.metadata.labels) ? owner.metadata.labels : [];
+      if (!values.includes(label.title)) values.push(label.title);
+      owner.metadata.labels = values;
+    } else {
+      diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_LABEL_MISSING',
+        message: '레이블 관계의 원본 Label 객체가 없습니다.', recordId: owner.id, path });
+    }
+  };
+  const associations = new Map<string, Map<string, string>>();
+  const uncertainOwners = new Set<string>();
+  for (const type of labelAssociationTypes) for (const item of byType.get(type) ?? []) {
+    const contents = [property(item.node, 'content'), property(item.node, 'contentEntity')]
+      .filter((value): value is LegacyXmlNode => value !== undefined);
+    const [content] = contents;
+    const ownerKey = content && `${objectClass(content) || 'Page'}:${idOf(content)}`;
+    const owner = ownerKey ? rows.get(ownerKey) : undefined;
+    const labelNode = property(item.node, 'label');
+    const labelId = idOf(labelNode);
+    if (owner && labelId) apply(owner, labelId);
+    else diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_LABEL_RELATION_UNRESOLVED',
+      message: '레이블과 콘텐츠의 연결을 확정할 수 없습니다.', recordId: `relation:${item.type}:${item.id}`, path });
+
+    if (ownerKey && owner && exactLabelObjectId(item.node) === item.id && labelNode && objectClass(labelNode) === 'Label' &&
+        exactLabelObjects.has(exactLabelReferenceId(labelNode)) &&
+        contents.every(node => `${objectClass(node)}:${exactLabelReferenceId(node)}` === ownerKey)) {
+      const links = associations.get(ownerKey) ?? new Map<string, string>();
+      links.set(`${item.type}:${item.id}`, labelId);
+      associations.set(ownerKey, links);
+    } else {
+      for (const node of contents) {
+        const id = idOf(node);
+        const type = objectClass(node) || 'Page';
+        uncertainOwners.add(`${type}:${id}`);
+        if (!rows.has(`${type}:${id}`) && rows.has(`Page:${id}`)) uncertainOwners.add(`Page:${id}`);
+      }
+    }
+  }
+
+  for (const [key, row] of rows) {
+    const object = objects.get(key);
+    if (!object) continue;
+    const direct = collection(object.node, 'labels');
+    for (const element of direct?.children ?? []) if (objectClass(element) === 'Label') apply(row, idOf(element));
+
+    const indirect = collection(object.node, 'labellings');
+    const status = property(object.node, 'contentStatus');
+    if (object.type !== 'Page' || row.kind !== 'page' || status && (status.children.length || status.text.trim() !== 'current') ||
+        exactLabelObjectId(object.node) !== object.id) continue;
+    const proven = associations.get(key) ?? new Map<string, string>();
+    const directIds = direct && labelCollectionKeys(direct, element => {
+      const id = exactLabelReferenceId(element);
+      return objectClass(element) === 'Label' && exactLabelObjects.has(id) ? id : '';
+    });
+    const provenLabels = new Set(proven.values());
+    const confirmedLabels = new Set([...provenLabels, ...(directIds?.keys ?? [])]);
+    if (confirmedLabels.size) row.metadata.confirmedLabelIds = [...confirmedLabels].sort();
+
+    if (!direct && !indirect || uncertainOwners.has(key)) continue;
+    const indirectIds = indirect && labelCollectionKeys(indirect, element => {
+      const type = objectClass(element);
+      const key = `${type}:${exactLabelReferenceId(element)}`;
+      return labelAssociationTypes.has(type) && proven.has(key) ? key : '';
+    });
+    if (directIds?.complete === false || indirectIds?.complete === false || property(object.node, 'labels') || property(object.node, 'labellings')) continue;
+    if (indirectIds && indirectIds.keys.size !== proven.size) continue;
+    if (directIds && ([...provenLabels].some(id => !directIds.keys.has(id)) || indirectIds && directIds.keys.size !== provenLabels.size)) continue;
+    row.metadata.labelSetComplete = true;
+  }
 }
 
 function attachRelations(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map<string,LegacyRecord>,objects:Map<string,XmlObject>,kindFor:(type:string,id:string)=>LegacyRecordKind,sourceIdFor:(type:string,id:string)=>string,path:string):void{

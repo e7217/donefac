@@ -4,7 +4,7 @@ import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_F
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
-import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel } from '../shared/document-labels.js';
+import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
@@ -93,8 +93,18 @@ function newerConfluencePage(next: LegacyRecord, previous: LegacyRecord, timezon
   return nextTime !== null && previousTime !== null && nextTime > previousTime;
 }
 
+function sameConfluencePageRevision(next: LegacyRecord, previous: LegacyRecord, timezone: string, previousTimezone: string): boolean {
+  const version = confluenceSourceVersion(next);
+  if (version === null || version !== confluenceSourceVersion(previous)) return false;
+  // A label-only checkpoint becomes the latest raw page for the next refresh.
+  if (next.title.trim() !== previous.title.trim() || hasConfluenceBody(next) !== hasConfluenceBody(previous) || next.text !== previous.text) return false;
+  if (next.updatedAt === null && previous.updatedAt === null) return true;
+  const nextTime = sourceTimestamp(next.updatedAt, timezone), previousTime = sourceTimestamp(previous.updatedAt, previousTimezone);
+  return nextTime !== null && previousTime !== null && nextTime >= previousTime;
+}
+
 function confluencePageFieldDigest(field: ConfluenceMigrationDocumentField, value: DocPage[ConfluenceMigrationDocumentField]): string {
-  return hash(field, JSON.stringify(value));
+  return hash(field, JSON.stringify(field === 'labels' ? value ?? [] : value));
 }
 
 function confluencePageFieldDigests(values: ConfluenceMigrationDocumentValues): ConfluenceMigrationPageFieldHashes {
@@ -834,6 +844,7 @@ class Planner{
     const review: ConfluenceMigrationDocumentReview[] = [];
     const updates: NonNullable<PreparedMigration['documentUpdates']> = [];
     const seen = new Set<string>();
+    const excludedLabels = this.excludedConfluencePageLabels();
     let updatedDocumentFields = 0, conflictingDocumentFields = 0, skippedDocumentUpdates = 0;
     for (const entry of this.entries) {
       const { row } = entry;
@@ -854,16 +865,20 @@ class Planner{
         continue;
       }
       seen.add(document.id);
-      if (!newerConfluencePage(row, previous.record, this.configuration.timezone, previousTimezone)) {
+      const timezone = this.configuration.timezone;
+      const newer = newerConfluencePage(row, previous.record, timezone, previousTimezone);
+      const sameRevision = !newer && row.metadata.labelSetComplete === true && !sourceBodyErrors.has(entry.key) &&
+        sameConfluencePageRevision(row, previous.record, timezone, previousTimezone);
+      if (!newer && !sameRevision) {
         skippedDocumentUpdates++;
         this.notice('CONFLUENCE_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 버전 또는 수정 시각을 확인할 수 없어 원본만 보관합니다.', 'info', entry);
         continue;
       }
       const title = row.title.trim();
-      if (!title || title.length > 300) {
+      if (newer && (!title || title.length > 300)) {
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
-      const bodyChanged = hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
+      const bodyChanged = newer && hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
       const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
           resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id) }) : null;
@@ -878,12 +893,26 @@ class Planner{
         }
       }
       const values: ConfluenceMigrationDocumentValues = {};
-      if (title && title.length <= 300) values.title = title;
+      if (newer && title && title.length <= 300) values.title = title;
       if (safeBody) {
         values.content = safeBody.content;
         for (const diagnostic of safeBody.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
       }
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
+      const currentLabels = document.labels ?? [];
+      const status = string(row.metadata.contentStatus).trim().toLowerCase();
+      const labels = !status || status === 'current'
+        ? this.confluenceDocumentLabels(entry, excludedLabels.get(entry.key), true) : { values: [], complete: false };
+      if (labels.complete) values.labels = labels.values;
+      else if (newer && labels.values.length) {
+        const present = new Set(currentLabels.map(documentLabelKey));
+        const additions = labels.values.filter(label => !present.has(documentLabelKey(label)));
+        if (additions.length) {
+          const combined = normalizeDocumentLabels([...currentLabels, ...additions]);
+          if (combined) values.labels = combined;
+          else this.notice('CONFLUENCE_REFRESH_LABEL_LIMIT', '기존 문서 라벨을 유지한 채 추가하면 개수 제한을 넘으므로 현재 라벨을 보존합니다.', 'warning', entry, true);
+        }
+      }
       const accepted: ConfluenceMigrationDocumentValues = {};
       const fields: ConfluenceMigrationDocumentReview['fields'] = [];
       let checkpoint = false;
@@ -902,10 +931,13 @@ class Planner{
           continue;
         }
         const decision = currentHash === hashes[field] ? 'apply' : 'conflict';
-        const current = field === 'title' ? document.title : document.plainText;
-        const incomingText = field === 'title' ? title : safeBody!.plainText;
-        fields.push({ field, current: confluenceReviewExcerpt(current), incoming: confluenceReviewExcerpt(incomingText), decision,
+        const current = field === 'title' ? document.title : field === 'labels' ? currentLabels.join('\n') || '—' : document.plainText;
+        const incomingText = field === 'title' ? title : field === 'labels' ? values.labels!.join('\n') || '—' : safeBody!.plainText;
+        fields.push({ field, current: field === 'labels' ? current : confluenceReviewExcerpt(current),
+          incoming: field === 'labels' ? incomingText : confluenceReviewExcerpt(incomingText), decision,
           ...(field === 'content' && current === incomingText ? { formatOnly: true } : {}) });
+        if (field === 'labels' && sameRevision && decision === 'apply') this.notice('CONFLUENCE_REFRESH_LABEL_SAME_REVISION',
+          '같은 페이지 버전에서 라벨 목록만 비교했습니다. 반영 전에 내보내기 순서를 확인해 주세요.', 'warning', entry, true);
         if (decision === 'apply') {
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
@@ -1289,14 +1321,20 @@ class Planner{
     }
     return labels;
   }
-  private confluenceDocumentLabels(entry: Entry, excludedLabels?: ReadonlySet<string>): string[] {
-    if (entry.pkg.dataset.source.product !== 'confluence') return [];
+  private confluenceDocumentLabels(entry: Entry, excludedLabels: ReadonlySet<string> | undefined, refreshing = false): { values: string[]; complete: boolean } {
+    if (entry.pkg.dataset.source.product !== 'confluence') return { values: [], complete: false };
     const labels = new Map<string, string>();
+    const rawIds = entry.row.metadata.confirmedLabelIds;
+    const confirmed = refreshing ? new Set(Array.isArray(rawIds) ? rawIds.filter(id => typeof id === 'string') : []) : null;
+    let complete = entry.row.metadata.labelSetComplete === true;
     let archivedScope = false, archivedValue = false;
     for (const reference of entry.row.references) {
-      if (reference.kind !== 'option' || reference.relation !== 'label' || excludedLabels?.has(reference.sourceId)) continue;
+      if (reference.kind !== 'option' || reference.relation !== 'label') continue;
       const option = this.sourceEntry(entry, 'option', reference.sourceId);
-      if (!option || this.skip(option)) continue;
+      if (!option || this.skip(option) || excludedLabels?.has(reference.sourceId) || confirmed && !confirmed.has(reference.sourceId)) {
+        complete = false;
+        continue;
+      }
       const { sourceClass, namespace, owner, ownerReference } = option.row.metadata;
       if (sourceClass !== 'Label' || namespace !== 'global' || (owner != null && owner !== '') || ownerReference !== undefined) {
         archivedScope = true;
@@ -1317,7 +1355,7 @@ class Planner{
     }
     if (archivedScope) this.notice('CONFLUENCE_LABEL_SCOPE_ARCHIVED', '개인용 또는 공용 범위를 확인할 수 없는 문서 라벨은 원본으로 보관합니다.', 'warning', entry, true);
     if (archivedValue) this.notice('CONFLUENCE_LABEL_VALUE_ARCHIVED', '이름이나 개수 제한을 충족하지 않는 문서 라벨은 원본으로 보관합니다.', 'warning', entry, true);
-    return [...labels.keys()].sort().map(key => labels.get(key)!);
+    return { values: [...labels.keys()].sort().map(key => labels.get(key)!), complete: complete && !archivedScope && !archivedValue };
   }
   createPrimary():void{
     for(const project of this.result.projects){this.schemas.set(project.id,{...defaultIssueSchema(project.id,this.input.now),issueTypes:[],fields:[]});this.workflows.set(project.id,{...defaultWorkflow(project.id,this.input.now),statuses:[],transitions:[],fieldRules:[]});}
@@ -1332,7 +1370,7 @@ class Planner{
     }
     for(const entry of this.entries){if(this.skip(entry)||!['issue','page'].includes(entry.row.kind))continue;const project=this.project(entry);if(!project)continue;const row=entry.row,id=randomUUID();if(!row.title.trim()||row.title.trim().length>300)this.notice('TITLE_INVALID','제목이 비어 있거나300자를 넘습니다. 원본은 보존하지만 현재 객체로 적용할 수 없습니다.','error',entry);const title=row.title.trim().slice(0,300)||'제목 없음',createdAt=this.time(row.createdAt,entry)!,updatedAt=this.time(row.updatedAt,entry,false)||createdAt;
       if (row.kind === 'page') {
-        const labels = this.confluenceDocumentLabels(entry, excludedLabels.get(entry.key));
+        const { values: labels } = this.confluenceDocumentLabels(entry, excludedLabels.get(entry.key));
         const document: DocPage = {
           id, projectId: project.id, parentId: null, title, content: { type: 'doc', content: [{ type: 'paragraph' }] },
           plainText: '', icon: '📄', status: 'published', version: 1, authorId: this.author(entry), createdAt, updatedAt,
@@ -2693,7 +2731,7 @@ class Planner{
         (createdIssue && entry.pkg.dataset.source.product === 'jira' ? this.initialJiraCustomFieldHashes(entry, createdIssue) : undefined);
       const createdPage = binding?.type === 'document' ? this.documentById.get(binding.id) : undefined;
       const pageHashes = pageCheckpoint?.hashes ??
-        (createdPage && entry.pkg.dataset.source.product === 'confluence' ? confluencePageFieldDigests(createdPage) : undefined);
+        (createdPage && entry.pkg.dataset.source.product === 'confluence' ? confluencePageFieldDigests({ ...createdPage, labels: createdPage.labels ?? [] }) : undefined);
       const value: SourceRecordArchive = {
         id: this.archiveIds.get(entry.key) || randomUUID(), sourceImportId: this.input.id,
         packageSha256: entry.pkg.summary.sha256, source: structuredClone(entry.pkg.dataset.source), record: structuredClone(entry.row),

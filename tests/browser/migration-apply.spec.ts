@@ -795,6 +795,110 @@ test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 
   }
 });
 
+test('360px에서 Confluence 라벨의 추가와 삭제를 검토하고 팀에서 바꾼 라벨을 보존한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), instance = `confluence-label-refresh-${id}`, spaceKey = `CF${id}`;
+  const changedTitle = `라벨 갱신 문서 ${id}`, editedTitle = `팀 라벨 문서 ${id}`, clearedTitle = `라벨 비우기 문서 ${id}`;
+  const body = '라벨만 바뀌는 Confluence 원본 본문';
+  const labelIds = { retired: 201, steady: 202, runbook: 203, 'old-topic': 204, 'new-topic': 205, 'clear-me': 206 };
+  type Label = keyof typeof labelIds;
+  type SourcePage = { id: number; title: string; version: number; labels: Label[] };
+  const exportSpace = (pages: SourcePage[]) => zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">라벨 변경 원본 공간 ${id}</property></object>
+    ${pages.map(source => `<object class="Page"><id name="id">${source.id}</id><property name="title">${source.title}</property><property name="version">${source.version}</property>
+      <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-0${source.version + 1}T00:00:00Z</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      <collection name="labels" class="java.util.Set">${source.labels.map(label => `<element class="Label"><id name="id">${labelIds[label]}</id></element>`).join('')}</collection>
+      </object>
+      <object class="BodyContent"><id name="id">${source.id + 300}</id><property name="body"><![CDATA[<p>${body}</p>]]></property>
+      <property name="content" class="Page"><id name="id">${source.id}</id></property></object>`).join('')}
+    ${[...new Set(pages.flatMap(source => source.labels))].map(label => `<object class="Label"><id name="id">${labelIds[label]}</id>
+      <property name="name">${label}</property><property name="namespace">global</property></object>`).join('')}
+  </hibernate-generic>`) }]);
+  const documents = async (projectId: string) => {
+    const response = await request.get('/api/workspace');
+    expect(response.ok(), await response.text()).toBe(true);
+    return new Map(((await response.json()) as WorkspaceSnapshot).documents.filter(document => document.projectId === projectId)
+      .map(document => [document.title, document]));
+  };
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const original = await upload(request, `label-refresh-original-${id}.zip`, exportSpace([
+      { id: 100, title: changedTitle, version: 1, labels: ['retired', 'steady'] },
+      { id: 101, title: editedTitle, version: 1, labels: ['old-topic'] },
+      { id: 102, title: clearedTitle, version: 1, labels: ['clear-me'] },
+    ]), instance);
+    staged.push(original);
+    const initial = await importIntoProject(request, original, `WIK${id}`, `라벨 변경 프로젝트 ${id}`);
+    const [projectId] = initial.import.projectIds;
+    const before = await documents(projectId);
+    expect(before.get(changedTitle)?.labels).toEqual(['retired', 'steady']);
+    expect(before.get(editedTitle)?.labels).toEqual(['old-topic']);
+    expect(before.get(clearedTitle)?.labels).toEqual(['clear-me']);
+    const edited = before.get(editedTitle)!;
+    const edit = await request.patch(`/api/documents/${edited.id}`, { data: { expectedVersion: edited.version, labels: ['team-topic'] } });
+    expect(edit.status(), await edit.text()).toBe(200);
+    const teamDocument = await edit.json() as DocPage;
+
+    const next = await upload(request, `label-refresh-next-${id}.zip`, exportSpace([
+      { id: 100, title: changedTitle, version: 2, labels: ['steady', 'runbook'] },
+      { id: 101, title: editedTitle, version: 2, labels: ['new-topic'] },
+      { id: 102, title: clearedTitle, version: 1, labels: [] },
+    ]), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    await settings.getByLabel('이관 방식', { exact: true }).selectOption('append-pages');
+    await settings.getByRole('checkbox', { name: '기존 Confluence 문서 변경분 반영', exact: true }).check();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts).toMatchObject({ documents: 0, updatedDocuments: 2, updatedDocumentFields: 2, conflictingDocumentFields: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const changes = review.getByRole('region', { name: '기존 Confluence 문서 변경 검토', exact: true });
+    const labels = (title: string) => changes.getByRole('article', { name: title, exact: true }).getByRole('listitem', { name: '라벨', exact: true });
+    await expect(labels(changedTitle)).toContainText('Confluence 값 반영');
+    await expect(labels(changedTitle).locator('dd').first()).toContainText('retired');
+    await expect(labels(changedTitle).locator('dd').last()).toContainText('runbook');
+    await expect(labels(changedTitle).locator('dd').last()).toContainText('steady');
+    await expect(labels(changedTitle).locator('dd').last()).not.toContainText('retired');
+    await expect(labels(editedTitle)).toContainText('현재 값 유지');
+    await expect(labels(editedTitle).locator('dd').first()).toContainText('team-topic');
+    await expect(labels(editedTitle).locator('dd').last()).toContainText('new-topic');
+    await expect(labels(clearedTitle)).toContainText('반영할 라벨');
+    await expect(labels(clearedTitle).locator('dd').last()).toHaveText('—');
+    const bounds = await changes.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByText('변경 문서 2', { exact: true })).toBeVisible();
+    await expect(settings.getByRole('status').filter({ hasText: '실제 이관 적용 중…' })).toHaveCount(0);
+    const after = await documents(projectId);
+    expect(after.get(changedTitle)).toMatchObject({ labels: ['runbook', 'steady'], plainText: body, version: before.get(changedTitle)!.version + 1 });
+    expect(after.get(editedTitle)).toEqual(teamDocument);
+    expect(after.get(clearedTitle)?.labels ?? []).toEqual([]);
+    expect(after.get(clearedTitle)?.version).toBe(before.get(clearedTitle)!.version + 1);
+
+    await page.goto(`/#/${projectId}/documents/${after.get(changedTitle)!.id}?label=runbook`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(changedTitle);
+    await expect(page.getByRole('button', { name: '라벨 삭제: runbook', exact: true })).toBeVisible();
+    const tree = page.getByRole('complementary', { name: '문서 목록' });
+    await expect(tree.getByRole('combobox', { name: '문서 라벨 필터' })).toHaveValue('runbook');
+    await expect(tree.locator('.docs-tree-link').filter({ hasText: changedTitle })).toBeVisible();
+    await expect(tree.locator('.docs-tree-link').filter({ hasText: editedTitle })).toHaveCount(0);
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px에서 기존 Confluence 문서에 첨부를 추가하고 새 버전과 고정된 이전 파일을 내려받는다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
