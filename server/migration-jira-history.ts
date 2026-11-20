@@ -119,10 +119,9 @@ function statusText(value: unknown, limit: number): string | null {
   return raw.trim() && raw.length <= limit && !/[\u0000-\u001f\u007f]/.test(raw) ? raw : null;
 }
 
-/** Read status fields supplied by Jira, independent of Teamspace's current workflow. */
-export function jiraStatusTransitions(record: LegacyRecord): { position: number; from: JiraIssueStatusValue; to: JiraIssueStatusValue }[] {
+function readJiraStatusTransitions(record: LegacyRecord): { position: number; from: JiraIssueStatusValue; to: JiraIssueStatusValue }[] {
   const items = record.metadata.items;
-  if (record.kind !== 'history' || isJiraWorklog(record) || isRestrictedJiraStatusHistory(record) || !Array.isArray(items)) return [];
+  if (record.kind !== 'history' || isJiraWorklog(record) || !Array.isArray(items)) return [];
   const normalized = (value: unknown) => statusText(value, 200)?.trim().toLowerCase();
   return items.flatMap((item, position) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
@@ -135,6 +134,16 @@ export function jiraStatusTransitions(record: LegacyRecord): { position: number;
     if ((!from.id && !from.label && !to.id && !to.label) || (from.id === to.id && from.label === to.label)) return [];
     return [{ position, from, to }];
   });
+}
+
+/** Read status fields supplied by Jira, independent of Teamspace's current workflow. */
+export function jiraStatusTransitions(record: LegacyRecord) {
+  return isRestrictedJiraStatusHistory(record) ? [] : readJiraStatusTransitions(record);
+}
+
+/** Audit counts include recognized changes on restricted records without projecting their contents. */
+export function countJiraStatusTransitions(record: LegacyRecord): number {
+  return readJiraStatusTransitions(record).length;
 }
 
 export function isRestrictedJiraAttachment(record: LegacyRecord): boolean {

@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
-import type { SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationStatus } from '../../shared/types';
+import type { SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationJiraStatusHistory, SourceReconciliationStatus } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
@@ -23,6 +23,14 @@ const integrityLabels: Record<SourceReconciliationIntegrity['status'], string> =
   'counts-only': '건수만 비교',
   unavailable: '비교 기준 없음',
 };
+const jiraHistoryLabels = {
+  sourceChanges: '보존 원본의 변경',
+  projected: '현재 업무에 표시',
+  duplicate: '중복 변경',
+  excluded: '이관 제외',
+  restricted: '표시 제한',
+  unavailable: '표시 대상 확인 필요',
+};
 
 type Filter = 'all' | 'findings' | SourceReconciliationAuditStatus;
 type AuditState = { kind: 'idle' | 'pending' | 'cancelled' } | { kind: 'complete'; result: SourceReconciliationAudit } | { kind: 'error'; message: string };
@@ -33,6 +41,7 @@ type AuditProps = {
   canStart: boolean;
   recordLabels: Record<SourceReconciliationStatus, string>;
   onStale: () => void;
+  onReviewJiraHistory: () => void;
   detail: {
     openId: string | null;
     content: ReactNode;
@@ -41,7 +50,7 @@ type AuditProps = {
   };
 };
 
-export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, onStale, detail }: AuditProps) {
+export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, onStale, onReviewJiraHistory, detail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -119,6 +128,8 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       {report && <>
         <p className="migration-audit-completed" role="status">원본 연결과 첨부 검증을 마쳤습니다.</p>
         <ReceiptIntegrity integrity={report.integrity} />
+        {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory}
+          integrity={report.integrity.status} onReviewHistory={onReviewJiraHistory} />}
         <h5>원본 객체 상태</h5>
         <AuditCounts label="원본 검증 건수" labels={recordLabels} counts={report.recordCounts} />
         <h5>첨부 검증 결과</h5>
@@ -170,6 +181,31 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       </>}
     </section>}
   </div>;
+}
+
+function JiraStatusHistoryAudit({ history, integrity, onReviewHistory }: {
+  history: SourceReconciliationJiraStatusHistory;
+  integrity: SourceReconciliationIntegrity['status'];
+  onReviewHistory: () => void;
+}) {
+  const { sourceChanges, projected, duplicate, excluded, restricted, unavailable, unresolvedTime, unresolvedAuthor } = history;
+  const needsReview = integrity !== 'verified' || [restricted, unavailable, unresolvedTime, unresolvedAuthor].some(value => value > 0);
+  return <section className="migration-audit-integrity" aria-label="Jira 상태 변경 검증">
+    <div className="migration-audit-integrity-heading">
+      <h5>Jira 상태 변경 검증</h5>
+      {needsReview && <span className="migration-audit-status is-mismatch">확인 필요</span>}
+    </div>
+    {integrity !== 'verified' && <p>이 집계를 사용하기 전에 이관 당시 기록과 현재 비교 결과를 확인해 주세요.</p>}
+    {sourceChanges > 0
+      ? <AuditCounts label="Jira 상태 변경 건수" labels={jiraHistoryLabels}
+        counts={{ sourceChanges, projected: projected.count, duplicate, excluded, restricted, unavailable }} />
+      : <p>보존 원본에서 확인한 상태 변경은 0건입니다. Jira 내보내기에 변경 이력이 포함되어 있는지 확인해 주세요.</p>}
+    {(unresolvedTime > 0 || unresolvedAuthor > 0) && <p>현재 표시된 변경 중 시각 미확인 {count(unresolvedTime)} · 작성자 미확인 {count(unresolvedAuthor)}</p>}
+    {unavailable > 0 && <div>
+      <p>표시되지 않은 변경의 보존 원본과 연결된 업무를 확인해 주세요.</p>
+      <button type="button" className="btn btn-ghost" onClick={onReviewHistory}>원본 변경 이력 대조 열기</button>
+    </div>}
+  </section>;
 }
 
 function ReceiptIntegrity({ integrity }: { integrity: SourceReconciliationIntegrity }) {

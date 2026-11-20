@@ -354,6 +354,16 @@ export interface SourceReconciliationTargetContent {
   worklogs: SourceReconciliationContentDigest;
   issueRelations: SourceReconciliationContentDigest;
 }
+export interface SourceReconciliationJiraStatusHistory {
+  sourceChanges: number;
+  projected: SourceReconciliationContentDigest;
+  duplicate: number;
+  excluded: number;
+  restricted: number;
+  unavailable: number;
+  unresolvedTime: number;
+  unresolvedAuthor: number;
+}
 export interface SourceReconciliationAudit {
   importId: string;
   receiptVersion: number;
@@ -362,6 +372,7 @@ export interface SourceReconciliationAudit {
   integrity: SourceReconciliationIntegrity;
   recordCounts: SourceReconciliationPage['counts'];
   targetContent: SourceReconciliationTargetContent;
+  jiraStatusHistory: SourceReconciliationJiraStatusHistory | null;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];
 }

@@ -49,6 +49,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
   const [record, setRecord] = useState<RecordLoad | null>(null);
   const recordRequest = useRef<AbortController | null>(null);
   const recordButton = useRef<HTMLButtonElement | null>(null);
+  const kindFilter = useRef<HTMLSelectElement | null>(null);
   const headingId = useId();
   const base = `/source-imports/${encodeURIComponent(sourceImportId)}`;
   const result = load?.filters === filters && 'data' in load ? load.data : null;
@@ -95,6 +96,11 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     event.preventDefault();
     updateFilters({ q: searchDraft.trim(), offset: 0 });
   }
+  function reviewJiraHistory() {
+    setSearchDraft('');
+    updateFilters({ kind: 'history', status: '', q: '', offset: 0 });
+    kindFilter.current?.focus();
+  }
   async function openRecord(sourceRecordId: string, area: RecordArea, trigger: HTMLButtonElement) {
     recordRequest.current?.abort();
     const abort = new AbortController();
@@ -121,7 +127,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     </header>
 
     <MigrationReceiptAudit key={`${base}:${receiptVersion ?? ''}`} base={base} receiptVersion={receiptVersion}
-      canStart={Boolean(result)} recordLabels={statusLabels} onStale={() => updateFilters()} detail={{
+      canStart={Boolean(result)} recordLabels={statusLabels} onStale={() => updateFilters()} onReviewJiraHistory={reviewJiraHistory} detail={{
         openId: auditRecord?.sourceRecordId ?? null,
         onToggle: (sourceRecordId, trigger) => {
           if (auditRecord?.sourceRecordId === sourceRecordId) closeRecord();
@@ -145,7 +151,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
         </select>
       </label>
       <label>대조 원본 종류
-        <select className="field" aria-label="대조 원본 종류" value={filters.kind} onChange={event => updateFilters({ kind: event.target.value as Filters['kind'], offset: 0 })}>
+        <select ref={kindFilter} className="field" aria-label="대조 원본 종류" value={filters.kind} onChange={event => updateFilters({ kind: event.target.value as Filters['kind'], offset: 0 })}>
           <option value="">전체 종류</option>
           {Object.entries(sourceRecordKindLabels).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
         </select>

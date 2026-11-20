@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import fileSystem from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { ApiKeyCreated, JiraIssueStatusHistoryPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
-  MigrationOptions, MigrationPreview, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
+  MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const created = '2025-01-01T00:00:00Z';
@@ -89,14 +90,17 @@ const restStatus = (from: string, fromString: string, to: string, toString: stri
   ({ fieldId: 'status', field: '상태', fieldtype: 'jira', from, fromString, to, toString });
 
 function restPackage() {
+  const bytes = Buffer.from('Synthetic attachment for the asynchronous audit');
   const task = (id: string, number: number, summary: string) => ({ id, key: `${project.key}-${number}`,
     fields: { project, summary, created, updated: created, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' } } });
-  return Buffer.from(JSON.stringify({ issues: [{ ...task('4401', 1, historicalTitle), changelog: { histories: [
+  const added = task('4403', 3, '함께 추가하는 업무');
+  const entities = Buffer.from(JSON.stringify({ issues: [{ ...task('4401', 1, historicalTitle), changelog: { histories: [
     { id: '501', author: actor, created: '2025-01-03T04:20:00Z', items: [restStatus('1', '보관된 상태 이름', '2', '보관된 다음 상태')] },
     { id: '601', author: actor, created: '2025-01-05T18:00:00+0900', items: [restStatus('2', '작업 중 기록', '3', '종료 기록')] },
     { id: '602', author: actor, created: '2025-01-05T22:00:00+0900', visibility: { type: 'role', value: 'Jira Team' },
       items: [restStatus('2', '제한된 REST 이력', '3', '숨김')] },
-  ] } }, task('4403', 3, '함께 추가하는 업무')] }));
+  ] } }, { ...added, fields: { ...added.fields, attachment: [{ id: '680', filename: 'evidence.bin', size: bytes.length, created }] } }] }));
+  return zip([{ path: 'issues.json', bytes: entities }, { path: 'attachments/680', bytes }]);
 }
 
 test('Jira status history reads preserved source transitions across initial migration and retained appends', async t => {
@@ -116,6 +120,8 @@ test('Jira status history reads preserved source transitions across initial migr
   assert.ok(issue && untouched);
   const history = `/issues/${issue.id}/jira-status-history`;
   const page = (query = '') => f.call<JiraIssueStatusHistoryPage>(history + query);
+  const auditPath = ({ id, version }: SourceImport) => `/source-imports/${id}/reconciliation/audit?expectedVersion=${version}`;
+  const audit = (source: SourceImport) => f.call<SourceReconciliationAudit>(auditPath(source));
 
   const first = await page('?limit=1');
   assert.deepEqual({ total: first.total, offset: first.offset, limit: first.limit }, { total: 2, offset: 0, limit: 1 });
@@ -136,17 +142,47 @@ test('Jira status history reads preserved source transitions across initial migr
   assert.deepEqual(await f.call(`/issues/${untouched.id}/jira-status-history`), { entries: [], total: 0, offset: 0, limit: 50 });
   for (const query of ['?offset=-1', '?limit=101', '?limit=0', '?limit=2&limit=3', '?other=x']) await f.call(history + query, 'GET', undefined, 400);
   assert.deepEqual(await workspace(), before);
+  const initialSummary = (await audit(receipt)).jiraStatusHistory;
+  assert.ok(initialSummary);
+  assert.equal(initialSummary.projected.count, first.total);
+  assert.match(initialSummary.projected.sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(initialSummary, {
+    sourceChanges: 5, projected: { count: 2, sha256: initialSummary.projected.sha256 }, duplicate: 0,
+    excluded: 3, restricted: 0, unavailable: 0, unresolvedTime: 1, unresolvedAuthor: 0,
+  });
 
   // Older receipts could still carry an owner link before scoped history filtering was introduced.
   const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
   try {
-    db.prepare(`UPDATE source_records SET owner_type='issue',owner_id=?,json=json_set(json_remove(json,'$.excluded'),'$.ownerType','issue','$.ownerId',?)
-      WHERE import_id=? AND kind='history' AND source_id='506'`).run(issue.id, issue.id, receipt.id);
+    const attachLegacy = db.prepare(`UPDATE source_records SET owner_type='issue',owner_id=?,json=json_set(json_remove(json,'$.excluded'),'$.ownerType','issue','$.ownerId',?)
+      WHERE import_id=? AND kind='history' AND source_id=?`);
+    for (const group of ['503', '506']) attachLegacy.run(issue.id, issue.id, receipt.id, group);
     const origins = await f.call<SourceRecordPage>(`/resource-origins?resourceType=issue&resourceId=${issue.id}&kind=history`);
     assert.ok(!origins.records.some(record => record.record.sourceId === '506'));
     assert.equal((await page()).total, 2);
-    db.prepare(`UPDATE source_records SET owner_type=NULL,owner_id=NULL,json=json_set(json,'$.ownerType',NULL,'$.ownerId',NULL,'$.excluded',json('true'))
-      WHERE import_id=? AND kind='history' AND source_id='506'`).run(receipt.id);
+    assert.deepEqual((await audit(receipt)).jiraStatusHistory, initialSummary, 'reviewed receipt exclusions still count when a legacy row lacks a flag');
+    const receiptRow = db.prepare('SELECT json FROM source_imports WHERE id=?').get(receipt.id);
+    assert.ok(typeof receiptRow?.json === 'string');
+    const reviewedExclusions = receipt.configuration.excludedRecords.filter(key => key !== `${initial.pkg.id}/history:506`);
+    db.prepare("UPDATE source_imports SET json=json_set(json,'$.configuration.excludedRecords',json(?)) WHERE id=?")
+      .run(JSON.stringify(reviewedExclusions), receipt.id);
+    const restricted = (await audit(receipt)).jiraStatusHistory;
+    assert.deepEqual(restricted, { ...initialSummary, excluded: 2, restricted: 1 });
+    assert.doesNotMatch(JSON.stringify(restricted), /원본 작성자|보관된 상태 이름|동일 그룹의 제한|시각 보류|18\/Jan\/25/);
+    db.prepare('UPDATE source_imports SET json=? WHERE id=?').run(receiptRow.json, receipt.id);
+    const restoreExclusion = db.prepare(`UPDATE source_records SET owner_type=NULL,owner_id=NULL,json=json_set(json,'$.ownerType',NULL,'$.ownerId',NULL,'$.excluded',json('true'))
+      WHERE import_id=? AND kind='history' AND source_id=?`);
+    for (const group of ['503', '506']) restoreExclusion.run(receipt.id, group);
+    assert.ok(original.record.authorId);
+    const identity = db.prepare("SELECT id,json FROM source_records WHERE import_id=? AND kind='identity' AND source_id=?")
+      .get(receipt.id, original.record.authorId);
+    assert.ok(typeof identity?.id === 'string' && typeof identity.json === 'string');
+    db.prepare("UPDATE source_records SET json=json_set(json,'$.excluded',json('true')) WHERE id=?").run(identity.id);
+    assert.equal((await page()).entries[0].originalAuthorName, null);
+    const withoutAuthor = (await audit(receipt)).jiraStatusHistory;
+    assert.equal(withoutAuthor?.unresolvedAuthor, 2);
+    assert.notEqual(withoutAuthor?.projected.sha256, initialSummary.projected.sha256);
+    db.prepare('UPDATE source_records SET json=? WHERE id=?').run(identity.json, identity.id);
   } finally {
     db.close();
   }
@@ -155,10 +191,17 @@ test('Jira status history reads preserved source transitions across initial migr
   await f.call(`/v1${history}`, 'GET', undefined, 403, { Authorization: `Bearer ${api.token}` });
   const deleted = await f.call<{ trashEntryId: string }>(`/issues/${issue.id}`, 'DELETE', { expectedVersion: issue.version });
   await f.call(history, 'GET', undefined, 404);
+  const trashedSummary = (await audit(receipt)).jiraStatusHistory;
+  assert.ok(trashedSummary);
+  assert.deepEqual(trashedSummary, {
+    ...initialSummary, projected: { count: 0, sha256: trashedSummary.projected.sha256 }, unavailable: 2, unresolvedTime: 0,
+  });
+  assert.notEqual(trashedSummary.projected.sha256, initialSummary.projected.sha256);
   await f.call(`/trash/${deleted.trashEntryId}/restore`, 'POST', {});
   assert.deepEqual(await page('?limit=1'), first);
+  assert.deepEqual((await audit(receipt)).jiraStatusHistory, initialSummary);
 
-  const additional = await f.options('jira-rest.json', restPackage());
+  const additional = await f.options('jira-rest.zip', restPackage());
   const target = additional.appendTarget;
   assert.ok(target && target.projectId === projectId);
   const append = await f.apply({ ...additional.defaultConfiguration, timezone: 'Asia/Seoul', excludedRecords: [`${additional.pkg.id}/history:602`], appendTo: {
@@ -179,4 +222,52 @@ test('Jira status history reads preserved source transitions across initial migr
   const retained = await f.call<SourceRecordArchive>(`/source-imports/${append.id}/records/${continued.sourceRecordId}`);
   assert.equal(retained.ownerId, null);
   assert.equal(retained.record.sourceId, '601');
+  const appendedAudit = await audit(append);
+  const appendedSummary = appendedAudit.jiraStatusHistory;
+  assert.ok(appendedSummary);
+  assert.match(appendedSummary.projected.sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(appendedSummary, {
+    sourceChanges: 3, projected: { count: 1, sha256: appendedSummary.projected.sha256 }, duplicate: 1,
+    excluded: 1, restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0,
+  });
+  assert.equal(appendedSummary.projected.count, combined.entries.filter(change => change.sourceImportId === append.id).length);
+  assert.doesNotMatch(JSON.stringify(appendedSummary), /종료 기록|제한된 REST 이력|원본 작성자/);
+
+  const attachment = appendedAudit.attachments.find(file => file.status === 'verified');
+  assert.ok(attachment?.fileId);
+  const updates = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    const oldGroup = updates.prepare('SELECT json FROM source_records WHERE id=?').get(entry.sourceRecordId);
+    assert.ok(typeof oldGroup?.json === 'string');
+    const originalJson = oldGroup.json;
+    const open = fileSystem.open;
+    let changed = false;
+    // The live duplicate comes from an earlier receipt, outside the attachment audit's own archive.
+    const concurrentChange = t.mock.method(fileSystem, 'open', async (...args: Parameters<typeof open>) => {
+      if (!changed && String(args[0]) === join(f.dataDir, 'uploads', attachment.fileId!)) {
+        changed = true;
+        assert.equal(updates.prepare("UPDATE source_records SET json=json_set(json,'$.record.metadata.items[0].field','summary') WHERE id=?")
+          .run(entry.sourceRecordId).changes, 1);
+      }
+      return open(...args);
+    });
+    try {
+      await f.call(auditPath(append), 'GET', undefined, 409);
+      assert.equal(changed, true);
+    } finally { concurrentChange.mock.restore(); }
+    const after = await audit(append);
+    assert.deepEqual(after.integrity, appendedAudit.integrity);
+    assert.deepEqual(after.recordCounts, appendedAudit.recordCounts);
+    assert.deepEqual(after.targetContent, appendedAudit.targetContent);
+    assert.equal(after.jiraStatusHistory?.duplicate, 0);
+    assert.equal(after.jiraStatusHistory?.projected.count, 2);
+    assert.notEqual(after.jiraStatusHistory?.projected.sha256, appendedSummary.projected.sha256);
+    assert.equal(updates.prepare('UPDATE source_records SET json=? WHERE id=?').run(originalJson, entry.sourceRecordId).changes, 1);
+  } finally { updates.close(); }
+
+  const backup = await f.call('/export');
+  await f.call('/import', 'POST', { data: backup });
+  const receipts = await f.call<SourceImport[]>('/source-imports');
+  assert.deepEqual((await audit(receipts.find(value => value.id === receipt.id)!)).jiraStatusHistory, initialSummary);
+  assert.deepEqual((await audit(receipts.find(value => value.id === append.id)!)).jiraStatusHistory, appendedSummary);
 });

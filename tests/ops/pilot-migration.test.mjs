@@ -22,6 +22,7 @@ const privateRevision = 'synthetic-private-historical-document-body';
 const privateWorklog = 'synthetic-private-worklog-note';
 const privateOldStatus = 'synthetic-private-previous-status';
 const jiraAuthor = 'synthetic-jira-author-key';
+const privateJiraDisplayName = 'Migration fixture Jira author';
 const confluenceAuthor = 'synthetic-confluence-author-key';
 const confluenceGroup = 'synthetic-private-confluence-group';
 const originalFrom = 'synthetic-source-instance';
@@ -31,7 +32,7 @@ function fixturePackages() {
   const jira = zip([
     { path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml>
       <ApplicationUser id="21" userKey="${jiraAuthor}" lowerUserName="audit-jira-user"/>
-      <User id="22" userName="audit-jira-user" displayName="Migration fixture Jira author" active="1"/>
+      <User id="22" userName="audit-jira-user" displayName="${privateJiraDisplayName}" active="1"/>
       <Project id="10" pkey="SRC" name="Jira fixture"/><Status id="1" pname="Open"/><IssueType id="2" pname="Task"/>
       <Issue id="100" project="10" number="1" summary="${privateTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
       <Issue id="101" project="10" number="2" summary="${privateRelatedTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
@@ -122,7 +123,7 @@ async function readReport(root, answer) {
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
-    privateRevision, privateWorklog, privateOldStatus, jiraAuthor, confluenceAuthor, confluenceGroup, originalFrom,
+    privateRevision, privateWorklog, privateOldStatus, jiraAuthor, privateJiraDisplayName, confluenceAuthor, confluenceGroup, originalFrom,
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
@@ -236,7 +237,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.deepEqual(relations.map(({ sourceIssueId, targetIssueId, type }) => [sourceIssueId, targetIssueId, type]), [[issue.id, related.id, 'Blocks']]);
     assert.equal(statusHistory.total, 1);
     assert.deepEqual(statusHistory.entries.map(({ from, to, changedAt, originalAuthorName }) => [from, to, changedAt, originalAuthorName]), [
-      [{ id: '2', label: privateOldStatus }, { id: '1', label: 'Open' }, '2020-03-02T00:15:00.000Z', 'Migration fixture Jira author'],
+      [{ id: '2', label: privateOldStatus }, { id: '1', label: 'Open' }, '2020-03-02T00:15:00.000Z', privateJiraDisplayName],
     ]);
     importedIssueId = issue.id;
     importedStatusHistory = statusHistory;
@@ -267,6 +268,14 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.deepEqual(Object.keys(targetContent[section]).sort(), ['count', 'sha256']);
   }
   assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
+  const { jiraStatusHistory } = receipt;
+  assert.match(jiraStatusHistory.projected.sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(jiraStatusHistory, {
+    sourceChanges: 1, projected: { count: 1, sha256: jiraStatusHistory.projected.sha256 }, duplicate: 0, excluded: 0,
+    restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0,
+  });
+  assert.deepEqual(report.restore.evidence.receipts[0].jiraStatusHistory, jiraStatusHistory);
+  assert.equal(report.source.evidence.checks.receiptsWithJiraHistoryReview, 0);
   assert.equal(report.source.evidence.workspace.counts.issues, 2);
   assert.equal(report.source.evidence.workspace.counts.documents, 1);
   assert.equal(report.source.evidence.workspace.counts.planningItems, 2);

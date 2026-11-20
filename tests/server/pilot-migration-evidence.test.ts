@@ -21,6 +21,8 @@ const targetDigests = {
   worklogs: { count: 1, sha256: '3'.repeat(64) },
   issueRelations: { count: 1, sha256: '4'.repeat(64) },
 };
+const statusHistory = { sourceChanges: 2, projected: { count: 1, sha256: '5'.repeat(64) }, duplicate: 1, excluded: 0,
+  restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0 };
 
 interface ReceiptNotice {
   code: string;
@@ -35,8 +37,8 @@ const warning: ReceiptNotice = {
 const info: ReceiptNotice = { ...warning, severity: 'info', code: 'SOURCE_DETAIL' };
 
 function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false,
-  notices = [] as ReceiptNotice[] | null } = {}) {
-  const packages = [jira, wiki];
+  notices = [] as ReceiptNotice[] | null, wikiOnly = false } = {}) {
+  const packages = wikiOnly ? [wiki] : [jira, wiki];
   const receipt = {
     id: receiptId, version, projectIds: ['project-synthetic'], configuration: { users: { original: changedOwner ? 'team-2' : 'team-1' } },
     packages: packages.map(({ packageId, sha256, product, instanceKey, format }) => ({ stagingId: packageId,
@@ -46,9 +48,10 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
   const observations = {
     importId: receiptId, receiptVersion: version, startedAt: `synthetic-time-${version}`,
     integrity: { status: 'verified', records: { expected: 5, observed: 5 }, boundAttachments: { expected: 1, observed: 1 },
-      unmatchedRecords: 0, columnMismatches: 0, packages: packages.map(({ packageId }, index) => ({
+      unmatchedRecords: 0, columnMismatches: 0, packages: packages.map(({ packageId, product }, index) => ({
         stagingId: packageId, status: 'verified', filename: '/private/never-emit-export.zip',
-        records: { expected: index + 2, observed: index + 2 }, boundAttachments: { expected: index, observed: index },
+        records: { expected: wikiOnly ? 5 : index + 2, observed: wikiOnly ? 5 : index + 2 },
+        boundAttachments: { expected: Number(product === 'confluence'), observed: Number(product === 'confluence') },
         recordsSha256: { expected: 'd'.repeat(64), observed: 'd'.repeat(64) },
       })) },
     recordCounts,
@@ -58,6 +61,8 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
       sha256: corrupt ? 'never-emit-invalid-file-metadata' : 'c'.repeat(64), title: 'never-emit-original-file-title' }],
     targetContent: { version: 1, ...targetDigests, comments: { ...targetDigests.comments, body: 'never-emit-comment' },
       documentHistory: 'never-emit-unexpected-target-section' },
+    jiraStatusHistory: wikiOnly ? null : { ...statusHistory,
+      projected: { ...statusHistory.projected, author: 'never-emit-jira-history-author' }, originalLabel: 'never-emit-jira-history-status' },
   };
   const workspace = {
     projects: [{ id: 'project-synthetic', name: 'never-emit-private-project-name' }],
@@ -89,6 +94,8 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.receipts[0].noticesAvailable, true);
   assert.equal(before.receipts[0].attachmentCounts.verified, 1);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
+  assert.deepEqual(before.receipts[0].jiraStatusHistory, statusHistory);
+  assert.equal(before.checks.receiptsWithJiraHistoryReview, 0);
   assert.equal(before.workspace.counts.documents, 1);
   assert.equal(before.workspace.counts.planningItems, 1);
   assert.doesNotMatch(JSON.stringify(before), /never-emit|\/private\//);
@@ -167,6 +174,37 @@ test('migration rehearsal rejects absent or malformed target-content evidence', 
     await assert.rejects(evidence(input, { ...input.observations, targetContent: { ...targetContent, [section]: value } }),
       { message: `이관 대상 내용 검증 항목(${section})의 건수 또는 해시가 올바르지 않습니다.` });
   }
+});
+
+test('Jira status projection differences fail restore comparison at unchanged counts and workspace', async () => {
+  const input = sample();
+  const before = await evidence(input);
+  const changed = await evidence(input, { ...input.observations, jiraStatusHistory: { ...statusHistory,
+    projected: { ...statusHistory.projected, sha256: 'f'.repeat(64) } } });
+  assert.equal(changed.status, 'verified');
+  assert.deepEqual(compareMigrationEvidence(before, changed), {
+    status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: true, packagesMatch: true,
+  });
+});
+
+test('Jira status history flags unresolved evidence for review and validates receipt scope and counts', async () => {
+  const input = sample();
+  const readHistory = (jiraStatusHistory: unknown) => evidence(input, { ...input.observations, jiraStatusHistory });
+  for (const extra of [{ restricted: 1, duplicate: 0 }, { unavailable: 1, duplicate: 0 }, { unresolvedTime: 1 }, { unresolvedAuthor: 1 }]) {
+    const review = await readHistory({ ...statusHistory, ...extra });
+    assert.equal(review.status, 'review');
+    assert.equal(review.checks.receiptsWithJiraHistoryReview, 1);
+  }
+  for (const invalid of [undefined, null, { ...statusHistory, sourceChanges: 1 }, { ...statusHistory, unavailable: -1 },
+    { ...statusHistory, unresolvedAuthor: 2 }, { ...statusHistory, projected: { count: 1, sha256: '/private/invalid' } }]) {
+    await assert.rejects(readHistory(invalid), /Jira 상태 이력의 검증 건수 또는 해시/);
+  }
+
+  const wiki = sample({ wikiOnly: true });
+  const wikiEvidence = await evidence(wiki);
+  assert.equal(wikiEvidence.status, 'verified');
+  assert.equal(wikiEvidence.receipts[0].jiraStatusHistory, null);
+  await assert.rejects(evidence(wiki, { ...wiki.observations, jiraStatusHistory: statusHistory }), /Jira 상태 이력의 검증 건수 또는 해시/);
 });
 
 test('migration rehearsal surfaces pending stages, conflicted package identities, and corrupt files', async () => {

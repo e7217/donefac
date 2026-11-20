@@ -98,6 +98,21 @@ function targetContentEvidence(raw) {
     worklogs: section('worklogs'), issueRelations: section('issueRelations') };
 }
 
+function jiraStatusHistoryEvidence(raw, hasJira) {
+  const message = 'Jira 상태 이력의 검증 건수 또는 해시가 올바르지 않습니다.';
+  if (!hasJira) {
+    requireEvidence(raw === null, message);
+    return null;
+  }
+  requireEvidence(isObject(raw) && isObject(raw.projected), message);
+  const { sourceChanges, projected, duplicate, excluded, restricted, unavailable, unresolvedTime, unresolvedAuthor } = raw;
+  const classified = [projected.count, duplicate, excluded, restricted, unavailable];
+  requireEvidence([sourceChanges, ...classified, unresolvedTime, unresolvedAuthor].every(count) && hex(projected.sha256) &&
+    sum(classified) === sourceChanges && unresolvedTime <= projected.count && unresolvedAuthor <= projected.count, message);
+  return { sourceChanges, projected: { count: projected.count, sha256: projected.sha256 }, duplicate, excluded, restricted,
+    unavailable, unresolvedTime, unresolvedAuthor };
+}
+
 function noticeCounts(notices) {
   const counts = new Map();
   for (const notice of notices ?? []) {
@@ -121,8 +136,9 @@ async function auditReceipt(call, receipt, packageIds, receiptKeys) {
   requireEvidence(integrity.records.observed === sum(Object.values(recordCounts)), '이관 원본의 검증 건수와 대조 건수가 다릅니다.');
   const attachmentsSha256 = attachmentEvidence(raw.attachments, receiptKeys, attachmentCounts);
   const targetContent = targetContentEvidence(raw.targetContent);
+  const jiraStatusHistory = jiraStatusHistoryEvidence(raw.jiraStatusHistory, receipt.packages.some(pkg => pkg.source.product === 'jira'));
   return { id: receipt.id, version: receipt.version, packageIds,
-    projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256, targetContent,
+    projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256, targetContent, jiraStatusHistory,
     configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]),
     noticesAvailable, notices: noticeCounts(receipt.notices) };
 }
@@ -161,7 +177,7 @@ export async function collectMigrationEvidence(call, packages) {
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
-    receiptsWithWarnings: 0, receiptsWithoutNotices: 0 };
+    receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0 };
   const seenReceipts = new Set();
   const receipts = [];
   for (const receipt of imports) {
@@ -201,6 +217,8 @@ export async function collectMigrationEvidence(call, packages) {
   checks.pendingPackages = staged.filter(pkg => !pkg.receiptIds.length).length;
   checks.receiptsWithWarnings = receipts.filter(receipt => receipt.notices.some(notice => notice.severity === 'warning')).length;
   checks.receiptsWithoutNotices = receipts.filter(receipt => !receipt.noticesAvailable).length;
+  checks.receiptsWithJiraHistoryReview = receipts.filter(({ jiraStatusHistory }) => jiraStatusHistory &&
+    (jiraStatusHistory.unavailable > 0 || jiraStatusHistory.restricted > 0 || jiraStatusHistory.unresolvedTime > 0 || jiraStatusHistory.unresolvedAuthor > 0)).length;
   receipts.sort((a, b) => a.id.localeCompare(b.id));
   const failed = checks.sourceIdentityMismatches > 0 || receipts.some(failedAudit);
   const review = Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>

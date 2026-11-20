@@ -492,6 +492,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 `targetContent`의 `version`은 `1`이다. `comments`, `revisions`, `worklogs`, `issueRelations`는 각각 저장된 대상의 `count`와 `sha256`을 반환한다. 원본에 연결된 댓글과 작업 기록은 보관 데이터가 남은 휴지통과 삭제 기록도 포함한다. 문서 이력은 직접 연결한 버전과 영수증에 연결한 문서의 저장 이력을 한 번씩 센다. 업무 관계는 영수증에 연결된 활성 업무가 양쪽 중 하나에 있는 관계를 센다. 이 값은 현재 대상의 복원 전후 대조에 쓰며, `targetContent`에는 본문이나 작성자 정보가 들어가지 않는다.
 
+Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서 확인한 상태 변경 수 `sourceChanges`를 반환한다. 이 값은 활성 티켓에 표시되는 `projected.count`, 다른 원본 기록과 겹치는 `duplicate`, 명시적 제외 `excluded`, 접근 제한 `restricted`, 현재 업무 연결을 확인할 수 없는 `unavailable`의 합이다. `unresolvedTime`과 `unresolvedAuthor`는 표시된 항목에서 시각과 작성자를 확정하지 못한 건수다. `projected.sha256`으로 티켓 연결 및 표시 내용의 복원 전후 일치를 대조한다. Confluence만 있는 영수증에서는 `jiraStatusHistory`가 `null`이다. 집계 범위는 이관 영수증에 저장된 원본이다.
+
 서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 

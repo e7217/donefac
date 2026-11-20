@@ -8,6 +8,7 @@ import type {
   SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
+import { auditJiraStatusHistory } from './jira-status-history.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import type { TrashArchive, TrashService } from './trash.js';
@@ -456,9 +457,12 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
     version: 1, comments: finishContent(contents.comments), revisions: finishContent(contents.revisions),
     worklogs: finishContent(contents.worklogs), issueRelations: issueRelationContent(dependencies.store, receipt.id, linkedIssues),
   };
-  fingerprint.update(JSON.stringify(targetContent));
+  const jiraStatusHistory = receipt.packages.some(packageInfo => packageInfo.source.product === 'jira')
+    ? auditJiraStatusHistory(dependencies.store, receipt)
+    : null;
+  fingerprint.update(JSON.stringify([targetContent, jiraStatusHistory]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity, targetContent };
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity, targetContent, jiraStatusHistory };
 }
 
 function errorCode(error: unknown): unknown {
@@ -533,7 +537,8 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   if (!current || current.version !== expectedVersion || auditSnapshot(dependencies, current, false).fingerprint !== before.fingerprint) conflict();
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
-    integrity: before.integrity, recordCounts: before.recordCounts, targetContent: before.targetContent, attachmentCounts, attachments,
+    integrity: before.integrity, recordCounts: before.recordCounts, targetContent: before.targetContent,
+    jiraStatusHistory: before.jiraStatusHistory, attachmentCounts, attachments,
   };
 }
 
