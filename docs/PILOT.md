@@ -103,13 +103,40 @@ npm run test:pilot
 
 ## 오프라인 원본 이관 리허설
 
-별도 파일럿 데이터 경로에서 **워크스페이스 설정 → 기존 도구 원본 분석**으로 Jira·Confluence 내보내기 파일을 분석한다. **실제 데이터 이관**에서 프로젝트와 팀원·상태 매핑, 변환 미리보기, 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다.
+리허설 명령은 지정한 내보내기 파일을 전용 워크스페이스에 분석한다. Jira 관리자 XML과 첨부파일을 담은 ZIP, Confluence 공간 XML ZIP 등 [지원 형식](API.md#기존-도구-원본-분석)에 해당하는 파일을 매니페스트에 적는다. `file`은 절대 경로나 매니페스트 기준 상대 경로다. 같은 원본 시스템에서 받은 후속 파일에는 같은 `instanceKey`를 사용한다.
+
+```json
+{
+  "packages": [
+    { "file": "jira-project.zip", "product": "jira", "instanceKey": "team-jira" },
+    { "file": "confluence-space.zip", "product": "confluence", "instanceKey": "team-wiki" }
+  ]
+}
+```
+
+```bash
+npm run build:pilot
+npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/rehearsal
+npm run pilot:rehearsal -- review /absolute/path/rehearsal
+```
+
+`stage`는 새 디렉터리에 `workspace/`와 `stage.json`을 만든다. 분석은 한 파일 64MiB, 최대 20개와 합계 512MiB까지 지원한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 외부 연동 자격 정보 없이 실행한다.
 
 **원본 주소와 제외 항목**에는 패키지별로 Jira·Confluence의 기본 주소를 선택해서 입력할 수 있다. `https://jira.example.test/jira`나 `https://wiki.example.test/confluence`처럼 서비스 경로까지 포함한다. Teamspace 이관 미리보기에는 원래 Jira 업무 키로 만든 `/browse/OLD-1` 주소와 Confluence 페이지 ID로 만든 `/pages/viewpage.action?pageId=100` 주소를 견본으로 표시한다. [Atlassian의 Jira와 Confluence 주소 형식](https://support.atlassian.com/migration/docs/supported-products-and-types-of-links/)
 
 미리보기에서 **원본 링크 생성**과 **원본 링크 미생성** 건수를 확인한다. 자동 연결은 Jira 업무와 Confluence 일반 페이지를 대상으로 한다. 기본 주소가 비어 있거나 원본 키·페이지 ID를 사용할 수 없는 새 항목은 미생성 건수에 집계한다. 적용하면 업무 상세나 문서 **연결** 탭의 **기존 도구 연결**에서 주소를 열 수 있다. 원본 정보 조회에는 별도의 서버 설정을 사용한다. [원본 조회 설정](#jiraconfluence-원본-조회)
 
 완료한 영수증의 **이관 결과 대조 → 전체 이관 검증**에서 **이관 당시 기록과 현재 비교**를 확인한다. 새 영수증은 패키지별 원본 수량과 SHA-256을 대조하고, 이전 영수증은 당시 기록된 수량을 표시한다. 이어서 대상이 없는 객체, 파일 누락·불일치, 원본 보관과 의도적 제외를 확인한다. **검증 결과 JSON 내보내기**로 당시 결과를 저장하고, 별도 경로 복원 뒤 영수증에서 다시 검증해 비교한다. 문서 본문·매크로·작성자 매핑은 목록의 대상과 보존 원본을 열어 함께 검토한다.
+
+브라우저 검토를 마치고 `review`를 `Ctrl+C`로 종료한 뒤 실행한다.
+
+```bash
+npm run pilot:rehearsal -- verify /absolute/path/rehearsal
+```
+
+`verify`는 분석 때 보관한 패키지 파일의 SHA-256을 다시 계산하고, 이관 영수증의 패키지 범위와 전체 원본·첨부 검증 결과를 확인한다. 검사에 사용한 파일럿을 종료한 뒤 물리 백업을 만들고, 별도 경로에 복원해 영수증과 업무·문서 데이터의 해시를 다시 비교한다. 매 실행마다 `verification-*/report.json`에 결과를 남긴다. 원본 검사를 통과하고 적용 영수증이 있으면 해당 디렉터리에 물리 `backup/`과 `restored/`도 보관한다. 보고서는 건수, 해시, 내부 ID를 기록하며, 워크스페이스와 백업에는 원본과 첨부 바이트가 들어 있다.
+
+종료 코드 `0`은 자동 대조 통과, `2`는 적용 대기·원본 제외·미연결 첨부 등 검토 필요, `1`은 파일·영수증 불일치 또는 실행 실패다. 복원 전후가 같아도 이관 검토 항목은 결과에 남는다. `npm run test:pilot:rehearsal`은 합성 Jira·Confluence 패키지로 이 절차를 재현한다.
 
 ## 20명 동시 사용 리허설
 

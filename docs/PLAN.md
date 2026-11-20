@@ -145,7 +145,7 @@ Confluence 본문의 제목 참조는 원본 인스턴스와 명시한 공간 �
 
 서버가 보관한 미리보기 계획에 패키지 해시·매핑 버전·대상 버전을 고정한다. 같은 패키지 재적용은 중복 생성하지 않고, 대상 변경은 충돌로 중단한다. 적용은 DB와 새 첨부 바이트를 복구 가능하게 묶으며 기존 업로드를 전체 교체하지 않는다. `origin:import`를 사용해 상태 자동화와 외부 발신 이벤트를 만들지 않는다. 완료 근거는 개수·원본 ID·작성자·이력·첨부 해시·양방향 링크 대조와 실패/재시작 복구다.
 
-합성 자료로 분석·매핑·적용·복원을 검증한다. 실제 오프라인 패키지 리허설에서는 Jira 관리자 백업 및 별도 첨부파일의 구성, Confluence 6.9.1의 공간 내보내기 범위, 조직별 매크로와 권한, 누락된 자료를 확인해야 한다.
+합성 자료로 분석·매핑·적용·복원을 검증한다. 오프라인 리허설에서는 패키지 등록, 브라우저에서 검토한 매핑과 적용, 별도 물리 복원 및 대조를 한 절차로 실행한다. 실제 패키지에서는 Jira 관리자 백업과 별도 첨부 구성, Confluence 6.9.1의 공간 내보내기 범위, 조직별 매크로와 권한, 누락된 자료를 확인한다. [오프라인 이관 리허설](PILOT.md#오프라인-원본-이관-리허설)
 
 근거: [Jira 검색 내보내기](https://confluence.atlassian.com/jirasoftware/working-with-search-results-1528533257.html), [관리자 XML 백업과 첨부 범위](https://confluence.atlassian.com/adminjiraserver/backing-up-data-938847673.html), [Jira Importers JSON](https://confluence.atlassian.com/adminjiraserver100/importing-data-from-json-1442845835.html), [Confluence XML 객체/이력 구조](https://confluence.atlassian.com/confkb/use-space-site-xml-export-entities-xml-to-find-confluence-objects-1283686755.html), [Confluence 저장 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html).
 
