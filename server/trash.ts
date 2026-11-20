@@ -7,8 +7,10 @@ import type {
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { CollaborationExport } from './collaboration.js';
 import { normalizeDocumentContent } from './document-content.js';
+import { isCanonicalTeamspaceIssueRelation, isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
+import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { Store } from './store.js';
 
 type ArchiveRows = {
@@ -239,9 +241,16 @@ export class TrashService {
     for (const value of archive.issueRelations) resolve('issueRelations', value,
       targets(endpoint('issue', value.sourceIssueId), endpoint('issue', value.targetIssueId)), '업무 관계', () => {
         const existing = this.store.get<IssueRelation>('issue_relations', value.id);
-        if (existing) return existing.sourceIssueId === value.sourceIssueId && existing.targetIssueId === value.targetIssueId && existing.type === value.type
+        if (existing) return existing.sourceIssueId === value.sourceIssueId && existing.targetIssueId === value.targetIssueId && existing.type === value.type && existing.origin === value.origin
           ? undefined : '업무 관계 ID가 충돌하여 기존 관계를 유지했습니다.';
-        insertRelation.run(value.id, value.sourceIssueId, value.targetIssueId, JSON.stringify(value));
+        let restored = value;
+        if (isTeamspaceIssueRelation(value)) {
+          if (findTeamspaceIssueRelation(this.store, value)) return '업무 관계의 현재 연결을 유지했습니다.';
+          try { restored = { ...value, version: nextIssueRelationVersion(value.version, issueRelationVersionFloor(this.store)) }; }
+          catch (error) { if (error instanceof IssueRelationVersionError) return error.message; throw error; }
+          recordIssueRelationVersion(this.store, restored.version);
+        }
+        insertRelation.run(restored.id, restored.sourceIssueId, restored.targetIssueId, JSON.stringify(restored));
       });
     return warnings;
   }
@@ -300,7 +309,8 @@ export class TrashService {
       const resourceLinks = collect<ResourceLink>(entry.resourceLinks, reserved.resourceLinks, '업무·문서 연결', row =>
         validString(row.issueId) && validString(row.documentId) && row[resourceType === 'issue' ? 'issueId' : 'documentId'] === entry.resourceId && validString(row.kind));
       const issueRelations = collect<IssueRelation>(entry.issueRelations, reserved.issueRelations, '업무 관계', row =>
-        resourceType === 'issue' && idInPair(row.sourceIssueId, row.targetIssueId) && validString(row.type) && validVersion(row.version) && validDate(row.createdAt));
+        resourceType === 'issue' && idInPair(row.sourceIssueId, row.targetIssueId) && validString(row.type) && validVersion(row.version) && validDate(row.createdAt) &&
+        (!Object.hasOwn(row, 'origin') || isCanonicalTeamspaceIssueRelation(row)));
       const gitlabLinks = collect<GitlabLink>(entry.gitlabLinks, reserved.gitlabLinks, 'GitLab 연결', row =>
         resourceType === 'issue' && row.issueId === entry.resourceId && isRestorableGitlabLink(row));
       const seenMilestones = new Set<string>();

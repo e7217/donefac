@@ -1,5 +1,6 @@
 import type { Express, Request } from 'express';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type User } from '../shared/types.js';
+import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
@@ -347,6 +348,10 @@ export class SourcePreservationService {
       CREATE UNIQUE INDEX IF NOT EXISTS attachment_versions_source_revision
         ON attachment_versions(attachment_id,json_extract(json,'$.sourceRevision')) WHERE json_type(json,'$.sourceRevision')='integer';
       CREATE TABLE IF NOT EXISTS issue_relations(id TEXT PRIMARY KEY,source_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,target_issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS issue_relations_source ON issue_relations(source_issue_id);
+      CREATE INDEX IF NOT EXISTS issue_relations_target ON issue_relations(target_issue_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS issue_relations_teamspace_pair
+        ON issue_relations(source_issue_id,target_issue_id,json_extract(json,'$.type')) WHERE json_extract(json,'$.origin')='teamspace';
       CREATE TABLE IF NOT EXISTS source_bindings(product TEXT NOT NULL,source_instance TEXT NOT NULL,kind TEXT NOT NULL,source_alias TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,PRIMARY KEY(product,source_instance,kind,source_alias));`);
   }
   allImports(): SourceImport[] { return this.store.all<SourceImport>('source_imports'); }
@@ -512,7 +517,19 @@ export class SourcePreservationService {
     this.validateConfluenceHistory(imports, records, context.revisions, appliedHistory);
     this.validateJiraChildren(imports, records, attachments, byVersion, appliedJiraChildren);
     const issues = new Map(context.issues.map(value => [value.id, value]));
-    const relations = list(input.relations, '업무 관계').map(raw => { const value = object(raw, '업무 관계'), sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200), targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200); if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) fail(400, '업무 관계는 현재 존재하는 서로 다른 업무를 연결해야 합니다.'); return { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId, type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) }; });
+    const relations = list(input.relations, '업무 관계').map((raw): IssueRelation => {
+      const value = object(raw, '업무 관계');
+      const sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200);
+      const targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200);
+      if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) {
+        fail(400, '업무 관계는 현재 존재하는 서로 다른 업무를 연결해야 합니다.');
+      }
+      const relation = { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId,
+        type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) };
+      if (!Object.hasOwn(value, 'origin')) return relation;
+      if (!isCanonicalTeamspaceIssueRelation(value)) fail(400, 'Teamspace 업무 관계의 출처·유형·방향·버전을 확인해 주세요.');
+      return { ...relation, origin: 'teamspace' };
+    });
     unique(relations, '업무 관계'); this.bindings(records); return { imports, records, versions, relations };
   }
   private validateJiraChildren(imports: SourceImport[], records: SourceRecordArchive[], attachments: Map<string, Attachment>,

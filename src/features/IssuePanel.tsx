@@ -77,15 +77,19 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const [loadedVersion, setLoadedVersion] = useState(issue?.version);
   const dirty = Boolean(draft && baseDraft && JSON.stringify(editableIssue(draft, labels)) !== JSON.stringify(editableIssue(baseDraft, baseDraft.labels.join(', '))));
   const dirtyRef = useRef(false);
-  const childDraft = useRef<{dirty:boolean;pending:boolean;discard:()=>void} | null>(null);
+  const childDraft = useRef<{dirty:boolean;pending:boolean;discard:()=>void;label?:string} | null>(null);
   const trackChildDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
     childDraft.current = dirty || pending ? {dirty,pending,discard} : null;
+  }, []);
+  const trackRelationDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
+    childDraft.current = dirty || pending ? { dirty, pending, discard, label: '업무 관계 입력' } : null;
   }, []);
   function switchTab(next: typeof tab) {
     if (next === tab) return;
     const editingReservations = tab === 'reservations';
-    if (childDraft.current?.pending) { notify(editingReservations ? '시간 배정 저장이 끝난 뒤 이동해 주세요.' : '작업 시간 저장이 끝난 뒤 이동해 주세요.', 'error'); return; }
-    if (childDraft.current?.dirty && !window.confirm(editingReservations ? '작성 중인 시간 배정 입력을 버리고 이동할까요?' : '작성 중인 작업 시간 기록을 버리고 이동할까요?')) return;
+    const label = childDraft.current?.label;
+    if (childDraft.current?.pending) { notify(label ? '업무 관계 저장이 끝난 뒤 이동해 주세요.' : editingReservations ? '시간 배정 저장이 끝난 뒤 이동해 주세요.' : '작업 시간 저장이 끝난 뒤 이동해 주세요.', 'error'); return; }
+    if (childDraft.current?.dirty && !window.confirm(`작성 중인 ${label ?? (editingReservations ? '시간 배정 입력' : '작업 시간 기록')}을 버리고 이동할까요?`)) return;
     childDraft.current?.discard();
     setTab(next);
   }
@@ -112,7 +116,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
       } else if (dirtyRef.current || activeDraft?.dirty || dependencyDraftRef.current) {
-        const childName = dependencyDraftRef.current ? '업무 연결 입력' : tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록';
+        const childName = dependencyDraftRef.current ? '업무 연결 입력' : activeDraft?.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록');
         const message = activeDraft?.dirty || dependencyDraftRef.current ? `저장하지 않은 업무·댓글·${childName}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
         if (!window.confirm(message)) event.preventDefault();
@@ -184,7 +188,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   function update<K extends keyof Issue>(key: K, value: Issue[K]) { setDraft(previous => previous ? { ...previous, [key]: value } : previous); }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
-    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current) return; savingRef.current = true; setSaving(true); setError('');
+    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError('');
     try {
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...editableIssue(draft, labels) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
@@ -199,7 +203,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
-    if (!issue || savingRef.current || commenting || dependencyBusyRef.current) return;
+    if (!issue || savingRef.current || commenting || dependencyBusyRef.current || childDraft.current?.pending) return;
     savingRef.current = true; setSaving(true); setError('');
     try {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
@@ -361,7 +365,8 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
           <span className="issue-related-status" style={{ color: status.color }}>{status.label}</span><ChevronRight size={14} aria-hidden="true" />
         </button>)}
       </section>
-      <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} />
+      <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
+        disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} />
       <section className="issue-related-section">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
         {linkedDocuments.map(link => {

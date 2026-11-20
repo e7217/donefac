@@ -20,6 +20,7 @@ import { registerDocumentIncludeRevisionRoutes } from './document-include-revisi
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
+import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -34,6 +35,7 @@ import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
+import { issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
@@ -61,11 +63,12 @@ import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '.
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
+import { hasDuplicateTeamspaceIssueRelations, isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -156,6 +159,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const planScheduleShift=new PlanScheduleShiftService(store);
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
+  const issueRelations=new IssueRelationsService(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
@@ -1261,10 +1265,23 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const attachment=store.get<AttachmentVersion>('attachment_versions',id) || get<Attachment>('attachments',id);
     serveAttachment(attachment,req,res);
   });
+  const relationAudit = (req: Request) => {
+    actor(req);
+    return (issueId: string, action: string, detail: string) => activity(req,'issue',issueId,action,detail);
+  };
   app.get('/api/issues/:id/relations',(req,res)=>{
-    const issue=get<Issue>('issues',req.params.id);
-    const rows=store.db.prepare('SELECT json FROM issue_relations WHERE source_issue_id=? OR target_issue_id=? ORDER BY rowid').all(issue.id,issue.id) as {json:string}[];
-    res.json(rows.map(row=>JSON.parse(row.json) as IssueRelation));
+    res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));
+  });
+  app.post('/api/issues/:id/relations',(req,res)=>{
+    const { relation, created }=issueRelations.create(req.params.id,req.body,relationAudit(req));
+    res.status(created?201:200).json(relation);
+  });
+  app.patch('/api/issues/:id/relations/:relationId',(req,res)=>{
+    res.json(issueRelations.update(req.params.id,req.params.relationId,req.body,relationAudit(req)));
+  });
+  app.delete('/api/issues/:id/relations/:relationId',(req,res)=>{
+    issueRelations.remove(req.params.id,req.params.relationId,req.query.expectedVersion,relationAudit(req));
+    res.json({ok:true});
   });
   app.delete('/api/attachments/:id',(req,res)=>{
     const expected=req.query.expectedVersionId===undefined?undefined:expectedAttachmentVersion(req.query.expectedVersionId);
@@ -1460,6 +1477,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<11&&Array.isArray(data.worklogs)&&data.worklogs.length)fail('작업 시간 기록이 있는 백업은 schemaVersion 11이 필요합니다.');
     if(data.schemaVersion<17&&((Array.isArray(data.trashEntries)&&data.trashEntries.length)||importedReportLedger.events.some(event=>event.kind==='restored')))fail('휴지통과 복원 이력이 있는 백업은 schemaVersion 17이 필요합니다.');
     if(data.schemaVersion>=9&&(!Array.isArray(data.attachmentVersions)||data.attachmentVersions.some((value:unknown)=>!value||typeof value!=='object'||!('id' in value)||typeof value.id!=='string')))fail('첨부 버전 목록을 확인해 주세요.');
+    if ((data.schemaVersion >= 9 || data.issueRelations != null) && (!Array.isArray(data.issueRelations) ||
+      data.issueRelations.some((value: unknown) => !value || typeof value !== 'object' || Array.isArray(value)))) fail('업무 관계 목록을 확인해 주세요.');
     const importedTrash=trash.validateImport(data.schemaVersion>=17?data.trashEntries:[],data);
     if(data.schemaVersion<31&&data.trashItems!==undefined&&(!Array.isArray(data.trashItems)||data.trashItems.length))fail('개별 댓글·첨부 휴지통을 포함한 백업은 schemaVersion 31이 필요합니다.');
     const importedTrashItems=trashItems.validateImport(data.schemaVersion>=31?data.trashItems:[],{...data,trash:importedTrash});
@@ -1513,6 +1532,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
+    const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
+    const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);
+    if (data.schemaVersion < 51 && importedTeamspaceRelations.length) fail('직접 만든 업무 관계를 포함한 백업은 schemaVersion 51이 필요합니다.');
+    if (hasDuplicateTeamspaceIssueRelations(importedTeamspaceRelations)) fail('같은 업무 사이의 동일한 관계가 중복되었습니다.');
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     for(const entry of importedTrash){
@@ -1668,6 +1691,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const event of importedReportLedger.events){const state=event.after??event.before;if(state)reserve(state.projectId,state.key);}
       for(const project of data.projects)store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(project.id,nextNumbers.get(project.id)||1);
       collaboration.replaceImported(importedCollaboration);
+      const previousIssueRelationVersion = issueRelationVersionFloor(store);
+      let restoredIssueRelationVersion = previousIssueRelationVersion;
+      for (const relation of importedTeamspaceRelations) {
+        relation.version = nextIssueRelationVersion(relation.version, previousIssueRelationVersion);
+        restoredIssueRelationVersion = Math.max(restoredIssueRelationVersion, relation.version);
+      }
+      recordIssueRelationVersion(store, restoredIssueRelationVersion);
       sourcePreservation.replaceImported(liveSources,previousImports);
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       trash.replaceImported(importedTrash);
@@ -1686,8 +1716,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChildCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});

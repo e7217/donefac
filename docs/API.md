@@ -28,6 +28,7 @@ curl --fail-with-body \
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
+| `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
 | `GET /issues/:id/gitlab-links` | 프로젝트 범위 안 업무의 브랜치·커밋·MR·파이프라인 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
@@ -47,6 +48,14 @@ curl --fail-with-body \
 백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
 
 업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
+
+## 티켓 사이의 업무 관계
+
+`GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelation[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.
+
+직접 만든 관계에는 `origin: "teamspace"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
+
+`/api/v1`의 동일한 경로에서 양쪽 프로젝트가 키의 허용 범위에 있어야 한다. 조회에는 읽기 키를 사용할 수 있으며, 관계 추가·수정·해제에는 쓰기 키가 필요하다.
 
 ## 선후행 업무 연결
 
@@ -357,7 +366,7 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 | `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
 | `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
-| `GET /api/issues/:id/relations` | 원본의 업무 간 관계 |
+| `GET /api/issues/:id/relations` | 이관한 관계와 팀에서 직접 만든 업무 관계 |
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.

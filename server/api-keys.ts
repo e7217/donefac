@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, PlanningItem, Project, RichContent, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
+import { listIssueRelations } from './issue-relations.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 
 export class ApiKeyError extends Error {
@@ -226,6 +227,7 @@ export class ApiKeyService {
       return next();
     }
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
+    const issueRelations = /^\/api\/issues\/([^/]+)\/relations(?:\/([^/]+))?$/.exec(path);
     const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot)?$/.exec(path);
     const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis)$/.exec(path);
     if (projectResource && (request.method === 'GET' || (request.method === 'PATCH' && ['workload-capacity','issue-order'].includes(projectResource[2])))) {
@@ -235,6 +237,21 @@ export class ApiKeyService {
       this.used(key); return next();
     }
     if (request.method === 'GET') {
+      if (issueRelations && !issueRelations[2]) {
+        this.query(request, []);
+        const id = this.decode(issueRelations[1]);
+        this.resource(key, 'issues', id);
+        const projects = key.projectIds;
+        const relations = listIssueRelations(this.store, id).filter(relation => {
+          if (projects === null) return true;
+          const otherId = relation.sourceIssueId === id ? relation.targetIssueId : relation.sourceIssueId;
+          const other = this.store.get<Issue>('issues', otherId);
+          return Boolean(other && projects.includes(other.projectId));
+        });
+        this.used(key);
+        response.set('Cache-Control', 'no-store').json(relations);
+        return;
+      }
       const gitlabLinks = /^\/api\/issues\/([^/]+)\/gitlab-links$/.exec(path);
       if (gitlabLinks) {
         this.query(request, ['kind', 'offset']);
@@ -329,6 +346,16 @@ export class ApiKeyService {
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
       } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+    } else if (issueRelations && (!issueRelations[2] && request.method === 'POST' || issueRelations[2] && ['PATCH','DELETE'].includes(request.method))) {
+      this.query(request, request.method === 'DELETE' ? ['expectedVersion'] : []);
+      const id = this.decode(issueRelations[1]);
+      this.resource(key, 'issues', id);
+      if (!issueRelations[2]) this.resource(key, 'issues', request.body?.otherIssueId);
+      else {
+        const relation = this.store.get<IssueRelation>('issue_relations', this.decode(issueRelations[2]));
+        if (!relation || (relation.sourceIssueId !== id && relation.targetIssueId !== id)) return fail(404, '업무 관계를 찾을 수 없습니다.');
+        this.resource(key, 'issues', relation.sourceIssueId === id ? relation.targetIssueId : relation.sourceIssueId);
+      }
     } else if (worklogs && (!worklogs[2] && request.method === 'POST' || worklogs[2] && ['PATCH','DELETE'].includes(request.method))) {
       this.query(request, []);
       this.resource(key, 'issues', this.decode(worklogs[1]));

@@ -165,7 +165,6 @@ test('native selection-comment backups verify live and trashed originals and ret
   assert.equal(first.documentSource?.revisionId, second.documentSource?.revisionId);
   const active = await f.call<Backup>('/export');
   assert.equal(active.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  assert.equal(active.schemaVersion, 50);
   const restore = (backup: Backup, status = 200) => other.call<{ error?: string }>('/import', { method: 'POST', body: { data: backup } }, status);
   assert.match((await restore({ ...active, schemaVersion: 49 }, 400)).error!, /schemaVersion 50/);
   const changed = structuredClone(active);
