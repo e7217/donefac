@@ -48,6 +48,30 @@ test('Confluence references/includes and local images resolve through callbacks,
   assert.ok(calls.some(value => value.kind === 'page' && value.spaceKey === 'SYN'));
 });
 
+test('Confluence textual include parameters preserve space scope and nested page identities', () => {
+  const include = (value: string, parameter = '') =>
+    `<ac:structured-macro ac:name="include"><ac:parameter ac:name="${parameter}">${value}</ac:parameter></ac:structured-macro>`;
+  const xml = [include(' OPS:Runbook:network '), include('MISSING:Runbook'), include('~user.name:Runbook', 'pageTitle'),
+    include('Summary: follow-up', 'page'), include('<ri:page ri:content-id="88" ri:content-title="OPS:Runbook"/>MISSING:Runbook')].join('');
+  const calls: MigrationReferenceInput[] = [];
+  const result = convertLegacyContent(source('confluence-storage', xml), { resolveReference: input => {
+    calls.push(input);
+    if (input.sourceId === '88') return { id: 'explicit', label: 'OPS:Runbook' };
+    if (input.spaceKey === 'OPS' && input.title === 'Runbook:network') return { id: 'network', label: input.title };
+    if (input.spaceKey === '~user.name' && input.title === 'Runbook') return { id: 'personal', label: input.title };
+    if (!input.spaceKey && input.title === 'Summary: follow-up') return { id: 'literal', label: input.title };
+    if (!input.spaceKey && input.title === 'Runbook') return { id: 'wrong-local-target', label: input.title };
+    return null;
+  } });
+  canonical(result);
+  assert.deepEqual(contentReferences(result.content).map(value => [value.kind, value.id]),
+    [['include', 'network'], ['include', 'personal'], ['include', 'literal'], ['include', 'explicit']]);
+  assert.deepEqual(calls.map(({ spaceKey, title }) => [spaceKey, title]),
+    [['OPS', 'Runbook:network'], ['MISSING', 'Runbook'], ['~user.name', 'Runbook'], [undefined, 'Summary: follow-up'], [undefined, 'OPS:Runbook']]);
+  assert.match(result.plainText, /\[문서 포함 참조: MISSING:Runbook\]/);
+  assert.ok(result.diagnostics.some(value => value.code === 'UNRESOLVED_REFERENCE'));
+});
+
 test('Confluence attachments carry the declared owner to link and image resolution', () => {
   const calls: MigrationReferenceInput[] = [];
   const context: MigrationContentContext = { resolveReference: input => {

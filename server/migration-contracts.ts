@@ -10,11 +10,19 @@ export interface MigrationAppendContext {
   token: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
 }
+export interface MigrationPageAppendContext {
+  project: Project;
+  sourceSpaceId: string;
+  sourceSpaceKey?: string;
+  token: string;
+  knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string }[];
+}
 export interface MigrationPlanningInput {
   id:string;configuration:MigrationConfiguration;actorId:string;users:User[];existingProjectKeys:string[];
   packages:MigrationPackage[];now:string;
   fileInfo?:Record<string,Record<string,{size:number;sha256:string;mimeType:string}>>;
   append?: MigrationAppendContext;
+  appendPages?: MigrationPageAppendContext;
 }
 export interface MigrationFileCopy { fileId:string;packageId:string;path:string;size:number;sha256:string }
 export interface PreparedMigration {
@@ -25,4 +33,5 @@ export interface PreparedMigration {
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
   append?: { projectId: string; token: string; startIssueNumber: number };
+  appendPages?: { projectId: string; token: string };
 }

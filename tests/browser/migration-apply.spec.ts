@@ -2,12 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
 async function upload(request: APIRequestContext, filename: string, content: Buffer, instanceKey: string) { const response = await request.post(`/api/legacy-import/packages?${new URLSearchParams({ filename, instanceKey })}`, { headers: { 'Content-Type': 'application/octet-stream' }, data: content }); expect(response.status(), await response.text()).toBe(201); return await response.json() as LegacyPackageSummary; }
-async function open(page: Page, request: APIRequestContext) { const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot; await page.goto(`/#/${workspace.projects[0].id}/settings`); const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true }); await expect(settings).toBeVisible(); return { settings, workspace }; }
+async function open(page: Page, request: APIRequestContext) {
+  const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  await page.goto(`/#/${workspace.projects[0].id}/settings`);
+  const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
+  await expect(settings).toBeVisible({ timeout: 30_000 });
+  return { settings, workspace };
+}
 async function selectPackage(settings: Locator, filename: string) { await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check(); await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click(); await expect(settings.getByLabel('이관 원본 시간대', { exact: true })).toBeVisible(); }
 async function openReconciliation(settings: Locator) {
   await settings.getByRole('button', { name:'이관 결과 대조',exact:true }).click();
@@ -18,6 +24,21 @@ async function openReconciliation(settings: Locator) {
 async function preview(page: Page, settings: Locator) { const response = page.waitForResponse(value => value.url().endsWith('/api/migrations/preview') && value.request().method() === 'POST'); await settings.getByRole('button', { name: '적용 전 미리보기 만들기', exact: true }).click(); const result = await response; expect(result.ok(), await result.text()).toBe(true); return await result.json() as MigrationPreview; }
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
+
+async function importIntoProject(request: APIRequestContext, source: LegacyPackageSummary, key: string, name: string) {
+  const optionResponse = await request.get(`/api/migrations/options?${new URLSearchParams({ packageId: source.id })}`);
+  expect(optionResponse.ok(), await optionResponse.text()).toBe(true);
+  const { defaultConfiguration } = await optionResponse.json() as MigrationOptions;
+  const configuration = { ...defaultConfiguration, projects: defaultConfiguration.projects.map(project => ({ ...project, key, name })) };
+  const previewResponse = await request.post('/api/migrations/preview', { data: { configuration } });
+  expect(previewResponse.status(), await previewResponse.text()).toBe(201);
+  const proposed = await previewResponse.json() as MigrationPreview;
+  const applied = await request.post(`/api/migrations/previews/${proposed.id}/apply`, { data: {
+    expectedVersion: proposed.version, acknowledgements: proposed.requiredAcknowledgements,
+  } });
+  expect(applied.status(), await applied.text()).toBe(201);
+  return await applied.json() as MigrationApplyResult;
+}
 
 test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트에 추가하고 편집한 업무를 보존한다', async ({ page, request }) => {
   test.setTimeout(90_000);
@@ -33,16 +54,7 @@ test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트�
   try {
     const original = await upload(request, `original-${id}.csv`, jira(sourceKey, oldTitle), instance);
     staged.push(original);
-    const originalOptions = await read<MigrationOptions>(`/api/migrations/options?${new URLSearchParams({ packageId: original.id })}`);
-    const configuration = { ...originalOptions.defaultConfiguration, projects: originalOptions.defaultConfiguration.projects.map(project => ({ ...project, key: targetKey, name: targetName })) };
-    const proposedResponse = await request.post('/api/migrations/preview', { data: { configuration } });
-    expect(proposedResponse.status(), await proposedResponse.text()).toBe(201);
-    const proposed = await proposedResponse.json() as MigrationPreview;
-    const initialResponse = await request.post(`/api/migrations/previews/${proposed.id}/apply`, { data: {
-      expectedVersion: proposed.version, acknowledgements: proposed.requiredAcknowledgements,
-    } });
-    expect(initialResponse.status(), await initialResponse.text()).toBe(201);
-    const initial = await initialResponse.json() as MigrationApplyResult;
+    const initial = await importIntoProject(request, original, targetKey, targetName);
     const [projectId] = initial.import.projectIds;
     const initialWorkspace = await read<WorkspaceSnapshot>('/api/workspace');
     const prior = initialWorkspace.issues.find(issue => issue.projectId === projectId && issue.title === oldTitle)!;
@@ -116,6 +128,112 @@ test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트�
     expect(after.projects).toEqual(initialWorkspace.projects);
     expect(after.issues.find(issue => issue.id === prior.id)).toEqual(saved);
     expect(after.issues.find(issue => issue.projectId === projectId && issue.title === newTitle)).toMatchObject({ status: targetStatusId, key: `${targetKey}-2` });
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집한 부모 문서의 참조를 연다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), instance = `append-confluence-${id}`, spaceKey = `CF${id}`, space = `Confluence 원본 공간 ${id}`;
+  const targetKey = `WIK${id}`, targetName = `기존 지식 프로젝트 ${id}`;
+  const originalParentTitle = `원본 상위 문서 ${id}`, localParentTitle = `팀에서 편집한 상위 문서 ${id}`;
+  const localParentBody = 'Teamspace에서만 편집한 상위 문서 본문', childTitle = `새 하위 페이지 ${id}`;
+  const date = '<property name="creationDate">2020-01-02T00:00:00Z</property>';
+  const pageRow = (sourceId: number, title: string, body: string, parentId?: number) => `
+    <object class="Page"><id name="id">${sourceId}</id><property name="title">${title}</property><property name="space" class="Space"><id name="id">42</id></property>${date}
+    ${parentId ? `<property name="parent" class="Page"><id name="id">${parentId}</id></property>` : ''}</object>
+    <object class="BodyContent"><id name="id">${sourceId + 300}</id><property name="body"><![CDATA[${body}]]></property><property name="content" class="Page"><id name="id">${sourceId}</id></property></object>`;
+  const exportSpace = (...rows: string[]) => zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">${space}</property></object>
+    ${rows.join('\n')}
+  </hibernate-generic>`) }]);
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const original = await upload(request, `space-original-${id}.zip`, exportSpace(
+      pageRow(100, originalParentTitle, '<p>처음 받은 상위 본문</p>'),
+      pageRow(101, '이미 받은 문서', '<p>처음 받은 별도 문서</p>'),
+    ), instance);
+    staged.push(original);
+    const first = await importIntoProject(request, original, targetKey, targetName);
+    const [projectId] = first.import.projectIds;
+    const initial = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const parent = initial.documents.find(document => document.projectId === projectId && document.title === originalParentTitle)!;
+    expect(parent).toBeTruthy();
+    const savedResponse = await request.patch(`/api/documents/${parent.id}`, { data: {
+      expectedVersion: parent.version, title: localParentTitle,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: localParentBody }] }] },
+    } });
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const saved = await savedResponse.json() as DocPage;
+
+    const next = await upload(request, `space-next-${id}.zip`, exportSpace(
+      pageRow(101, '원본에서 바꾼 제목', '<p>기존 페이지의 갱신 원본</p>'),
+      pageRow(102, childTitle, `<p>신규 하위 문서 본문</p><ac:link><ri:page ri:space-key="${spaceKey}" ri:content-title="${originalParentTitle}" /></ac:link>`, 100),
+    ), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    const newProjectKey = settings.getByLabel(`새 프로젝트 키 ${space}`, { exact: true });
+    await expect(mode).toHaveValue('new');
+    await newProjectKey.fill(`TMP${id}`);
+    await mode.selectOption({ label: '기존 프로젝트에 새 Confluence 문서 추가' });
+    const target = settings.getByRole('region', { name: '추가할 기존 프로젝트', exact: true });
+    await expect(target).toContainText(`${targetKey} · ${targetName}`);
+    await expect(target).toContainText(`Confluence ${instance} · 원본 공간 ${spaceKey}`);
+    await expect(settings.getByText('상태 매핑', { exact: true })).toHaveCount(0);
+    await expect(settings.getByText('업무 유형 매핑', { exact: true })).toHaveCount(0);
+    const bounds = await target.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    const firstReview = await preview(page, settings);
+    expect(firstReview.canApply, JSON.stringify(firstReview.notices)).toBe(true);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await mode.selectOption('new');
+    await expect(review).toHaveCount(0);
+    await expect(newProjectKey).toHaveValue(`TMP${id}`);
+    await mode.selectOption('append-pages');
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendPagesTo).toEqual({ projectId });
+    expect(plan.counts).toMatchObject({ projects: 0, documents: 1, retainedPages: 1 });
+    await expect(review.getByText('새로 추가할 문서 1', { exact: true })).toBeVisible();
+    await expect(review.getByText('이미 이관한 문서 1', { exact: true })).toBeVisible();
+    const refreshed = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}`) && response.ok());
+    await review.getByRole('button', { name: '검토 결과 다시 확인', exact: true }).click();
+    await refreshed;
+    await expect(review.getByText('새로 추가할 문서 1', { exact: true })).toBeVisible();
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('검토한 Confluence 문서를');
+      await dialog.accept();
+    });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const response = await applyResponse;
+    expect(response.status(), await response.text()).toBe(201);
+    const appended = await response.json() as MigrationApplyResult;
+    expect(appended.import.projectIds).toEqual([projectId]);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByText('원본 기록과 문서를 추가한 프로젝트', { exact: true })).toBeVisible();
+    await expect(receipt.getByText('새로 추가할 문서 1', { exact: true })).toBeVisible();
+
+    const after = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    expect(after.projects).toEqual(initial.projects);
+    expect(after.documents.find(document => document.id === parent.id)).toEqual(saved);
+    expect(after.documents.find(document => document.projectId === projectId && document.title === '원본에서 바꾼 제목')).toBeUndefined();
+    const child = after.documents.find(document => document.projectId === projectId && document.title === childTitle)!;
+    expect(child).toMatchObject({ parentId: parent.id });
+    const reconciliation = await openReconciliation(settings);
+    await reconciliation.getByRole('button', { name: `현재 문서 열기 ${childTitle}`, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(childTitle);
+    await page.getByRole('button', { name: `참조 문서 열기 ${localParentTitle}`, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(localParentTitle);
+    await expect(page.locator('.docs-prose')).toContainText(localParentBody);
   } finally {
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }

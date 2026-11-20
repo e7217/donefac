@@ -48,6 +48,11 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     fields: mapping(append.fields, value => nullable(value, '추가 대상 필드', 200)),
   };
 }
+export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
+  const append = object(raw, '기존 프로젝트 문서 추가 설정');
+  if (Object.keys(append).length !== 1) fail(400, '기존 프로젝트 문서 추가 설정 형식을 확인해 주세요.');
+  return { projectId: string(append.projectId, '문서를 추가할 프로젝트', 200) };
+}
 function configuration(raw: unknown, users: Set<string>): MigrationConfiguration {
   const value = object(raw, '이관 설정');
   const packageIds = list(value.packageIds, '설정 패키지', 20).map(id => string(id, '패키지 ID', 200)); if (new Set(packageIds).size !== packageIds.length) fail(400, '설정 패키지가 중복되었습니다.');
@@ -63,8 +68,10 @@ function configuration(raw: unknown, users: Set<string>): MigrationConfiguration
   if (value.datePolicy !== 'block' && value.datePolicy !== 'import-time') fail(400, '날짜 해석 정책을 확인해 주세요.');
   const excludedRecords = list(value.excludedRecords, '제외 원본', 100000).map(value => string(value, '제외 원본', 1200)); if (new Set(excludedRecords).size !== excludedRecords.length) fail(400, '제외 원본이 중복되었습니다.');
   const appendTo = Object.hasOwn(value, 'appendTo') ? parseMigrationAppendConfiguration(value.appendTo) : undefined;
+  const appendPagesTo = Object.hasOwn(value, 'appendPagesTo') ? parseMigrationPageAppendConfiguration(value.appendPagesTo) : undefined;
+  if (appendTo && appendPagesTo) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
   return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy,
-    excludedRecords, ...(appendTo ? { appendTo } : {}) };
+    excludedRecords, ...(appendTo ? { appendTo } : {}), ...(appendPagesTo ? { appendPagesTo } : {}) };
 }
 
 function parseIntegrity(raw: unknown, packages: SourceImport['packages']): SourceImportIntegrity | undefined {
@@ -125,6 +132,10 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   if (config.appendTo && (projectIds.length !== 1 || projectIds[0] !== config.appendTo.projectId ||
       packages.some(pkg => pkg.source.product !== 'jira' || pkg.source.instanceKey !== packages[0].source.instanceKey))) {
     fail(400, '추가 이관 영수증의 대상 프로젝트와 Jira 원본 인스턴스를 확인해 주세요.');
+  }
+  if (config.appendPagesTo && (projectIds.length !== 1 || projectIds[0] !== config.appendPagesTo.projectId ||
+      packages.some(pkg => pkg.source.product !== 'confluence' || pkg.source.instanceKey !== packages[0].source.instanceKey))) {
+    fail(400, '문서 추가 이관 영수증의 대상 프로젝트와 Confluence 원본 인스턴스를 확인해 주세요.');
   }
   const rawCounts = object(value.counts, '이관 수량'), counts: Record<string, number> = {}; if (Object.keys(rawCounts).length > 100) fail(400, '이관 수량 종류가 너무 많습니다.');
   for (const [key, count] of Object.entries(rawCounts)) { string(key, '수량 종류', 100); if (['__proto__', 'prototype', 'constructor'].includes(key) || !Number.isSafeInteger(count) || Number(count) < 0) fail(400, '이관 수량을 확인해 주세요.'); counts[key] = Number(count); }

@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
+import { contentReferences } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
@@ -440,6 +441,149 @@ test('repositories skip colliding Jira and current keys for distinct tickets whi
   assert.deepEqual(live.data.runs, []);
   const links = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
   assert.deepEqual(links.map(link => [link.iid, link.issueId]), [[902, renamed.id]]);
+});
+
+test('incremental Confluence imports reuse live parents and references while preserving edited and deleted pages', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-continuing-confluence';
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
+  const body = (id: string, kind: string, owner: string, storage: string) => object('BodyContent', id, prop('body', `<![CDATA[${storage}]]>`) + ref('content', kind, owner));
+  const date = prop('creationDate', '2020-03-01T00:00:00Z');
+  const page = (id: string, title: string, parent?: string, spaceId = '42', version = '1') =>
+    object('Page', id, prop('title', title) + prop('version', version) + ref('space', 'Space', spaceId) + date + (parent ? ref('parent', 'Page', parent) : ''));
+  const space = (id: string, key: string) => object('Space', id, prop('key', key) + prop('name', '원본 위키'));
+  const file = Buffer.from('새 페이지의 원본 첨부\x00\r\n');
+  const upload = (name: string, rows: string[], { origin = instance, withAttachment = false } = {}) => f.upload(zip([
+    { path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${rows.join('')}</hibernate-generic>`) },
+    ...(withAttachment ? [{ path: 'attachments/400/701/1', bytes: file }] : []),
+  ]), `${name}.zip`, 'confluence', origin);
+
+  const initial = await upload('initial-pages', [space('42', 'WIKI'), page('100', '원본 상위 문서'), page('200', '원본 참조 문서'), page('300', '삭제한 원본 문서')]);
+  const initialPlan = await f.preview(await f.configuration(initial, 'WIKI'));
+  assert.equal(initialPlan.canApply, true, JSON.stringify(initialPlan.notices));
+  const initialApply = await f.apply(initialPlan);
+  assert.equal(initialApply.status, 201, JSON.stringify(initialApply.data));
+  const [projectId] = initialApply.data.import.projectIds;
+  const originals = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.filter(document => document.projectId === projectId);
+  const parent = originals.find(document => document.title === '원본 상위 문서')!;
+  const reference = originals.find(document => document.title === '원본 참조 문서')!;
+  const removed = originals.find(document => document.title === '삭제한 원본 문서')!;
+  assert.ok(parent && reference && removed);
+  const archived = await f.call<{ trashEntryId: string }>(`/documents/${removed.id}`, 'DELETE', { expectedVersion: removed.version });
+  assert.equal(archived.status, 200);
+  assert.equal((await f.call(`/trash/${archived.data.trashEntryId}`, 'DELETE')).status, 200);
+
+  const storage = [
+    '<p><ac:link><ri:page ri:content-id="100"/><ac:link-body>식별자로 상위 문서</ac:link-body></ac:link></p>',
+    '<ac:structured-macro ac:name="include"><ac:parameter ac:name=""><ri:page ri:space-key="WIKI" ri:content-title="원본 참조 문서"/></ac:parameter></ac:structured-macro>',
+    '<ac:structured-macro ac:name="include"><ac:parameter ac:name="">WIKI:원본 참조 문서</ac:parameter></ac:structured-macro>',
+    '<p><ac:link><ri:attachment ri:filename="new-report.bin"/><ac:link-body>새 보고서</ac:link-body></ac:link></p>',
+  ].join('');
+  const next = await upload('continuing-pages', [
+    space('42', 'WIKI'), page('300', '다시 나타난 삭제 문서'), page('400', '추가 이관 하위 문서', '100', '42', '2'),
+    body('401', 'Page', '400', storage),
+    object('Page', '402', prop('title', '추가 이관 하위 문서의 이전 버전') + prop('version', '1') +
+      prop('contentStatus', 'historical') + ref('originalVersion', 'Page', '400') + ref('space', 'Space', '42') + date),
+    body('403', 'Page', '402', '<p>추가한 문서의 이전 본문</p>'),
+    object('Comment', '600', ref('containerContent', 'Page', '300') + date),
+    body('601', 'Comment', '600', '<p>기존 원본에만 남기는 댓글</p>'),
+    object('Comment', '602', ref('containerContent', 'Page', '400') + date),
+    body('603', 'Comment', '602', '<p>추가한 문서에 연결한 댓글</p>'),
+    object('Attachment', '701', prop('title', 'new-report.bin') + prop('version', '1') + ref('containerContent', 'Page', '400') + date),
+  ], { withAttachment: true });
+  const optionsFor = async (...packages: LegacyPackageSummary[]) => (await f.call<MigrationOptions>(`/migrations/options?${new URLSearchParams(packages.map(pkg => ['packageId', pkg.id]))}`)).data;
+  const options = await optionsFor(next);
+  assert.deepEqual(options.appendPagesTarget, { projectId, key: 'WIKI', name: 'Synthetic unified migration', instanceKey: instance, sourceSpaceId: '42', sourceSpaceKey: 'WIKI' });
+  assert.equal(options.appendTarget, undefined);
+  const wrongSpace = await upload('different-space', [space('43', 'OTHER'), page('500', '다른 공간 문서', undefined, '43')]);
+  const wrongSource = await upload('different-origin', [space('42', 'WIKI'), page('500', '다른 원본 문서')], { origin: 'synthetic-different-confluence' });
+  assert.equal((await optionsFor(wrongSpace)).appendPagesTarget, undefined);
+  assert.equal((await optionsFor(wrongSource)).appendPagesTarget, undefined);
+  assert.equal((await optionsFor(next, wrongSpace)).appendPagesTarget, undefined);
+  const config = { ...options.defaultConfiguration, appendPagesTo: { projectId } };
+  assert.equal((await f.call('/migrations/preview', 'POST', { configuration: { ...config, appendPagesTo: { projectId: 'project-neo' } } })).status, 400);
+  assert.equal((await f.call('/migrations/preview', 'POST', { configuration: { ...config, appendTo: { projectId, statuses: {}, issueTypes: {}, fields: {} } } })).status, 400);
+
+  const stale = await f.preview(config);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  assert.equal(stale.counts.documents, 1);
+  assert.equal(stale.counts.retainedPages, 1);
+  assert.equal(stale.counts.retainedRecords, 2);
+  assert.equal(stale.counts.projects, 0);
+  assert.equal(stale.counts.comments, 1);
+  assert.equal(stale.counts.revisions, 2);
+  const trashed = await f.call<{ trashEntryId: string }>(`/documents/${parent.id}`, 'DELETE', { expectedVersion: parent.version });
+  assert.equal(trashed.status, 200);
+  assert.equal((await f.apply(stale)).status, 409);
+  assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
+
+  const review = await f.preview(config);
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  assert.deepEqual(review.projects.map(project => [project.id, project.documentCount]), [[projectId, 1]]);
+  const edit = await f.call<DocPage>(`/documents/${reference.id}`, 'PATCH', {
+    expectedVersion: reference.version, title: '팀에서 수정한 문서 제목',
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '팀에서 수정한 본문' }] }] },
+  });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+  const applied = await f.apply(review);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.deepEqual(applied.data.import.configuration.appendPagesTo, { projectId });
+  assert.equal((await f.apply(review)).data.duplicate, true);
+
+  const workspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const child = workspace.documents.find(document => document.title === '추가 이관 하위 문서')!;
+  assert.ok(child);
+  assert.equal(child.projectId, projectId);
+  assert.equal(child.parentId, parent.id);
+  assert.equal(child.version, 2);
+  assert.deepEqual(contentReferences(child.content).map(item => [item.kind, item.id]),
+    [['reference', parent.id], ['include', reference.id], ['include', reference.id]]);
+  assert.deepEqual(workspace.documents.find(document => document.id === reference.id), edit.data);
+  assert.equal(workspace.documents.filter(document => document.projectId === projectId).length, 3);
+  assert.equal(workspace.documents.some(document => document.id === removed.id), false);
+  const recordsPath = `/source-imports/${applied.data.import.id}/records`;
+  const sourceRecords = (await f.call<SourceRecordPage>(recordsPath)).data.records;
+  for (const id of ['page:300', 'comment:600']) {
+    const record = sourceRecords.find(row => row.record.id === id);
+    assert.ok(record);
+    assert.equal(record.excluded, undefined);
+    assert.equal(record.targetId, null);
+    assert.equal(record.ownerId, null);
+  }
+  const oldComment = sourceRecords.find(row => row.record.id === 'comment:600')!;
+  assert.equal((await f.call<SourceRecordArchive>(`${recordsPath}/${oldComment.id}`)).data.record.text, '<p>기존 원본에만 남기는 댓글</p>');
+  const importedRevision = sourceRecords.find(row => row.record.id === 'revision:402');
+  const importedComment = sourceRecords.find(row => row.record.id === 'comment:602');
+  assert.equal(importedRevision?.ownerId, child.id);
+  assert.equal(importedRevision.targetType, 'revision');
+  assert.equal(importedComment?.ownerId, child.id);
+  assert.equal(importedComment.targetType, 'comment');
+  const attachment = sourceRecords.find(row => row.record.id === 'attachment:701');
+  assert.equal(attachment?.ownerId, child.id);
+  assert.ok(attachment.targetId);
+  const download = await fetch(`${f.base}/attachments/${attachment.targetId}/content`);
+  assert.equal(download.status, 200);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()), file);
+
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[] }>('/export');
+  assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 37 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+  const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === child.id);
+  assert.equal(restored?.parentId, parent.id);
+  assert.deepEqual(restored?.content, child.content);
+  const restoredFile = await fetch(`${f.base}/attachments/${attachment.targetId}/content`);
+  assert.equal(restoredFile.status, 200);
+  assert.deepEqual(Buffer.from(await restoredFile.arrayBuffer()), file);
+  const repeated = await f.preview(config);
+  assert.equal(repeated.canApply, false);
+  assert.equal(repeated.counts.documents, 0);
+  assert.equal(repeated.counts.retainedPages, 2);
+  const receipts = (await f.call<SourceImport[]>('/source-imports')).data;
+  assert.deepEqual(receipts.find(receipt => receipt.id === applied.data.import.id)?.configuration.appendPagesTo, { projectId });
 });
 
 function confluence(withAuditFixtures = false) {

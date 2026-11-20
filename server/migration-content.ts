@@ -268,7 +268,14 @@ class Converter {
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
     if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
     if (['info', 'warning', 'note', 'tip', 'panel'].includes(name)) { this.warn('PANEL_FLATTENED', '안내·경고 패널은 종류와 제목을 남긴 인용 블록으로 변환했습니다.'); return [{ type: 'blockquote', content: [paragraph(text(`[${name}]${params.title ? ` ${params.title}` : ''}`)), ...blocks()] }]; }
-    if (name === 'include') { const page = this.findXml(node, 'ri:page'); return this.reference({ kind: 'page', sourceId: page?.attrs['ri:content-id'] || page?.attrs['ri:page-id'], title: page?.attrs['ri:content-title'] || params[''] || params.page, spaceKey: page?.attrs['ri:space-key'] }, true); }
+    if (name === 'include') {
+      const page = this.findXml(node, 'ri:page');
+      if (page) return this.reference({ kind: 'page', ...pageIdentity(page) }, true);
+      const parameter = (params[''] || params.page || params.pageTitle || '').trim();
+      const qualified = /^([A-Za-z0-9]+|~[^\s:]+):(\S[\s\S]*)$/.exec(parameter);
+      const identity = qualified ? { spaceKey: qualified[1], title: qualified[2] } : { title: parameter };
+      return this.reference({ kind: 'page', ...identity }, true);
+    }
     if ((name === 'jira' || name === 'jiraissues') && params.key) return this.reference({ kind: 'issue', sourceId: params.key });
     if (name === 'status') { this.warn('STATUS_FLATTENED', '본문 상태 매크로는 상태 텍스트로 보존했습니다.'); return text(`[상태: ${params.title || params.colour || '상태'}]`); }
     if (name === 'excerpt') { this.warn('EXCERPT_FLATTENED', '발췌문 정의는 본문으로 유지했으며 발췌 범위 의미는 원본 보관 자료에 남습니다.'); return blocks(); }

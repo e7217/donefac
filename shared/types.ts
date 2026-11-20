@@ -147,11 +147,15 @@ export interface MigrationAppendConfiguration {
   issueTypes: Record<string, string>;
   fields: Record<string, string | null>;
 }
+export interface MigrationPageAppendTarget {
+  projectId: string; key: string; name: string; instanceKey: string; sourceSpaceId: string; sourceSpaceKey?: string;
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
   defaultConfiguration:MigrationConfiguration;
   appendTarget?: MigrationAppendTarget;
+  appendPagesTarget?: MigrationPageAppendTarget;
 }
 export interface MigrationConfiguration {
   packageIds:string[];projects:{containerId:string;key:string;name:string}[];
@@ -159,6 +163,7 @@ export interface MigrationConfiguration {
   fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
   appendTo?: MigrationAppendConfiguration;
+  appendPagesTo?: { projectId: string };
 }
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
 export interface MigrationPreview {

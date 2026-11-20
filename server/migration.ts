@@ -2,17 +2,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, User } from '../shared/types.js';
+import type { LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
-import type { MigrationAppendContext, MigrationPackage, PreparedMigration } from './migration-contracts.js';
+import type { MigrationAppendContext, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { parseMigrationAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
+import { parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -22,8 +22,11 @@ const generationKey = 'migrationWorkspaceGeneration';
 const conversionVersion = 2;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
+type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourceSpaceId' | 'sourceSpaceKey'> & { instanceKey: string };
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
+const changedPageAppend = '문서를 추가할 프로젝트 또는 원본 페이지 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
 const jiraNumericId = /^\d+$/;
 
@@ -85,16 +88,22 @@ export class MigrationService {
       },
     }));
   }
+  private sourceInstance(packages: MigrationPackage[], product: LegacySource['product']): string | undefined {
+    const key = packages[0]?.summary.source.instanceKey;
+    return key && packages.every(({ summary }) => summary.source.product === product && summary.source.instanceKey === key) ? key : undefined;
+  }
+  private projectBinding(product: LegacySource['product'], instanceKey: string, sourceId: string) {
+    return this.store.db.prepare(`SELECT target_id AS id, import_id AS importId FROM source_bindings
+      WHERE product=? AND source_instance=? AND kind='project' AND source_alias=? AND target_type='project'`)
+      .get(product, instanceKey, sourceId) as { id: string; importId: string } | undefined;
+  }
   private appendDestination(packages: MigrationPackage[], options: MigrationOptions): AppendDestination | undefined {
-    const instanceKey = packages[0]?.summary.source.instanceKey;
-    if (!instanceKey || packages.some(({ summary }) => summary.source.product !== 'jira' || summary.source.instanceKey !== instanceKey)) return;
+    const instanceKey = this.sourceInstance(packages, 'jira');
+    if (!instanceKey) return;
     const issueContainers = options.containers.filter(container => container.issueCount > 0);
     const sourceProjectId = issueContainers[0]?.sourceProjectId;
     if (!sourceProjectId || sourceProjectId === '__unassigned__' || issueContainers.some(container => container.sourceProjectId !== sourceProjectId)) return;
-    const direct = this.store.db.prepare(`SELECT target_id AS id FROM source_bindings
-      WHERE product='jira' AND source_instance=? AND kind='project' AND source_alias=? AND target_type='project'`)
-      .get(instanceKey, sourceProjectId) as { id: string } | undefined;
-    let projectId = direct?.id;
+    let projectId = this.projectBinding('jira', instanceKey, sourceProjectId)?.id;
     if (!projectId) {
       const officialKeys = new Set<string>();
       for (const pkg of packages) {
@@ -137,6 +146,59 @@ export class MigrationService {
       ORDER BY binding.source_alias`).all(instanceKey) as MigrationAppendContext['knownIssues'];
     const token = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues])).digest('hex');
     return { project, workflow, schema, nextIssueNumber: sequence.value, token, knownIssues };
+  }
+  private pageAppendDestination(packages: MigrationPackage[], options: MigrationOptions): PageAppendDestination | undefined {
+    const instanceKey = this.sourceInstance(packages, 'confluence');
+    if (!instanceKey) return;
+    const spaces = options.containers.filter(container => container.documentCount > 0);
+    const sourceSpaceId = spaces[0]?.sourceProjectId;
+    if (!sourceSpaceId || sourceSpaceId === '__unassigned__' || spaces.some(space => space.sourceProjectId !== sourceSpaceId)) return;
+    const binding = this.projectBinding('confluence', instanceKey, sourceSpaceId);
+    const project = binding && this.store.get<Project>('projects', binding.id);
+    if (!project) return;
+
+    const keys = new Set<string>();
+    for (const pkg of packages) {
+      const row = pkg.dataset.records.find(record => record.kind === 'project' && record.sourceId === sourceSpaceId);
+      const key = row?.metadata.spaceKey || row?.metadata.key;
+      if (typeof key === 'string' && key) keys.add(key);
+    }
+    if (!keys.size) {
+      const archived = this.store.db.prepare(`SELECT DISTINCT COALESCE(NULLIF(json_extract(json,'$.record.metadata.spaceKey'),''),
+        json_extract(json,'$.record.metadata.key')) AS key FROM source_records WHERE import_id=? AND product='confluence'
+        AND source_instance=? AND kind='project' AND source_id=? AND target_id=? AND target_type='project' AND json_valid(json)`)
+        .all(binding.importId, instanceKey, sourceSpaceId, project.id) as { key: string | null }[];
+      for (const { key } of archived) if (typeof key === 'string' && key) keys.add(key);
+    }
+    return { project, instanceKey, sourceSpaceId, ...(keys.size === 1 ? { sourceSpaceKey: [...keys][0] } : {}) };
+  }
+  private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false): MigrationPageAppendContext | undefined {
+    if (!configuration.appendPagesTo) return;
+    const destination = this.pageAppendDestination(packages, buildMigrationOptions(packages));
+    if (!destination || destination.project.id !== configuration.appendPagesTo.projectId) {
+      return fail(applying ? 409 : 400, applying ? changedPageAppend : invalidPageAppend);
+    }
+    const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = destination;
+    const selectedPageIds = new Set(packages.flatMap(pkg => pkg.dataset.records.filter(record => record.kind === 'page').map(record => record.sourceId)));
+    // A binding survives trash or permanent deletion. Its original title and space are used for source references,
+    // while only the current document's existence and project affect whether that reference can be reused.
+    const boundPages = this.store.db.prepare(`WITH page_origins AS (
+      SELECT binding.source_alias AS sourceId, binding.target_id AS documentId, document.project_id AS projectId,
+        json_extract(archive.json,'$.record.containerId') AS sourceSpaceId,
+        json_extract(archive.json,'$.record.title') AS sourceTitle
+      FROM source_bindings AS binding
+      LEFT JOIN documents AS document ON document.id=binding.target_id
+      LEFT JOIN source_records AS archive ON archive.import_id=binding.import_id AND archive.product=binding.product
+        AND archive.source_instance=binding.source_instance AND archive.kind=binding.kind AND archive.source_id=binding.source_alias
+        AND archive.target_type=binding.target_type AND archive.target_id=binding.target_id AND json_valid(archive.json)
+      WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
+    ) SELECT sourceId, documentId, projectId,
+      CASE WHEN COUNT(DISTINCT sourceSpaceId)=1 THEN MAX(sourceSpaceId) END AS sourceSpaceId,
+      CASE WHEN COUNT(DISTINCT sourceTitle)=1 THEN MAX(sourceTitle) ELSE '' END AS sourceTitle
+    FROM page_origins GROUP BY sourceId, documentId, projectId ORDER BY sourceId`).all(instanceKey) as MigrationPageAppendContext['knownPages'];
+    const knownPages = boundPages.filter(page => page.sourceSpaceId === sourceSpaceId || selectedPageIds.has(page.sourceId));
+    const token = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages])).digest('hex');
+    return { project, sourceSpaceId, sourceSpaceKey, token, knownPages };
   }
   private fileSpec(summary: LegacyPackageSummary): MigrationSourceFile {
     return { id: summary.id, filename: summary.filename, sha256: summary.sha256, path: join(this.dataDir, 'legacy-imports', `${summary.id}.bundle`) };
@@ -193,9 +255,14 @@ export class MigrationService {
     for (const mapping of [config.users, config.statuses, config.issueTypes, config.fields, config.sourceBaseUrls]) {
       if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) fail(400, '이관 매핑 형식이 올바르지 않습니다.');
     }
+    if (Object.hasOwn(config, 'appendTo') && Object.hasOwn(config, 'appendPagesTo')) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
     if (Object.hasOwn(config, 'appendTo')) {
       const appendTo = parseMigrationAppendConfiguration(config.appendTo);
       return { ...config, projects: [], statuses: {}, issueTypes: {}, fields: {}, appendTo };
+    }
+    if (Object.hasOwn(config, 'appendPagesTo')) {
+      const appendPagesTo = parseMigrationPageAppendConfiguration(config.appendPagesTo);
+      return { ...config, projects: [], statuses: {}, issueTypes: {}, fields: {}, appendPagesTo };
     }
     if (config.projects.length > 100 || config.projects.some(project => !project || typeof project !== 'object' ||
         typeof project.containerId !== 'string' || typeof project.key !== 'string' || typeof project.name !== 'string')) {
@@ -210,11 +277,12 @@ export class MigrationService {
       const generation = this.generation();
       const packages = this.loadPackages(configuration.packageIds);
       const append = this.appendContext(configuration, packages);
+      const appendPages = this.pageAppendContext(configuration, packages);
       const prepared = await this.work<PreparedMigration>({
         action: 'preview', sources: packages.map(item => this.fileSpec(item.summary)),
         input: { id: randomUUID(), configuration, actorId, packages, now: new Date().toISOString(),
           users: this.store.all<User>('users'), existingProjectKeys: this.store.all<Project>('projects').map(project => project.key),
-          ...(append ? { append } : {}) },
+          ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}) },
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
@@ -223,13 +291,14 @@ export class MigrationService {
       const duplicate = prepared.sourceRecords.find(row => {
         if (!row.targetId || !['project', 'issue', 'page'].includes(row.record.kind)) return false;
         const { source, record } = row;
+        const existingProject = source.product === 'jira' ? append?.project : appendPages?.project;
         const aliases = [record.sourceId];
         if (source.product === 'jira' && record.kind === 'issue' && typeof record.metadata.key === 'string') aliases.push(record.metadata.key);
         return aliases.some(alias => {
           const bound = binding.get(source.product, source.instanceKey, record.kind, alias) as { type: string; id: string } | undefined;
           if (!bound) return false;
-          return !(append && source.product === 'jira' && record.kind === 'project' && row.targetType === 'project' &&
-            bound.type === 'project' && bound.id === append.project.id && row.targetId === append.project.id);
+          return !(existingProject && record.kind === 'project' && row.targetType === 'project' &&
+            bound.type === 'project' && bound.id === existingProject.id && row.targetId === existingProject.id);
         });
       });
       if (duplicate) {
@@ -330,12 +399,17 @@ export class MigrationService {
           if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
           if (Date.parse(preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
           this.verifyPackages(prepared.sourceImport.packages);
-          const { append } = prepared;
+          const { append, appendPages } = prepared;
           if (Boolean(append) !== Boolean(preview.configuration.appendTo)) fail(409, changedAppend);
           if (append) {
             const current = this.appendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
             if (!current || append.projectId !== current.project.id || append.startIssueNumber !== current.nextIssueNumber ||
                 append.token !== current.token) fail(409, changedAppend);
+          }
+          if (Boolean(appendPages) !== Boolean(preview.configuration.appendPagesTo)) fail(409, changedPageAppend);
+          if (appendPages) {
+            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
+            if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
           }
           const keys = new Set(this.store.all<Project>('projects').map(project => project.key));
           if (prepared.projects.some(project => keys.has(project.key))) fail(409, '이관할 프로젝트 키가 이미 사용 중입니다.');
@@ -364,6 +438,11 @@ export class MigrationService {
         const { project, workflow, schema, instanceKey, sourceProjectId } = destination;
         options.appendTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceProjectId,
           statuses: workflow.statuses, issueTypes: schema.issueTypes, fields: schema.fields };
+      }
+      const pageDestination = this.pageAppendDestination(packages, options);
+      if (pageDestination) {
+        const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = pageDestination;
+        options.appendPagesTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceSpaceId, sourceSpaceKey };
       }
       res.json(options);
     });

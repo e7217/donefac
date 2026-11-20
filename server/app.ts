@@ -402,7 +402,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   migrations.registerRoutes(app, {
     actor,
     persistCanonical(value, req) {
-      if (value.append) {
+      if (value.appendPages) {
+        const { projectId } = value.appendPages;
+        get<Project>('projects', projectId);
+        const newDocumentIds = new Set(value.documents.map(document => document.id));
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length || !value.documents.length ||
+            value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
+            value.revisions.some(revision => !newDocumentIds.has(revision.documentId)) ||
+            [...value.comments, ...value.attachments].some(record => record.resourceType !== 'document' || !newDocumentIds.has(record.resourceId))) {
+          fail('기존 프로젝트에 추가할 문서의 범위가 올바르지 않습니다.',409);
+        }
+      } else if (value.append) {
         const { projectId, startIssueNumber } = value.append;
         const project = get<Project>('projects', projectId);
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
@@ -435,7 +445,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);
       for (const link of value.atlassianLinks??[]) atlassianLinks.create(link);
-      if (!value.append) {
+      if (!value.append && !value.appendPages) {
         const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
         for (const issue of value.issues) {
           const number = Number(issue.key.split('-').at(-1));
@@ -445,7 +455,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      activity(req, 'source-import', value.sourceImport.id, value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용', `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
+      const action = value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
+      activity(req, 'source-import', value.sourceImport.id, action, `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
     },
   });
   worklogs.registerRoutes(app,{actor,activity});
@@ -1159,6 +1170,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     if(data.schemaVersion<9&&['sourceImports','sourceRecords','attachmentVersions','issueRelations'].some(key=>Array.isArray(data[key])&&data[key].length))fail('원본 이관과 첨부 버전이 있는 백업은 schemaVersion 9가 필요합니다.');
     if(data.schemaVersion<37&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo!==undefined))fail('기존 프로젝트에 Jira 업무를 추가한 영수증에는 schemaVersion 37 백업이 필요합니다.');
+    if(data.schemaVersion<38&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo!==undefined))fail('기존 프로젝트에 Confluence 문서를 추가한 영수증에는 schemaVersion 38 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

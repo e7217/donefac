@@ -9,7 +9,7 @@ import { convertLegacyContent } from './migration-content.js';
 import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
-import type { MigrationPackage,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
+import type { MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
@@ -65,6 +65,9 @@ function jiraEnglishDate(value:string):{local:string;century:boolean}|null{
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
 type KnownIssue = { issueId: string; projectId: string | null };
+type KnownPage = MigrationPageAppendContext['knownPages'][number];
+type ResolvedReference = { id: string; label: string; url?: string };
+const pageOwnerRelations = new Set(['container-content', 'current-version', 'body-owner']);
 class Planner{
   options:MigrationOptions;result:PreparedMigration;entries:Entry[]=[];entryByKey=new Map<string,Entry>();bindings=new Map<string,Binding>();excluded=new Set<string>();projectsByContainer=new Map<string,Project>();schemas=new Map<string,ProjectIssueSchema>();workflows=new Map<string,ProjectWorkflow>();notices:MigrationNotice[]=[];noticeKeys=new Set<string>();timezoneValid=true;archiveIds=new Map<string,string>();ownerCache=new Map<string,Entry|null>();indexes=new Map<string,Map<string,LegacyRecord>>();issueById=new Map<string,Issue>();documentById=new Map<string,PreparedMigration['documents'][number]>();primaryById=new Map<string,Entry>();referenceIndex=new Map<string,Entry[]>();resolutionCache=new Map<string,{id:string;label:string;url?:string}|null>();fieldOptions=new Map<string,Map<string,MigrationOptions['fields'][number]>>();sourceOptions=new Map<string,Map<string,LegacyRecord[]>>();
   originBases = new Map<string, MigrationOriginBase>();
@@ -73,6 +76,11 @@ class Planner{
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
   private boundIssues = new Map<string, KnownIssue>();
+  private boundPages = new Map<string, KnownPage>();
+  private boundPageIdsByTitle = new Map<string, Set<string>>();
+  private boundPageTargets = new Set<string>();
+  private retainedPageOwners = new Map<string, string | null>();
+  private restrictedSourcePages = new Set<string>();
   constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
@@ -149,6 +157,108 @@ class Planner{
     return ownerReferences.length
       ? ownerReferences.every(reference => this.boundIssues.has(reference.sourceId))
       : !!row.containerId && this.boundIssues.has(row.containerId);
+  }
+  private originalPage(sourceId: string): KnownPage | undefined {
+    const append = this.input.appendPages;
+    const page = this.boundPages.get(sourceId);
+    return append && page?.projectId === append.project.id && page.sourceSpaceId === append.sourceSpaceId ? page : undefined;
+  }
+  private initializePageAppend(): void {
+    const append = this.input.appendPages;
+    const mapping = this.configuration.appendPagesTo;
+    if (!append && !mapping) return;
+    const instance = this.input.packages[0]?.dataset.source.instanceKey;
+    const containers = this.options.containers.filter(container => container.documentCount > 0);
+    if (!append || !mapping || this.configuration.appendTo || append.project.id !== mapping.projectId || !instance ||
+        this.input.packages.some(({ dataset }) => dataset.source.product !== 'confluence' || dataset.source.instanceKey !== instance) ||
+        !containers.length || containers.some(container => container.sourceProjectId !== append.sourceSpaceId)) {
+      this.notice('APPEND_PAGE_TARGET_INVALID', '같은 Confluence 공간에 연결된 기존 프로젝트를 확인해 주세요.', 'error');
+      return;
+    }
+    this.result.appendPages = { projectId: append.project.id, token: append.token };
+    for (const page of append.knownPages) {
+      this.boundPages.set(page.sourceId, page);
+      if (page.sourceSpaceId !== append.sourceSpaceId) continue;
+      if (page.projectId === append.project.id) this.boundPageTargets.add(page.documentId);
+      if (!page.sourceTitle) continue;
+      const ids = this.boundPageIdsByTitle.get(page.sourceTitle) ?? new Set<string>();
+      ids.add(page.sourceId);
+      this.boundPageIdsByTitle.set(page.sourceTitle, ids);
+    }
+    for (const container of containers) this.projectsByContainer.set(container.id, append.project);
+
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'page' || this.excluded.has(entry.key)) continue;
+      const page = this.boundPages.get(entry.row.sourceId);
+      if (!page) continue;
+      if (page.sourceSpaceId && page.sourceSpaceId !== append.sourceSpaceId) {
+        this.notice('SOURCE_PAGE_SPACE_CONFLICT', '같은 Confluence 페이지 ID가 다른 원본 공간에 연결되어 있습니다.', 'error', entry);
+      }
+      this.retainedEntries.add(entry.key);
+    }
+    const retainedPages = this.retainedEntries.size;
+    for (const entry of this.entries) {
+      if (!['attachment', 'comment', 'revision'].includes(entry.row.kind) || this.excluded.has(entry.key)) continue;
+      const owner = this.ownerEntry(entry);
+      if (owner ? this.retainedEntries.has(owner.key) : this.retainedPageOwner(entry)) this.retainedEntries.add(entry.key);
+    }
+    this.result.preview.counts.retainedPages = retainedPages;
+    this.result.preview.counts.retainedRecords = this.retainedEntries.size;
+    if (this.retainedEntries.size) this.notice('APPEND_PRIOR_PAGES_RETAINED', `기존 페이지 ${retainedPages}개를 포함한 원본 기록 ${this.retainedEntries.size}건을 보관합니다.`, 'info');
+    this.indexConfluenceRestrictions();
+  }
+  private indexConfluenceRestrictions(): void {
+    const children = new Map<string, string[]>();
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'page') continue;
+      const { sourceId, parentId, references } = entry.row;
+      if (this.restricted(entry)) this.restrictedSourcePages.add(sourceId);
+      const ancestors = new Set(references.filter(reference => reference.kind === 'page' && reference.relation === 'ancestor').map(reference => reference.sourceId));
+      if (parentId) ancestors.add(parentId);
+      for (const ancestor of ancestors) {
+        const values = children.get(ancestor) ?? [];
+        values.push(sourceId);
+        children.set(ancestor, values);
+      }
+    }
+    // Confluence analysis propagates restrictions within one export. A parent and child may be in separate selected exports.
+    const queue = [...this.restrictedSourcePages];
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      for (const child of children.get(queue[cursor]) ?? []) {
+        if (this.restrictedSourcePages.has(child)) continue;
+        this.restrictedSourcePages.add(child);
+        queue.push(child);
+      }
+    }
+  }
+  private retainedPageOwner(entry: Entry): boolean {
+    if (this.retainedPageOwners.has(entry.key)) return this.retainedPageOwners.get(entry.key) !== null;
+    const pending = [entry], visited = new Set<string>(), owners = new Set<string>();
+    for (let index = 0; index < pending.length && owners.size < 2; index++) {
+      const candidate = pending[index];
+      if (visited.has(candidate.key)) continue;
+      visited.add(candidate.key);
+      const cached = this.retainedPageOwners.get(candidate.key);
+      if (cached) {
+        owners.add(cached);
+        continue;
+      }
+      for (const reference of candidate.row.references) {
+        if (!pageOwnerRelations.has(reference.relation)) continue;
+        if (reference.kind === 'page') owners.add(reference.sourceId);
+        else {
+          const owner = this.sourceEntry(candidate, reference.kind, reference.sourceId);
+          if (owner) pending.push(owner);
+        }
+      }
+      const { orphan, ownerClass, ownerId } = candidate.row.metadata;
+      if (orphan === true && typeof ownerId === 'string' && (ownerClass === 'Page' || ownerClass === 'BlogPost')) owners.add(ownerId);
+    }
+    const ownerId = owners.size === 1 ? [...owners][0] : null;
+    const known = ownerId ? this.boundPages.get(ownerId) : undefined;
+    const retainedId = known?.sourceSpaceId === this.input.appendPages?.sourceSpaceId ? ownerId : null;
+    this.retainedPageOwners.set(entry.key, retainedId);
+    return retainedId !== null;
   }
   mappedAuthor(entry:Entry,id=entry.row.authorId):string|null {
     if(!id)return null;
@@ -233,7 +343,8 @@ class Planner{
     for(const option of this.options.identities){if(!Object.hasOwn(config.users,option.id))this.notice('USER_MAPPING_REQUIRED',`원본 사용자 매핑을 선택해 주세요: ${option.label}`,'error');else if(config.users[option.id]!==null&&!this.input.users.some(user=>user.id===config.users[option.id]))this.notice('USER_MAPPING_INVALID','매핑한 팀원을 찾을 수 없습니다.','error');}
     if(this.options.identities.some(option=>config.users[option.id]===null))this.notice('SOURCE_IDENTITIES_ARCHIVED','매핑하지 않은 원본 사용자 신원은 그대로 보관하고, 현재 댓글·문서·첨부의 작성자는 이관 작업자로 기록합니다.','warning',undefined,true);
     this.initializeAppend();
-    if (!config.appendTo) {
+    this.initializePageAppend();
+    if (!config.appendTo && !config.appendPagesTo) {
       for(const option of this.options.statuses)if(!categories.includes(config.statuses[option.id]))this.notice('STATUS_MAPPING_REQUIRED',`원본 상태의 분류를 선택해 주세요: ${option.label}`,'error');
       for(const option of this.options.issueTypes)if(!Object.hasOwn(config.issueTypes,option.id)||config.issueTypes[option.id]!==null&&!ISSUE_TYPES.includes(config.issueTypes[option.id] as typeof ISSUE_TYPES[number]))this.notice('TYPE_MAPPING_REQUIRED',`원본 유형을 기존 유형 또는 새 유형에 매핑해 주세요: ${option.label}`,'error');
       for(const option of this.options.fields)if(config.fields[option.id]!=='archive'&&!fieldKinds.includes(config.fields[option.id] as CustomFieldKind))this.notice('FIELD_MAPPING_REQUIRED',`원본 필드의 처리 방식을 선택해 주세요: ${option.label}`,'error');
@@ -256,8 +367,9 @@ class Planner{
       if (project && !this.excluded.has(entry.key)) this.bindings.set(entry.key, { type: 'project', id: project.id, projectId: project.id });
     }
     if(this.result.projects.length)this.notice('PROJECT_ACCESS_NOT_REPRODUCED','원본 Jira/Confluence 프로젝트·공간 권한 체계는 새 팀 프로젝트에 재현하지 않습니다. 제한된 개별 콘텐츠는 제외 전까지 차단하며 원래 권한 자료는 보관합니다.','warning',undefined,true);
+    if(this.result.appendPages)this.notice('CONFLUENCE_APPEND_ACCESS_NOT_REPRODUCED','추가하는 페이지는 대상 프로젝트의 접근 범위를 따릅니다. 원본에 접근 제한이 있는 콘텐츠는 제외 전까지 적용을 차단합니다.','warning',undefined,true);
     const sourceAliases=new Map<string,string>();for(const entry of this.entries)if(!this.skip(entry)&&['issue','page','project'].includes(entry.row.kind)){const target=this.bindings.get(entry.key)?.id;for(const alias of [entry.row.sourceId,...(entry.row.kind==='issue'&&entry.row.metadata.key?[string(entry.row.metadata.key)]:[])]){const key=JSON.stringify([entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,entry.row.kind,alias]),previous=sourceAliases.get(key);if(previous&&previous!==entry.key&&!(target&&target===this.bindings.get(previous)?.id))this.notice('SOURCE_BINDING_AMBIGUOUS','같은 원본 인스턴스·ID가 여러 적용 대상으로 존재합니다. 겹치는 내보내기를 제외해 주세요.','error',entry);else sourceAliases.set(key,entry.key);}}
-    for(const entry of this.entries)if(!this.skip(entry)&&this.restricted(entry))this.notice('RESTRICTED_CONTENT','권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.','error',entry);
+    for(const entry of this.entries)if(!this.skip(entry)&&(this.restricted(entry)||entry.row.kind==='page'&&this.restrictedSourcePages.has(entry.row.sourceId)))this.notice('RESTRICTED_CONTENT','권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.','error',entry);
     for(const pkg of this.input.packages){for(const diagnostic of pkg.dataset.diagnostics){const recordKey=diagnostic.recordId?`${pkg.summary.id}/${diagnostic.recordId}`:null;if(recordKey&&(this.excluded.has(recordKey)||this.retainedEntries.has(recordKey)))continue;const missingBytes=/ATTACHMENT_BYTES_MISSING/.test(diagnostic.code);if(diagnostic.severity==='error'&&!missingBytes)this.notice(`SOURCE_${diagnostic.code}`,diagnostic.message,'error',recordKey?this.entryByKey.get(recordKey):undefined);}
       for(const warning of pkg.dataset.diagnostics.filter(notice=>notice.severity==='warning')){const key=warning.recordId?`${pkg.summary.id}/${warning.recordId}`:null;if(key&&(this.excluded.has(key)||this.retainedEntries.has(key)))continue;if(['DATE_TIMEZONE_UNRESOLVED','CONFLUENCE_TIMEZONE_UNKNOWN','MISSING_REFERENCE','CONFLUENCE_STORAGE_REFERENCES_UNRESOLVED'].includes(warning.code))continue;this.notice(`SOURCE_${warning.code}`,warning.message,'warning',warning.recordId?this.entryByKey.get(`${pkg.summary.id}/${warning.recordId}`):undefined,true);}
       if(pkg.dataset.unsupported.length)this.notice('UNSUPPORTED_SOURCE_RECORDS',`원본 ${pkg.summary.filename}의 미지원 객체/필드는 보관 가능한 분석 결과만 남으며 실행 기능을 재현하지 않습니다.`,'warning',undefined,true);
@@ -475,16 +587,18 @@ class Planner{
     const project = this.sourceEntry(candidate, 'project', candidate.container)?.row;
     return [project?.metadata.spaceKey, project?.metadata.key, project?.metadata.pkey].includes(spaceKey);
   }
-  private confluencePage(entry: Entry, { sourceId, title, spaceKey }: MigrationPageIdentity): Entry | null {
+  private confluencePage(entry: Entry, { sourceId, title, spaceKey }: MigrationPageIdentity): { entry?: Entry; reference: ResolvedReference } | null {
+    const append = this.input.appendPages;
     let candidates = this.confluenceCandidates(entry, 'page', sourceId, title);
-    if (spaceKey || !sourceId) {
-      let spaceId: string | null;
+    let spaceId: string | null = null;
+    if (spaceKey || !sourceId || append) {
       let spaceOrigin: string | undefined;
       if (spaceKey) {
         const spaces = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []);
         const spaceIds = new Set(spaces.map(space => space.row.sourceId));
+        if (append && spaceKey === append.sourceSpaceKey) spaceIds.add(append.sourceSpaceId);
         if (spaceIds.size !== 1 || !this.uniqueConfluenceOrigin(spaces)) return null;
-        spaceId = spaces[0].row.sourceId;
+        spaceId = [...spaceIds][0];
         spaceOrigin = spaces.map(space => this.originIdentity(space)).find(Boolean);
       } else spaceId = this.confluenceSpace(entry);
       if (!spaceId) return null;
@@ -494,9 +608,19 @@ class Planner{
       });
     }
     // Excluding a document does not make another source document with the same title its target.
-    if (new Set(candidates.map(candidate => candidate.row.sourceId)).size !== 1 || !this.uniqueConfluenceOrigin(candidates)) return null;
+    const ids = new Set(candidates.map(candidate => candidate.row.sourceId));
+    if (append && spaceId === append.sourceSpaceId) {
+      if (sourceId && this.boundPages.get(sourceId)?.sourceSpaceId === spaceId) ids.add(sourceId);
+      else if (!sourceId && title) for (const id of this.boundPageIdsByTitle.get(title) ?? []) ids.add(id);
+    }
+    if (ids.size !== 1 || !this.uniqueConfluenceOrigin(candidates)) return null;
+    const [id] = ids;
+    if (this.restrictedSourcePages.has(id)) return null;
     const imported = candidates.filter(candidate => this.bindings.get(candidate.key)?.type === 'document');
-    return imported.length === 1 ? imported[0] : null;
+    if (imported.length === 1) return { entry: imported[0], reference: this.resolvedReference(imported[0]) };
+    if (imported.length || candidates.some(candidate => this.excluded.has(candidate.key) || this.restricted(candidate))) return null;
+    const known = this.originalPage(id);
+    return known ? { reference: { id: known.documentId, label: title || known.sourceTitle || known.sourceId } } : null;
   }
   private confluenceAttachment(entry: Entry, request: MigrationReferenceInput): Entry | null {
     const { attachmentOwner, sourceId, title } = request;
@@ -504,7 +628,7 @@ class Planner{
     let candidates = this.confluenceCandidates(entry, 'attachment', sourceId, title);
     let ownerId: string | undefined;
     if (attachmentOwner || !sourceId) {
-      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner) : this.ownerEntry(entry);
+      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner)?.entry : this.ownerEntry(entry);
       if (owner?.row.kind !== 'page') return null;
       const binding = this.bindings.get(owner.key);
       if (binding?.type !== 'document') return null;
@@ -530,22 +654,23 @@ class Planner{
     });
     return imported.length === 1 ? imported[0] : null;
   }
-  private resolvedReference(candidate: Entry): { id: string; label: string; url?: string } {
+  private resolvedReference(candidate: Entry): ResolvedReference {
     const binding = this.bindings.get(candidate.key)!;
     if (binding.type !== 'attachment') return { id: binding.id, label: candidate.row.title };
     const version = this.attachmentVersionsById.get(binding.id);
     const inline = version && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(version.mimeType);
     return { id: binding.id, label: candidate.row.title, url: `/api/attachments/${binding.id}/content${inline ? '?inline=1' : ''}` };
   }
-  resolve(entry: Entry, request: MigrationReferenceInput): { id: string; label: string; url?: string } | null {
+  resolve(entry: Entry, request: MigrationReferenceInput): ResolvedReference | null {
     const scoped = this.isConfluenceStorageReference(entry, request);
     const space = scoped ? this.confluenceSpace(entry) : null;
     const owner = request.kind === 'attachment' ? this.ownerEntry(entry)?.key : null;
     const key = JSON.stringify([entry.pkg.summary.id, scoped, space, owner, request]);
     if (this.resolutionCache.has(key)) return this.resolutionCache.get(key)!;
-    let value: { id: string; label: string; url?: string } | null;
-    if (scoped) {
-      const candidate = request.kind === 'page' ? this.confluencePage(entry, request) : this.confluenceAttachment(entry, request);
+    let value: ResolvedReference | null;
+    if (scoped && request.kind === 'page') value = this.confluencePage(entry, request)?.reference ?? null;
+    else if (scoped) {
+      const candidate = this.confluenceAttachment(entry, request);
       value = candidate ? this.resolvedReference(candidate) : null;
     } else value = this.resolveUncached(entry, request);
     this.resolutionCache.set(key, value);
@@ -567,12 +692,43 @@ class Planner{
       const existing = this.originalIssue(requestedId);
       if (existing) return { id: existing.id, label: requestedId };
     }
+    if (!candidates.length && request.kind === 'page' && requestedId && requestedUrl && this.input.appendPages) {
+      const base = this.originBases.get(entry.pkg.summary.id);
+      if (base && isWithinMigrationOrigin(requestedUrl, base)) {
+        return this.confluencePage(entry, { sourceId: requestedId, spaceKey: request.spaceKey })?.reference ?? null;
+      }
+    }
     return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }
   converted(entry:Entry){const result=convertLegacyContent(entry.row,{resolveReference:request=>this.resolve(entry,request)});for(const diagnostic of result.diagnostics)this.notice(diagnostic.code,diagnostic.message,diagnostic.severity,entry,diagnostic.severity==='warning');return result;}
+  private parentBinding(entry: Entry, parentId: string): Binding | undefined {
+    if (entry.row.kind === 'page' && this.input.appendPages) {
+      const parent = this.confluencePage(entry, { sourceId: parentId });
+      return parent ? { type: 'document', id: parent.reference.id, projectId: this.input.appendPages.project.id } : undefined;
+    }
+    const parent = this.sourceEntry(entry, entry.row.kind, parentId);
+    const binding = parent && this.bindings.get(parent.key);
+    return binding ?? (entry.row.kind === 'issue' && (!parent || !this.excluded.has(parent.key)) ? this.originalIssue(parentId) : undefined);
+  }
   convertDocuments():void{
     for(const entry of this.entries){if(this.excluded.has(entry.key))continue;const binding=this.bindings.get(entry.key);if(binding?.type==='issue'){const issue=this.issueById.get(binding.id)!,converted=this.converted(entry);issue.description=converted.plainText;if(issue.description.length>200000)this.notice('ISSUE_DESCRIPTION_LIMIT','일반 텍스트 설명이 현재200000자 제한을 넘습니다.','error',entry);}else if(binding?.type==='document'){const document=this.documentById.get(binding.id)!,converted=this.converted(entry);document.content=converted.content;document.plainText=converted.plainText;}}
-    for(const entry of this.entries){if(this.excluded.has(entry.key)||!['issue','page'].includes(entry.row.kind))continue;const binding=this.bindings.get(entry.key);if(!binding)continue;const parentId=entry.row.parentId;if(!parentId)continue;const parent=this.sourceEntry(entry,entry.row.kind,parentId);const parentBinding=(parent?this.bindings.get(parent.key):undefined) ?? (entry.row.kind==='issue'&&(!parent||!this.excluded.has(parent.key))?this.originalIssue(parentId):undefined);if(!parentBinding||parentBinding.type!==binding.type){this.notice('PARENT_NOT_IMPORTED','원본 상위 항목이 적용 대상에 없어 현재 항목은 최상위로 배치합니다. 원래 계층은 보관합니다.','warning',entry,true);continue;}if(parentBinding.projectId!==binding.projectId){this.notice('PARENT_PROJECT_CONFLICT','부모와 자식 항목이 서로 다른 새 프로젝트로 매핑되었습니다.','error',entry);continue;}if(binding.type==='issue')this.issueById.get(binding.id)!.parentId=parentBinding.id;else this.documentById.get(binding.id)!.parentId=parentBinding.id;}
+    for (const entry of this.entries) {
+      if (this.skip(entry) || !['issue', 'page'].includes(entry.row.kind)) continue;
+      const binding = this.bindings.get(entry.key);
+      const { parentId } = entry.row;
+      if (!binding || !parentId) continue;
+      const parent = this.parentBinding(entry, parentId);
+      if (!parent || parent.type !== binding.type) {
+        this.notice('PARENT_NOT_IMPORTED', '원본 상위 항목이 적용 대상에 없어 현재 항목은 최상위로 배치합니다. 원래 계층은 보관합니다.', 'warning', entry, true);
+        continue;
+      }
+      if (parent.projectId !== binding.projectId) {
+        this.notice('PARENT_PROJECT_CONFLICT', '부모와 자식 항목이 서로 다른 새 프로젝트로 매핑되었습니다.', 'error', entry);
+        continue;
+      }
+      if (binding.type === 'issue') this.issueById.get(binding.id)!.parentId = parent.id;
+      else this.documentById.get(binding.id)!.parentId = parent.id;
+    }
   }
   createSecondary():void{
     const revisions=new Map<string,Entry[]>();for(const entry of this.entries){if(this.skip(entry))continue;const ownerEntry=this.ownerEntry(entry),owner=ownerEntry?this.bindings.get(ownerEntry.key):undefined;if(entry.row.kind==='revision'){if(!owner||owner.type!=='document'){this.notice('REVISION_OWNER_MISSING','원본 문서 버전의 현재 문서를 찾을 수 없습니다.','error',entry);continue;}const values=revisions.get(owner.id)||[];values.push(entry);revisions.set(owner.id,values);}else if(entry.row.kind==='comment'){if(!owner||!['issue','document'].includes(owner.type)){this.notice('COMMENT_OWNER_MISSING','댓글의 현재 업무·문서 소유자를 찾을 수 없습니다.','error',entry);continue;}const converted=this.converted(entry),body=converted.plainText;if(!body.trim()||body.length>20000)this.notice('COMMENT_BODY_LIMIT','댓글이 비어 있거나 현재20000자 제한을 넘습니다.','error',entry);if(!['plain','none'].includes(entry.row.textFormat))this.notice('COMMENT_FORMAT_PLAIN_TEXT','댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.','warning',entry,true);const id=randomUUID();this.result.comments.push({id,resourceType:owner.type as 'issue'|'document',resourceId:owner.id,authorId:this.author(entry),body,createdAt:this.time(entry.row.createdAt,entry)!});this.bindings.set(entry.key,{type:'comment',id,projectId:owner.projectId});}}
@@ -594,9 +750,32 @@ class Planner{
     if(this.result.issueRelations.length)this.notice('ISSUE_RELATIONS_PRESERVED','원본 업무 연결은 별도 관계로 보존합니다. blocks/relates 같은 연결을 일정 FS 종속성으로 바꾸지 않습니다.','info');
   }
   validateGraph():void{
-    const cyclic=(rows:{id:string;parentId:string|null}[])=>{const incoming=new Map(rows.map(row=>[row.id,0])),children=new Map<string,string[]>();for(const row of rows)if(row.parentId&&(!this.input.append||incoming.has(row.parentId))){incoming.set(row.id,(incoming.get(row.id)||0)+1);const values=children.get(row.parentId)||[];values.push(row.id);children.set(row.parentId,values);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[]){const count=incoming.get(child)!-1;incoming.set(child,count);if(!count)queue.push(child);}return queue.length!==rows.length;};
-    if(cyclic(this.result.issues))this.notice('ISSUE_PARENT_CYCLE','이관할 업무 계층에 순환 관계가 있습니다.','error');if(cyclic(this.result.documents))this.notice('DOCUMENT_PARENT_CYCLE','이관할 문서 계층에 순환 관계가 있습니다.','error');
-    const issueIds=new Set(this.result.issues.map(issue=>issue.id)),documentIds=new Set(this.result.documents.map(document=>document.id)),incoming=new Map([...documentIds].map(id=>[id,0])),edges=new Map<string,string[]>();for(const document of this.result.documents){const targets:string[]=[];for(const reference of contentReferences(document.content)){if(!(reference.type==='issue'?issueIds:documentIds).has(reference.id))this.notice('CONTENT_REFERENCE_MISSING','변환한 본문의 참조 대상이 적용 계획에 없습니다.','error');if(reference.kind==='include'){targets.push(reference.id);incoming.set(reference.id,(incoming.get(reference.id)||0)+1);}}edges.set(document.id,targets);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const target of edges.get(queue[cursor])||[]){const count=incoming.get(target)!-1;incoming.set(target,count);if(!count)queue.push(target);}if(queue.length!==incoming.size)this.notice('DOCUMENT_INCLUDE_CYCLE','이관할 문서 포함 관계에 순환이 있습니다. 원본을 제외하거나 매핑을 검토해 주세요.','error');
+    const cyclic=(rows:{id:string;parentId:string|null}[], appended:boolean)=>{const incoming=new Map(rows.map(row=>[row.id,0])),children=new Map<string,string[]>();for(const row of rows)if(row.parentId&&(!appended||incoming.has(row.parentId))){incoming.set(row.id,(incoming.get(row.id)||0)+1);const values=children.get(row.parentId)||[];values.push(row.id);children.set(row.parentId,values);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[]){const count=incoming.get(child)!-1;incoming.set(child,count);if(!count)queue.push(child);}return queue.length!==rows.length;};
+    if(cyclic(this.result.issues, Boolean(this.input.append)))this.notice('ISSUE_PARENT_CYCLE','이관할 업무 계층에 순환 관계가 있습니다.','error');if(cyclic(this.result.documents, Boolean(this.input.appendPages)))this.notice('DOCUMENT_PARENT_CYCLE','이관할 문서 계층에 순환 관계가 있습니다.','error');
+    const issueIds = new Set(this.result.issues.map(issue => issue.id));
+    const incoming = new Map(this.result.documents.map(document => [document.id, 0]));
+    const edges = new Map<string, string[]>();
+    for (const document of this.result.documents) {
+      const targets: string[] = [];
+      for (const reference of contentReferences(document.content)) {
+        const present = reference.type === 'issue' ? issueIds.has(reference.id) : incoming.has(reference.id) || this.boundPageTargets.has(reference.id);
+        if (!present) this.notice('CONTENT_REFERENCE_MISSING', '변환한 본문의 참조 대상이 적용 계획에 없습니다.', 'error');
+        if (reference.kind === 'include' && incoming.has(reference.id)) {
+          targets.push(reference.id);
+          incoming.set(reference.id, incoming.get(reference.id)! + 1);
+        }
+      }
+      edges.set(document.id, targets);
+    }
+    const queue = [...incoming].filter(([, count]) => count === 0).map(([id]) => id);
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      for (const target of edges.get(queue[cursor]) ?? []) {
+        const count = incoming.get(target)! - 1;
+        incoming.set(target, count);
+        if (count === 0) queue.push(target);
+      }
+    }
+    if (queue.length !== incoming.size) this.notice('DOCUMENT_INCLUDE_CYCLE', '이관할 문서 포함 관계에 순환이 있습니다. 원본을 제외하거나 매핑을 검토해 주세요.', 'error');
     for(const schema of this.result.issueSchemas)for(const field of schema.fields)if((field.kind==='select'||field.kind==='multi_select')&&(!field.options.some(option=>!option.archived)||field.options.length>200||field.options.some(option=>!option.name.trim()||option.name.length>120)||new Set(field.options.map(option=>option.name)).size!==field.options.length))this.notice('FIELD_OPTIONS_INVALID',`선택형 필드 '${field.name}'의 활성 선택지·이름·개수 제한을 확인해 주세요.`,'error');
   }
   createWorklogs():void {
@@ -667,7 +846,8 @@ class Planner{
     const sourceWorklogs = this.entries.filter(entry=>entry.pkg.dataset.source.product==='jira'&&isJiraWorklog(entry.row)).length;
     if (sourceWorklogs) Object.assign(counts,{worklogs:this.result.worklogs.length,archivedWorklogs:sourceWorklogs-this.result.worklogs.length});
     if(Object.entries(counts).filter(([key])=>['issues','documents','comments','revisions','attachmentVersions','resourceLinks','issueRelations','worklogs'].includes(key)).reduce((sum,[,value])=>sum+value,0)>MAX_RECORDS)this.notice('CANONICAL_RECORD_LIMIT','생성할 현재 객체·이력·파일 버전 합계가100000개를 넘습니다.','error');
-    const projects = this.input.append ? [this.input.append.project] : this.result.projects;
+    const target = this.input.append?.project ?? this.input.appendPages?.project;
+    const projects = target ? [target] : this.result.projects;
     this.result.preview.projects=projects.map(project=>({id:project.id,key:project.key,name:project.name,issueCount:this.result.issues.filter(issue=>issue.projectId===project.id).length,documentCount:this.result.documents.filter(document=>document.projectId===project.id).length}));
     const origins = new Map(this.result.atlassianLinks.map(link => [link.targetId, link.url]));
     for (const entry of this.entries) {
@@ -685,6 +865,9 @@ class Planner{
     }
     if (this.input.append && !this.result.issues.length && !this.notices.some(notice => notice.severity === 'error')) {
       this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
+    }
+    if (this.input.appendPages && !this.result.documents.length && !this.notices.some(notice => notice.severity === 'error')) {
+      this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
     }
     this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=projects.map(project=>project.id);this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
   }

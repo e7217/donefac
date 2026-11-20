@@ -125,7 +125,7 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
       <label>원본 파일<input ref={fileInput} className="field" type="file" accept=".zip,.xml,.csv,.json" aria-label="Jira·Confluence 원본 파일" onChange={event => { setFile(event.target.files?.[0] || null); setActionError(''); }} /></label>
       <label>원본 인스턴스 식별값<input className="field" aria-label="원본 인스턴스 식별값" value={instanceKey} onChange={event => setInstanceKey(event.target.value)} maxLength={500} placeholder="예: jira-team-original" required /></label>
       <label>원본 도구<select className="field" aria-label="원본 도구" value={product} onChange={event => setProduct(event.target.value as Product)}><option value="auto">자동 판별</option><option value="jira">Jira</option><option value="confluence">Confluence</option></select></label>
-      <p className="legacy-upload-help">외부 서비스에 연결하지 않습니다. 식별값은 같은 원본 서버에서 내보낸 자료를 구분하는 매핑 공간입니다. ZIP·XML·CSV·JSON, 최대 64 MiB.</p>
+      <p className="legacy-upload-help">파일을 로컬에서 분석합니다. 같은 서버의 새 내보내기 파일에는 처음 이관 때 입력한 원본 인스턴스 식별값을 사용하세요. ZIP·XML·CSV·JSON, 최대 64 MiB.</p>
       {file && <p className="legacy-file-selected">{file.name} · {sizeLabel(file.size)}{file.size > MAX_FILE_BYTES && <strong> · 64 MiB 한도 초과</strong>}</p>}
       <div className="legacy-upload-actions"><button className="btn btn-ghost" type="button" disabled={!isDirty} onClick={() => { if (window.confirm('선택한 파일과 분석 설정 입력을 초기화할까요?')) resetDraft(); }}><X size={15} />입력 초기화</button><button className="btn btn-primary" type="submit" disabled={!file || file.size > MAX_FILE_BYTES || !instanceKey.trim()}>{pending ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}{pending ? '처리 중…' : '원본 분석 시작'}</button></div>
     </fieldset></form>
