@@ -110,14 +110,28 @@ function cli(action, from, to) {
 
 function fileHash(path) { return createHash('sha256').update(readFileSync(path)).digest('hex'); }
 
-async function applyPilotSourceMigration(url, actorId) {
-  const jira = Buffer.from([
-    'Issue id,Issue key,Project key,Summary,Description,Created,Updated,Status,Issue Type',
-    '100,OLD-1,OLD,파일럿 원본 업무,보관할 원본 내용,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task',
-    '101,OLD-2,OLD,파일럿 두 번째 업무,진행 상태의 원본,2020-01-02T00:00:00Z,2020-01-03T00:00:00Z,In Progress,Task',
-    '',
-  ].join('\r\n'));
-  const versions = [Buffer.from('보존할 첨부 첫 버전\r\n'), Buffer.from('보존할 첨부 두 번째 버전\x00\n')];
+const jiraAuthorKey = 'pilot-jira-author';
+const jiraRestrictedWorklog = 'history:worklog:32';
+
+async function applyPilotSourceMigration(url, actorId, authorId) {
+  const jiraAttachment = Buffer.from('Jira 관리자 백업에 따로 보관한 첨부 바이트\x00\n');
+  const jira = zip([
+    {path: 'entities.xml', bytes: Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><entity-engine-xml>
+      <ApplicationUser id="10" userKey="${jiraAuthorKey}" lowerUserName="pilotalice"/>
+      <User id="11" userName="pilotalice" displayName="파일럿 Jira 원본 작성자" active="1"/>
+      <Project id="20" pkey="OLD" name="파일럿 원본 프로젝트"/>
+      <Status id="1" pname="Open"/>
+      <Status id="3" pname="In Progress"/>
+      <IssueType id="5" pname="Task"/>
+      <Issue id="100" project="20" number="1" summary="파일럿 원본 업무" creator="pilotalice" reporter="pilotalice" assignee="pilotalice" status="1" issuetype="5" created="2020-01-01T00:00:00Z" updated="2020-01-02T00:00:00Z"><description>보관할 원본 내용</description></Issue>
+      <Issue id="101" project="20" number="2" summary="파일럿 두 번째 업무" status="3" issuetype="5" created="2020-01-02T00:00:00Z" updated="2020-01-03T00:00:00Z"><description>진행 상태의 원본</description></Issue>
+      <Worklog id="31" issue="100" author="pilotalice" timeworked="91" startdate="2020-01-02 00:30:00" created="2020-01-02T00:31:00+09:00"><body>원본 작업 시간</body></Worklog>
+      <Worklog id="32" issue="100" author="pilotalice" timeworked="60" startdate="2020-01-02 01:30:00" created="2020-01-02T01:31:00+09:00" rolelevel="123"><body>공개 제한 작업 시간</body></Worklog>
+      <FileAttachment id="800" issue="100" filename="jira-origin.bin" filesize="${jiraAttachment.length}" mimetype="application/octet-stream" author="pilotalice" created="2020-01-02T00:00:00Z"/>
+    </entity-engine-xml>`)},
+    {path: 'attachments/OLD/OLD-1/800', bytes: jiraAttachment},
+  ]);
+  const wikiVersions = [Buffer.from('보존할 첨부 첫 버전\r\n'), Buffer.from('보존할 첨부 두 번째 버전\x00\n')];
   const confluence = zip([
     {path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
       <object class="Space"><id name="id">42</id><property name="key">SYN</property><property name="name">파일럿 원본 공간</property></object>
@@ -126,7 +140,7 @@ async function applyPilotSourceMigration(url, actorId) {
       <object class="Attachment"><id name="id">700</id><property name="title">pilot-origin.bin</property><property name="version">2</property><property name="containerContent" class="Page"><id name="id">100</id></property><collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection><property name="creationDate">2020-01-02T00:00:00Z</property></object>
       <object class="Attachment"><id name="id">701</id><property name="title">pilot-origin.bin</property><property name="version">1</property><property name="containerContent" class="Page"><id name="id">100</id></property><property name="originalVersion" class="Attachment"><id name="id">700</id></property><property name="creationDate">2020-01-01T00:00:00Z</property></object>
     </hibernate-generic>`)},
-    ...versions.map((bytes, index) => ({path: `attachments/100/700/${index + 1}`, bytes})),
+    ...wikiVersions.map((bytes, index) => ({path: `attachments/100/700/${index + 1}`, bytes})),
   ]);
   const headers = { 'X-Actor-Id': actorId };
   async function stage(filename, product, body) {
@@ -135,33 +149,60 @@ async function applyPilotSourceMigration(url, actorId) {
       method: 'POST', status: 201, headers: {...headers, 'Content-Type': 'application/octet-stream'}, body,
     })).json();
   }
-  const jiraPackage = await stage('pilot.csv', 'jira', jira);
-  const wikiPackage = await stage('pilot.zip', 'confluence', confluence);
+  const jiraPackage = await stage('pilot-jira-backup.zip', 'jira', jira);
+  const wikiPackage = await stage('pilot-confluence-space.zip', 'confluence', confluence);
+  assert.equal(jiraPackage.source.format, 'jira-backup-xml');
+  assert.equal(wikiPackage.source.format, 'confluence-xml');
   const query = new URLSearchParams();
   for (const info of [jiraPackage, wikiPackage]) query.append('packageId', info.id);
   const options = await (await call(url, `/migrations/options?${query}`, {headers})).json();
   const migration = options.defaultConfiguration;
   migration.projects = migration.projects.map(project => ({...project, key: 'PILOTIMP', name: '파일럿 합성 이관'}));
+  const originalAuthor = options.identities.find(identity => identity.packageId === jiraPackage.id && identity.sourceValue === jiraAuthorKey);
+  assert.ok(originalAuthor, 'The Jira administrator backup must expose the stable author key for mapping.');
+  migration.users[originalAuthor.id] = authorId;
+  migration.timezone = 'Asia/Seoul';
   migration.sourceBaseUrls = {
     [jiraPackage.id]: 'https://jira.example.test/jira',
     [wikiPackage.id]: 'https://wiki.example.test/confluence',
   };
-  const preview = await (await call(url, '/migrations/preview', {
-    method: 'POST', status: 201, headers, body: {configuration: migration},
-  })).json();
+  async function previewMigration() {
+    return (await call(url, '/migrations/preview', {
+      method: 'POST', status: 201, headers, body: {configuration: migration},
+    })).json();
+  }
+  async function applyMigration(preview, status) {
+    return (await call(url, `/migrations/previews/${preview.id}/apply`, {
+      method: 'POST', status, headers,
+      body: {expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements},
+    })).json();
+  }
+  const restrictedRecord = `${jiraPackage.id}/${jiraRestrictedWorklog}`;
+  const blocked = await previewMigration();
+  assert.equal(blocked.canApply, false);
+  assert.ok(blocked.notices.some(notice => notice.code === 'RESTRICTED_CONTENT' && notice.recordId === restrictedRecord));
+  await applyMigration(blocked, 409);
+  migration.excludedRecords = [restrictedRecord];
+  const preview = await previewMigration();
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
   assert.equal(preview.counts.atlassianLinks, 3);
   assert.equal(preview.counts.unlinkedAtlassianRecords, 0);
-  const {import: receipt} = await (await call(url, `/migrations/previews/${preview.id}/apply`, {
-    method: 'POST', status: 201, headers,
-    body: {expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements},
-  })).json();
+  assert.equal(preview.counts.worklogs, 1);
+  const {import: receipt} = await applyMigration(preview, 201);
   assert.deepEqual(receipt.counts, preview.counts);
-  return {receipt, versions, packages: [{summary: jiraPackage, bytes: jira}, {summary: wikiPackage, bytes: confluence}]};
+  return {
+    receipt, authorId,
+    packages: [{summary: jiraPackage, bytes: jira}, {summary: wikiPackage, bytes: confluence}],
+    expectedFiles: [
+      {product: 'jira', sourceId: '800', packageSha256: jiraPackage.sha256, bytes: jiraAttachment},
+      {product: 'confluence', sourceId: '701', packageSha256: wikiPackage.sha256, bytes: wikiVersions[0]},
+      {product: 'confluence', sourceId: '700', packageSha256: wikiPackage.sha256, bytes: wikiVersions[1]},
+    ],
+  };
 }
 
 async function verifyPilotSourceMigration(url, migration) {
-  const {receipt, versions} = migration;
+  const {receipt, authorId, expectedFiles} = migration;
   assert.equal(receipt.projectIds.length, 1);
   const [projectId] = receipt.projectIds;
   const base = `/source-imports/${receipt.id}/reconciliation`;
@@ -172,6 +213,9 @@ async function verifyPilotSourceMigration(url, migration) {
   const workflow = workspace.workflows.find(item => item.projectId === projectId);
   const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
   assert.ok(issue && otherIssue && nextStatus && nextStatus !== issue.status);
+  assert.equal(otherIssue.status, nextStatus);
+  assert.equal(issue.assigneeId, authorId);
+  assert.match(issue.description, /보관할 원본 내용/);
   assert.equal(document?.title, '파일럿 원본 설계 문서');
   assert.ok(document.plainText.includes('이관 뒤 검토할 설계 내용'));
   assert.ok(document.content.content.some(node => node.type === 'issueReference' && node.attrs.issueId === issue.id));
@@ -187,24 +231,52 @@ async function verifyPilotSourceMigration(url, migration) {
     assert.deepEqual(links.map(link => link.url), [originalUrl]);
     originalLinks.push(links[0]);
   }
-  const reconciliation = await (await call(url, `${base}?kind=issue`)).json();
-  assert.equal(reconciliation.rows.find(row => row.sourceKey === 'OLD-1')?.target?.id, issue.id);
+  const reconciliation = await (await call(url, base)).json();
+  const sourceRows = reconciliation.rows;
+  for (const [product, kind, sourceId, key, target] of [
+    ['jira', 'issue', '100', 'OLD-1', issue],
+    ['jira', 'issue', '101', 'OLD-2', otherIssue],
+    ['confluence', 'page', '100', null, document],
+  ]) {
+    const sourceRow = sourceRows.find(row => row.product === product && row.kind === kind && row.sourceId === sourceId);
+    assert.equal(sourceRow?.sourceKey, key);
+    assert.equal(sourceRow.target?.id, target.id);
+    assert.equal(sourceRow.status, 'linked');
+  }
+  const worklogs = await (await call(url, `/issues/${issue.id}/worklogs`)).json();
+  assert.equal(worklogs.totalEntries, 1);
+  assert.equal(worklogs.totalMinutes, 91 / 60);
+  const [worklog] = worklogs.entries;
+  assert.equal(worklog.authorId, authorId);
+  assert.equal(worklog.durationSeconds, 91);
+  assert.equal(worklog.workDate, '2020-01-02');
+  assert.equal(worklog.note, '원본 작업 시간');
+  const worklogRow = sourceRows.find(row => row.kind === 'history' && row.sourceId === 'worklog:31');
+  assert.equal(worklogRow?.sourceRecordId, worklog.sourceRecordId);
+  assert.equal(worklogRow.status, 'linked');
+  assert.equal(worklogRow?.target?.id, worklog.id);
+  assert.equal(worklogRow?.target?.type, 'worklog');
+  const origin = await (await call(url, `/source-imports/${receipt.id}/records/${worklog.sourceRecordId}`)).json();
+  assert.equal(origin.record.authorId, jiraAuthorKey);
+  const restricted = sourceRows.find(row => row.kind === 'history' && row.sourceId === 'worklog:32');
+  assert.equal(restricted?.status, 'excluded');
+  assert.equal(restricted.target, null);
   const audit = await (await call(url, `${base}/audit?expectedVersion=${receipt.version}`)).json();
   assert.equal(audit.receiptVersion, receipt.version);
   assert.deepEqual(audit.recordCounts, reconciliation.counts);
   assert.equal(audit.recordCounts.missing, 0);
-  assert.deepEqual(audit.attachmentCounts, {verified: 2, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0});
-  assert.equal(audit.attachments.length, versions.length);
-  for (const [index, bytes] of versions.entries()) {
-    const sha = createHash('sha256').update(bytes).digest('hex');
-    const checked = audit.attachments.find(file => file.sha256 === sha);
+  assert.deepEqual(audit.attachmentCounts, {verified: expectedFiles.length, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0});
+  assert.equal(audit.attachments.length, expectedFiles.length);
+  for (const {product, sourceId, packageSha256, bytes} of expectedFiles) {
+    const checked = audit.attachments.find(file => file.product === product && file.sourceId === sourceId);
     assert.equal(checked?.status, 'verified');
-    assert.equal(checked.sourceId, index === 0 ? '701' : '700');
-    assert.equal(checked.packageSha256, migration.packages[1].summary.sha256);
+    assert.equal(checked.packageSha256, packageSha256);
+    assert.equal(checked.size, bytes.length);
+    assert.equal(checked.sha256, createHash('sha256').update(bytes).digest('hex'));
     const download = await call(url, `/attachment-versions/${checked.fileId}/download`);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
   }
-  return {issue, document, nextStatus, originalLinks, recordCounts: audit.recordCounts, attachments: audit.attachments};
+  return {issue, document, nextStatus, originalLinks, sourceRows, worklog, recordCounts: audit.recordCounts, attachments: audit.attachments};
 }
 
 async function browser(url, teamFixture) {
@@ -419,7 +491,7 @@ async function runStandardPilot() {
   })).json();
   assert.equal(updatedAttachment.id,attachment.id);
   assert.equal(updatedAttachment.versionCount,2);
-  const migration = await applyPilotSourceMigration(pilot.url, assigneeId);
+  const migration = await applyPilotSourceMigration(pilot.url, assigneeId, workspace.users[1].id);
   const sourceAudit = await verifyPilotSourceMigration(pilot.url, migration);
   const key = await (await call(pilot.url,'/api-keys',{
     method:'POST',status:201,body:{name:'파일럿 복원 키',access:'read',projectIds:[projectId],expiresAt:null},
@@ -503,7 +575,7 @@ async function runStandardPilot() {
     assert.deepEqual(readFileSync(join(restored, 'legacy-imports', `${summary.id}.bundle`)), bytes);
   }
   const restoredAudit = await verifyPilotSourceMigration(copy.url, migration);
-  assert.deepEqual(restoredAudit, sourceAudit, 'The migrated ticket, document, linkage and file audit must agree across physical restore.');
+  assert.deepEqual(restoredAudit, sourceAudit, 'Migrated items, source rows, worklogs, links and file audit must agree across physical restore.');
   const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {
     method: 'PATCH', body: {expectedVersion: restoredAudit.issue.version, status: restoredAudit.nextStatus},
   })).json();
@@ -512,7 +584,7 @@ async function runStandardPilot() {
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, mixed Jira/Confluence migration audit, single-writer lock, cold copy, integrity rejection and restored data.');
+  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection and restored data.');
 }
 
 process.on('SIGINT', onInterrupt);
