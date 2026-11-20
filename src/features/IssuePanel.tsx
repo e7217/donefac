@@ -1,7 +1,7 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { ArrowRight, Check, ChevronRight, Clock3, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -18,6 +18,7 @@ import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
+import { IssueDocumentPreview } from './IssueDocumentPreview';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -32,8 +33,11 @@ type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
+  previewDocumentId: string | null;
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
+  onPreviewDocument: (id: string) => boolean;
+  onCloseDocumentPreview: () => boolean;
 };
 
 function editableIssue(issue: Issue, labels: string) {
@@ -46,8 +50,10 @@ export function IssuePanel(props: IssuePanelProps) {
 }
 
 function IssuePanelContent(props: IssuePanelProps) {
-  const { data, issueId, documentOverlay, onClose, onOpenIssueSchedule, refresh, notify, openIssue, openDocument } = props;
+  const { data, issueId, documentOverlay, previewDocumentId, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
+    refresh, notify, openIssue, openDocument } = props;
   const issue = data.issues.find(i => i.id === issueId);
+  const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
@@ -182,12 +188,29 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
   }, [issueId, props.actorId]);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const issuePanel = useRef<HTMLElement>(null);
+  const previewOpener = useRef<HTMLButtonElement | null>(null);
+  const previousPreview = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const closedDocumentId = previousPreview.current;
+    previousPreview.current = previewDocumentId;
+    if (previewDocumentId || !closedDocumentId) return;
+    const opener = previewOpener.current;
+    previewOpener.current = null;
+    const frame = requestAnimationFrame(() => {
+      const trigger = opener?.isConnected && opener.dataset.previewDocumentId === closedDocumentId
+        ? opener
+        : issuePanel.current?.querySelector<HTMLButtonElement>(`[data-preview-document-id="${CSS.escape(closedDocumentId)}"]`);
+      (trigger && !trigger.disabled ? trigger : closeButton.current)?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [previewDocumentId]);
   useEffect(() => {
     if (documentOverlay) closeButton.current?.focus({ preventScroll: true });
   }, [documentOverlay]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || dependencyEditor) return;
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || dependencyEditor || previewDocumentId) return;
       if (documentOverlay) {
         event.preventDefault();
         event.stopPropagation();
@@ -196,7 +219,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation, dependencyEditor, documentOverlay]);
+  }, [closePanel, saving, childCreation, dependencyEditor, documentOverlay, previewDocumentId]);
 
   function keepDocumentOverlayFocus(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key !== 'Tab' || event.defaultPrevented) return;
@@ -330,9 +353,9 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <>
-    <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor)} onMouseDown={event => {
+    <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor || previewDocument)} onMouseDown={event => {
       if (event.target === event.currentTarget && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
-    }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
+    }}><aside ref={issuePanel} className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
       tabIndex={documentOverlay ? -1 : undefined} onKeyDown={documentOverlay ? keepDocumentOverlayFocus : undefined}>
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
@@ -417,7 +440,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       </section>
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
         disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} />
-      <section className="issue-related-section">
+      <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
         {linkedDocuments.map(link => {
           const doc = data.documents.find(d => d.id === link.documentId);
@@ -427,6 +450,10 @@ function IssuePanelContent(props: IssuePanelProps) {
             <div className="issue-related-row">
               <FileText size={15} />
               <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button>
+              <button type="button" className="issue-document-preview-trigger" aria-label={`${doc.title} 미리보기`} data-preview-document-id={doc.id}
+                onClick={event => {
+                  if (onPreviewDocument(doc.id)) previewOpener.current = event.currentTarget;
+                }}><Eye size={14} aria-hidden="true" />미리보기</button>
               <button type="button" className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button>
             </div>
             {source && <section className="issue-decision-source" aria-label="결정 근거">
@@ -468,6 +495,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>
     </aside></div>
+    {previewDocument && <IssueDocumentPreview key={previewDocument.id} data={data} document={previewDocument}
+      onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
+      openIssue={navigateIssue} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
       anchor={{ issueId, otherRole: dependencyEditor.otherRole }} staleMessage={staleDependencyMessage} busy={dependencyBusy}

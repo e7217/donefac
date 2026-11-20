@@ -20,3 +20,32 @@
 }
 
 .issue-decision-source .doc-pinned-include { margin: 0; }
+
+.issue-linked-documents .issue-document-link {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.issue-document-preview-trigger {
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+  align-items: center;
+  min-height: 32px;
+  padding: 3px 6px;
+  border: 1px solid #dce8de;
+  border-radius: 5px;
+  background: #fff;
+  color: #3e6853;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.issue-document-preview-trigger:hover {
+  background: #edf6ef;
+}
+
+.issue-document-preview-trigger:focus-visible {
+  outline: 2px solid #3e6853;
+  outline-offset: 2px;
+}
