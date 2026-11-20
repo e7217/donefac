@@ -126,10 +126,10 @@
 .docs-prose.resize-cursor { cursor:col-resize; }
 .docs-prose p.is-editor-empty:first-child:before { content:attr(data-placeholder); float:left; height:0; color:#b2bbc9; pointer-events:none; }
 .docs-prose .ProseMirror-selectednode { outline:2px solid #b1c2f7; }
-.docs-slash-menu { left:0; top:40px; width:215px; }
+.docs-slash-menu { left:0; top:40px; width:215px; max-height: min(420px, 65vh); overflow-y:auto; }
 .docs-slash-caption { font-size:9px; color:#9da7b9; padding:7px 10px; letter-spacing:.6px; }
 .docs-slash-menu button { justify-content:space-between; }
-.docs-slash-menu button>span { color:#b9c2d3; font-size:11px; }
+.docs-slash-menu button[aria-current="true"] { background:#eef3fc; color:#365ba4; }
 .docs-paper-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:9px; color:#adb5c3; border-top:1px solid #f0f2f6; padding-top:17px; margin-top:40px; }
 .docs-details { min-width:0; display:flex; flex-direction:column; border-left:1px solid #e9edf3; background:#fdfefe; }
 .docs-panel-close { display:none; align-items:center; justify-content:flex-end; gap:5px; background:#f9fbfe; border:0; border-bottom:1px solid #edf0f5; color:#98a5bc; font-size:9px; padding:8px 15px; cursor:pointer; }

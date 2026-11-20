@@ -21,7 +21,7 @@ export function DocumentEditorOutline({ editor }: { editor: Editor | null }) {
     const headings: DocumentOutlineEntry<number>[] = [];
     content?.descendants((node, position) => {
       if (node.type.name !== 'heading') return;
-      const title = outlineHeadingTitle(node.textBetween(0, node.content.size, '', ' '));
+      const title = outlineHeadingTitle(node.textBetween(0, node.content.size, '', child => child.type.name === 'statusBadge' ? String(child.attrs.label) : ' '));
       if (title) headings.push({ target: position, level: node.attrs.level, title });
       return false;
     });

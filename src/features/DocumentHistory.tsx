@@ -5,9 +5,9 @@ import { createPortal } from 'react-dom';
 import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, GitCompareArrows, History, List, RotateCcw, X } from 'lucide-react';
 import type { DocRevision, RichContent, User } from '../../shared/types';
 import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffUnit } from '../../shared/document-diff';
-import { contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { CALLOUT_LABELS, contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone, STATUS_BADGE_TONE_LABELS } from '../../shared/document-nodes';
 import { containsOutlineHeading, ReadonlyDocumentContent } from './DocumentBlocks';
-import { documentRevisionLabel } from './document-utils';
+import { documentRevisionLabel, hasDocumentAnnotations } from './document-utils';
 import './document-history.css';
 
 export interface DocumentHistoryProps {
@@ -22,7 +22,7 @@ export interface DocumentHistoryProps {
   saving?: boolean;
 }
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
+const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', callout: '안내 상자', statusBadge: '상태 배지', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
 const PAGE_SIZE = 60;
 
 export function DocumentHistory({ revisions, loading, error, current, users, onRestore, restoreDisabled, onSaveCopy, saving = false }: DocumentHistoryProps) {
@@ -36,7 +36,7 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
     return (b.confluenceSourceVersion ?? b.version) - (a.confluenceSourceVersion ?? a.version) || b.createdAt.localeCompare(a.createdAt);
   });
   const preview = ordered.find(value => value.id === previewId);
-  const hasFormattedPreview = preview && (containsOutlineHeading(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
+  const hasFormattedPreview = preview && (containsOutlineHeading(preview.content) || hasDocumentAnnotations(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
   const dirtyLabel = current.dirty ? '현재 미저장 초안' : '현재 편집본';
   function openCompare(revision?: DocRevision) { setBeforeId((revision || ordered[1] || ordered[0])?.id || ''); setAfterId('current'); setCompareOpen(true); }
   return <div className="document-history">
@@ -142,6 +142,14 @@ function metadataSummary(unit: DocumentDiffUnit): { lines: SummaryLine[]; additi
   if (unit.nodeType === 'taskItem') attribute('checked', '완료 여부', true, value => value === true ? '완료' : '미완료');
   if (unit.nodeType === 'codeBlock') attribute('language', '코드 언어', true);
   if (unit.nodeType === 'details') attribute('open', '펼침 상태', false, value => value === true ? '열림' : '닫힘');
+  if (unit.nodeType === 'callout') {
+    attribute('variant', '안내 상자 유형', true, value => isCalloutVariant(value) ? CALLOUT_LABELS[value] : value);
+    attribute('title', '안내 상자 제목', true);
+  }
+  if (unit.nodeType === 'statusBadge') {
+    attribute('label', '배지 이름', true);
+    attribute('tone', '배지 색상', true, value => isStatusBadgeTone(value) ? STATUS_BADGE_TONE_LABELS[value] : value);
+  }
   attribute('textAlign', '문단 정렬'); attribute('color', '글자색'); attribute('backgroundColor', '배경색');
   const countLabels: Record<string, string> = { doc: '하위 블록', detailsContent: '하위 블록', blockquote: '하위 블록', bulletList: '목록 항목', orderedList: '목록 항목', taskList: '목록 항목', listItem: '하위 블록', table: '표 행', tableRow: '표 셀' };
   if (countLabels[unit.nodeType] && typeof data.shape?.childCount === 'number') add(countLabels[unit.nodeType], `${data.shape.childCount.toLocaleString('ko-KR')}개`);

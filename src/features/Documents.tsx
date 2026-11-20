@@ -1,18 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
+import { ySyncPluginKey } from '@tiptap/y-tiptap';
+import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronRight,
-  Code2, FileCheck2, FileClock, FilePlus2, FileText, History, ImageIcon, Italic, Link2, List,
+  Code2, FileCheck2, FileClock, FilePlus2, FileText, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
-  Table2, Trash2, Unlink, X,
+  Table2, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
+import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
@@ -101,8 +104,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [referenceSelection, setReferenceSelection] = useState<ReferenceSelection | null>(null);
   const [issueBlockSelection, setIssueBlockSelection] = useState<IssueBlockSelection | null>(null);
   const closeIssueBlock = useCallback(() => setIssueBlockSelection(null), []);
+  const [annotationSelection, setAnnotationSelection] = useState<DocumentAnnotationSelection | null>(null);
+  const closeAnnotation = useCallback(() => setAnnotationSelection(null), []);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [slashTop, setSlashTop] = useState(40);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const editorWrap = useRef<HTMLDivElement>(null);
   const [issueSearch, setIssueSearch] = useState('');
   const [linkBusy, setLinkBusy] = useState(false);
   const [followUpSource, setFollowUpSource] = useState<FollowUpSource | null>(null);
@@ -190,6 +197,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (next.dirty) rememberDraft(next);
   }, [rememberDraft]);
 
+  const updateSlash = useCallback((instance: Editor) => {
+    const { $from, empty } = instance.state.selection;
+    const before = $from.parent.textBetween(0, $from.parentOffset, '', '\ufffc');
+    const match = instance.isFocused && empty && !$from.parent.type.spec.code && before.match(/^\/([^\s/]*)$/);
+    setSlashQuery(match ? match[1] : null);
+    setSlashIndex(0);
+    if (match && editorWrap.current) {
+      const coordinates = instance.view.coordsAtPos($from.pos);
+      setSlashTop(coordinates.bottom - editorWrap.current.getBoundingClientRect().top + 7);
+    }
+  }, []);
+  const updateEditorSelection = useCallback(() => { forceToolbar(value => value + 1); setSlashQuery(null); }, []);
   const manualEditor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -200,25 +219,39 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     editorProps: { attributes: { class: 'docs-prose', 'aria-label': '문서 본문' } },
     onUpdate: ({ editor: instance }) => {
       updateDraft({ content: instance.getJSON() as RichContent, plainText: documentPlainText(instance.getJSON() as RichContent) });
-      const { $from } = instance.state.selection;
-      const before = $from.parent.textContent.slice(0, $from.parentOffset);
-      const match = before.match(/^\/([^\s/]*)$/);
-      setSlashQuery(match ? match[1] : null);
-      if (match) {
-        const coordinates = instance.view.coordsAtPos($from.pos);
-        setSlashTop(coordinates.bottom - instance.view.dom.getBoundingClientRect().top + 7);
-      }
+      updateSlash(instance);
     },
-    onSelectionUpdate: () => { forceToolbar(value => value + 1); setSlashQuery(null); },
+    onSelectionUpdate: updateEditorSelection,
   });
   const editor = liveMode ? liveEditor : manualEditor;
+  useEffect(() => {
+    if (!liveMode || !liveEditor) return;
+    const update = ({ editor: instance, transaction }: { editor: Editor; transaction: Transaction }) => {
+      if (transaction.getMeta(ySyncPluginKey)) setSlashQuery(null);
+      else updateSlash(instance);
+    };
+    liveEditor.on('update', update);
+    liveEditor.on('selectionUpdate', updateEditorSelection);
+    return () => {
+      liveEditor.off('update', update);
+      liveEditor.off('selectionUpdate', updateEditorSelection);
+      setSlashQuery(null);
+    };
+  }, [liveEditor, liveMode, updateEditorSelection, updateSlash]);
   const openIssueBlock = useCallback<OpenIssueBlock>((instance, nodeType, target) => {
     const current = draftRef.current;
     if (!current || instance !== editor || instance.isDestroyed || !instance.isEditable) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const context = { editor: instance, documentId: current.id, opener, nodeType };
     setIssueBlockSelection(target ? { ...context, kind: 'edit', target } : { ...context, kind: 'insert', bookmark: instance.state.selection.getBookmark() });
-    setSlashQuery(null); setInsertKind(null); setReferenceSelection(null);
+    setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); closeAnnotation();
+  }, [editor, closeAnnotation]);
+  const openAnnotation = useCallback<OpenDocumentAnnotation>((instance, kind, opener, target) => {
+    const current = draftRef.current;
+    if (!current || instance !== editor || instance.isDestroyed || !instance.isEditable) return;
+    const annotation = { editor: instance, documentId: current.id, kind, opener };
+    setAnnotationSelection(target ? { ...annotation, mode: 'edit', target } : { ...annotation, mode: 'insert', bookmark: instance.state.selection.getBookmark() });
+    setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); setReferenceSelection(null);
   }, [editor]);
   const receiveDisabledSession = useCallback((current: CollaborationSession) => {
     const previous = draftRef.current;
@@ -291,9 +324,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setShowLatest(false);
     setReferenceSelection(null);
     setIssueBlockSelection(null);
+    closeAnnotation();
     setSlashQuery(null);
     setInsertKind(null);
-  }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument]); // Deliberately preserve the local buffer on snapshot refresh.
+  }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument, closeAnnotation]); // Deliberately preserve the local buffer on snapshot refresh.
 
   useEffect(() => {
     if (!selectedDocumentId && scoped.length) onSelectDocument(scoped[0].id);
@@ -641,10 +675,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   function openReference(kind: ReferenceKind) {
     if (!editor?.isEditable || !draftRef.current) return;
     setReferenceSelection({ kind, editor, bookmark: editor.state.selection.getBookmark(), documentId: draftRef.current.id });
-    setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null);
+    setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); closeAnnotation();
   }
 
-  const slashCommands = [
+  const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind }))[] = [
     { label: '제목 1', search: 'h1 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 1 }).run() },
     { label: '제목 2', search: 'h2 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 2 }).run() },
     { label: '글머리 목록', search: 'list bullet 목록', action: () => editor?.chain().focus().toggleBulletList().run() },
@@ -658,15 +692,41 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
+    { label: '안내 상자', search: 'callout info note warning tip panel 안내 상자', annotation: 'callout' },
+    { label: '상태 배지', search: 'status badge 상태 배지', annotation: 'statusBadge' },
     { label: '접기 블록', search: 'details expand collapse 접기 펼치기', action: () => insertDetails(editor) },
     { label: '구분선', search: 'divider 구분선', action: () => editor?.chain().focus().setHorizontalRule().run() },
   ];
 
-  function runSlash(action: () => unknown) {
-    if (!editor) return;
+  const matchingSlashCommands = slashQuery === null ? [] : slashCommands.filter(command => `${command.label} ${command.search}`.toLowerCase().includes(slashQuery.toLowerCase()));
+
+  function runSlash(command: typeof slashCommands[number]) {
+    const current = draftRef.current;
+    if (!editor?.isEditable || !current || slashQuery === null) return;
     const { $from } = editor.state.selection;
-    editor.chain().focus().deleteRange({ from: $from.start(), to: $from.pos }).run();
-    action(); setSlashQuery(null);
+    const from = $from.start(), to = $from.pos;
+    const text = editor.state.doc.textBetween(from, to, '', '\ufffc');
+    if (text !== '/' + slashQuery) { setSlashQuery(null); return; }
+    if ('annotation' in command) {
+      setAnnotationSelection({ editor, documentId: current.id, kind: command.annotation, opener: null, mode: 'insert',
+        bookmark: editor.state.selection.getBookmark(), slash: { from, to, text } });
+      setInsertKind(null); setIssueBlockSelection(null); setReferenceSelection(null);
+    } else {
+      editor.chain().focus().deleteRange({ from, to }).run();
+      command.action();
+    }
+    setSlashQuery(null);
+  }
+
+  function navigateSlash(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (bodyReadOnly || !matchingSlashCommands.length || event.nativeEvent.isComposing || !editor?.isFocused) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setSlashIndex(index => (index + (event.key === 'ArrowDown' ? 1 : matchingSlashCommands.length - 1)) % matchingSlashCommands.length);
+    } else if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      runSlash(matchingSlashCommands[slashIndex]);
+    }
   }
 
   const references = draft ? contentReferences(draft.content) : [];
@@ -698,6 +758,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
   const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
+  const annotationDialog = !bodyReadOnly && !publicationOpen && annotationSelection?.editor === editor && annotationSelection.documentId === selectedPage?.id ? annotationSelection : null;
   const canRequestPublication = Boolean(draft && !draft.dirty && !saving && !bodyReadOnly &&
     (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
   const selectionDocument = liveMode ? liveState?.document : selectedPage;
@@ -713,9 +774,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     followUpOpener.current = opener;
     setFollowUpSource({ id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection });
   }
-  const button = (label: string, icon: React.ReactNode, onClick: () => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
+  const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
-  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueBlock={bodyReadOnly ? undefined : openIssueBlock}><section className="documents-feature">
+  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueBlock={bodyReadOnly ? undefined : openIssueBlock}>
+    <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
     <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || followUpSource)}>
       <aside className="docs-tree" aria-label="문서 목록">
@@ -789,6 +851,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('문서 버전 포함 삽입', <FileClock size={15} />, () => openReference('documentRevisionInclude'))}
+                {button('안내 상자 삽입', <Info size={15} />, event => { if (editor) openAnnotation(editor, 'callout', event.currentTarget); })}
+                {button('상태 배지 삽입', <Tag size={15} />, event => { if (editor) openAnnotation(editor, 'statusBadge', event.currentTarget); })}
                 {button('접기 블록 삽입', <ChevronDown size={15} />, () => insertDetails(editor))}
                 {button('접기 블록 모두 펼치기', <ChevronRight size={15} />, () => unfoldDetails(editor))}
                 {editor?.isActive('details') && button('접기 블록 해제', <Unlink size={15} />, () => unwrapDetails(editor))}
@@ -799,14 +863,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
               {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor} />}
-              <div className="docs-editor-wrap" onClick={event => {
+              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={navigateSlash}
+                onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
+                onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 const href = event.target.closest('a[href]')?.getAttribute('href');
                 if (href && /^#\/[^/?#]+\/reports\/[0-9a-f-]{36}$/i.test(href)) {
                   event.preventDefault();
                   window.location.hash = href;
                 }
-              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}{slashQuery !== null && !liveMode && <div className="docs-slash-menu docs-popover" style={{ top: slashTop }}><div className="docs-slash-caption">블록 추가</div>{slashCommands.filter(command => `${command.label} ${command.search}`.toLowerCase().includes(slashQuery.toLowerCase())).map(command => <button key={command.label} onMouseDown={event => event.preventDefault()} onClick={() => runSlash(command.action)}>{command.label}<span>추가</span></button>)}</div>}</div>
+              }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
+                {!bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
+                  <div className="docs-slash-caption" aria-hidden="true">블록 추가</div>
+                  {matchingSlashCommands.map((command, index) => <button key={command.label} type="button" aria-current={index === slashIndex || undefined}
+                    onMouseDown={event => event.preventDefault()} onClick={() => runSlash(command)}>{command.label}</button>)}
+                </div>}
+              </div>
               <div className="docs-paper-footer"><span>{draft.plainText.trim().length.toLocaleString()}자</span><span>{liveMode ? '본문 자동 동기화 · 제목과 속성은 별도 저장' : '변경 후 저장 버튼 또는 ⌘ / Ctrl + S'}</span></div>
             </div>
           </div>
@@ -857,6 +929,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       initialSnapshot={publicationLink} onClose={closePublication} notify={notify} refreshDocument={refresh} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
+    {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}
     {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !creating) setNewOpen(false); }}><form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}><div className="docs-modal-header"><div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div><button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={() => setNewOpen(false)}><X size={19} /></button></div><label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?" value={newTitle} onChange={event => setNewTitle(event.target.value)} required maxLength={240} /></label><div className="docs-template-grid">{DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id} onClick={() => { setNewTemplate(template.id); if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle)) setNewTitle(template.id === 'blank' ? '' : template.name); }}><span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}</button>)}</div><div className="docs-location-fields"><label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent)} value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}><option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="docs-modal-label">상위 문서<select className="field" value={newParent} onChange={event => setNewParent(event.target.value)}><option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label></div><div className="docs-modal-footer"><button className="btn btn-ghost" type="button" disabled={creating} onClick={() => setNewOpen(false)}>취소</button><button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating}>{creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />} 문서 만들기</button></div></form></div>}
-  </section></DocumentBlocksProvider>;
+  </section></DocumentAnnotationProvider></DocumentBlocksProvider>;
 }

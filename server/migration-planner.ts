@@ -110,9 +110,13 @@ function confluencePageFieldDigests(values: ConfluenceMigrationDocumentValues): 
 }
 
 const confluenceRefreshBodyErrors = new Set(['CONFLUENCE_BODY_RELATION_CONFLICT', 'CONFLUENCE_MULTIPLE_BODIES', 'CONFLUENCE_NON_SCALAR_BODY']);
+const lossyConfluenceCalloutConversions = new Set([
+  'CALLOUT_PRESENTATION_UNSUPPORTED', 'CALLOUT_TITLE_UNSUPPORTED',
+  'STATUS_COLOR_UNSUPPORTED', 'STATUS_LABEL_UNSUPPORTED', 'STATUS_PRESENTATION_UNSUPPORTED',
+]);
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
-  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED',
+  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', ...lossyConfluenceCalloutConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -124,7 +128,7 @@ function hasConfluenceBody(record: LegacyRecord): boolean {
   return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
 }
 
-function previousConfluencePageFieldDigests(archive: SourceRecordArchive): ConfluenceMigrationPageFieldHashes {
+function previousConfluencePageFieldDigests(archive: SourceRecordArchive, currentContent: DocPage['content']): ConfluenceMigrationPageFieldHashes {
   if (archive.confluencePageFieldHashes) return archive.confluencePageFieldHashes;
   const { record } = archive;
   const title = record.title.trim();
@@ -133,8 +137,15 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive): Confl
   if (hasConfluenceBody(record)) {
     // A legacy archive has no canonical checkpoint. Reconstruct only what can be verified
     // without guessing any of the original page, issue or attachment mappings.
-    const converted = convertLegacyContent(record, { resolveReference: () => null });
+    const resolveReference = () => null;
+    const converted = convertLegacyContent(record, { resolveReference });
     if (usableConfluenceBody(converted)) values.content = converted.content;
+    const currentHash = confluencePageFieldDigest('content', currentContent);
+    if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
+      // A document imported before native annotations may still exactly match the old conversion.
+      const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations: true });
+      if (usableConfluenceBody(legacy) && confluencePageFieldDigest('content', legacy.content) === currentHash) values.content = legacy.content;
+    }
   }
   return confluencePageFieldDigests(values);
 }
@@ -397,7 +408,7 @@ class Planner{
     const previousAppend = configuration.appendTo;
     const values: JiraMigrationIssueValues = {};
     if (record.title.trim() && record.title.trim().length <= 300) values.title = record.title.trim();
-    const description = convertLegacyContent(record, { resolveReference: () => null });
+    const description = convertLegacyContent(record, { resolveReference: () => null, legacyAnnotations: true });
     if (!description.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK' || item.code.startsWith('UNRESOLVED_'))) {
       values.description = description.plainText;
     }
@@ -445,7 +456,7 @@ class Planner{
     if (title && title.length <= 300) values.title = title;
     else if (title) unavailable('제목');
     if (explicit.includes('description') || !hasSnapshotFields && (row.text || sourceField(row, 'description') !== undefined)) {
-      const description = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+      const description = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations: true });
       if (description.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK') || description.plainText.length > 200000) unavailable('설명');
       else {
         values.description = description.plainText;
@@ -816,6 +827,9 @@ class Planner{
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (bodyChanged && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
+        for (const diagnostic of converted?.diagnostics ?? []) {
+          if (lossyConfluenceCalloutConversions.has(diagnostic.code)) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
+        }
       }
       const values: ConfluenceMigrationDocumentValues = {};
       if (title && title.length <= 300) values.title = title;
@@ -823,7 +837,7 @@ class Planner{
         values.content = safeBody.content;
         for (const diagnostic of safeBody.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
       }
-      const hashes = { ...previousConfluencePageFieldDigests(previous) };
+      const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
       const accepted: ConfluenceMigrationDocumentValues = {};
       const fields: ConfluenceMigrationDocumentReview['fields'] = [];
       let checkpoint = false;
@@ -1881,7 +1895,11 @@ class Planner{
     }
     return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }
-  converted(entry:Entry){const result=convertLegacyContent(entry.row,{resolveReference:request=>this.resolve(entry,request)});for(const diagnostic of result.diagnostics)this.notice(diagnostic.code,diagnostic.message,diagnostic.severity,entry,diagnostic.severity==='warning');return result;}
+  converted(entry: Entry, { legacyAnnotations = false }: { legacyAnnotations?: boolean } = {}) {
+    const result = convertLegacyContent(entry.row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations });
+    for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
+    return result;
+  }
   private parentBinding(entry: Entry, parentId: string): Binding | undefined {
     if (entry.row.kind === 'page' && this.input.appendPages) {
       const parent = this.confluencePage(entry, { sourceId: parentId });
@@ -1892,7 +1910,20 @@ class Planner{
     return binding ?? (entry.row.kind === 'issue' && (!parent || !this.excluded.has(parent.key)) ? this.originalIssue(parentId) : undefined);
   }
   convertDocuments():void{
-    for(const entry of this.entries){if(this.excluded.has(entry.key))continue;const binding=this.bindings.get(entry.key);if(binding?.type==='issue'){const issue=this.issueById.get(binding.id)!,converted=this.converted(entry);issue.description=converted.plainText;if(issue.description.length>200000)this.notice('ISSUE_DESCRIPTION_LIMIT','일반 텍스트 설명이 현재200000자 제한을 넘습니다.','error',entry);}else if(binding?.type==='document'){const document=this.documentById.get(binding.id)!,converted=this.converted(entry);document.content=converted.content;document.plainText=converted.plainText;}}
+    for (const entry of this.entries) {
+      if (this.excluded.has(entry.key)) continue;
+      const binding = this.bindings.get(entry.key);
+      if (binding?.type === 'issue') {
+        const issue = this.issueById.get(binding.id)!;
+        issue.description = this.converted(entry, { legacyAnnotations: true }).plainText;
+        if (issue.description.length > 200000) this.notice('ISSUE_DESCRIPTION_LIMIT', '일반 텍스트 설명이 현재200000자 제한을 넘습니다.', 'error', entry);
+      } else if (binding?.type === 'document') {
+        const document = this.documentById.get(binding.id)!;
+        const converted = this.converted(entry);
+        document.content = converted.content;
+        document.plainText = converted.plainText;
+      }
+    }
     for (const entry of this.entries) {
       if (this.skip(entry) || !['issue', 'page'].includes(entry.row.kind)) continue;
       const binding = this.bindings.get(entry.key);
@@ -1912,7 +1943,34 @@ class Planner{
     }
   }
   createSecondary():void{
-    const revisions=new Map<string,Entry[]>();for(const entry of this.entries){if(this.skip(entry))continue;const ownerEntry=this.ownerEntry(entry),owner=ownerEntry?this.bindings.get(ownerEntry.key):undefined;if(entry.row.kind==='revision'){if(!owner||owner.type!=='document'){this.notice('REVISION_OWNER_MISSING','원본 문서 버전의 현재 문서를 찾을 수 없습니다.','error',entry);continue;}const values=revisions.get(owner.id)||[];values.push(entry);revisions.set(owner.id,values);}else if(entry.row.kind==='comment'){if(!owner||!['issue','document'].includes(owner.type)){this.notice('COMMENT_OWNER_MISSING','댓글의 현재 업무·문서 소유자를 찾을 수 없습니다.','error',entry);continue;}const converted=this.converted(entry),body=converted.plainText;if(!body.trim()||body.length>20000)this.notice('COMMENT_BODY_LIMIT','댓글이 비어 있거나 현재20000자 제한을 넘습니다.','error',entry);if(!['plain','none'].includes(entry.row.textFormat))this.notice('COMMENT_FORMAT_PLAIN_TEXT','댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.','warning',entry,true);const id=randomUUID();this.result.comments.push({id,resourceType:owner.type as 'issue'|'document',resourceId:owner.id,authorId:this.author(entry),body,createdAt:this.time(entry.row.createdAt,entry)!});this.bindings.set(entry.key,{type:'comment',id,projectId:owner.projectId});}}
+    const revisions = new Map<string, Entry[]>();
+    for (const entry of this.entries) {
+      if (this.skip(entry)) continue;
+      const ownerEntry = this.ownerEntry(entry), owner = ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
+      if (entry.row.kind === 'revision') {
+        if (!owner || owner.type !== 'document') {
+          this.notice('REVISION_OWNER_MISSING', '원본 문서 버전의 현재 문서를 찾을 수 없습니다.', 'error', entry);
+          continue;
+        }
+        const values = revisions.get(owner.id) || [];
+        values.push(entry);
+        revisions.set(owner.id, values);
+      } else if (entry.row.kind === 'comment') {
+        if (!owner || !['issue', 'document'].includes(owner.type)) {
+          this.notice('COMMENT_OWNER_MISSING', '댓글의 현재 업무·문서 소유자를 찾을 수 없습니다.', 'error', entry);
+          continue;
+        }
+        const body = this.converted(entry, { legacyAnnotations: true }).plainText;
+        if (!body.trim() || body.length > 20000) this.notice('COMMENT_BODY_LIMIT', '댓글이 비어 있거나 현재20000자 제한을 넘습니다.', 'error', entry);
+        if (!['plain', 'none'].includes(entry.row.textFormat)) {
+          this.notice('COMMENT_FORMAT_PLAIN_TEXT', '댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.', 'warning', entry, true);
+        }
+        const id = randomUUID();
+        this.result.comments.push({ id, resourceType: owner.type as 'issue' | 'document', resourceId: owner.id,
+          authorId: this.author(entry), body, createdAt: this.time(entry.row.createdAt, entry)! });
+        this.bindings.set(entry.key, { type: 'comment', id, projectId: owner.projectId });
+      }
+    }
     for(const document of this.result.documents){const current=this.primaryById.get(document.id)!,entries=(revisions.get(document.id)||[]).sort((a,b)=>Number(a.row.metadata.version||0)-Number(b.row.metadata.version||0)||string(a.row.createdAt).localeCompare(string(b.row.createdAt))||a.key.localeCompare(b.key));let highest=0;
       for(const entry of entries){let version=Number(entry.row.metadata.version);if(!Number.isSafeInteger(version)||version<1||version>1000000000||version<=highest){version=highest+1;this.notice('REVISION_VERSION_RENUMBERED','원본 버전 번호가 없거나 중복되어 현재 이력에는 순서를 부여했습니다. 원래 번호는 보관합니다.','warning',entry,true);}highest=version;const id=randomUUID(),converted=this.converted(entry);this.result.revisions.push({id,documentId:document.id,version,title:entry.row.title||document.title,content:converted.content,plainText:converted.plainText,authorId:this.author(entry),createdAt:this.time(entry.row.updatedAt||entry.row.createdAt,entry)!,summary:string(entry.row.metadata.versionComment)||`원본 버전 ${string(entry.row.metadata.version)||version}`});this.bindings.set(entry.key,{type:'revision',id,projectId:document.projectId});}
       const sourceVersion=Number(current.row.metadata.version);document.version=Number.isSafeInteger(sourceVersion)&&sourceVersion>highest&&sourceVersion<=1000000000?sourceVersion:highest+1;this.result.revisions.push({id:randomUUID(),documentId:document.id,version:document.version,title:document.title,content:document.content,plainText:document.plainText,authorId:document.authorId,createdAt:document.updatedAt,summary:'원본 현재 문서 이관'});
@@ -2035,8 +2093,11 @@ class Planner{
         rawOnly++;
         continue;
       }
-      const converted = convertLegacyContent(row, { resolveReference: request => version !== null && request.kind === 'attachment'
-        ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request) });
+      const converted = convertLegacyContent(row, {
+        resolveReference: request => version !== null && request.kind === 'attachment'
+          ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request),
+        legacyAnnotations: version === null,
+      });
       const createdAt = version !== null ? row.updatedAt || row.createdAt : row.createdAt;
       const invalidBody = version === null
         ? !converted.plainText.trim() || converted.plainText.length > 20000 || converted.diagnostics.some(item => item.severity === 'error')
@@ -2139,7 +2200,7 @@ class Planner{
       included.add(identity);
       let note = '';
       if (entry.row.text && entry.row.text!=='null') {
-        const converted = this.converted(entry);
+        const converted = this.converted(entry, { legacyAnnotations: true });
         if (converted.plainText.trim().length<=2000) note=converted.plainText.trim();
         else this.notice('WORKLOG_NOTE_ARCHIVED','작업 메모가 2,000자를 초과합니다. 작업 시간은 적용하고 전체 메모는 원본에 보관합니다.','warning',entry,true);
       }
@@ -2234,7 +2295,7 @@ class Planner{
       const { row } = entry;
       if (kind === 'comment') {
         const createdAt = sourceTimestamp(row.createdAt, this.configuration.timezone);
-        const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+        const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations: true });
         if (!createdAt || !converted.plainText.trim() || converted.plainText.length > 20_000 ||
             converted.diagnostics.some(diagnostic => diagnostic.severity === 'error')) {
           rawOnly++;
@@ -2257,7 +2318,7 @@ class Planner{
         }
         let note = '';
         if (row.text && row.text !== 'null') {
-          const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+          const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations: true });
           const body = converted.plainText.trim();
           if (body.length <= 2000 && !converted.diagnostics.some(diagnostic => diagnostic.severity === 'error')) note = body;
           else this.notice('WORKLOG_NOTE_ARCHIVED', '작업 시간은 적용하고 변환할 수 없는 메모는 원본으로 보관합니다.', 'warning', entry, true);

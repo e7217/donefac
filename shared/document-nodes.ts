@@ -4,18 +4,31 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 5;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 6;
 export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
 export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
 export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
   status: '상태', assignee: '담당자', priority: '우선순위',
 };
+export const MAX_CALLOUT_TITLE_LENGTH = 300;
+export const MAX_STATUS_BADGE_LABEL_LENGTH = 120;
+export const CALLOUT_VARIANTS = ['info', 'note', 'warning', 'tip', 'panel'] as const;
+export type CalloutVariant = typeof CALLOUT_VARIANTS[number];
+export const CALLOUT_LABELS: Record<CalloutVariant, string> = {
+  info: '정보', note: '참고', warning: '경고', tip: '팁', panel: '패널',
+};
+export const STATUS_BADGE_TONES = ['neutral', 'blue', 'green', 'amber', 'red', 'purple'] as const;
+export type StatusBadgeTone = typeof STATUS_BADGE_TONES[number];
+export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
+  neutral: '기본', blue: '파랑', green: '초록', amber: '주황', red: '빨강', purple: '보라',
+};
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string): DocumentSchemaVersion {
+  if (nodeType === 'callout' || nodeType === 'statusBadge') return 6;
   if (nodeType === 'documentRevisionInclude') return 5;
   if (nodeType === 'issueSummary') return 4;
   if (nodeType === 'issueList') return 3;
@@ -51,6 +64,18 @@ export interface DocumentIssueSummary extends DocumentIssueList { groupBy: Issue
 
 export function isIssueSummaryGroupBy(value: unknown): value is IssueSummaryGroupBy {
   return ISSUE_SUMMARY_GROUP_BY.some(group => group === value);
+}
+
+export function isCalloutVariant(value: unknown): value is CalloutVariant {
+  return CALLOUT_VARIANTS.some(variant => variant === value);
+}
+
+export function isStatusBadgeTone(value: unknown): value is StatusBadgeTone {
+  return STATUS_BADGE_TONES.some(tone => tone === value);
+}
+
+export function isStatusBadgeLabel(value: unknown): value is string {
+  return typeof value === 'string' && Boolean(value.trim()) && value.length <= MAX_STATUS_BADGE_LABEL_LENGTH;
 }
 
 export type DocumentIssueBlockTarget = {
@@ -136,7 +161,79 @@ export const DetailsContent = Node.create({
   name: 'detailsContent', content: 'block+', defining: true,
   parseHTML() { return [{ tag: 'div[data-teamspace-details-content]' }]; }, renderHTML() { return ['div', { 'data-teamspace-details-content': '' }, 0]; },
 });
-export function documentNodeExtensions() { return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent]; }
+
+const calloutContent = ':scope > div[data-teamspace-callout-content]';
+export const Callout = Node.create({
+  name: 'callout', group: 'block', content: 'block+', defining: true, isolating: true,
+  addAttributes() {
+    return {
+      variant: {
+        default: 'info',
+        parseHTML: element => {
+          const value = element.getAttribute('data-callout-variant');
+          return isCalloutVariant(value) ? value : 'info';
+        },
+        renderHTML: attributes => ({ 'data-callout-variant': isCalloutVariant(attributes.variant) ? attributes.variant : 'info' }),
+      },
+      title: {
+        default: '',
+        parseHTML: element => {
+          const value = element.getAttribute('data-callout-title') ?? '';
+          return value.length <= MAX_CALLOUT_TITLE_LENGTH ? value : '';
+        },
+        renderHTML: attributes => ({ 'data-callout-title': attributes.title }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{
+      tag: 'aside[data-teamspace-node="callout"]',
+      getAttrs: element => element.querySelector(calloutContent) ? null : false,
+      contentElement: calloutContent,
+    }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const variant = isCalloutVariant(node.attrs.variant) ? node.attrs.variant : 'info';
+    const title = typeof node.attrs.title === 'string' ? node.attrs.title : '';
+    return ['aside', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'callout', class: 'document-callout' }),
+      ['div', { class: 'document-callout-header', contenteditable: 'false' }, title || CALLOUT_LABELS[variant]],
+      ['div', { class: 'document-callout-content', 'data-teamspace-callout-content': '' }, 0],
+    ];
+  },
+});
+
+const statusBadgeLabel = (element: HTMLElement) => element.getAttribute('data-status-label') ?? element.textContent;
+export const StatusBadge = Node.create({
+  name: 'statusBadge', group: 'inline', inline: true, atom: true, selectable: true,
+  addAttributes() {
+    return {
+      label: {
+        default: '',
+        parseHTML: statusBadgeLabel,
+        renderHTML: attributes => ({ 'data-status-label': attributes.label }),
+      },
+      tone: {
+        default: 'neutral',
+        parseHTML: element => {
+          const value = element.getAttribute('data-status-tone');
+          return isStatusBadgeTone(value) ? value : 'neutral';
+        },
+        renderHTML: attributes => ({ 'data-status-tone': isStatusBadgeTone(attributes.tone) ? attributes.tone : 'neutral' }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span[data-teamspace-node="statusBadge"]', getAttrs: element => isStatusBadgeLabel(statusBadgeLabel(element)) ? null : false }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    return ['span', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'statusBadge', class: 'document-status-badge' }), String(node.attrs.label)];
+  },
+  renderText({ node }) { return String(node.attrs.label); },
+});
+
+export function documentNodeExtensions() {
+  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge];
+}
 
 export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {
   const revisions: { documentId: string; revisionId: string }[] = [];
@@ -169,6 +266,7 @@ export function contentReferences(content: RichContent): ContentReference[] {
 export function documentPlainText(node: RichContent): string {
   if (node.type === 'text') return node.text || '';
   if (node.type === 'hardBreak') return '\n';
+  if (node.type === 'statusBadge') return typeof node.attrs?.label === 'string' ? node.attrs.label : '';
   if (referenceNodes.has(node.type)) {
     const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');
     const label = String(node.attrs?.label || id);
@@ -184,5 +282,9 @@ export function documentPlainText(node: RichContent): string {
   }
   if (node.type === 'image') return String(node.attrs?.alt || '');
   const separator = node.type === 'tableRow' ? '\t' : ['paragraph', 'heading', 'codeBlock', 'detailsSummary'].includes(node.type) ? '' : '\n';
-  return (node.content || []).map(documentPlainText).join(separator);
+  const text = (node.content || []).map(documentPlainText).join(separator);
+  if (node.type === 'callout' && typeof node.attrs?.title === 'string' && node.attrs.title) {
+    return text ? `${node.attrs.title}\n${text}` : node.attrs.title;
+  }
+  return text;
 }

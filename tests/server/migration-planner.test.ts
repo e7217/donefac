@@ -17,9 +17,37 @@ function jira(){return pkg('jira','jira',[record('project','j',{title:'기존 Ji
 function confluence(){return pkg('wiki','confluence',[record('project','s',{title:'기존 문서',metadata:{spaceKey:'TEAM'}}),record('identity','bob',{title:'원래 문서 작성자'}),page('10'),record('revision','old10',{title:'과거 문서',containerId:'s',authorId:'bob',createdAt:created,updatedAt:created,text:'<p>과거 본문</p>',textFormat:'confluence-storage',metadata:{version:'1',currentVersionId:'10'},references:[{kind:'page',sourceId:'10',relation:'current-version'}]}),record('comment','wc',{title:'댓글',containerId:'10',authorId:'bob',createdAt:created,text:'문서 댓글',textFormat:'plain',references:[{kind:'page',sourceId:'10',relation:'container-content'}]})]);}
 function input(packages:MigrationPackage[]):MigrationPlanningInput{const configuration=buildMigrationOptions(packages).defaultConfiguration;configuration.projects=configuration.projects.map(value=>({...value,key:'NEW',name:'한 팀'}));return{id:'import-test',configuration,actorId:actor.id,users:[actor],existingProjectKeys:['EXISTING'],packages,now};}
 const notices=(plan:ReturnType<typeof buildMigrationPlan>)=>new Set(plan.preview.notices.map(notice=>notice.code));
+const adfStatus = (label: string) => ({ type: 'status', attrs: { text: label, color: 'yellow' } });
+const storageStatus = (label: string) => `<ac:structured-macro ac:name="status"><ac:parameter ac:name="title">${label}</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter></ac:structured-macro>`;
 
 test('options are stable opaque IDs scoped by package and include an explicit editable default configuration',()=>{
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
+});
+
+test('initial Jira and Confluence text-only fields keep annotation labels while documents retain native nodes', () => {
+  const taskSource = jira(), documentSource = confluence();
+  const adf = JSON.stringify({ type: 'doc', version: 1, content: [
+    { type: 'panel', attrs: { panelType: 'warning' }, content: [
+      { type: 'paragraph', content: [{ type: 'text', text: '업무 상태 ' }, adfStatus('진행 중')] },
+    ] },
+  ] });
+  const storage = `<ac:structured-macro ac:name="note"><ac:parameter ac:name="title">운영</ac:parameter><ac:rich-text-body><p>${storageStatus('확인 완료')}</p></ac:rich-text-body></ac:structured-macro>`;
+  for (const id of ['issue:1', 'comment:jc']) {
+    Object.assign(taskSource.dataset.records.find(row => row.id === id)!, { text: adf, textFormat: 'adf' });
+  }
+  for (const id of ['page:10', 'revision:old10', 'comment:wc']) {
+    Object.assign(documentSource.dataset.records.find(row => row.id === id)!, { text: storage, textFormat: 'confluence-storage' });
+  }
+  const plan = buildMigrationPlan(input([taskSource, documentSource]));
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const taskText = '[warning]\n업무 상태 [상태: 진행 중]';
+  assert.equal(plan.issues.find(row => row.title === '업무 1')?.description, taskText);
+  assert.equal(plan.comments.find(row => row.resourceType === 'issue')?.body, taskText);
+  assert.equal(plan.comments.find(row => row.resourceType === 'document')?.body, '[note] 운영\n[상태: 확인 완료]');
+  for (const document of [...plan.documents, ...plan.revisions]) {
+    assert.equal(document.content.content?.[0].type, 'callout');
+    assert.equal(document.plainText, '운영\n확인 완료');
+  }
 });
 
 test('Jira history append verifies owner aliases, preserves stable source IDs, and accepts proven sparse backups', () => {
@@ -63,7 +91,10 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
     return buildMigrationPlan(request);
   };
 
-  const newComment = comment('200', '300', { references: [{ kind: 'issue', sourceId: 'OLD-1', relation: 'commentOn' }] });
+  const newComment = comment('200', '300', {
+    references: [{ kind: 'issue', sourceId: 'OLD-1', relation: 'commentOn' }], textFormat: 'adf',
+    text: JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [adfStatus('진행 중')] }] }),
+  });
   const newWorklog = worklog('500');
   const rows = [identity, retained, restricted, newComment, newWorklog, comment('201'), worklog('501'),
     comment('csv:300:comment:2'), worklog('300:0'), comment('202', '300', { metadata: { internal: true } }),
@@ -83,7 +114,7 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
   assert.equal(added.preview.counts.newJiraComments, 1);
   assert.equal(added.preview.counts.newJiraWorklogs, 1);
   assert.deepEqual(added.comments.map(({ resourceId, authorId, createdAt, body }) => ({ resourceId, authorId, createdAt, body })),
-    [{ resourceId: first.id, authorId: actor.id, createdAt: created, body: '원본 댓글 200' }]);
+    [{ resourceId: first.id, authorId: actor.id, createdAt: created, body: '[상태: 진행 중]' }]);
   assert.equal(added.worklogs[0].issueId, first.id);
   assert.equal(added.worklogs[0].issueKey, first.key);
   assert.equal(added.worklogs[0].durationSeconds, 61);
@@ -198,9 +229,12 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
     project: { id: '42', key: 'OLD' }, summary, updated, created,
     issuetype: { id: '3', name: 'Task' }, ...fields,
   } });
+  const description = (label: string) => ({ type: 'doc', version: 1, content: [
+    { type: 'panel', attrs: { panelType: 'info' }, content: [{ type: 'paragraph', content: [adfStatus(label)] }] },
+  ] });
   const open = { id: '1', name: 'Open' }, done = { id: '2', name: 'Done' };
   const original = snapshot('original', 'json', JSON.stringify({ issues: [
-    issueJson('1', 'OLD-1', created, '남길 제목', { status: open, description: '비울 설명', labels: ['alpha', 'beta'],
+    issueJson('1', 'OLD-1', created, '남길 제목', { status: open, description: description('비울 설명'), labels: ['alpha', 'beta'],
       assignee: { name: 'original-owner' }, priority: { id: '4', name: 'High' } }),
     issueJson('2', 'OLD-2', created, '보조 업무', { status: done }),
   ] }));
@@ -211,7 +245,7 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
   const canonical = baseline.issues[0];
   const archive = baseline.sourceRecords.find(row => row.targetId === canonical.id)!;
   const project = baseline.projects[0], workflow = baseline.workflows[0], schema = baseline.issueSchemas[0];
-  const refresh = (source: MigrationPackage, current = canonical) => {
+  const refresh = (source: MigrationPackage, current = canonical, previousArchive = archive) => {
     const planned = input([source]);
     planned.configuration.appendTo = {
       projectId: project.id, refreshExisting: true,
@@ -221,7 +255,7 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
     planned.append = {
       project, workflow, schema, nextIssueNumber: 3, token: 'test-planner',
       knownIssues: [{ alias: '1', issueId: canonical.id, projectId: project.id }, { alias: 'OLD-1', issueId: canonical.id, projectId: project.id }],
-      refreshIssues: [{ issue: current, previous: { archive, stagingId: original.summary.id, configuration: request.configuration } }],
+      refreshIssues: [{ issue: current, previous: { archive: previousArchive, stagingId: original.summary.id, configuration: request.configuration } }],
     };
     return buildMigrationPlan(planned);
   };
@@ -233,6 +267,13 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
   assert.deepEqual(clear.preview.issueRefresh?.[0].fields.map(field => field.field), ['description', 'assigneeId']);
   assert.equal(clear.sourceRecords.find(row => row.targetId === canonical.id)?.jiraIssueFieldHashes?.status, archive.jiraIssueFieldHashes?.status);
   assert.ok(notices(clear).has('JIRA_REFRESH_FIELD_UNAVAILABLE'));
+  const legacy = { ...archive };
+  delete legacy.jiraIssueFieldHashes;
+  const annotated = refresh(snapshot('revised-description', 'json', JSON.stringify({ issues: [
+    issueJson('1', 'OLD-1', '2020-01-02T00:00:00Z', '남길 제목', { status: open, description: description('변경한 설명') }),
+  ] })), canonical, legacy);
+  assert.equal(annotated.preview.issueRefresh?.[0].fields.find(field => field.field === 'description')?.decision, 'apply');
+  assert.equal(annotated.issueUpdates?.[0].changes.description, '[info]\n[상태: 변경한 설명]');
   const bad = refresh(snapshot('malformed', 'json', JSON.stringify({ issues: [
     issueJson('1', 'OLD-1', '2020-01-02T00:00:00Z', '남길 제목', {
       status: open, description: { type: 'unrecognized' }, labels: { malformed: true }, priority: 'Unrecognized',
@@ -415,6 +456,38 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
   assert.equal(unsafe.preview.canApply, true, JSON.stringify(unsafe.preview.notices));
   assert.deepEqual(unsafe.documentUpdates?.[0].changes, { title: '안전한 제목 변경' });
   assert.ok(unsafe.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_BODY_UNAVAILABLE'));
+  const callout = `<ac:structured-macro ac:name="note"><ac:rich-text-body><p>상태는 ${storageStatus('진행 중')}</p></ac:rich-text-body></ac:structured-macro>`;
+  const rich = refresh([next({ text: callout })]);
+  assert.equal(rich.preview.canApply, true, JSON.stringify(rich.preview.notices));
+  const richCallout = rich.documentUpdates?.[0].changes.content?.content?.[0];
+  assert.deepEqual({ ...richCallout?.attrs }, { variant: 'note', title: '' });
+  assert.deepEqual({ ...richCallout?.content?.[0].content?.[1].attrs }, { label: '진행 중', tone: 'amber' });
+  const previousAnnotations = { ...olderArchive, record: { ...olderArchive.record, text: callout } };
+  const flat = { ...canonical, plainText: '[note]\n상태는 [상태: 진행 중]', content: { type: 'doc', content: [
+    { type: 'blockquote', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: '[note]' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: '상태는 [상태: 진행 중]' }] },
+    ] },
+  ] } };
+  const native = { ...canonical, plainText: '상태는 진행 중', content: rich.documentUpdates![0].changes.content! };
+  const updatedAnnotation = next({ text: callout.replace('진행 중', '완료') });
+  for (const untouched of [flat, native]) {
+    const update = refresh([updatedAnnotation], untouched, previousAnnotations);
+    assert.equal(update.preview.documentRefresh?.[0].fields[0].decision, 'apply');
+    assert.equal(update.documentUpdates?.[0].changes.content?.content?.[0].content?.[0].content?.[1].attrs?.label, '완료');
+  }
+  const edited = { ...flat, plainText: '팀 편집', content: { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: '팀 편집' }] },
+  ] } };
+  const conflict = refresh([updatedAnnotation], edited, previousAnnotations);
+  assert.equal(conflict.preview.documentRefresh?.[0].fields[0].decision, 'conflict');
+  assert.deepEqual(conflict.documentUpdates, []);
+  const customBody = callout.replace('>Yellow<', '>#123456<');
+  const custom = refresh([next({ title: '원본의 새 제목', text: customBody })]);
+  assert.deepEqual(custom.documentUpdates?.[0].changes, { title: '원본의 새 제목' });
+  assert.ok(notices(custom).has('STATUS_COLOR_UNSUPPORTED'));
+  assert.ok(custom.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_BODY_UNAVAILABLE'));
+  assert.equal(custom.sourceRecords.find(row => row.record.text === customBody)?.record.text, customBody);
   const stale = refresh([next({ text: '<p>오래된 본문</p>', metadata: { version: '2' }, updatedAt: now })]);
   assert.equal(stale.preview.canApply, false);
   assert.ok(notices(stale).has('CONFLUENCE_REFRESH_SOURCE_NOT_NEWER'));
@@ -452,7 +525,7 @@ test('Confluence history appends original rows with proven owners and leaves rep
   });
   const link = (reference: string) => `<p><ac:link><ri:attachment ${reference}><ri:page ri:content-id="10"/></ri:attachment></ac:link></p>`;
   const source = pkg('additional-history', 'confluence', [space,
-    comment('reply', '<p><strong>새</strong> 댓글</p>', '10', { parentId: 'deleted', references: [
+    comment('reply', `<p><strong>새</strong> 댓글 ${storageStatus('검토 중')}</p>`, '10', { parentId: 'deleted', references: [
       { kind: 'page', sourceId: '10', relation: 'container-content' }, { kind: 'comment', sourceId: 'deleted', relation: 'parent' },
     ] }),
     comment('deleted', '<p>수정된 원본 댓글</p>', '20'),
@@ -497,7 +570,7 @@ test('Confluence history appends original rows with proven owners and leaves rep
   assert.deepEqual(plan.confluenceHistoryOwners, [owner.id]);
   assert.deepEqual(plan.documents, []);
   assert.equal(plan.documentUpdates, undefined);
-  assert.deepEqual(plan.comments.map(row => [row.resourceId, row.body]), [[owner.id, '새 댓글']]);
+  assert.deepEqual(plan.comments.map(row => [row.resourceId, row.body]), [[owner.id, '새 댓글 [상태: 검토 중]']]);
   assert.deepEqual(plan.revisions.map(row => [row.documentId, row.version, row.confluenceSourceVersion]), [[owner.id, 2, 2], [owner.id, 3, 3]]);
   assert.equal(plan.preview.counts.newConfluenceComments, 1);
   assert.equal(plan.preview.counts.newConfluenceRevisions, 2);

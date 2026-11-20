@@ -15,6 +15,7 @@ import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import { DocumentOutline, jumpToDocumentHeading, outlineHeadingTitle, type DocumentOutlineEntry } from './DocumentOutline';
+import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
 
@@ -171,8 +172,8 @@ function renderIncluded(context: Context, id: string, label: string, state: Rend
 }
 function renderNode(node: RichContent, context: Context, state: RenderState, key: string): ReactNode {
   if (state.remaining-- <= 0 || state.structuralDepth >= 60) { state.exhausted = true; return null; }
-  if (node.type === 'text') {
-    let result: ReactNode = node.text || '';
+  if (node.type === 'text' || node.type === 'statusBadge') {
+    let result: ReactNode = node.type === 'statusBadge' ? <ReadonlyStatusBadge attrs={node.attrs || {}} /> : node.text || '';
     for (const mark of node.marks || []) {
       if (mark.type === 'bold') result = <strong>{result}</strong>;
       else if (mark.type === 'italic') result = <em>{result}</em>;
@@ -223,6 +224,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'taskList': return <ul key={key} className="doc-readonly-tasks">{children}</ul>;
     case 'taskItem': return <li key={key} className="doc-readonly-task"><input type="checkbox" checked={attrs.checked === true} disabled readOnly aria-label={attrs.checked ? '완료된 할 일' : '미완료 할 일'} /><div>{children}</div></li>;
     case 'blockquote': return <blockquote key={key}>{children}</blockquote>;
+    case 'callout': return <ReadonlyCallout key={key} attrs={attrs}>{children}</ReadonlyCallout>;
     case 'codeBlock': return <pre key={key}><code>{children}</code></pre>;
     case 'hardBreak': return <br key={key} />;
     case 'horizontalRule': return <hr key={key} />;
@@ -304,7 +306,7 @@ export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExten
   return extensions.map(extension => (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
     addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.teamspaceNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
     addKeyboardShortcuts() { return { Enter: () => detailsBody(this.editor), ArrowDown: () => this.editor.state.selection.$from.parentOffset === this.editor.state.selection.$from.parent.content.size && detailsBody(this.editor) }; },
-  }) : extension);
+  }) : decorateDocumentAnnotation(extension));
 }
 export function insertDetails(editor: Editor | null) { return editor?.chain().focus().insertContent({ type: 'details', content: [{ type: 'detailsSummary', content: [{ type: 'text', text: '내용 더 보기' }] }, { type: 'detailsContent', content: [{ type: 'paragraph' }] }] }).run(); }
 export function unfoldDetails(editor: Editor | null) { if (!editor) return; for (const element of editor.view.dom.querySelectorAll<HTMLDetailsElement>('details[data-teamspace-node="details"]')) element.open = true; }

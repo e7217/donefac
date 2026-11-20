@@ -94,6 +94,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 6 && backupVersion < 46) fail('안내 상자와 상태 배지는 schemaVersion 46 백업이 필요합니다.');
   if (version >= 5 && backupVersion < 26) fail('문서 버전 포함 블록은 schemaVersion 26 백업이 필요합니다.');
   if (version >= 4 && backupVersion < 22) fail('업무 현황 블록은 schemaVersion 22 백업이 필요합니다.');
   if (version >= 2 && backupVersion < 7) fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');
@@ -984,12 +985,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if (bodyChanged) {
         const existingSchema = documentContentSchemaVersion(old.content);
         const clientSchema = req.body.contentSchemaVersion;
-        if (existingSchema >= 4 && clientSchema !== existingSchema && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && JSON.stringify(d.content) !== JSON.stringify(old.content)) {
-          const block = existingSchema === 5 ? '고정 버전 포함 블록' : '업무 현황';
-          fail(`${block}이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.`, 409, { currentVersion: old.version, contentSchemaVersion: existingSchema });
-        }
-        if (existingSchema === 3 && clientSchema !== 3 && clientSchema !== 4 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && documentContentSchemaVersion(d.content) < 3) {
-          fail('업무 목록이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: 3 });
+        const supportsExistingSchema = typeof clientSchema === 'number' && Number.isInteger(clientSchema)
+          && clientSchema >= existingSchema && clientSchema <= DOCUMENT_CONTENT_SCHEMA_VERSION;
+        if (!supportsExistingSchema) {
+          const removesIssueList = existingSchema === 3 && documentContentSchemaVersion(d.content) < 3;
+          const changesProtectedBody = existingSchema >= 4 && JSON.stringify(d.content) !== JSON.stringify(old.content);
+          if (removesIssueList || changesProtectedBody) {
+            fail('이 문서의 본문 형식을 지원하는 최신 편집기를 열어 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: existingSchema });
+          }
         }
       }
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');

@@ -107,6 +107,8 @@ curl --fail-with-body \
 
 삭제할 때는 `?expectedVersion=3`처럼 전달한다. 하위 업무·문서가 있으면 삭제를 거절한다. 문서 `content`는 Tiptap JSON이며, 공동 편집 문서의 본문 교체는 편집 세대를 바꾸므로 의도한 전체 교체에만 사용한다.
 
+문서 본문 형식 6은 블록 노드 `callout`과 인라인 노드 `statusBadge`를 지원한다. `callout`은 `attrs: {variant, title}`과 하나 이상의 하위 블록을 받는다. `variant`는 `info`, `note`, `warning`, `tip`, `panel` 중 하나이고 선택 제목은 최대 300자다. `statusBadge`는 `attrs: {label, tone}`을 받는다. 표시 이름은 필수이며 최대 120자다. 색상은 `neutral`, `blue`, `green`, `amber`, `red`, `purple` 중 하나다. 이 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 6`을 보내야 한다. 제목과 같은 문서 속성만 바꿀 때는 생략할 수 있다. 자체 백업 형식 46은 현재 문서와 저장 이력의 두 노드를 보존한다.
+
 ## 업무 일괄 편집
 
 브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다.

@@ -1,4 +1,8 @@
 import { XMLParser } from 'fast-xml-parser';
+import {
+  isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH,
+  type CalloutVariant, type StatusBadgeTone,
+} from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
@@ -13,14 +17,25 @@ export interface MigrationReferenceInput extends MigrationPageIdentity {
   // A null owner marks an explicit container that cannot be resolved safely.
   attachmentOwner?: MigrationPageIdentity | null;
 }
-export interface MigrationContentContext { resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null }
+export interface MigrationContentContext {
+  resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
+  // Text-only fields and older migration checkpoints used explicit annotation labels.
+  legacyAnnotations?: boolean;
+}
 export interface MigrationContentDiagnostic { severity: 'warning' | 'error'; code: string; message: string }
 export interface MigrationContentResult { content: RichContent; plainText: string; diagnostics: MigrationContentDiagnostic[] }
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024, MAX_NODES = 30000, MAX_DEPTH = 50, MAX_WORK = 100000, MAX_MS = 2500;
+const sourceStatusTones = new Map<string, StatusBadgeTone>([
+  ['neutral', 'neutral'], ['grey', 'neutral'], ['gray', 'neutral'], ['blue', 'blue'], ['green', 'green'],
+  ['yellow', 'amber'], ['red', 'red'], ['purple', 'purple'],
+]);
+const adfPanelVariants = new Map<string, CalloutVariant>([
+  ['info', 'info'], ['note', 'note'], ['warning', 'warning'], ['success', 'tip'], ['error', 'warning'],
+]);
 type Mark = NonNullable<RichContent['marks']>[number];
 const text = (value: string, marks?: Mark[]): RichContent[] => value ? [{ type: 'text', text: value, ...(marks?.length ? { marks } : {}) }] : [];
 const paragraph = (content: RichContent[] = []): RichContent => ({ type: 'paragraph', content });
-const inline = (node: RichContent) => node.type === 'text' || node.type === 'hardBreak';
+const inline = (node: RichContent) => node.type === 'text' || node.type === 'hardBreak' || node.type === 'statusBadge';
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown) => typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '';
 const ensureListItem = (nodes: RichContent[]) => { const blocks = flow(nodes); return blocks[0].type === 'paragraph' ? blocks : [paragraph(), ...blocks]; };
@@ -110,6 +125,22 @@ class Converter {
     });
   }
   fallback(label: string, raw: string): RichContent[] { this.warn('UNSUPPORTED_CONTENT', `지원하지 않는 ${label}을 원문 텍스트 블록으로 보존했습니다.`); return [codeBlock(`[${label}]\n${raw}`)]; }
+  callout(variant: CalloutVariant, title: string, content: RichContent[]): RichContent[] {
+    if (title.length > MAX_CALLOUT_TITLE_LENGTH) {
+      this.warn('CALLOUT_TITLE_UNSUPPORTED', '길이 한도를 초과한 안내 상자 제목 전체를 안내 상자 첫 문단으로 보존했습니다.');
+      return [{ type: 'callout', attrs: { variant, title: '' }, content: [paragraph(text(title)), ...content] }];
+    }
+    return [{ type: 'callout', attrs: { variant, title }, content }];
+  }
+  statusBadge(label: string, color: string): RichContent[] {
+    if (label.length > MAX_STATUS_BADGE_LABEL_LENGTH) {
+      this.warn('STATUS_LABEL_UNSUPPORTED', '길이 한도를 초과한 상태 배지 이름 전체를 본문 텍스트로 보존했습니다. 배지 정보는 원본 보관 자료에서 확인할 수 있습니다.');
+      return text(`[상태: ${label}]`);
+    }
+    const tone = sourceStatusTones.get(color.trim().toLowerCase());
+    if (!tone) this.warn('STATUS_COLOR_UNSUPPORTED', '지원하지 않는 원본 상태 색상은 원본 보관 자료에 남으며 배지는 중립 색상으로 표시합니다.');
+    return [{ type: 'statusBadge', attrs: { label, tone: tone ?? 'neutral' } }];
+  }
   plain(value: string): RichContent[] { return value.replace(/\r\n?/g, '\n').split('\n').map(line => { this.tick(); return paragraph(text(line)); }); }
   span(value: unknown): number { const number = Number(value ?? 1); if (!Number.isSafeInteger(number) || number < 1 || number > 100) { this.warn('TABLE_SPAN_NORMALIZED', '잘못되었거나 너무 큰 표 셀 병합 수를 1로 바꿨습니다.'); return 1; } return number; }
   headingLevel(value: unknown): number { const level = Number(value || 1); if (![1, 2, 3].includes(level)) this.warn('HEADING_LEVEL_NORMALIZED', '편집기가 지원하는 제목 1~3단계로 정규화했습니다.'); return Math.max(1, Math.min(3, Number.isFinite(level) ? level : 1)); }
@@ -147,7 +178,20 @@ class Converter {
       case 'rule': return [{ type: 'horizontalRule' }];
       case 'codeBlock': return Array.isArray(node.content) && node.content.some(child => !['text', 'hardBreak'].includes(string(object(child).type))) ? this.fallback('비정형 ADF 코드 블록', JSON.stringify(node)) : [codeBlock(this.adfPlain(node), string(attrs.language).slice(0, 100))];
       case 'blockquote': return [{ type: 'blockquote', content: flow(children()) }];
-      case 'panel': this.warn('PANEL_FLATTENED', 'ADF 패널은 종류를 제목으로 남긴 인용 블록으로 변환했습니다.'); return [{ type: 'blockquote', content: [paragraph(text(`[${string(attrs.panelType) || '패널'}]`)), ...flow(children())] }];
+      case 'panel': {
+        if (this.context.legacyAnnotations) {
+          this.warn('PANEL_FLATTENED', 'ADF 패널은 종류를 제목으로 남긴 인용 블록으로 변환했습니다.');
+          return [{ type: 'blockquote', content: [paragraph(text(`[${string(attrs.panelType) || '패널'}]`)), ...flow(children())] }];
+        }
+        const panelType = typeof attrs.panelType === 'string' ? attrs.panelType : '';
+        const variant = adfPanelVariants.get(panelType);
+        if (!variant || !Array.isArray(node.content) || !node.content.length) return this.fallback('ADF 패널', JSON.stringify(node));
+        const title = panelType === 'success' ? '성공' : panelType === 'error' ? '오류' : '';
+        if (title || Object.keys(attrs).some(key => key !== 'panelType')) {
+          this.warn('CALLOUT_PRESENTATION_UNSUPPORTED', '원본 패널의 표시 설정은 원본 보관 자료에 남으며 안내 상자에는 지원하는 종류와 서식을 적용합니다.');
+        }
+        return this.callout(variant, title, flow(children()));
+      }
       case 'bulletList': case 'orderedList': { const items = children(); return [{ type: type === 'bulletList' ? 'bulletList' : 'orderedList', ...(type === 'orderedList' ? { attrs: { start: Number.isSafeInteger(attrs.order) && Number(attrs.order) > 0 ? attrs.order : 1 } } : {}), content: items.length ? items : [{ type: 'listItem', content: [paragraph()] }] }]; }
       case 'listItem': return [{ type: 'listItem', content: ensureListItem(children()) }];
       case 'taskList': { const items = children(); return [{ type: 'taskList', content: items.length ? items : [{ type: 'taskItem', attrs: { checked: false }, content: [paragraph()] }] }]; }
@@ -164,7 +208,20 @@ class Converter {
       case 'media': case 'mediaInline': return this.image({ kind: 'attachment', sourceId: string(attrs.id) || undefined, url: string(attrs.url) || undefined }, string(attrs.alt));
       case 'mention': this.warn('MENTION_FLATTENED', '원본 사용자 멘션은 표시 이름·ID를 텍스트로 보존했습니다.'); return text(string(attrs.text) || string(attrs.displayName) || `@${string(attrs.id)}`);
       case 'emoji': return text(string(attrs.text) || string(attrs.shortName) || string(attrs.id) || '[이모지]');
-      case 'status': this.warn('STATUS_FLATTENED', '본문 상태 배지는 상태 텍스트로 보존했습니다.'); return text(`[상태: ${string(attrs.text) || string(attrs.color)}]`);
+      case 'status': {
+        if (this.context.legacyAnnotations) {
+          this.warn('STATUS_FLATTENED', '본문 상태 배지는 상태 텍스트로 보존했습니다.');
+          return text(`[상태: ${string(attrs.text) || string(attrs.color)}]`);
+        }
+        if (typeof attrs.text !== 'string' || !attrs.text.trim() || typeof attrs.color !== 'string' ||
+            (Array.isArray(node.content) && node.content.length) || (Array.isArray(node.marks) && node.marks.length)) {
+          return this.fallback('ADF 상태', JSON.stringify(node));
+        }
+        if (Object.keys(attrs).some(key => !['text', 'color', 'localId'].includes(key))) {
+          this.warn('STATUS_PRESENTATION_UNSUPPORTED', '지원하지 않는 상태 배지의 표시 설정은 원본 보관 자료에서 확인할 수 있습니다.');
+        }
+        return this.statusBadge(attrs.text, attrs.color);
+      }
       case 'date': this.warn('DATE_FLATTENED', '본문 날짜 노드는 원본 값이 보이는 텍스트로 변환했습니다.'); return text(string(attrs.timestamp));
       default: return this.fallback(`ADF ${type || '알 수 없는 노드'}`, JSON.stringify(value));
     }
@@ -267,7 +324,42 @@ class Converter {
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
     if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
-    if (['info', 'warning', 'note', 'tip', 'panel'].includes(name)) { this.warn('PANEL_FLATTENED', '안내·경고 패널은 종류와 제목을 남긴 인용 블록으로 변환했습니다.'); return [{ type: 'blockquote', content: [paragraph(text(`[${name}]${params.title ? ` ${params.title}` : ''}`)), ...blocks()] }]; }
+    if (this.context.legacyAnnotations) {
+      if (isCalloutVariant(name)) {
+        this.warn('PANEL_FLATTENED', '안내·경고 패널은 종류와 제목을 남긴 인용 블록으로 변환했습니다.');
+        return [{ type: 'blockquote', content: [paragraph(text(`[${name}]${params.title ? ` ${params.title}` : ''}`)), ...blocks()] }];
+      }
+      if (name === 'status') {
+        this.warn('STATUS_FLATTENED', '본문 상태 매크로는 상태 텍스트로 보존했습니다.');
+        return text(`[상태: ${params.title || params.colour || '상태'}]`);
+      }
+    }
+    if (isCalloutVariant(name) || name === 'status') {
+      const parameters = node.children.filter((child): child is XmlNode => typeof child !== 'string' && child.name === 'ac:parameter');
+      const malformed = parameters.length !== Object.keys(params).length || node.children.some(child => {
+        if (typeof child === 'string') return Boolean(child.trim());
+        if (child.name === 'ac:parameter') return child.children.some(value => typeof value !== 'string');
+        return name === 'status' || child !== body;
+      });
+      if (malformed) return this.fallback(`Confluence ${name} 매크로의 비정형 구조`, serializeXml(node));
+      if (name === 'status') {
+        if (Object.keys(params).some(key => !['title', 'colour', 'subtle'].includes(key)) ||
+            Object.hasOwn(params, 'subtle') && params.subtle.trim().toLowerCase() !== 'false') {
+          this.warn('STATUS_PRESENTATION_UNSUPPORTED', '지원하지 않는 상태 배지의 표시 설정은 원본 보관 자료에서 확인할 수 있습니다.');
+        }
+        const color = params.colour?.trim() || 'Grey';
+        const label = params.title?.trim() ? params.title : color;
+        if (!params.title?.trim() && !sourceStatusTones.has(color.toLowerCase())) {
+          return this.fallback('Confluence 상태 매크로의 제목과 색상', serializeXml(node));
+        }
+        return this.statusBadge(label, color);
+      }
+      if (Object.keys(params).some(key => key !== 'title' &&
+          !(name !== 'panel' && key === 'icon' && params.icon.trim().toLowerCase() === 'true'))) {
+        this.warn('CALLOUT_PRESENTATION_UNSUPPORTED', '원본 패널의 표시 설정은 원본 보관 자료에 남으며 안내 상자에는 지원하는 종류와 서식을 적용합니다.');
+      }
+      return this.callout(name, params.title || '', blocks());
+    }
     if (name === 'include') {
       const page = this.findXml(node, 'ri:page');
       if (page) return this.reference({ kind: 'page', ...pageIdentity(page) }, true);
@@ -277,7 +369,6 @@ class Converter {
       return this.reference({ kind: 'page', ...identity }, true);
     }
     if ((name === 'jira' || name === 'jiraissues') && params.key) return this.reference({ kind: 'issue', sourceId: params.key });
-    if (name === 'status') { this.warn('STATUS_FLATTENED', '본문 상태 매크로는 상태 텍스트로 보존했습니다.'); return text(`[상태: ${params.title || params.colour || '상태'}]`); }
     if (name === 'excerpt') { this.warn('EXCERPT_FLATTENED', '발췌문 정의는 본문으로 유지했으며 발췌 범위 의미는 원본 보관 자료에 남습니다.'); return blocks(); }
     this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];

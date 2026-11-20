@@ -13,7 +13,7 @@ import { WebSocket } from 'ws';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
-import { contentReferences } from '../../shared/document-nodes.js';
+import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
@@ -1598,6 +1598,85 @@ function confluence(withAuditFixtures = false) {
   );
   return { first, latest, bytes: zip(entries) };
 }
+
+test('Confluence panels and status badges survive import, collaborative snapshots and backup restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const storage = [
+    '<ac:structured-macro ac:name="warning"><ac:parameter ac:name="title">배포 주의</ac:parameter>',
+    '<ac:rich-text-body><p>고객 확인 후 반영</p><p>상태 <ac:structured-macro ac:name="status">',
+    '<ac:parameter ac:name="title">검증 완료</ac:parameter><ac:parameter ac:name="colour">Green</ac:parameter>',
+    '</ac:structured-macro></p></ac:rich-text-body></ac:structured-macro>',
+  ].join('');
+  const bundle = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">PANELS</property><property name="name">문서 양식</property></object>
+    <object class="Page"><id name="id">100</id><property name="title">배포 검토</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-01T00:00:00Z</property></object>
+    <object class="BodyContent"><id name="id">101</id><property name="body"><![CDATA[${storage}]]></property>
+      <property name="content" class="Page"><id name="id">100</id></property></object>
+    </hibernate-generic>`) }]);
+  const pkg = await f.upload(bundle, 'panels.zip', 'confluence');
+  const plan = await f.preview(await f.configuration(pkg, 'PANEL'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(!plan.notices.some(({code}) => ['PANEL_FLATTENED', 'STATUS_FLATTENED'].includes(code)));
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const document = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(doc => doc.projectId === applied.data.import.projectIds[0]);
+  assert.ok(document);
+  const path = `/documents/${document.id}`;
+  const callout = document.content.content?.[0];
+  assert.equal(callout?.type, 'callout');
+  assert.deepEqual(callout.attrs, { variant: 'warning', title: '배포 주의' });
+  assert.deepEqual(callout.content?.[1]?.content?.[1], { type: 'statusBadge', attrs: { label: '검증 완료', tone: 'green' } });
+  assert.equal(documentContentSchemaVersion(document.content), 6);
+  assert.match(document.plainText, /배포 주의[\s\S]*고객 확인 후 반영[\s\S]*상태 검증 완료/u);
+
+  const stripped = await f.call<{details: {contentSchemaVersion: number}}>(path, 'PATCH', {
+    expectedVersion: document.version, contentSchemaVersion: 5, content: { type: 'doc', content: [{ type: 'paragraph' }] },
+  });
+  assert.equal(stripped.status, 409);
+  assert.equal(stripped.data.details.contentSchemaVersion, 6);
+  const renamed = await f.call<DocPage>(path, 'PATCH', { expectedVersion: document.version, title: '배포 팀 검토' });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(renamed.data.content, document.content);
+  const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: renamed.data.version });
+  assert.equal(live.status, 200, JSON.stringify(live.data));
+  assert.equal(live.data.schemaVersion, 6);
+  assert.deepEqual(live.data.document.content, document.content);
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; collabStates: { documentId: string; schemaVersion: number }[] };
+  const { data: backup, status: exported } = await f.call<Backup>('/export');
+  assert.equal(exported, 200);
+  assert.equal(backup.schemaVersion, 46);
+  const oldEnvelope = await f.call<{error: string}>('/import', 'POST', {data: {...backup, schemaVersion: 45}});
+  assert.equal(oldEnvelope.status, 400);
+  assert.match(oldEnvelope.data.error, /schemaVersion 46/u);
+  const oldState = structuredClone(backup);
+  const state = oldState.collabStates.find(value => value.documentId === document.id);
+  assert.ok(state);
+  state.schemaVersion = 5;
+  assert.equal((await f.call('/import', 'POST', {data: oldState})).status, 422);
+  assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+
+  assert.equal((await f.call('/import', 'POST', {data: backup})).status, 200);
+  const restored = await f.call<CollaborationSession>(`${path}/collaboration`);
+  assert.equal(restored.status, 200);
+  assert.notEqual(restored.data.epoch, live.data.epoch);
+  assert.deepEqual(restored.data.document.content, document.content);
+  const history = await f.call<DocRevision[]>(`${path}/revisions`);
+  assert.ok(history.data.some(revision => JSON.stringify(revision.content) === JSON.stringify(document.content)));
+
+  const archived = await f.call<{trashEntryId: string}>(path, 'DELETE', {expectedVersion: restored.data.document.version});
+  assert.equal(archived.status, 200);
+  const {data: archivedBackup} = await f.call<Backup>('/export');
+  assert.ok(!archivedBackup.documents.some(doc => doc.id === document.id));
+  assert.equal((await f.call('/import', 'POST', {data: {...archivedBackup, schemaVersion: 45}})).status, 400);
+  assert.equal((await f.call('/import', 'POST', {data: archivedBackup})).status, 200);
+  assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+  const restoredArchive = await f.call<CollaborationSession>(`${path}/collaboration`);
+  assert.equal(restoredArchive.status, 200);
+  assert.deepEqual(restoredArchive.data.document.content, document.content);
+});
 
 test('actual HTTP worker merges source containers into a new project, enforces review/actor/server IDs, rejects conflicts and suppresses outbound import events', async () => {
   const f = await fixture(); try {

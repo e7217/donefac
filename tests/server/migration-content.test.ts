@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { LegacyRecord, RichContent } from '../../shared/types.js';
-import { contentReferences } from '../../shared/document-nodes.js';
+import { contentReferences, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
 import { normalizeDocumentContent } from '../../server/document-content.js';
 import { convertLegacyContent, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
@@ -35,6 +35,55 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
   assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, code); assert.equal(nodes(result.content, 'codeBlock')[0].attrs?.language, 'javascript');
   assert.equal(nodes(result.content, 'tableHeader')[0].attrs?.colspan, 2); assert.equal(nodes(result.content, 'taskItem')[0].attrs?.checked, true);
   assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 3); assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '펼쳐 보기'); assert.ok(result.plainText.includes('접힌 내용'));
+});
+
+test('Confluence callouts preserve types, titles and nested blocks, and status macros remain inline', () => {
+  const variants = ['info', 'note', 'warning', 'tip', 'panel'];
+  const xml = variants.map(variant => `<ac:structured-macro ac:name="${variant}" ac:macro-id="synthetic-id">
+    <ac:parameter ac:name="title">${variant} &amp; 제목</ac:parameter>
+    <ac:rich-text-body><p><strong>강조</strong></p><ul><li>목록</li></ul></ac:rich-text-body>
+    </ac:structured-macro>`).join('') +
+    '<p>앞 <ac:macro ac:name="status"><ac:parameter ac:name="title">진행 중</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter><ac:parameter ac:name="subtle">false</ac:parameter></ac:macro> 다음 <ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter></ac:structured-macro> 끝</p>' +
+    '<p><ac:structured-macro ac:name="status"/></p>';
+  const result = convertLegacyContent(source('confluence-storage', xml), resolver());
+  canonical(result);
+  const callouts = nodes(result.content, 'callout');
+  assert.deepEqual(callouts.map(node => ({ ...node.attrs })), variants.map(variant => ({ variant, title: `${variant} & 제목` })));
+  for (const callout of callouts) {
+    assert.deepEqual(callout.content?.map(node => node.type), ['paragraph', 'bulletList']);
+    assert.deepEqual(callout.content?.[0].content?.[0].marks, [{ type: 'bold' }]);
+  }
+  assert.deepEqual(result.content.content?.[5].content?.map(node => node.text ?? node.attrs?.label),
+    ['앞 ', '진행 중', ' 다음 ', 'Green', ' 끝']);
+  assert.deepEqual(nodes(result.content, 'statusBadge').map(node => ({ ...node.attrs })), [
+    { label: '진행 중', tone: 'amber' }, { label: 'Green', tone: 'green' }, { label: 'Grey', tone: 'neutral' },
+  ]);
+  assert.match(result.plainText, /info & 제목\n강조\n목록/);
+  assert.match(result.plainText, /앞 진행 중 다음 Green 끝\nGrey$/);
+  assert.deepEqual(result.diagnostics, []);
+});
+
+test('unsupported callout presentation and status colors are reported with readable source text and inert markup', () => {
+  const title = '제'.repeat(MAX_CALLOUT_TITLE_LENGTH + 1);
+  const label = '상'.repeat(MAX_STATUS_BADGE_LABEL_LENGTH + 1);
+  const xml = '<ac:structured-macro ac:name="panel"><ac:parameter ac:name="bgColor">url(https://example.test/style)</ac:parameter>' +
+    `<ac:parameter ac:name="title">${title}</ac:parameter><ac:rich-text-body><p>패널 본문</p></ac:rich-text-body></ac:structured-macro>` +
+    '<p><ac:structured-macro ac:name="status"><ac:parameter ac:name="title">&lt;script&gt;</ac:parameter>' +
+    '<ac:parameter ac:name="colour">#f1e2d3</ac:parameter><ac:parameter ac:name="subtle">true</ac:parameter></ac:structured-macro>' +
+    ` <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">${label}</ac:parameter></ac:structured-macro></p>` +
+    '<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>첫 본문</p></ac:rich-text-body><ac:rich-text-body><p>다른 본문</p></ac:rich-text-body></ac:structured-macro>';
+  const result = convertLegacyContent(source('confluence-storage', xml), resolver());
+  canonical(result);
+  assert.deepEqual(nodes(result.content, 'callout').map(node => ({ ...node.attrs })), [{ variant: 'panel', title: '' }]);
+  assert.deepEqual(nodes(result.content, 'statusBadge').map(node => ({ ...node.attrs })), [{ label: '<script>', tone: 'neutral' }]);
+  assert.ok(result.plainText.includes(`${title}\n패널 본문`));
+  assert.ok(result.plainText.includes(label));
+  assert.match(nodes(result.content, 'codeBlock')[0].content?.[0].text ?? '', /첫 본문.*다른 본문/);
+  assert.doesNotMatch(JSON.stringify(result.content), /bgColor|https:\/\/example.test|#f1e2d3/);
+  assert.deepEqual(result.diagnostics.map(value => value.code), [
+    'CALLOUT_PRESENTATION_UNSUPPORTED', 'CALLOUT_TITLE_UNSUPPORTED', 'STATUS_PRESENTATION_UNSUPPORTED',
+    'STATUS_COLOR_UNSUPPORTED', 'STATUS_LABEL_UNSUPPORTED', 'UNSUPPORTED_CONTENT',
+  ]);
 });
 
 test('Confluence references/includes and local images resolve through callbacks, keeping surrounding text and custom labels', () => {
@@ -134,6 +183,33 @@ test('ADF preserves core blocks and marks, local media, task/expand nodes and sa
   assert.equal(nodes(result.content, 'heading')[0].attrs?.level, 3); assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 4); assert.equal(nodes(result.content, 'taskItem')[0].attrs?.checked, true); assert.equal(nodes(result.content, 'tableHeader')[0].attrs?.colspan, 2);
   assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '상세'); assert.equal(nodes(result.content, 'codeBlock')[0].attrs?.language, 'python'); assert.equal(nodes(result.content, 'image').length, 1); assert.equal(nodes(result.content, 'issueReference').length, 1);
   assert.ok(result.plainText.includes('확장 원문 값')); assert.ok(result.diagnostics.some(value => value.code === 'UNSUPPORTED_CONTENT')); assert.ok(result.diagnostics.some(value => value.code === 'HEADING_LEVEL_NORMALIZED'));
+});
+
+test('ADF panels and status preserve native kinds, palette and inline text with explicit fallback for custom presentation', () => {
+  const raw = { type: 'doc', version: 1, content: [
+    ...['info', 'note', 'warning', 'success', 'error', 'custom'].map(panelType => ({
+      type: 'panel', attrs: { panelType }, content: [{ type: 'paragraph', content: [{ type: 'text', text: `본문 ${panelType}` }] }],
+    })),
+    { type: 'paragraph', content: [
+      { type: 'text', text: '앞 ' },
+      ...['neutral', 'blue', 'green', 'yellow', 'red', 'purple', '#123ABC'].map(color =>
+        ({ type: 'status', attrs: { color, text: color === '#123ABC' ? '사용자 색상' : color, localId: 'source-status-id' } })),
+      { type: 'text', text: ' 뒤' },
+    ] },
+  ] };
+  const result = convertLegacyContent(source('adf', JSON.stringify(raw)), resolver());
+  canonical(result);
+  assert.deepEqual(nodes(result.content, 'callout').map(node => ({ ...node.attrs })), [
+    { variant: 'info', title: '' }, { variant: 'note', title: '' }, { variant: 'warning', title: '' },
+    { variant: 'tip', title: '성공' }, { variant: 'warning', title: '오류' },
+  ]);
+  assert.match(nodes(result.content, 'codeBlock')[0].content?.[0].text ?? '', /"panelType":"custom".*본문 custom/);
+  assert.deepEqual(nodes(result.content, 'statusBadge').map(node => node.attrs?.tone),
+    ['neutral', 'blue', 'green', 'amber', 'red', 'purple', 'neutral']);
+  assert.match(result.plainText, /성공\n본문 success\n오류\n본문 error/);
+  assert.match(result.plainText, /앞 neutralbluegreenyellowredpurple사용자 색상 뒤$/);
+  assert.deepEqual(result.diagnostics.map(value => value.code),
+    ['CALLOUT_PRESENTATION_UNSUPPORTED', 'UNSUPPORTED_CONTENT', 'STATUS_COLOR_UNSUPPORTED']);
 });
 
 test('Jira wiki converts nested lists, task lists, headings, table link pipes, marks, code, quotes, expand, references and images', () => {

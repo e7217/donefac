@@ -1,5 +1,5 @@
 import type { DocRevision, RichContent } from '../../shared/types';
-import { ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
 const heading = (text: string): RichContent => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
@@ -28,15 +28,28 @@ export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'c
   return revision.confluenceSourceVersion == null ? `버전 ${revision.version}` : `Confluence 원본 버전 ${revision.confluenceSourceVersion}`;
 }
 
+export function hasDocumentAnnotations(node: RichContent): boolean {
+  return node.type === 'callout' || node.type === 'statusBadge' || (node.content?.some(hasDocumentAnnotations) ?? false);
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function statusBadgeHtml(node: RichContent) {
+  const label = escapeHtml(String(node.attrs?.label ?? '')).replace(/\|/g, '&#124;');
+  const tone = isStatusBadgeTone(node.attrs?.tone) ? node.attrs.tone : 'neutral';
+  return `<span data-teamspace-node="statusBadge" data-status-tone="${tone}" data-status-label="${label}" class="document-status-badge">${label}</span>`;
+}
+
 function summaryHtml(node: RichContent): string {
-  const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   if (node.type === 'hardBreak') return '<br>';
-  if (node.type !== 'text') return (node.content || []).map(summaryHtml).join('');
-  let text = escape(node.text || '');
+  if (node.type !== 'text' && node.type !== 'statusBadge') return (node.content || []).map(summaryHtml).join('');
+  let text = node.type === 'statusBadge' ? statusBadgeHtml(node) : escapeHtml(node.text || '');
   for (const mark of node.marks || []) {
     const tag = ({bold:'strong',italic:'em',strike:'s',code:'code',underline:'u'} as Record<string,string>)[mark.type];
     if (tag) text = `<${tag}>${text}</${tag}>`;
-    if (mark.type === 'link' && /^(?:https?:\/\/|mailto:|#|\/)/i.test(String(mark.attrs?.href || ''))) text = `<a href="${escape(String(mark.attrs?.href))}">${text}</a>`;
+    if (mark.type === 'link' && /^(?:https?:\/\/|mailto:|#|\/)/i.test(String(mark.attrs?.href || ''))) text = `<a href="${escapeHtml(String(mark.attrs?.href))}">${text}</a>`;
   }
   return text;
 }
@@ -84,6 +97,14 @@ export function contentMarkdown(node: RichContent): string {
     case 'details': return `<details>\n${inline()}</details>\n\n`;
     case 'detailsSummary': return `<summary>${summaryHtml(node)}</summary>\n\n`;
     case 'detailsContent': return inline();
+    case 'callout': {
+      const variant = isCalloutVariant(node.attrs?.variant) ? node.attrs.variant : 'info';
+      const title = String(node.attrs?.title ?? '').replace(/\s+/g, ' ').replace(/([\\`*_\[\]<>])/g, '\\$1').trim();
+      const heading = `**${CALLOUT_LABELS[variant]}${title ? ' · ' + title : ''}**`;
+      const body = inline().trim();
+      return (body ? `${heading}\n\n${body}` : heading).split('\n').map(line => line ? '> ' + line : '>').join('\n') + '\n\n';
+    }
+    case 'statusBadge': return summaryHtml(node);
     case 'horizontalRule': return '\n---\n\n';
     case 'codeBlock': return '```' + (node.attrs?.language || '') + '\n' + contentText(node).trimEnd() + '\n```\n\n';
     case 'blockquote': return inline().trim().split('\n').map(line => '> ' + line).join('\n') + '\n\n';

@@ -1,5 +1,9 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
-import { contentReferences, documentIssueBlocks, documentPlainText, documentRevisionIncludes, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS, type DocumentIssueBlockTarget } from '../shared/document-nodes.js';
+import {
+  contentReferences, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
+  isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
+  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, type DocumentIssueBlockTarget,
+} from '../shared/document-nodes.js';
 import { documentSelectionText } from '../shared/document-selection.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
@@ -59,6 +63,16 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
       if (attributes.savedViewId != null && !referenceId(attributes.savedViewId)) invalid(`${label}의 공유 보기 ID는 1~200자여야 합니다.`);
       if (!referenceLabel(attributes.label)) invalid(`${label} 이름은 300자 이하여야 합니다.`);
       if (node.type === 'issueSummary' && attributes.groupBy !== undefined && !isIssueSummaryGroupBy(attributes.groupBy)) invalid('업무 현황의 집계 기준을 확인해 주세요.');
+    }
+    if (node.type === 'callout') {
+      if (attributes.variant !== undefined && !isCalloutVariant(attributes.variant)) invalid('안내 상자 유형을 확인해 주세요.');
+      if (attributes.title !== undefined && (typeof attributes.title !== 'string' || attributes.title.length > MAX_CALLOUT_TITLE_LENGTH)) {
+        invalid(`안내 상자 제목은 ${MAX_CALLOUT_TITLE_LENGTH}자 이하여야 합니다.`);
+      }
+    }
+    if (node.type === 'statusBadge') {
+      if (!isStatusBadgeLabel(attributes.label)) invalid(`상태 배지 이름은 1~${MAX_STATUS_BADGE_LABEL_LENGTH}자여야 합니다.`);
+      if (attributes.tone !== undefined && !isStatusBadgeTone(attributes.tone)) invalid('상태 배지 색상을 확인해 주세요.');
     }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
