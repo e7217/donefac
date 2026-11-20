@@ -22,13 +22,26 @@ const targetDigests = {
   issueRelations: { count: 1, sha256: '4'.repeat(64) },
 };
 
-function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false } = {}) {
+interface ReceiptNotice {
+  code: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  recordId: string;
+}
+
+const warning: ReceiptNotice = {
+  code: 'SOURCE_EXAMPLE', severity: 'warning', message: 'never-emit-original-private-notice', recordId: 'never-emit-original-key',
+};
+const info: ReceiptNotice = { ...warning, severity: 'info', code: 'SOURCE_DETAIL' };
+
+function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false,
+  notices = [] as ReceiptNotice[] | null } = {}) {
   const packages = [jira, wiki];
   const receipt = {
     id: receiptId, version, projectIds: ['project-synthetic'], configuration: { users: { original: changedOwner ? 'team-2' : 'team-1' } },
     packages: packages.map(({ packageId, sha256, product, instanceKey, format }) => ({ stagingId: packageId,
       sha256, source: { product, instanceKey, format }, filename: '/private/never-emit-export.zip' })),
-    notices: [{ code: 'SOURCE_EXAMPLE', severity: 'warning', message: 'never-emit-original-private-notice', recordId: 'never-emit-original-key' }],
+    ...(notices === null ? {} : { notices }),
   };
   const observations = {
     importId: receiptId, receiptVersion: version, startedAt: `synthetic-time-${version}`,
@@ -66,10 +79,13 @@ function evidence(input: ReturnType<typeof sample>, observations: unknown = inpu
 }
 
 test('migration rehearsal proves package coverage and matching cold-restore evidence without emitting contents', async () => {
-  const before = await evidence(sample());
-  const after = await evidence(sample({ version: 2 }));
+  const before = await evidence(sample({ notices: [info] }));
+  const after = await evidence(sample({ version: 2, notices: [info] }));
   assert.equal(before.status, 'verified');
   assert.deepEqual(before.packages.map(pkg => pkg.receiptIds), [[receiptId], [receiptId]]);
+  assert.equal(before.packages[0].warnings, 2);
+  assert.equal(before.checks.receiptsWithWarnings, 0);
+  assert.equal(before.receipts[0].noticesAvailable, true);
   assert.equal(before.receipts[0].attachmentCounts.verified, 1);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.equal(before.workspace.counts.documents, 1);
@@ -77,10 +93,43 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.deepEqual(compareMigrationEvidence(before, after), {
     status: 'verified', matches: true, changedReceiptIds: [], workspaceMatches: true, packagesMatch: true,
   });
-  const changed = await evidence(sample({ changedOwner: true, swappedAuthors: true }));
+  const changed = await evidence(sample({ changedOwner: true, swappedAuthors: true, notices: [info] }));
   assert.deepEqual(compareMigrationEvidence(before, changed), {
     status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: false, packagesMatch: true,
   });
+});
+
+test('migration rehearsal reports applied warnings by receipt even when the cold restore matches', async () => {
+  const notices = [warning, warning, info,
+    { ...warning, code: '/private/never-emit-invalid-notice-code' }];
+  const before = await evidence(sample({ notices }));
+  const after = await evidence(sample({ version: 2, notices }));
+  assert.equal(before.status, 'review');
+  assert.equal(before.checks.receiptsWithWarnings, 1);
+  assert.equal(before.receipts[0].id, receiptId);
+  assert.equal(before.receipts[0].noticesAvailable, true);
+  assert.deepEqual(before.receipts[0].notices, [
+    { severity: 'info', code: 'SOURCE_DETAIL', count: 1 },
+    { severity: 'warning', code: 'SOURCE_EXAMPLE', count: 2 },
+    { severity: 'warning', code: 'UNRECOGNIZED_NOTICE_CODE', count: 1 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(before), /never-emit|\/private\//);
+  assert.deepEqual(compareMigrationEvidence(before, after), {
+    status: 'review', matches: true, changedReceiptIds: [], workspaceMatches: true, packagesMatch: true,
+  });
+  const error = await evidence(sample({ notices: [warning, { ...warning, severity: 'error', code: 'UNEXPECTED_ERROR' }] }));
+  assert.equal(error.status, 'failed');
+});
+
+test('migration rehearsal requires review when older receipts have no saved diagnostics', async () => {
+  const before = await evidence(sample({ notices: null }));
+  const after = await evidence(sample({ version: 2, notices: null }));
+  assert.equal(before.status, 'review');
+  assert.equal(before.checks.receiptsWithoutNotices, 1);
+  assert.equal(before.receipts[0].id, receiptId);
+  assert.equal(before.receipts[0].noticesAvailable, false);
+  assert.deepEqual(before.receipts[0].notices, []);
+  assert.equal(compareMigrationEvidence(before, after).status, 'review');
 });
 
 test('migration rehearsal detects changed target contents even when restored counts and workspace match', async () => {
@@ -126,8 +175,9 @@ test('migration rehearsal surfaces pending stages, conflicted package identities
   assert.equal(rejected.checks.sourceIdentityMismatches, 1);
   assert.deepEqual(rejected.packages[0].receiptIds, []);
 
-  const corrupt = await evidence(sample({ corrupt: true }));
+  const corrupt = await evidence(sample({ corrupt: true, notices: [warning] }));
   assert.equal(corrupt.status, 'failed');
+  assert.equal(corrupt.checks.receiptsWithWarnings, 1);
   assert.equal(corrupt.receipts[0].attachmentCounts.corrupt, 1);
   assert.doesNotMatch(JSON.stringify(corrupt), /never-emit/);
   assert.deepEqual(compareMigrationEvidence(await evidence(sample()), corrupt).changedReceiptIds, [receiptId]);

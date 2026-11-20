@@ -19,6 +19,7 @@ const privateRevision = 'synthetic-private-historical-document-body';
 const privateWorklog = 'synthetic-private-worklog-note';
 const jiraAuthor = 'synthetic-jira-author-key';
 const confluenceAuthor = 'synthetic-confluence-author-key';
+const confluenceGroup = 'synthetic-private-confluence-group';
 const originalFrom = 'synthetic-source-instance';
 const attachment = Buffer.from('synthetic source attachment\0');
 
@@ -42,6 +43,8 @@ function fixturePackages() {
     <object class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id><property name="name">audit-wiki-user</property>
       <property name="displayName">Migration fixture Confluence author</property></object>
     <object class="Space"><id name="id">20</id><property name="key">WIKI</property><property name="name">Confluence fixture</property></object>
+    <object class="SpacePermission"><id name="id">21</id><property name="type">VIEWSPACE</property>
+      <property name="groupName">${confluenceGroup}</property><property name="space" class="Space"><id name="id">20</id></property></object>
     <object class="Page"><id name="id">200</id><property name="title">Original page</property><property name="version">2</property>
       <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
       <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property>
@@ -102,7 +105,8 @@ async function readReport(root, answer) {
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateBody, privateJiraComment, privateConfluenceComment,
-    privateRevision, privateWorklog, jiraAuthor, confluenceAuthor, originalFrom, 'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
+    privateRevision, privateWorklog, jiraAuthor, confluenceAuthor, confluenceGroup, originalFrom,
+    'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
   assert.equal((await stat(path)).mode & 0o777, 0o600);
@@ -177,6 +181,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.equal(preview.counts.revisions, 2);
     assert.equal(preview.counts.worklogs, 1);
     assert.equal(preview.counts.issueRelations, 1);
+    assert.ok(preview.requiredAcknowledgements.includes('SOURCE_CONFLUENCE_SPACE_PERMISSION_REVIEW'));
     await json(base, `/migrations/previews/${preview.id}/apply`, { method: 'POST', actor, status: 201,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
     const imported = await json(base, '/workspace');
@@ -206,13 +211,20 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.equal(stopped.code, 130, stopped.stderr);
   }
 
-  const verified = await launch(['verify', root], env).exited;
-  assert.equal(verified.code, 0, verified.stderr);
-  const { attempt, report } = await readReport(root, verified);
-  assert.equal(report.status, 'verified');
+  const requiresReview = await launch(['verify', root], env).exited;
+  assert.equal(requiresReview.code, 2, requiresReview.stderr);
+  const { attempt, report } = await readReport(root, requiresReview);
+  assert.equal(report.status, 'review');
+  assert.equal(report.source.evidence.checks.pendingPackages, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
   assert.equal(report.source.evidence.receipts.length, 1);
-  assert.equal(report.source.evidence.receipts[0].attachmentCounts.verified, 1);
-  const { targetContent } = report.source.evidence.receipts[0];
+  const [receipt] = report.source.evidence.receipts;
+  assert.deepEqual(report.source.evidence.packages.map(pkg => pkg.receiptIds), [[receipt.id], [receipt.id]]);
+  assert.equal(receipt.noticesAvailable, true);
+  assert.equal(receipt.attachmentCounts.verified, 1);
+  assert.deepEqual(receipt.notices.find(notice => notice.code === 'SOURCE_CONFLUENCE_SPACE_PERMISSION_REVIEW'),
+    { severity: 'warning', code: 'SOURCE_CONFLUENCE_SPACE_PERMISSION_REVIEW', count: 1 });
+  const { targetContent } = receipt;
   assert.equal(targetContent.version, 1);
   for (const [section, count] of Object.entries({ comments: 2, revisions: 2, worklogs: 1, issueRelations: 1 })) {
     assert.equal(targetContent[section].count, count);
@@ -222,6 +234,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
   assert.equal(report.source.evidence.workspace.counts.issues, 2);
   assert.equal(report.source.evidence.workspace.counts.documents, 1);
+  assert.equal(report.comparison.status, 'review');
   assert.equal(report.comparison.matches, true);
   assert.deepEqual(report.source.bundles, report.restore.bundles);
   assert.ok(existsSync(join(attempt, 'backup', 'manifest.json')));

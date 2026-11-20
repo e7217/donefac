@@ -1,16 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { ArchiveRestore, CheckCircle2, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
+import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
+import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
 import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceImportRecords } from './SourceOrigins';
+import { downloadDocument } from './document-utils';
 import './migration-apply.css';
 
 const PAGE_SIZE = 50;
+const reviewExclusionKinds = new Set(['issue', 'page', 'comment', 'revision', 'history', 'attachment', 'relation']);
 const categoryLabels: Record<StatusCategory, string> = { backlog: '백로그', todo: '할 일', in_progress: '진행 중', review: '검토', done: '완료', cancelled: '취소' };
 const fieldLabels: Record<CustomFieldKind | 'archive', string> = { archive: '원본 보관만', text: '텍스트', number: '숫자', date: '날짜', select: '단일 선택', multi_select: '여러 선택', checkbox: '체크박스', user: '사용자', url: 'URL' };
 const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinkedAtlassianRecords: '원본 링크 미생성' };
@@ -31,7 +34,7 @@ const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량',
 };
 const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문' };
-const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
+const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
 const appendLabels = {
   append: {
     item: '업무', counts: ['issues', 'retainedIssues', 'retainedRecords', ...Object.keys(jiraRefreshCountLabels)],
@@ -88,6 +91,7 @@ function ActorMigration(props: FeatureProps) {
   const [preview, setPreview] = useState<MigrationPreview | null>(null), [acknowledgements, setAcknowledgements] = useState<string[]>([]), [selectedImport, setSelectedImport] = useState<string | null>(null);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(''), [error, setError] = useState(''), [listError, setListError] = useState(''), [clock, setClock] = useState(() => Date.now());
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
+  const previewButton = useRef<HTMLButtonElement>(null);
   const savedAppendDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
   const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setError(''); savedAppendDraft.current = {}; dirtyRef.current = false; }, []);
@@ -160,6 +164,24 @@ function ActorMigration(props: FeatureProps) {
       setAcknowledgements([]);
       setClock(Date.now());
     });
+  }
+  function stageExclusions(recordIds: readonly string[]) {
+    if (!preview || !configuration || !matching || busyRef.current) return;
+    const excludedRecords = [...new Set([...configuration.excludedRecords, ...recordIds])];
+    const added = excludedRecords.length - configuration.excludedRecords.length;
+    if (added <= 0) return;
+    if (excludedRecords.length > 100_000) {
+      notify('한 이관에서 제외할 원본은 최대 100,000개입니다.', 'error');
+      return;
+    }
+    change({ ...configuration, excludedRecords });
+    previewButton.current?.focus();
+    notify(`원본 ${added.toLocaleString()}개를 제외로 지정했습니다. 적용 전 미리보기를 다시 만드세요.`);
+  }
+  function downloadPreflight() {
+    if (!preview) return;
+    const report = buildMigrationPreflightReport(preview, options?.packages ?? packages);
+    downloadDocument(`migration-preflight-${preview.id}.json`, JSON.stringify(report, null, 2), 'application/json;charset=utf-8');
   }
   async function apply() {
     if (!preview || !canApply || busyRef.current) return;
@@ -254,13 +276,20 @@ function ActorMigration(props: FeatureProps) {
           </MappingRow>} />
           <Exclusions key={configuration.packageIds.join('|')} packageIds={configuration.packageIds} packages={options.packages} excluded={configuration.excludedRecords} onChange={excludedRecords => change({ ...configuration, excludedRecords })} />
         </MappingSection>
-        <button className="btn btn-primary" disabled={!matching || !destinationReady} onClick={() => void createPreview()}><FileCheck2 size={17} />적용 전 미리보기 만들기</button>
+        <button ref={previewButton} className="btn btn-primary" disabled={!matching || !destinationReady} onClick={() => void createPreview()}><FileCheck2 size={17} />적용 전 미리보기 만들기</button>
       </div>}
     </fieldset>
-    {preview && <section className="migration-review" aria-label="이관 적용 미리보기"><header><div><h3>{reviewHeading}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div><button className="btn btn-ghost" disabled={Boolean(pending)} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button></header>
+    {preview && <section className="migration-review" aria-label="이관 적용 미리보기">
+      <header>
+        <div><h3>{reviewHeading}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div>
+        <div className="migration-review-actions">
+          <button type="button" className="btn btn-ghost" disabled={Boolean(pending)} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button>
+          <button type="button" className="btn btn-ghost" disabled={Boolean(pending)} onClick={downloadPreflight}><Download size={16} aria-hidden="true" />이관 사전 검토 JSON 내보내기</button>
+        </div>
+      </header>
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
       <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
-      <MigrationReviewDetails key={preview.id} preview={preview} packages={options?.packages ?? packages} actorId={actorId} />
+      <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending)} onExclude={stageExclusions} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
         {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
@@ -289,30 +318,70 @@ function ActorMigration(props: FeatureProps) {
 
 type PreviewOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement; documentReview?: true };
 
-function MigrationReviewDetails({ preview, packages, actorId }: { preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string }) {
+function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }: {
+  preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string; busy: boolean; onExclude: (ids: readonly string[]) => void;
+}) {
   const [original, setOriginal] = useState<PreviewOriginal | null>(null);
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set());
   const sources = new Map(packages.filter(item => preview.configuration.packageIds.includes(item.id)).map(item => [item.id, item]));
-  function originalButton(qualifiedId: string | null, documentReview?: true) {
+  function resolveOriginal(qualifiedId: string | null) {
     if (!qualifiedId) return null;
     const separator = qualifiedId.indexOf('/');
     const source = separator > 0 ? sources.get(qualifiedId.slice(0, separator)) : undefined;
     const recordId = qualifiedId.slice(separator + 1);
-    return source && recordId ? <button className="btn btn-ghost migration-source-button" type="button"
-      onClick={event => setOriginal({ source, recordId, opener: event.currentTarget, documentReview })}>
+    return source && recordId ? { source, recordId } : null;
+  }
+  function originalButton(qualifiedId: string | null, documentReview?: true) {
+    const target = resolveOriginal(qualifiedId);
+    return target ? <button className="btn btn-ghost migration-source-button" type="button"
+      onClick={event => setOriginal({ ...target, opener: event.currentTarget, documentReview })}>
       <FileSearch size={16} aria-hidden="true" />{documentReview ? 'Confluence 원본 보기' : '원본 상세 보기'}
     </button> : null;
+  }
+  const alreadyExcluded = new Set(preview.configuration.excludedRecords);
+  const candidates = new Set<string>();
+  for (const { severity, recordId } of preview.notices) {
+    if (severity !== 'error' || !recordId || recordId.length > 1200 || alreadyExcluded.has(recordId)) continue;
+    const target = resolveOriginal(recordId);
+    const kind = target?.recordId.split(':', 1)[0];
+    if (kind && reviewExclusionKinds.has(kind)) candidates.add(recordId);
+  }
+  const selected = [...chosen].filter(id => candidates.has(id));
+  function toggleExclusion(id: string, checked: boolean) {
+    setChosen(previous => {
+      const next = new Set(previous);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   }
   return <>
     {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
     {preview.documentRefresh && preview.documentRefresh.length > 0 && <ConfluenceRefreshReview rows={preview.documentRefresh} renderOriginal={recordId => originalButton(recordId, true)} />}
-    <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => (
-      <div className={`migration-notice is-${item.severity}`}>
-        <strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong>
-        <p>{item.message}</p>
-        {item.recordId && <small>원본 항목 {item.recordId}</small>}
-        {originalButton(item.recordId)}
-      </div>
-    )} />
+    <fieldset className="migration-fieldset migration-review-diagnostics" disabled={busy}>
+      <legend>이관 검토 진단</legend>
+      {candidates.size > 0 && <div className="migration-review-exclusions">
+        <div className="migration-review-actions">
+          <button type="button" className="btn" disabled={!selected.length} onClick={() => onExclude(selected)}>선택한 원본 제외로 지정</button>
+          <span aria-live="polite">{selected.length.toLocaleString()}개 선택</span>
+        </div>
+        <small>하위 기록도 함께 제외될 수 있습니다. 새 미리보기에서 제외 범위를 확인하세요.</small>
+      </div>}
+      <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message} ${item.recordId ?? ''}`} render={item => {
+        const id = item.recordId;
+        return <div className={`migration-notice is-${item.severity}`}>
+          <strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong>
+          <p>{item.message}</p>
+          {id && <small>원본 항목 {id}</small>}
+          <div className="migration-review-actions">
+            {originalButton(id)}
+            {item.severity === 'error' && id && candidates.has(id) && <label className="migration-review-choice">
+              <input type="checkbox" aria-label={`이관에서 제외할 원본으로 선택 ${id}`} checked={chosen.has(id)} onChange={event => toggleExclusion(id, event.target.checked)} />이관에서 제외할 원본으로 선택
+            </label>}
+          </div>
+        </div>;
+      }} />
+    </fieldset>
     {original && <MigrationOriginalDialog {...original} actorId={actorId} onClose={() => setOriginal(null)} />}
   </>;
 }

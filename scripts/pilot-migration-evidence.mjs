@@ -101,15 +101,18 @@ function targetContentEvidence(raw) {
 function noticeCounts(notices) {
   const counts = new Map();
   for (const notice of notices ?? []) {
-    if (!['error', 'warning', 'info'].includes(notice?.severity) || typeof notice.code !== 'string' || !/^[A-Z][A-Z\d_]{0,99}$/.test(notice.code)) continue;
-    const key = `${notice.severity}:${notice.code}`;
-    if (!counts.has(key)) counts.set(key, { severity: notice.severity, code: notice.code, count: 0 });
+    if (!['error', 'warning', 'info'].includes(notice?.severity)) continue;
+    const code = typeof notice.code === 'string' && /^[A-Z][A-Z\d_]{0,99}$/.test(notice.code) ? notice.code : 'UNRECOGNIZED_NOTICE_CODE';
+    const key = `${notice.severity}:${code}`;
+    if (!counts.has(key)) counts.set(key, { severity: notice.severity, code, count: 0 });
     counts.get(key).count++;
   }
   return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value);
 }
 
 async function auditReceipt(call, receipt, packageIds, receiptKeys) {
+  const noticesAvailable = Array.isArray(receipt.notices);
+  requireEvidence(noticesAvailable || receipt.notices === undefined || receipt.notices === null, '이관 영수증의 검토 진단 형식이 올바르지 않습니다.');
   const raw = await call(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`, { timeoutMs: 120_000 });
   requireEvidence(raw?.importId === receipt.id && raw.receiptVersion === receipt.version, '검증 결과와 이관 영수증의 버전이 다릅니다.');
   const integrity = archiveIntegrity(raw.integrity);
@@ -120,7 +123,8 @@ async function auditReceipt(call, receipt, packageIds, receiptKeys) {
   const targetContent = targetContentEvidence(raw.targetContent);
   return { id: receipt.id, version: receipt.version, packageIds,
     projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256, targetContent,
-    configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]), notices: noticeCounts(receipt.notices) };
+    configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]),
+    noticesAvailable, notices: noticeCounts(receipt.notices) };
 }
 
 function workspaceEvidence(workspace) {
@@ -156,7 +160,8 @@ export async function collectMigrationEvidence(call, packages) {
   const expected = inputPackages(packages);
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
-  const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0 };
+  const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
+    receiptsWithWarnings: 0, receiptsWithoutNotices: 0 };
   const seenReceipts = new Set();
   const receipts = [];
   for (const receipt of imports) {
@@ -194,6 +199,8 @@ export async function collectMigrationEvidence(call, packages) {
   const staged = [...expected.values()].sort((a, b) => a.packageId.localeCompare(b.packageId));
   for (const pkg of staged) pkg.receiptIds.sort();
   checks.pendingPackages = staged.filter(pkg => !pkg.receiptIds.length).length;
+  checks.receiptsWithWarnings = receipts.filter(receipt => receipt.notices.some(notice => notice.severity === 'warning')).length;
+  checks.receiptsWithoutNotices = receipts.filter(receipt => !receipt.noticesAvailable).length;
   receipts.sort((a, b) => a.id.localeCompare(b.id));
   const failed = checks.sourceIdentityMismatches > 0 || receipts.some(failedAudit);
   const review = Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>

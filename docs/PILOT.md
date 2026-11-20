@@ -126,6 +126,10 @@ npm run pilot:rehearsal -- review /absolute/path/rehearsal
 
 `stage`는 새 디렉터리에 `workspace/`와 `stage.json`을 만든다. 분석은 한 파일 64MiB, 최대 20개와 합계 512MiB까지 지원한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 외부 연동 자격 정보 없이 실행한다.
 
+이관을 막는 원본 객체의 진단에서 대상 항목을 선택하고 **선택한 원본 제외로 지정**을 누르면 현재 매핑에 제외가 추가된다. 새 미리보기를 만든 뒤 직접 제외한 항목과 함께 제외된 하위 기록의 건수를 검토한다. **원본 주소와 제외 항목**에서 제외를 해제할 수 있다. 이 단계의 변경은 미리보기 설정에만 적용된다.
+
+**이관 사전 검토 JSON 내보내기**는 미리보기 만료 시각, 패키지별 SHA-256과 분석 건수, 변환·매핑·제외 집계, 진단 코드별 건수와 적용 전 확인 항목을 저장한다. 원본 파일명·주소·객체 ID·작성자·제목·본문은 보고서에서 생략한다. 파일의 `status`는 미리보기 생성 시점의 `blocked`, `review`, `ready` 중 하나다. 브라우저에서 최신 미리보기와 확인 항목을 검토한 뒤 적용한다.
+
 **원본 주소와 제외 항목**에는 패키지별로 Jira·Confluence의 기본 주소를 선택해서 입력할 수 있다. `https://jira.example.test/jira`나 `https://wiki.example.test/confluence`처럼 서비스 경로까지 포함한다. Teamspace 이관 미리보기에는 원래 Jira 업무 키로 만든 `/browse/OLD-1` 주소와 Confluence 페이지 ID로 만든 `/pages/viewpage.action?pageId=100` 주소를 견본으로 표시한다. [Atlassian의 Jira와 Confluence 주소 형식](https://support.atlassian.com/migration/docs/supported-products-and-types-of-links/)
 
 미리보기에서 **원본 링크 생성**과 **원본 링크 미생성** 건수를 확인한다. 자동 연결은 Jira 업무와 Confluence 일반 페이지를 대상으로 한다. 기본 주소가 비어 있거나 원본 키·페이지 ID를 사용할 수 없는 새 항목은 미생성 건수에 집계한다. 적용하면 업무 상세나 문서 **연결** 탭의 **기존 도구 연결**에서 주소를 열 수 있다. 원본 정보 조회에는 별도의 서버 설정을 사용한다. [원본 조회 설정](#jiraconfluence-원본-조회)
@@ -142,7 +146,7 @@ npm run pilot:rehearsal -- verify /absolute/path/rehearsal
 
 매 실행마다 `verification-*/report.json`에 결과를 남긴다. 원본 검사를 통과하고 적용 영수증이 있으면 해당 디렉터리에 물리 `backup/`과 `restored/`도 보관한다. 보고서는 건수, 해시, 내부 ID를 기록하며, 워크스페이스와 백업에는 원본과 첨부 바이트가 들어 있다.
 
-종료 코드 `0`은 자동 대조 통과, `2`는 적용 대기·원본 제외·미연결 첨부 등 검토 필요, `1`은 파일·영수증 불일치 또는 실행 실패다. 복원 전후가 같아도 이관 검토 항목은 결과에 남는다. `npm run test:pilot:rehearsal`은 합성 Jira·Confluence 패키지로 이 절차를 재현한다.
+종료 코드 `0`은 자동 대조 통과, `2`는 적용 대기·원본 제외·미연결 첨부·적용 영수증 경고 또는 이전 영수증의 진단 부재 등 검토 필요, `1`은 파일·영수증 불일치 또는 실행 실패다. 권한 범위나 변환 방식에 대한 적용 당시의 경고는 복원본이 일치해도 `2`로 기록된다. 보고서의 `source.evidence.checks`에서 `receiptsWithWarnings`와 `receiptsWithoutNotices` 건수를 보고, `source.evidence.receipts`에서 대상 영수증 ID와 진단 코드별 건수를 확인한다. `npm run test:pilot:rehearsal`은 합성 Jira·Confluence 패키지로 이 절차를 재현한다.
 
 ## 20명 동시 사용 리허설
 

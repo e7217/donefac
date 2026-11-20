@@ -31,6 +31,17 @@
 .migration-refresh-entry dd { margin: 0; font-size: .875rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .migration-source-button { margin-top: .4rem; }
+.migration-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.migration-review > header .migration-review-actions { justify-content: flex-end; }
+.migration-review-diagnostics { margin: 1rem 0; }
+.migration-review-diagnostics legend { padding: 0; font-weight: 650; }
+.migration-review-exclusions { margin: .5rem 0 .75rem; }
+.migration-review-exclusions small { margin-top: .3rem; }
+.migration-review-choice { display: inline-flex; align-items: center; gap: .4rem; padding: .45rem .15rem; }
+.migration-review-choice input { width: 1rem; height: 1rem; margin: 0; flex-shrink: 0; accent-color: #177c72; }
+.migration-review-diagnostics .migration-source-button { margin-top: 0; }
+.migration-notice .migration-review-actions:not(:empty) { margin-top: .4rem; }
+@media (max-width: 800px) { .migration-review > header .migration-review-actions { justify-content: flex-start; } }
 .migration-original-dialog {
   --border: #d5e3df;
   --muted: #516965;
