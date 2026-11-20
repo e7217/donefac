@@ -168,11 +168,4 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
   }
 }
 
-export function downloadDocument(filename: string, value: string, mime: string) {
-  const url = URL.createObjectURL(new Blob([value], { type: mime }));
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+export { downloadText as downloadDocument } from '../lib/download';

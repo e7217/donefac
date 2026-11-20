@@ -1,9 +1,11 @@
 'use client';
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState } from '../../shared/types';
+import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
+import { downloadText } from '../lib/download';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
 import { CustomFieldSummary, IssueTypeName } from './CustomFields';
@@ -306,6 +308,15 @@ export function Issues(props: FeatureProps & {
   const controls = (issue: Issue, visible: Issue[], index: number) => ordering && <IssueOrderControls issue={issue}
     previous={visible[index - 1]} next={visible[index + 1]} busy={Boolean(busy || notice?.needsRefresh)}
     move={(source, placement, opener) => void moveIssue(source, placement, { opener })} />;
+  const csvDisabled = Boolean(busy || bulk.locked || unavailableView || !issues.length);
+
+  function downloadIssuesCsv(selectionOnly: boolean) {
+    if (csvDisabled) return;
+    const rows = selectionOnly ? issues.filter(issue => bulk.selectedIds.has(issue.id)) : issues;
+    if (!rows.length) return;
+    const projectKey = data.projects.find(project => project.id === projectId)?.key ?? 'all';
+    downloadText(`teamspace-issues-${projectKey}${selectionOnly ? '-selected' : ''}.csv`, formatIssueCsv(data, rows), 'text/csv;charset=utf-8');
+  }
 
   return <div className="issues-feature">
     <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
@@ -341,7 +352,17 @@ export function Issues(props: FeatureProps & {
     <SavedViews projectId={projectId} planningItems={planningItems} views={projectViews} selectedId={savedViewId}
       current={{layout:view,filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
-    <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>
+    <div className="issue-results">
+      <span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span>
+      {view === 'list' ? <div className="issue-export-actions">
+        <button className="btn btn-ghost" type="button" disabled={csvDisabled} onClick={() => downloadIssuesCsv(false)}>
+          <ArrowDownToLine size={14} aria-hidden="true" />현재 목록 CSV
+        </button>
+        {bulk.active && <button className="btn btn-ghost" type="button" disabled={csvDisabled || !bulk.selectedCount} onClick={() => downloadIssuesCsv(true)}>
+          <ArrowDownToLine size={14} aria-hidden="true" />선택 업무 CSV
+        </button>}
+      </div> : <span className="muted">{order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
+    </div>
     {order && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
