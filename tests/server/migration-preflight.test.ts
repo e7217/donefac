@@ -32,8 +32,11 @@ function makePreview(overrides: Partial<MigrationPreview> = {}): MigrationPrevie
       fields: [{ field: 'title', current: 'never-emit-current-title', incoming: 'never-emit-incoming-title', decision: 'conflict' }] }],
     jiraReleaseChoices: [{ recordId, sourceKey: 'never-emit-release-issue', title: 'never-emit-release-title',
       selected: 'never-emit-version-id', candidates: [{ sourceId: 'never-emit-version-id', name: 'never-emit-version-name' }] }],
+    jiraSprintChoices: [{ recordId, sourceKey: 'never-emit-sprint-issue', title: 'never-emit-sprint-title',
+      selected: 'never-emit-sprint-id', candidates: [{ sourceId: 'never-emit-sprint-id', name: 'never-emit-sprint-name' }] }],
     counts: { sourceRecords: 4, issues: 1, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1,
-      conflictingFields: 1, jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0, worklogs: -1, 'never-emit-unknown-count-key': 42 },
+      conflictingFields: 1, jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0,
+      jiraSprints: 2, jiraSprintLinks: 1, jiraSprintUnassigned: 0, jiraSprintHistoryOnly: 1, worklogs: -1, 'never-emit-unknown-count-key': 42 },
     notices: [
       { severity: 'warning', code: 'RECORDS_EXCLUDED', message: 'never-emit-exclusion', recordId, requiresAcknowledgement: true },
       { severity: 'error', code: 'RESTRICTED_CONTENT', message: 'never-emit-restriction', recordId, requiresAcknowledgement: false },
@@ -55,7 +58,8 @@ test('migration preflight exports the selected package and counts without copyin
     packages: [{ id: packageId, product: 'jira', format: 'jira-json', size: 4000, sha256: jira.sha256, errors: 1, warnings: 2 }],
     missingPackageSummaryCount: 0,
     counts: { sourceRecords: 4, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1, issues: 1, conflictingFields: 1,
-      jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0 },
+      jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0,
+      jiraSprints: 2, jiraSprintLinks: 1, jiraSprintUnassigned: 0, jiraSprintHistoryOnly: 1 },
     diagnostics: [
       { severity: 'error', code: 'RESTRICTED_CONTENT', count: 1 },
       { severity: 'warning', code: 'RECORDS_EXCLUDED', count: 2 },

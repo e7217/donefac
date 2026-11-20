@@ -16,6 +16,7 @@ import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase,
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
+import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
@@ -1073,18 +1074,22 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
-  private createJiraReleases(): void {
-    const choices = this.configuration.jiraReleaseSelections;
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
+    const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
       const entry = this.entryByKey.get(key);
       if (!entry || entry.row.kind !== 'issue' || entry.pkg.dataset.source.product !== 'jira') {
-        this.notice('JIRA_RELEASE_SELECTION_INVALID', '대표 릴리스 선택의 Jira 원본 업무를 찾을 수 없습니다.', 'error');
+        this.notice(code, `대표 ${label} 선택의 Jira 원본 업무를 찾을 수 없습니다.`, 'error');
         return false;
       }
       return !this.skip(entry);
     }));
-    if (choices) this.configuration.jiraReleaseSelections = selections;
+    if (choices) this.configuration[field] = selections;
+    return selections;
+  }
+  private createJiraReleases(): void {
+    const selections = this.jiraPlanningSelections('jiraReleaseSelections', 'JIRA_RELEASE_SELECTION_INVALID', '릴리스');
     const catalog: Parameters<typeof planJiraReleases>[0]['catalog'][number][] = [];
     const administratorLinks = new Map<string, string[]>();
     for (const entry of this.entries) {
@@ -1127,6 +1132,38 @@ class Planner{
     if (planningItems.length || links || unassigned) {
       Object.assign(this.result.preview.counts, { jiraReleases: planningItems.length, jiraReleaseLinks: links, jiraReleaseUnassigned: unassigned });
       if (this.result.append && this.input.append?.planningToken) this.result.append.planningToken = this.input.append.planningToken;
+    }
+  }
+  private createJiraSprints(): void {
+    const selections = this.jiraPlanningSelections('jiraSprintSelections', 'JIRA_SPRINT_SELECTION_INVALID', '사이클');
+    const issues = this.result.issues.flatMap(issue => {
+      const entry = this.primaryById.get(issue.id);
+      return entry?.pkg.dataset.source.product === 'jira'
+        ? [{ issue, record: entry.row, recordId: entry.key, instanceKey: entry.pkg.dataset.source.instanceKey }] : [];
+    });
+    if (!issues.length) return;
+    const catalog = this.entries.flatMap(entry => {
+      if (entry.pkg.dataset.source.product !== 'jira' || !jiraSprintCatalogId(entry.row)) return [];
+      return [{ record: entry.row, recordId: entry.key, instanceKey: entry.pkg.dataset.source.instanceKey, excluded: this.excluded.has(entry.key) }];
+    });
+    const { planningItems, choices, links, unassigned, historyOnly } = planJiraSprints({
+      catalog, issues, selections, existing: this.input.append?.cyclePlanningItems ?? [],
+      now: this.input.now, calendarDate: value => sourceCalendarDate(value, this.configuration.timezone),
+      notice: (recordId, code, message, severity = 'warning') =>
+        this.notice(code, message, severity, this.entryByKey.get(recordId), severity === 'warning'),
+    });
+    if (planningItems.length) {
+      this.result.planningItems = [...(this.result.planningItems ?? []), ...planningItems];
+      if (this.result.planningItems.length > 20_000) {
+        this.notice('JIRA_PLANNING_LIMIT', '한 번에 이관할 수 있는 사이클·릴리스 20,000개를 초과했습니다.', 'error');
+      }
+    }
+    if (choices.length) this.result.preview.jiraSprintChoices = choices;
+    if (planningItems.length || links || unassigned || historyOnly) {
+      Object.assign(this.result.preview.counts, {
+        jiraSprints: planningItems.length, jiraSprintLinks: links, jiraSprintUnassigned: unassigned, jiraSprintHistoryOnly: historyOnly,
+      });
+      if (this.result.append && this.input.append?.cyclePlanningToken) this.result.append.cyclePlanningToken = this.input.append.cyclePlanningToken;
     }
   }
   initializeOriginBases(): void {

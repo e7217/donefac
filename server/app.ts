@@ -633,10 +633,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const schema of schemas) store.put('issue_schemas', schema);
         for (const workflow of importedWorkflows) store.put('workflows', workflow);
       }
-      const releaseProjects = value.appendPages ? [] : value.append ? [value.append.projectId] : value.projects.map(project => project.id);
-      const releases = planning.persistMigratedJiraReleases(value.planningItems ?? [], new Set(releaseProjects));
-      const historicalReleases = new Set(releases.filter(item => item.status === 'archived').map(item => item.id));
-      for (const item of releases) activity(req, 'planning', item.id, 'Jira 릴리스 이관', item.name);
+      const planningProjects = value.appendPages ? [] : value.append ? [value.append.projectId] : value.projects.map(project => project.id);
+      const jiraPlans = planning.persistMigratedJiraPlans(value.planningItems ?? [], new Set(planningProjects));
+      const historicalPlans = new Set(jiraPlans.filter(item => item.status === 'archived').map(item => item.id));
+      for (const item of jiraPlans) activity(req, 'planning', item.id, item.kind === 'cycle' ? 'Jira 스프린트 이관' : 'Jira 릴리스 이관', item.name);
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
       for (const document of value.documents) store.put('documents', document);
@@ -645,7 +645,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       validateDocumentLabelListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {
-        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalReleases,
+        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalPlans,
       }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       for (const { before, after, fields } of refreshedIssues) {

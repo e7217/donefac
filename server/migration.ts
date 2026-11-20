@@ -15,7 +15,7 @@ import { AttachmentFiles } from './attachments.js';
 import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraReleaseSelections, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
+import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -37,6 +37,7 @@ type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourc
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedPlanning = '이관을 검토하는 동안 대상 프로젝트의 릴리스가 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedCyclePlanning = '이관을 검토하는 동안 대상 프로젝트의 사이클이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
 const changedPageAppend = '대상 프로젝트, 원본 연결 또는 문서·첨부 이력이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
@@ -178,17 +179,21 @@ export class MigrationService {
       FROM source_bindings AS binding LEFT JOIN issues AS issue ON issue.id=binding.target_id
       WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
       ORDER BY binding.source_alias`).all(instanceKey) as MigrationAppendContext['knownIssues'];
-    const releaseRows = this.store.db.prepare("SELECT json FROM planning_items WHERE project_id=? AND kind='release' ORDER BY id ASC")
+    const planRows = this.store.db.prepare("SELECT json FROM planning_items WHERE project_id=? AND kind IN ('release', 'cycle') ORDER BY id ASC")
       .all(project.id) as { json: string }[];
-    const planningItems = releaseRows.map(row => JSON.parse(row.json) as PlanningItem);
+    const plans = planRows.map(row => JSON.parse(row.json) as PlanningItem);
+    const planningItems = plans.filter(item => item.kind === 'release');
+    const cyclePlanningItems = plans.filter(item => item.kind === 'cycle');
     const planningToken = createHash('sha256').update(JSON.stringify(planningItems)).digest('hex');
+    const cyclePlanningToken = createHash('sha256').update(JSON.stringify(cyclePlanningItems)).digest('hex');
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
     const refreshIssues = mapping.refreshExisting || mapping.refreshCustomFields
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, project.id, instanceKey, digest)
       : undefined;
     const history = mapping.refreshHistory ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const attachments = mapping.refreshAttachments ? this.jiraAttachmentContext(packages, configuration, knownIssues, destination, digest) : undefined;
-    return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues, planningItems, planningToken,
+    return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues,
+      planningItems, planningToken, cyclePlanningItems, cyclePlanningToken,
       ...(refreshIssues ? { refreshIssues } : {}), ...history, ...attachments };
   }
   private jiraChildIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
@@ -663,9 +668,10 @@ export class MigrationService {
     for (const mapping of [config.users, config.statuses, config.issueTypes, config.fields, config.sourceBaseUrls]) {
       if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) fail(400, '이관 매핑 형식이 올바르지 않습니다.');
     }
-    if (Object.hasOwn(config, 'jiraReleaseSelections')) {
-      const jiraReleaseSelections = parseJiraReleaseSelections(config.jiraReleaseSelections, config.packageIds);
-      config = { ...config, jiraReleaseSelections };
+    for (const [field, label] of [['jiraReleaseSelections', '릴리스'], ['jiraSprintSelections', '스프린트']] as const) {
+      if (Object.hasOwn(config, field)) {
+        config = { ...config, [field]: parseJiraPlanSelections(config[field], config.packageIds, label) };
+      }
     }
     if (Object.hasOwn(config, 'appendTo') && Object.hasOwn(config, 'appendPagesTo')) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
     if (Object.hasOwn(config, 'appendTo')) {
@@ -836,8 +842,10 @@ export class MigrationService {
             const current = this.appendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
             if (!current || append.projectId !== current.project.id || append.startIssueNumber !== current.nextIssueNumber ||
                 append.token !== current.token) fail(409, changedAppend);
-            if ((append.planningToken !== undefined || prepared.planningItems?.length || prepared.issues.some(issue => issue.releaseId)) &&
+            if ((append.planningToken !== undefined || prepared.planningItems?.some(item => item.kind === 'release') || prepared.issues.some(issue => issue.releaseId)) &&
                 (!append.planningToken || append.planningToken !== current?.planningToken)) fail(409, changedPlanning);
+            if ((append.cyclePlanningToken !== undefined || prepared.planningItems?.some(item => item.kind === 'cycle') || prepared.issues.some(issue => issue.cycleId)) &&
+                (!append.cyclePlanningToken || append.cyclePlanningToken !== current?.cyclePlanningToken)) fail(409, changedCyclePlanning);
           }
           if (Boolean(appendPages) !== Boolean(preview.configuration.appendPagesTo)) fail(409, changedPageAppend);
           if (appendPages) {

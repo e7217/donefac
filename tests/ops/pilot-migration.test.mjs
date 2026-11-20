@@ -13,6 +13,7 @@ const date = '2020-03-01T00:00:00Z';
 const privateTitle = 'synthetic-private-issue-title';
 const privateRelatedTitle = 'synthetic-private-related-issue-title';
 const privateRelease = 'synthetic-private-release-name';
+const privateSprint = 'synthetic-private-sprint-name';
 const privateBody = 'synthetic-private-document-body';
 const privateJiraComment = 'synthetic-private-jira-comment';
 const privateConfluenceComment = 'synthetic-private-confluence-comment';
@@ -34,12 +35,20 @@ function fixturePackages() {
       <Issue id="101" project="10" number="2" summary="${privateRelatedTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
       <Version id="13" project="10" vname="${privateRelease}" releasedate="2020-03-08" released="true"/>
       <NodeAssociation sourceNodeId="100" sourceNodeEntity="Issue" sinkNodeId="13" sinkNodeEntity="Version" associationType="IssueFixVersion"/>
+      <CustomField id="70" cfname="Sprint" customfieldtypekey="com.pyxis.greenhopper.jira:gh-sprint"/>
+      <CustomFieldValue id="71" issue="100" customfield="70" stringvalue="14"/>
       <IssueLinkType id="600" linkname="Blocks" inward="is blocked by" outward="blocks"/>
       <IssueLink id="601" linktype="600" source="100" destination="101"/>
       <Action id="400" issue="100" author="audit-jira-user" type="comment" created="${date}" body="${privateJiraComment}"/>
       <Worklog id="500" issue="100" author="audit-jira-user" startdate="${date}" timeworked="91" created="${date}" updated="${date}" body="${privateWorklog}"/>
       <FileAttachment id="700" issue="100" filename="original.bin" filesize="${attachment.length}" created="${date}"/>
     </entity-engine-xml>`) },
+    { path: 'activeobjects.xml', bytes: Buffer.from(`<backup><data tableName="AO_60DB71_SPRINT">
+      <column name="ID"/><column name="NAME"/><column name="STARTED"/><column name="CLOSED"/>
+      <column name="START_DATE"/><column name="END_DATE"/>
+      <row><integer>14</integer><string>${privateSprint}</string><boolean>true</boolean><boolean>false</boolean>
+        <long>${Date.parse(date)}</long><long>${Date.parse('2020-03-10T00:00:00Z')}</long></row>
+    </data></backup>`) },
     { path: 'attachments/SRC/SRC-1/700', bytes: attachment },
   ]);
   const confluence = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
@@ -107,7 +116,7 @@ async function readReport(root, answer) {
   assert.ok(match, answer.stdout + answer.stderr);
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
-  for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateBody, privateJiraComment, privateConfluenceComment,
+  for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
     privateRevision, privateWorklog, jiraAuthor, confluenceAuthor, confluenceGroup, originalFrom,
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
@@ -186,6 +195,8 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.equal(preview.counts.issueRelations, 1);
     assert.equal(preview.counts.jiraReleases, 1);
     assert.equal(preview.counts.jiraReleaseLinks, 1);
+    assert.equal(preview.counts.jiraSprints, 1);
+    assert.equal(preview.counts.jiraSprintLinks, 1);
     assert.ok(preview.requiredAcknowledgements.includes('SOURCE_CONFLUENCE_SPACE_PERMISSION_REVIEW'));
     await json(base, `/migrations/previews/${preview.id}/apply`, { method: 'POST', actor, status: 201,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
@@ -194,10 +205,12 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     const related = imported.issues.find(value => value.title === privateRelatedTitle);
     const [document] = imported.documents;
     assert.ok(issue && related && document);
-    assert.equal(imported.planningItems.length, 1);
-    assert.equal(imported.planningItems[0].name, privateRelease);
-    assert.equal(imported.planningItems[0].targetDate, '2020-03-08');
-    assert.equal(issue.releaseId, imported.planningItems[0].id);
+    assert.equal(imported.planningItems.length, 2);
+    const release = imported.planningItems.find(item => item.kind === 'release');
+    const sprint = imported.planningItems.find(item => item.kind === 'cycle');
+    assert.deepEqual([release?.name, release?.targetDate, issue.releaseId], [privateRelease, '2020-03-08', release?.id]);
+    assert.deepEqual([sprint?.name, sprint?.startDate, sprint?.endDate, sprint?.status, issue.cycleId],
+      [privateSprint, '2020-03-01', '2020-03-10', 'active', sprint?.id]);
     const [jiraComments, wikiComments, revisions, worklogs, relations] = await Promise.all([
       json(base, `/comments?resourceType=issue&resourceId=${issue.id}`),
       json(base, `/comments?resourceType=document&resourceId=${document.id}`),
@@ -243,7 +256,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
   assert.equal(report.source.evidence.workspace.counts.issues, 2);
   assert.equal(report.source.evidence.workspace.counts.documents, 1);
-  assert.equal(report.source.evidence.workspace.counts.planningItems, 1);
+  assert.equal(report.source.evidence.workspace.counts.planningItems, 2);
   assert.equal(report.comparison.status, 'review');
   assert.equal(report.comparison.matches, true);
   assert.deepEqual(report.source.bundles, report.restore.bundles);

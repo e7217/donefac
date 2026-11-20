@@ -9,6 +9,7 @@ const countKeys = [
   'skippedDocumentUpdates', 'newConfluenceAttachments', 'newConfluenceAttachmentVersions', 'reusedConfluenceAttachmentVersions',
   'newConfluenceComments', 'newConfluenceRevisions', 'newJiraAttachments', 'newJiraComments', 'newJiraWorklogs',
   'jiraReleases', 'jiraReleaseLinks', 'jiraReleaseUnassigned',
+  'jiraSprints', 'jiraSprintLinks', 'jiraSprintUnassigned', 'jiraSprintHistoryOnly',
 ] as const;
 
 const severityOrder: Record<MigrationNotice['severity'], number> = { error: 0, warning: 1, info: 2 };

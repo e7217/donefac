@@ -4,6 +4,7 @@ import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKin
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
+import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 
 // Primary dialect references: Jira search export documentation, Importers JSON
@@ -41,6 +42,7 @@ const csvSnapshotFields = new Map<string, JiraMigrationIssueField>([
 class Context{
   dataset:LegacyDataset;byId=new Map<string,LegacyRecord>();fileNames=new Map<string,string[]>();
   readonly scheduleDates=new JiraDateProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
+  readonly sprints=new JiraSprintProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
@@ -86,6 +88,7 @@ class Context{
   }
   finish():LegacyDataset{
     this.scheduleDates.apply();
+    this.sprints.apply(this.dataset);
     for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
     const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;
   }
@@ -273,6 +276,16 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   }
   if(fields.security!==undefined&&fields.security!==null){const security=obj(fields.security);values.security=typeof fields.security==='boolean'?fields.security:typeof fields.security==='object'?{...selected(security,['id','name']),present:true}:str(fields.security)?{name:str(fields.security),present:true}:null;}
   for(const name of ['status','issuetype','issueType','priority','resolution','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','watches'])if(fields[name]!==undefined){values[name]=jsonValue(fields[name]);if(['status','issuetype','issueType','priority','resolution'].includes(name)){const fieldId=`builtin:${name==='issueType'?'issuetype':name}`;context.field(fieldId,name,'jira-builtin');const optionId=context.option(fieldId,fields[name]);item.references.push(...ref('option',optionId,name));}}
+  if (!importers && Object.hasOwn(fields, 'closedSprints')) {
+    const closedSprints = fields.closedSprints;
+    const preserve = (value: unknown) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return jsonValue(value);
+      const { self, ...sprint } = obj(value);
+      const url = context.url(self, item.id);
+      return jsonValue({ ...sprint, ...(url ? { self: url } : {}) });
+    };
+    values.closedSprints = Array.isArray(closedSprints) ? closedSprints.map(preserve) : preserve(closedSprints);
+  }
   for (const [name, value] of Object.entries(fields)) {
     if (!/^customfield_\d+$/.test(name)) continue;
     values[name] = jsonValue(value);
@@ -313,15 +326,27 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     },references:[...ref('issue',id,'worklogOf'),...ref('identity',author,'author')]});
   }
   for(let linkIndex=0;linkIndex<list(fields.issuelinks).length;linkIndex++){const link=obj(list(fields.issuelinks)[linkIndex]),inward=obj(link.inwardIssue),outward=obj(link.outwardIssue),type=obj(link.type),other=str(inward.id||inward.key||outward.id||outward.key),linkId=str(link.id)||`json:${id}:link:${linkIndex}`;context.ensure('relation',linkId,{title:str(type.name)||'업무 연결',containerId:id,metadata:{direction:link.inwardIssue?'inward':'outward',...selected(type,['id','name','inward','outward'])},references:[...ref('issue',id,'source'),...ref('issue',other,'target')]});}
-  const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
+  const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','closedSprints','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
   for(const name of Object.keys(fields))if(!known.has(name)&&!/^customfield_\d+$/.test(name))context.unsupported(`json-field:${name}`);
 }
 function declareRestFields(context: Context, root: ObjectValue, path: string): ProjectedDateField[] {
   const names = obj(root.names), schemas = obj(root.schema);
-  return Object.entries(names).flatMap(([sourceId, title]) => {
+  const trustedSprintFields = Object.keys(schemas).filter(id => {
+    const custom = obj(schemas[id]).custom;
+    return custom === JIRA_SPRINT_FIELD_TYPE || context.byId.get(`field:${id}`)?.metadata.fieldType === JIRA_SPRINT_FIELD_TYPE;
+  });
+  return [...new Set([...Object.keys(names), ...trustedSprintFields])].flatMap(sourceId => {
     if (!/^customfield_\d+$/.test(sourceId)) return [];
+    const title = names[sourceId];
     const schema = obj(schemas[sourceId]), type = str(schema.type), custom = str(schema.custom);
-    context.field(sourceId, str(title) || sourceId, custom || type || 'unknown');
+    const field = context.field(sourceId, str(title) || sourceId, custom || type || 'unknown');
+    const priorType = str(field.metadata.fieldType);
+    if (custom === JIRA_SPRINT_FIELD_TYPE && ['unknown', 'rest-custom-unspecified', 'array'].includes(priorType)) {
+      field.metadata.fieldType = JIRA_SPRINT_FIELD_TYPE;
+      if (str(title)) field.title = str(title);
+    } else if (custom && custom !== priorType && [custom, priorType].includes(JIRA_SPRINT_FIELD_TYPE)) {
+      field.metadata.jiraSprintFieldAmbiguous = true;
+    }
     const role = jiraScheduleDateRole(str(title));
     if (!role) return [];
     const proof = jiraRestDateProof(type, custom);
@@ -504,7 +529,28 @@ export function parseJira(files:Map<string,Buffer>,instanceKey:string):LegacyDat
   if(!inputs.length){context.warn('JIRA_INPUT_NOT_FOUND','Jira XML·CSV·JSON 분석 파일을 찾지 못했습니다.',null,null,'error');return context.finish();}
   if(entities)for(const path of paths)if(path!==entities&&/\.(?:json|csv|xml)$/i.test(path)&&posix.basename(path).toLowerCase()!=='activeobjects.xml'){context.warn('ADDITIONAL_METADATA_NOT_PARSED','관리자 XML 외의 추가 메타데이터 파일은 자동 병합하지 않았습니다.',null,path);context.unsupported('additional-input');}
   for(const path of inputs){if(!entities&&((format==='jira-csv'&&!/\.csv$/i.test(path))||(format==='jira-json'&&!/\.json$/i.test(path))||(format==='jira-search-xml'&&!/\.xml$/i.test(path)))){context.warn('MIXED_DIALECT_NOT_COMBINED','서로 다른 입력 형식은 하나의 분석 결과로 자동 병합하지 않았습니다.',null,path);context.unsupported('mixed-input');continue;}const source=decodeLegacyText(files.get(path)!);if(/\.csv$/i.test(path))parseCsv(context,path,source);else if(/\.json$/i.test(path))parseJson(context,path,source);else{const root=parseLegacyXml(source);if(root.name==='entity-engine-xml'){context.dataset.source.format='jira-backup-xml';parseBackupXml(context,root,path);}else if(root.name==='rss'){context.dataset.source.format='jira-search-xml';parseSearchXml(context,root,path);}else{context.warn('XML_DIALECT_UNSUPPORTED','Jira 관리자 백업 또는 RSS 검색 XML 루트가 아닙니다.',null,path,'error');context.unsupported(`xml-root:${root.name}`);}}}
-  for(const path of paths.filter(path=>posix.basename(path).toLowerCase()==='activeobjects.xml')){const root=parseLegacyXml(decodeLegacyText(files.get(path)!)),pending=[root];let counted=0;while(pending.length){const node=pending.pop()!;if(node.attributes.tableName||node.name==='table'){context.unsupported(`activeobjects:${node.attributes.tableName||node.attributes.name||'table'}`,Math.max(1,node.children.filter(child=>child.name==='row').length));counted++;}pending.push(...node.children);}if(!counted)context.unsupported('activeobjects.xml');context.warn('ACTIVEOBJECTS_NOT_CONVERTED','Active Objects 플러그인 데이터는 종류·개수만 분석했습니다. 원시 행이나 자격 증명은 복사하지 않았습니다.',null,path);}
+  for (const path of paths.filter(path => posix.basename(path).toLowerCase() === 'activeobjects.xml')) {
+    const root = parseLegacyXml(decodeLegacyText(files.get(path)!));
+    const sprintTables = root.name === 'backup' && context.dataset.source.format === 'jira-backup-xml'
+      ? root.children.filter(node => context.sprints.readActiveObjects(node, path)) : [];
+    const consumed = new Set(sprintTables);
+    const pending = [root];
+    let unsupported = 0;
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (consumed.has(node)) continue;
+      if (node.attributes.tableName || node.name === 'table') {
+        const table = node.attributes.tableName || node.attributes.name || 'table';
+        if (!sprintTables.length || table !== 'AO_60DB71_SPRINT' || node.name !== 'table') {
+          context.unsupported(`activeobjects:${table}`, Math.max(1, node.children.filter(child => child.name === 'row').length));
+          unsupported++;
+        }
+      }
+      for (const child of node.children) pending.push(child);
+    }
+    if (!unsupported && !sprintTables.length) context.unsupported('activeobjects.xml');
+    if (unsupported || !sprintTables.length) context.warn('ACTIVEOBJECTS_NOT_CONVERTED', '추가 Active Objects 플러그인 데이터의 종류와 개수를 기록했습니다.', null, path);
+  }
   if(context.dataset.unsupported.some(item=>item.type.startsWith('json-field:')))context.warn('JSON_FIELDS_NOT_NORMALIZED','일부 JSON 필드는 정규화하지 않았으며 종류·개수를 별도로 기록했습니다.');
   return context.finish();
 }

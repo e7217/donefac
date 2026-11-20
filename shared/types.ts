@@ -219,10 +219,15 @@ export interface MigrationConfiguration {
   fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
   jiraReleaseSelections?: Record<string, string | null>;
+  jiraSprintSelections?: Record<string, string | null>;
   appendTo?: MigrationAppendConfiguration;
   appendPagesTo?: MigrationPageAppendConfiguration;
 }
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
+export interface MigrationJiraPlanningChoice {
+  recordId: string; sourceKey: string; title: string;
+  candidates: { sourceId: string; name: string }[]; selected: string | null;
+}
 export interface MigrationPreview {
   id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
   projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
@@ -230,10 +235,8 @@ export interface MigrationPreview {
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
-  jiraReleaseChoices?: {
-    recordId: string; sourceKey: string; title: string;
-    candidates: { sourceId: string; name: string }[]; selected: string | null;
-  }[];
+  jiraReleaseChoices?: MigrationJiraPlanningChoice[];
+  jiraSprintChoices?: MigrationJiraPlanningChoice[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;

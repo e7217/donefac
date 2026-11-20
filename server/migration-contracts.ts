@@ -47,6 +47,8 @@ export interface MigrationAppendContext {
   token: string;
   planningItems?: PlanningItem[];
   planningToken?: string;
+  cyclePlanningItems?: PlanningItem[];
+  cyclePlanningToken?: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
   refreshIssues?: MigrationJiraRefreshCandidate[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
@@ -82,7 +84,7 @@ export interface PreparedMigration {
   attachments:Attachment[];attachmentVersions:AttachmentVersion[];fileCopies:MigrationFileCopy[];
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
-  append?: { projectId: string; token: string; startIssueNumber: number; planningToken?: string };
+  append?: { projectId: string; token: string; startIssueNumber: number; planningToken?: string; cyclePlanningToken?: string };
   appendPages?: { projectId: string; token: string; sectionInventory?: boolean; labelListInventory?: true };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
