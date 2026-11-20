@@ -17,7 +17,7 @@ import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
-import { DocumentFollowUpError, DocumentFollowUpService } from './document-follow-up.js';
+import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -716,13 +716,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.status(201).json(issue);
   });
   app.post('/api/documents/:id/follow-up-issues',(req,res)=>{
-    const result=documentFollowUp.create({documentId:String(req.params.id),actorId:actor(req),body:req.body},{
-      create(documentId,expectedVersion,input){
+    const actorId=actor(req);
+    const result=documentFollowUp.create({documentId:String(req.params.id),actorId,body:req.body},{
+      create(documentId,expectedVersion,input,sourceSelection){
         const document=get<DocPage>('documents',documentId);
         checkVersion(document,expectedVersion);
         if(document.projectId!==null&&document.projectId!==input.projectId)fail('프로젝트 문서의 후속 업무는 같은 프로젝트에 만들어 주세요.');
+        const documentSource=sourceSelection && resolveDocumentDecisionSource(store,document,actorId,sourceSelection);
         const issue=createIssueInTransaction(req,input);
-        const link:ResourceLink={id:uid(),issueId:issue.id,documentId,kind:'후속 업무'};
+        const link:ResourceLink={id:uid(),issueId:issue.id,documentId,kind:'후속 업무',...(documentSource?{documentSource}:{})};
         store.put('resource_links',link);
         activity(req,'document',documentId,'후속 업무 생성',`${issue.key} ${issue.title}`);
         return {issue,link};
@@ -1207,8 +1209,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       entry.resource = importDocument(entry.resource);
       entry.revisions = entry.revisions.map(importDocument);
     }
-    const revisionOwners = new Map([...importedRevisions, ...archivedDocuments.flatMap(entry => entry.revisions)].map(revision => [revision.id, revision.documentId]));
-    const revisionOwner = (id: string) => revisionOwners.get(id);
+    const revisionsById = new Map([...importedRevisions, ...archivedDocuments.flatMap(entry => entry.revisions)].map(revision => [revision.id, revision]));
+    const revisionOwner = (id: string) => revisionsById.get(id)?.documentId;
+    const importedDocumentIds = new Set([...importedDocuments.map(document=>document.id), ...archivedDocuments.map(entry=>entry.resource.id)]);
+    const validateDecisionLink = (link: ResourceLink, live: boolean) => {
+      if (!link || typeof link !== 'object' || !Object.hasOwn(link,'documentSource')) return;
+      if (data.schemaVersion < 36) fail('문서 결정 근거를 포함한 백업은 schemaVersion 36이 필요합니다.');
+      if (link.kind !== '후속 업무') fail('문서 결정 근거는 문서에서 만든 후속 업무에 연결해야 합니다.');
+      validateDocumentDecisionSource(link.documentSource, link.documentId, revisionsById, live || importedDocumentIds.has(link.documentId));
+    };
+    for (const link of data.resourceLinks as ResourceLink[]) validateDecisionLink(link, true);
+    for (const entry of importedTrash) for (const link of entry.resourceLinks) validateDecisionLink(link, false);
     const firstDocument = importedDocuments[0];
     documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
       { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets, revisionOwner });

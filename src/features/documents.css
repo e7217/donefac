@@ -75,6 +75,16 @@
 .docs-format-btn { display:inline-flex; align-items:center; justify-content:center; width:29px; height:27px; border:0; background:transparent; color:#8190a6; border-radius:4px; cursor:pointer; }
 .docs-format-btn:hover { background:#eaf0f9; color:#506dc5; }
 .docs-format-btn.is-active { color:#5372d5; background:#e4ebff; }
+.docs-editor-toolbar .docs-selection-follow-up {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 4px 7px;
+  font-size: 11px;
+  text-align: left;
+  white-space: normal;
+}
+.docs-selection-follow-up svg { flex: none; }
+.docs-selection-follow-up-hint { flex-basis: 100%; padding: 3px 5px; color: #56647b; font-size: 11px; }
 .docs-table-tools { display:flex; flex-wrap:wrap; gap:6px; margin-top:-15px; margin-bottom:15px; }
 .docs-table-tools button { border:1px solid #e5eaf2; background:white; color:#7c89a1; padding:4px 7px; border-radius:4px; font-size:9px; cursor:pointer; }
 .docs-insert-form { display:flex; align-items:center; gap:6px; margin:-10px 0 17px; }

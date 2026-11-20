@@ -101,5 +101,21 @@
 @media(max-width:1100px){.issue-table td,.issue-table th{padding-left:11px;padding-right:11px}.issue-table .issue-labels{max-width:110px}.gantt-bottom-grid{grid-template-columns:1fr}.gantt-toolbar-spacer{display:none}.gantt-toolbar>.issue-search{max-width:none}.gantt-stats{gap:18px}.issue-results>.muted{display:none}}
 @media(max-width:700px){.feature-heading{gap:12px;margin-bottom:21px}.feature-heading h1{font-size:25px}.feature-heading p{font-size:11px;max-width:240px}.feature-heading>.btn{font-size:10px;padding:8px!important}.feature-eyebrow{font-size:9px;letter-spacing:1.3px}.issue-search{max-width:none;flex-basis:50%}.issue-filter-select select,.issue-filter{font-size:10px}.issue-table{min-width:760px}.issue-panel-title{padding-left:20px;padding-right:20px}.issue-panel-content{padding-left:20px;padding-right:20px}.issue-detail-panel{width:100%}.issue-panel-title h2{font-size:20px}.issue-form-grid{gap:13px}.issue-modal-overlay{padding:15px}.issue-create-modal header,.gantt-preview-modal>header,.gantt-link-modal header{padding:20px}.issue-create-fields,.gantt-link-fields{padding:20px}.issue-create-modal footer,.gantt-preview-modal footer,.gantt-link-modal footer{padding:15px 20px;flex-wrap:wrap}.issue-create-modal footer>span,.gantt-preview-modal footer>span{width:100%;font-size:9px}.gantt-stats{gap:12px;flex-wrap:wrap;font-size:9px}.gantt-stats strong{font-size:13px}.gantt-manual-badge{margin-left:0}.gantt-undo-label{display:none}.gantt-hint{font-size:9px;gap:7px}.gantt-legend>.muted{margin-left:0}.gantt-preview-table{padding-left:13px;padding-right:13px}.gantt-preview-table td:first-child strong{max-width:130px}.gantt-preview-table td{font-size:10px}.gantt-bottom-heading>.muted{display:none}}
 .issue-follow-up-source{font-size:12px;line-height:1.55;margin:8px 0 0;color:#657a6b;overflow-wrap:anywhere}
+.issue-follow-up-passage {
+  margin: 16px 27px 0;
+  padding: 9px 12px;
+  background: #f6faf5;
+  border-inline-start: 3px solid #94b5a0;
+  color: #42564a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.issue-follow-up-passage blockquote {
+  margin: 3px 0 0;
+  max-height: min(9rem, 25vh);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .issue-follow-up-error{display:grid;justify-items:start;gap:9px;padding:0 27px 14px}
-@media(max-width:700px){.issue-follow-up-error{padding:0 20px 14px}}
+@media(max-width:700px){.issue-follow-up-error{padding:0 20px 14px}.issue-follow-up-passage{margin-inline:20px}}

@@ -291,7 +291,7 @@ test('explicit repository routes match imported Jira keys only for their selecte
 
   const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
   assert.equal(backup.status, 200);
-  assert.equal(backup.data.schemaVersion, 35);
+  assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
   assert.equal(Object.hasOwn(backup.data, 'jiraRoutes'), false, 'The mapping is local GitLab connection configuration.');
   assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 34 } })).status, 400);

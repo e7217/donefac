@@ -1,0 +1,22 @@
+.issue-decision-source {
+  min-width: 0;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #e5ece2;
+  border-radius: 0 0 7px 7px;
+  color: #435a44;
+}
+
+.issue-decision-source h4 { margin: 0; font-size: 12px; }
+
+.issue-decision-source blockquote {
+  margin: 8px 0 12px;
+  padding-inline-start: 10px;
+  border-inline-start: 3px solid #8cab86;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.issue-decision-source .doc-pinned-include { margin: 0; }

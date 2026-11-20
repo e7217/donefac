@@ -1,11 +1,27 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
 import { contentReferences, documentIssueBlocks, documentPlainText, documentRevisionIncludes, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS, type DocumentIssueBlockTarget } from '../shared/document-nodes.js';
+import { documentSelectionText } from '../shared/document-selection.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
 import { includeRevisionOwner } from './document-include-revisions.js';
 
 export const MAX_DOCUMENT_BYTES=8*1024*1024;
 const schema=createEditorSchema();
+const selectionDocuments = new WeakMap<RichContent, ReturnType<typeof schema.nodeFromJSON>>();
+
+export function readDocumentSelection(content: RichContent, from: number, to: number): string | null {
+  try {
+    let document = selectionDocuments.get(content);
+    if (!document) {
+      document = schema.nodeFromJSON(content);
+      selectionDocuments.set(content, document);
+    }
+    return document.type === schema.topNodeType ? documentSelectionText(document, from, to) : null;
+  } catch {
+    return null;
+  }
+}
+
 export class DocumentContentError extends Error{constructor(public status:number,message:string,public code='INVALID_SCHEMA'){super(message);}}
 function invalid(message:string,status=422,code='INVALID_SCHEMA'):never{throw new DocumentContentError(status,message,code);}
 function object(value:unknown):Record<string,unknown>{if(!value||typeof value!=='object'||Array.isArray(value))invalid('문서 노드 구조가 올바르지 않습니다.');return value as Record<string,unknown>;}

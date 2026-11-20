@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import type { DocPage, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, DocRevision, DocumentFollowUpResult, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
@@ -8,10 +8,11 @@ async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot>
   return response.json();
 }
 
-async function createDecision(request: APIRequestContext, projectId: string | null, title: string): Promise<DocPage> {
+async function createDecision(request: APIRequestContext, projectId: string | null, title: string, content: RichContent = {
+  type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '저장된 합성 결정' }] }],
+}): Promise<DocPage> {
   const source = await request.post('/api/documents', { data: {
-    projectId, title,
-    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '저장된 합성 결정' }] }] },
+    projectId, title, content,
   } });
   expect(source.status()).toBe(201);
   return source.json();
@@ -137,6 +138,95 @@ test('공통 문서에서 현재 프로젝트와 다른 프로젝트를 명시�
     expect(snapshot.resourceLinks.filter(link => link.documentId === document.id)).toEqual([
       expect.objectContaining({ documentId: document.id, kind: '후속 업무', issueId: created?.id }),
     ]);
+  } finally {
+    await cleanupDecision(request, document.id, issueTitle);
+  }
+});
+
+test('360px 문서에서 고른 본문을 후속 업무에 첨부하고 최초 원문 저장본을 다시 연다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const { projects: [project] } = await workspace(request);
+  const title = `결정 원문 ${randomUUID()}`;
+  const issueTitle = `${title} 후속 업무`;
+  const prefix = '회의 요약 ';
+  const marked = '재현 조건';
+  const ending = '을 고정하기로 했다.';
+  const next = '변경 전에 실측한다.';
+  const quote = `${marked}${ending}\n${next}`;
+  const document = await createDecision(request, project.id, title, { type: 'doc', content: [
+    { type: 'paragraph', content: [
+      { type: 'text', text: prefix },
+      { type: 'text', text: marked, marks: [{ type: 'bold' }] },
+      { type: 'text', text: ending },
+    ] },
+    { type: 'paragraph', content: [{ type: 'text', text: `${next} 담당자는 회의록에 기록한다.` }] },
+  ] });
+  try {
+    const revisions = await request.get(`/api/documents/${document.id}/revisions`);
+    expect(revisions.ok(), await revisions.text()).toBeTruthy();
+    const [original] = await revisions.json() as DocRevision[];
+    await openDecision(page, document, project.id);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveAttribute('contenteditable', 'true');
+    const action = page.getByRole('button', { name: '선택한 본문으로 후속 업무 만들기', exact: true });
+    await expect(action).toBeDisabled();
+    await editor.evaluate((element, through) => {
+      const [first, second] = Array.from(element.querySelectorAll(':scope > p'));
+      const start = first?.querySelector('strong')?.firstChild;
+      const end = second?.firstChild;
+      if (!start || !end) throw new Error('Expected marked selection in the saved editor body');
+      element.focus();
+      const range = element.ownerDocument.createRange();
+      range.setStart(start, 0);
+      range.setEnd(end, through);
+      const selection = element.ownerDocument.getSelection();
+      if (!selection) throw new Error('Expected browser selection');
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }, next.length);
+    await expect(action).toBeEnabled();
+    await action.click();
+
+    const dialog = page.getByRole('dialog', { name: '후속 업무 만들기', exact: true });
+    const excerpt = dialog.getByRole('region', { name: '선택한 본문', exact: true });
+    await expect(excerpt).toBeVisible();
+    expect(await excerpt.locator('blockquote').textContent()).toBe(quote);
+    await dialog.getByRole('textbox', { name: '업무 제목', exact: true }).fill(issueTitle);
+    const submitted = page.waitForResponse(response => response.url().endsWith(`/api/documents/${document.id}/follow-up-issues`) && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '업무 만들고 연결', exact: true }).click();
+    const response = await submitted;
+    expect(response.status(), await response.text()).toBe(201);
+    const sourceSelection = { from: 1 + prefix.length, to: prefix.length + marked.length + ending.length + 3 + next.length, text: quote };
+    expect(response.request().postDataJSON()).toMatchObject({ sourceSelection, expectedDocumentVersion: document.version });
+    const created = await response.json() as DocumentFollowUpResult;
+    expect(created.link.documentSource).toEqual({ ...sourceSelection, revisionId: original.id });
+    await expect(dialog).toHaveCount(0);
+    expect((await workspace(request)).documents.find(page => page.id === document.id)).toEqual(document);
+
+    const latestTitle = '개정된 결정 원문';
+    const latestText = '나중에 수정한 실측 조건';
+    const edited = await request.patch(`/api/documents/${document.id}`, { data: {
+      expectedVersion: document.version, title: latestTitle,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: latestText }] }] },
+    } });
+    expect(edited.ok(), await edited.text()).toBeTruthy();
+    await page.goto(`/#/${project.id}/issues?issue=${created.issue.id}`);
+    await page.reload();
+    const issue = page.getByRole('dialog', { name: issueTitle, exact: true });
+    await expect(issue).toBeVisible({ timeout: 20_000 });
+    await expect(issue.getByRole('button', { name: latestTitle, exact: true })).toBeVisible();
+    const evidence = issue.getByRole('region', { name: '결정 근거', exact: true });
+    expect(await evidence.locator('blockquote').textContent()).toBe(quote);
+    const opening = page.waitForResponse(result => result.url().endsWith(`/api/documents/${document.id}/include-revisions/${original.id}`));
+    await evidence.getByRole('button', { name: '원문 저장본 열기', exact: true }).click();
+    const stored = await opening;
+    expect(stored.ok(), await stored.text()).toBeTruthy();
+    expect(await stored.json()).toEqual(original);
+    const revision = evidence.getByRole('region', { name: `결정 근거 원문 ${title}`, exact: true });
+    await expect(revision.getByText('담당자는 회의록에 기록한다.', { exact: false })).toBeVisible();
+    await expect(revision).not.toContainText(latestText);
+    await expect(revision.locator('[contenteditable=true]')).toHaveCount(0);
+    await expect(evidence.getByRole('button', { name: '원문 저장본 접기', exact: true })).toBeVisible();
   } finally {
     await cleanupDecision(request, document.id, issueTitle);
   }

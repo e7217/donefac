@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type DocPage, type DocumentFollowUpResult, type FeatureProps, type Issue, type IssueStatus } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueStatus } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
 import { requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
@@ -14,7 +14,7 @@ import { PlanningSelect } from './PlanningSelectors';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 
-export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'>;
+export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & { sourceSelection?: DocumentSourceSelection };
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStatus?: IssueStatus;
   sourceDocument?: FollowUpSource;
@@ -35,6 +35,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     ? initialStatus : projectWorkflow(data, selectedProject).initialStatusId);
   const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
   const [sourceVersion, setSourceVersion] = useState(sourceDocument?.version);
+  const [sourceSelection, setSourceSelection] = useState(sourceDocument?.sourceSelection);
   const [recovering, setRecovering] = useState(false);
   const [replayRejected, setReplayRejected] = useState(false);
   const [versionConflict, setVersionConflict] = useState(false);
@@ -47,7 +48,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const states = projectStatuses(data, selectedProject);
   const required = requiredFieldsFor(data, selectedProject, selectedType, selectedStatus);
   const currentDocument = sourceDocument && data.documents.find(page => page.id === sourceDocument.id);
-  const canReviewVersion = versionConflict && currentDocument && currentDocument.version !== sourceVersion;
+  const canReviewVersion = versionConflict && currentDocument && (Boolean(sourceSelection) || currentDocument.version !== sourceVersion);
+  const needsSourceReview = Boolean(canReviewVersion || (versionConflict && sourceSelection));
 
   function close() {
     if (pendingRef.current) return;
@@ -100,7 +102,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pendingRef.current || !selectedProject || canReviewVersion || replayRejected) return;
+    if (pendingRef.current || !selectedProject || needsSourceReview || replayRejected) return;
     const replay = Boolean(attempt.current);
     const form = event.currentTarget;
     pendingRef.current = true;
@@ -111,7 +113,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       if (sourceDocument) {
         const request = attempt.current ?? {
           actorId,
-          body: JSON.stringify({ requestId: newRequestId(), expectedDocumentVersion: sourceVersion, issue: issuePayload(new FormData(form)) }),
+          body: JSON.stringify({ requestId: newRequestId(), expectedDocumentVersion: sourceVersion, issue: issuePayload(new FormData(form)), sourceSelection }),
         };
         attempt.current = request;
         const result = await api<DocumentFollowUpResult>(`/documents/${encodeURIComponent(sourceDocument.id)}/follow-up-issues`, {
@@ -188,6 +190,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           <h2 id="new-issue-title">{sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
           {sourceDocument && <p className="issue-follow-up-source">연결할 문서 · <strong>{sourceDocument.title}</strong></p>}
         </div><button className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
+        {sourceSelection && <section className="issue-follow-up-passage" aria-label="선택한 본문">
+          <strong>선택한 본문</strong>
+          <blockquote>{sourceSelection.text}</blockquote>
+        </section>}
         <fieldset disabled={busy || recovering} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
@@ -235,14 +241,15 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           <div className="issue-form-error" role="alert">{error}</div>
           {canReviewVersion && <button type="button" className="btn" disabled={busy} onClick={() => {
             setSourceVersion(currentDocument.version);
+            setSourceSelection(undefined);
             setVersionConflict(false);
             setError('');
-          }}>최신 문서 버전 {currentDocument.version} 사용</button>}
+          }}>{sourceSelection ? '인용 없이 최신 문서 사용' : `최신 문서 버전 ${currentDocument.version} 사용`}</button>}
         </div>}
         <footer>
           <span className="muted">{sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={close}>취소</button>
-          <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType || Boolean(canReviewVersion) || replayRejected}>
+          <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType || needsSourceReview || replayRejected}>
             {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument ? '업무 만들고 연결' : '업무 만들기'}</>}
           </button>
         </footer>

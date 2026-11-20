@@ -127,6 +127,8 @@ curl --fail-with-body \
 
 브라우저의 `POST /api/documents/:id/follow-up-issues`에 `{requestId, expectedDocumentVersion, issue}`를 보낸다. `requestId`는 새 요청마다 생성하는 UUID v4이며 `issue`는 일반 티켓 생성과 같은 입력을 사용한다. 프로젝트 문서는 현재 문서의 프로젝트를 사용하고, 공통 문서는 `issue.projectId`를 지정한다. 신규 요청은 문서 버전을 검사하고 업무, 번호, 연결 및 활동 기록을 함께 저장한다. 최초 응답은 `201`과 `{issue, link, duplicate:false}`를 반환한다.
 
+선택한 원문을 연결하려면 `sourceSelection`에 저장 본문의 ProseMirror 위치 `{from,to,text}`를 보낸다. 텍스트는 선택 범위에서 구한 최대 2,000 UTF-16 단위의 발췌이며, 문단과 줄바꿈은 LF로 연결한다. 서버가 저장된 본문에서 같은 범위를 다시 읽고 텍스트가 다르면 `409`를 반환한다. 정확히 일치하면 `link.documentSource`에 `{revisionId,from,to,text}`를 기록한다. 저장본이 필요하면 업무와 함께 생성한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`에서 읽으며, 자체 백업 형식 36은 이 연결을 보존한다.
+
 응답을 받지 못하면 같은 작업자와 문서에서 같은 요청 ID와 본문으로 재시도한다. 기존 업무와 연결을 열 수 있으면 `200`과 `{issue, link, duplicate:true}`로 응답한다. 요청 내용이나 연결 상태가 바뀌면 `409`를 반환한다. 자체 백업은 업무와 `후속 업무` 연결을 보존하며 복원 시 재시도용 기록을 초기화한다. 이 경로는 브라우저 관리 API에서 제공한다.
 
 ## 문서 참조·포함·접기

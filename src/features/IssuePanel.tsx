@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, FileText, GitMerge, Link2, MessageSquare, Plus, Save, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
@@ -22,6 +22,9 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import './issues.css';
+import './issue-decision-source.css';
+
+const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
@@ -231,7 +234,29 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       </fieldset></form>
       {children.length > 0 && <section className="issue-related-section"><h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>{children.map(child => <button className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}><IssueTypeIcon type={child.type} data={data} projectId={child.projectId} /><span className="issue-key">{child.key}</span><span>{child.title}</span><span className="issue-related-status" style={{ color: statusMeta(data,child.projectId,child.status).color }}>{statusMeta(data,child.projectId,child.status).label}</span><ChevronRight size={14} /></button>)}</section>}
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} />
-      <section className="issue-related-section"><h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>{linkedDocuments.map(link => { const doc = data.documents.find(d => d.id === link.documentId); return doc && <div className="issue-related-row" key={link.id}><FileText size={15} /><button onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button><button className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button></div>; })}<div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div></section>
+      <section className="issue-related-section">
+        <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
+        {linkedDocuments.map(link => {
+          const doc = data.documents.find(d => d.id === link.documentId);
+          if (!doc) return null;
+          const source = link.documentSource;
+          return <div key={link.id}>
+            <div className="issue-related-row">
+              <FileText size={15} />
+              <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button>
+              <button type="button" className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button>
+            </div>
+            {source && <section className="issue-decision-source" aria-label="결정 근거">
+              <h4>결정 근거</h4>
+              <blockquote>{source.text}</blockquote>
+              <Suspense fallback={<p className="issue-section-empty" role="status">원문 저장본 열기를 준비하는 중…</p>}>
+                <DocumentDecisionRevision key={source.revisionId} data={data} documentId={doc.id} revisionId={source.revisionId} label={doc.title} />
+              </Suspense>
+            </section>}
+          </div>;
+        })}
+        <div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div>
+      </section>
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <section className="issue-related-section" aria-label="GitLab">
         <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{gitlabLinks.length}</span></h3><GitlabActivityRefresh refresh={refresh} notify={notify} /></div>

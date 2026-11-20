@@ -81,7 +81,13 @@ function subscribeToRevision(documentId: string, revisionId: string) {
 }
 
 type RevisionLoad = { revision: DocRevision } | { error: string; missing: boolean };
-function PinnedRevision({ documentId, revisionId, label, nodeBudget }: { documentId: string; revisionId: string; label: string; nodeBudget: number }) {
+function PinnedRevision({ documentId, revisionId, label, nodeBudget, decisionSource = false }: {
+  documentId: string;
+  revisionId: string;
+  label: string;
+  nodeBudget: number;
+  decisionSource?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState<RevisionLoad | null>(null);
@@ -110,9 +116,10 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget }: { documen
 
   const revision = loaded && 'revision' in loaded ? loaded.revision : undefined;
   const title = revision?.title || label || '제목 없는 문서';
-  return <section className="doc-included-content doc-pinned-include" aria-label={`고정 포함 문서 ${title}`}>
+  const toggleLabel = decisionSource ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
+  return <section className="doc-included-content doc-pinned-include" aria-label={`${decisionSource ? '결정 근거 원문' : '고정 포함 문서'} ${title}`}>
     <button type="button" className="doc-reference-card document" aria-expanded={open}
-      aria-label={open ? '고정 버전 내용 접기' : '고정 버전 내용 보기'} onClick={() => { setLoaded(null); setOpen(!open); }}>
+      aria-label={toggleLabel} onClick={() => { setLoaded(null); setOpen(!open); }}>
       <span className="doc-reference-icon"><FileClock size={15} aria-hidden="true" /></span>
       <span><small>{revision ? `고정 버전 ${revision.version}` : '고정 버전'}</small><strong>{title}</strong></span>
       {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
@@ -121,8 +128,21 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget }: { documen
     {open && loaded && 'error' in loaded && <div className="doc-pinned-message"><p role="alert">{loaded.error}</p>
       {!loaded.missing && <button className="btn btn-ghost" type="button" onClick={() => { setLoaded(null); setAttempt(previous => previous + 1); }}>고정 버전 다시 불러오기</button>}
     </div>}
-    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned" pinnedSource={{ documentId, revisionId }} />}
+    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned" pinnedSource={{ documentId, revisionId }} showOutline={decisionSource} />}
   </section>;
+}
+
+const keepReading = () => {};
+
+export function DocumentDecisionRevision({ data, documentId, revisionId, label }: {
+  data: WorkspaceSnapshot;
+  documentId: string;
+  revisionId: string;
+  label: string;
+}) {
+  return <DocumentBlocksProvider data={data} documentId={documentId} openIssue={keepReading} openDocument={keepReading}>
+    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} decisionSource />
+  </DocumentBlocksProvider>;
 }
 
 function pinnedRevision(id: string, revision: string, label: string, budget: number, key: string) {
