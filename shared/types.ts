@@ -272,6 +272,26 @@ export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:st
 export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
 export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};
 export interface SourceRecordPage { records:SourceRecordSummary[];total:number;offset:number;limit:number }
+export interface JiraIssueStatusValue {
+  id: string | null;
+  label: string | null;
+}
+export interface JiraIssueStatusHistoryEntry {
+  id: string;
+  sourceImportId: string;
+  sourceRecordId: string;
+  changedAt: string | null;
+  originalChangedAt: string | null;
+  originalAuthorName: string | null;
+  from: JiraIssueStatusValue;
+  to: JiraIssueStatusValue;
+}
+export interface JiraIssueStatusHistoryPage {
+  entries: JiraIssueStatusHistoryEntry[];
+  total: number;
+  offset: number;
+  limit: number;
+}
 export type SourceReconciliationStatus = 'linked' | 'trashed' | 'missing' | 'archive-only' | 'excluded';
 export interface SourceReconciliationOwner {
   type: 'issue' | 'document'; id: string; label: string; projectId: string | null;

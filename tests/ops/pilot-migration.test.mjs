@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { startRehearsalPilot } from '../../scripts/pilot-migration-runtime.mjs';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -19,6 +20,7 @@ const privateJiraComment = 'synthetic-private-jira-comment';
 const privateConfluenceComment = 'synthetic-private-confluence-comment';
 const privateRevision = 'synthetic-private-historical-document-body';
 const privateWorklog = 'synthetic-private-worklog-note';
+const privateOldStatus = 'synthetic-private-previous-status';
 const jiraAuthor = 'synthetic-jira-author-key';
 const confluenceAuthor = 'synthetic-confluence-author-key';
 const confluenceGroup = 'synthetic-private-confluence-group';
@@ -39,6 +41,9 @@ function fixturePackages() {
       <CustomFieldValue id="71" issue="100" customfield="70" stringvalue="14"/>
       <IssueLinkType id="600" linkname="Blocks" inward="is blocked by" outward="blocks"/>
       <IssueLink id="601" linktype="600" source="100" destination="101"/>
+      <ChangeGroup id="320" issue="100" author="audit-jira-user" created="2020-03-02T09:15:00+0900"/>
+      <ChangeItem id="321" group="320" fieldtype="jira" field="status" oldvalue="2" oldstring="${privateOldStatus}" newvalue="1" newstring="Open"/>
+      <ChangeItem id="322" group="320" fieldtype="jira" field="summary" oldstring="Earlier title" newstring="${privateTitle}"/>
       <Action id="400" issue="100" author="audit-jira-user" type="comment" created="${date}" body="${privateJiraComment}"/>
       <Worklog id="500" issue="100" author="audit-jira-user" startdate="${date}" timeworked="91" created="${date}" updated="${date}" body="${privateWorklog}"/>
       <FileAttachment id="700" issue="100" filename="original.bin" filesize="${attachment.length}" created="${date}"/>
@@ -117,7 +122,7 @@ async function readReport(root, answer) {
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
-    privateRevision, privateWorklog, jiraAuthor, confluenceAuthor, confluenceGroup, originalFrom,
+    privateRevision, privateWorklog, privateOldStatus, jiraAuthor, confluenceAuthor, confluenceGroup, originalFrom,
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
@@ -165,6 +170,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(pendingEvidence.restore, null);
 
   const review = launch(['review', root], env);
+  let importedIssueId, importedStatusHistory;
   try {
     const base = await waitForReview(review);
     assert.equal((await fetch(base, { signal: AbortSignal.timeout(10_000) })).status, 200);
@@ -211,12 +217,13 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.deepEqual([release?.name, release?.targetDate, issue.releaseId], [privateRelease, '2020-03-08', release?.id]);
     assert.deepEqual([sprint?.name, sprint?.startDate, sprint?.endDate, sprint?.status, issue.cycleId],
       [privateSprint, '2020-03-01', '2020-03-10', 'active', sprint?.id]);
-    const [jiraComments, wikiComments, revisions, worklogs, relations] = await Promise.all([
+    const [jiraComments, wikiComments, revisions, worklogs, relations, statusHistory] = await Promise.all([
       json(base, `/comments?resourceType=issue&resourceId=${issue.id}`),
       json(base, `/comments?resourceType=document&resourceId=${document.id}`),
       json(base, `/documents/${document.id}/revisions`),
       json(base, `/issues/${issue.id}/worklogs`),
       json(base, `/issues/${issue.id}/relations`),
+      json(base, `/issues/${issue.id}/jira-status-history`),
     ]);
     assert.deepEqual(jiraComments.map(({ body, authorId }) => [body, authorId]), [[privateJiraComment, actor]]);
     assert.deepEqual(wikiComments.map(({ body, authorId }) => [body, authorId]), [[privateConfluenceComment, actor]]);
@@ -227,6 +234,12 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     ]);
     assert.deepEqual(worklogs.entries.map(({ note, durationSeconds, authorId }) => [note, durationSeconds, authorId]), [[privateWorklog, 91, actor]]);
     assert.deepEqual(relations.map(({ sourceIssueId, targetIssueId, type }) => [sourceIssueId, targetIssueId, type]), [[issue.id, related.id, 'Blocks']]);
+    assert.equal(statusHistory.total, 1);
+    assert.deepEqual(statusHistory.entries.map(({ from, to, changedAt, originalAuthorName }) => [from, to, changedAt, originalAuthorName]), [
+      [{ id: '2', label: privateOldStatus }, { id: '1', label: 'Open' }, '2020-03-02T00:15:00.000Z', 'Migration fixture Jira author'],
+    ]);
+    importedIssueId = issue.id;
+    importedStatusHistory = statusHistory;
   } finally {
     review.child.kill('SIGINT');
     const stopped = await review.exited;
@@ -262,6 +275,12 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.deepEqual(report.source.bundles, report.restore.bundles);
   assert.ok(existsSync(join(attempt, 'backup', 'manifest.json')));
   assert.ok(existsSync(join(attempt, 'restored', 'teamspace.sqlite')));
+  const restored = await startRehearsalPilot(join(attempt, 'restored'));
+  try {
+    assert.deepEqual(await json(restored.url, `/issues/${importedIssueId}/jira-status-history`), importedStatusHistory);
+  } finally {
+    await restored.close();
+  }
 
   const rawPath = join(root, 'workspace', 'legacy-imports', `${staged.packages[0].packageId}.bundle`);
   const corrupted = await readFile(rawPath);

@@ -1,4 +1,4 @@
-import type { LegacyRecord, LegacyValue } from '../shared/types.js';
+import type { JiraIssueStatusValue, LegacyRecord, LegacyValue } from '../shared/types.js';
 import { isJiraWorklog, isRestrictedJiraWorklog } from './migration-worklog.js';
 
 export type JiraHistoryKind = 'comment' | 'worklog';
@@ -85,8 +85,8 @@ function restrictedCommentProperty(value: LegacyValue): boolean {
   return nonemptyRestriction(details.internal) || details.public === false || details.public === 'false';
 }
 
-function hasJiraVisibilityRestriction(record: LegacyRecord): boolean {
-  return Object.entries(record.metadata).some(([name, value]) => {
+function hasJiraVisibilityRestriction(metadata: LegacyRecord['metadata']): boolean {
+  return Object.entries(metadata).some(([name, value]) => {
     const normalized = attributeName(name);
     if (normalized === 'public') return value === false || value === 'false' || value === 0 || value === '0';
     if (normalized === 'properties') return Array.isArray(value) ? value.some(restrictedCommentProperty) : nonemptyRestriction(value);
@@ -100,11 +100,45 @@ function hasJiraVisibilityRestriction(record: LegacyRecord): boolean {
 }
 
 export function isRestrictedJiraHistory(record: LegacyRecord): boolean {
-  return isJiraWorklog(record) ? isRestrictedJiraWorklog(record) : record.kind === 'comment' && hasJiraVisibilityRestriction(record);
+  return isJiraWorklog(record) ? isRestrictedJiraWorklog(record) : record.kind === 'comment' && hasJiraVisibilityRestriction(record.metadata);
+}
+
+export function isRestrictedJiraStatusHistory(record: LegacyRecord): boolean {
+  if (record.kind !== 'history' || isJiraWorklog(record)) return false;
+  const { items } = record.metadata;
+  return hasJiraVisibilityRestriction(record.metadata) || (Array.isArray(items) && items.some(item =>
+    item !== null && typeof item === 'object' && !Array.isArray(item) && hasJiraVisibilityRestriction(item)));
+}
+
+export function jiraStatusHistoryOwnerAliases(record: LegacyRecord): string[] | null {
+  return record.kind === 'history' && !isJiraWorklog(record) ? jiraChildOwnerAliases(record, 'historyOf') : null;
+}
+
+function statusText(value: unknown, limit: number): string | null {
+  const raw = typeof value === 'string' ? value : typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : '';
+  return raw.trim() && raw.length <= limit && !/[\u0000-\u001f\u007f]/.test(raw) ? raw : null;
+}
+
+/** Read status fields supplied by Jira, independent of Teamspace's current workflow. */
+export function jiraStatusTransitions(record: LegacyRecord): { position: number; from: JiraIssueStatusValue; to: JiraIssueStatusValue }[] {
+  const items = record.metadata.items;
+  if (record.kind !== 'history' || isJiraWorklog(record) || isRestrictedJiraStatusHistory(record) || !Array.isArray(items)) return [];
+  const normalized = (value: unknown) => statusText(value, 200)?.trim().toLowerCase();
+  return items.flatMap((item, position) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const fieldId = normalized(item.fieldId);
+    const types = [item.fieldtype, item.fieldType].map(normalized).filter(type => type !== undefined);
+    if ((fieldId ? fieldId !== 'status' : normalized(item.field) !== 'status') ||
+        types.some(type => type !== 'jira' && type !== 'system')) return [];
+    const from = { id: statusText(item.from, 200) ?? statusText(item.oldvalue, 200), label: statusText(item.fromString, 500) ?? statusText(item.oldstring, 500) };
+    const to = { id: statusText(item.to, 200) ?? statusText(item.newvalue, 200), label: statusText(item.toString, 500) ?? statusText(item.newstring, 500) };
+    if ((!from.id && !from.label && !to.id && !to.label) || (from.id === to.id && from.label === to.label)) return [];
+    return [{ position, from, to }];
+  });
 }
 
 export function isRestrictedJiraAttachment(record: LegacyRecord): boolean {
-  return record.kind === 'attachment' && hasJiraVisibilityRestriction(record);
+  return record.kind === 'attachment' && hasJiraVisibilityRestriction(record.metadata);
 }
 
 const issueSecurityFields = new Set(['security', 'securitylevel', 'issuesecuritylevel']);

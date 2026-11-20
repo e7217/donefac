@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKind,LegacyReference,LegacyValue } from '../shared/types.js';
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
@@ -23,7 +24,7 @@ const child=(node:LegacyXmlNode,name:string)=>node.children.find(value=>value.na
 const children=(node:LegacyXmlNode,name:string)=>node.children.filter(value=>value.name===name);
 const text=(node:LegacyXmlNode|undefined):string=>node?node.text+node.children.map(value=>text(value)).join(''):'';
 const ref=(kind:LegacyRecordKind,sourceId:unknown,relation:string):LegacyReference[]=>str(sourceId)?[{kind,sourceId:str(sourceId),relation}]:[];
-const selected=(value:ObjectValue,names:string[]):Record<string,LegacyValue>=>Object.fromEntries(names.filter(name=>value[name]!==undefined).map(name=>[name,str(value[name])]));
+const selected=(value:ObjectValue,names:string[]):Record<string,LegacyValue>=>Object.fromEntries(names.filter(name=>Object.hasOwn(value,name)&&value[name]!==undefined).map(name=>[name,str(value[name])]));
 function jsonValue(value:unknown,depth=0):LegacyValue{if(depth>30)return'[nested value omitted]';if(value===null||typeof value==='string'||typeof value==='boolean')return value;if(typeof value==='number')return Number.isFinite(value)?value:null;if(Array.isArray(value))return value.map(item=>jsonValue(item,depth+1));return Object.fromEntries(Object.entries(obj(value)).filter(([key])=>!/(?:password|credential|secret|token|privatekey)/i.test(key)).map(([key,value])=>[key,jsonValue(value,depth+1)]));}
 
 function jiraVisibilityMetadata(input: ObjectValue, syntheticId: boolean): Record<string, LegacyValue> {
@@ -31,6 +32,120 @@ function jiraVisibilityMetadata(input: ObjectValue, syntheticId: boolean): Recor
     .map(([name, value]) => [name, jsonValue(value)]));
   if (syntheticId) metadata.syntheticId = true;
   return metadata;
+}
+
+function stableHistoryId(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value);
+}
+
+function jsonHistoryGroup(context: Context, raw: unknown, issueId: string, fallbackId: string, allowPageOverlap = false): LegacyRecord {
+  const group = obj(raw);
+  const groupId = str(group.id) || fallbackId;
+  const authorId = context.identity(group.author);
+  const metadata = { ...jiraVisibilityMetadata(group, !stableHistoryId(group.id)), items: list(group.items).map(rawItem => {
+    const item = obj(rawItem);
+    return { ...selected(item, ['id', 'field', 'fieldId', 'fieldtype', 'fieldType', 'from', 'fromString', 'to', 'toString']),
+      ...jiraVisibilityMetadata(item, false) };
+  }) };
+  const previous = context.byId.get(`history:${groupId}`);
+  if (allowPageOverlap && previous && stableHistoryId(group.id)) {
+    if (previous.containerId === issueId && previous.authorId === authorId && previous.createdAt === (str(group.created) || null) &&
+        isDeepStrictEqual(previous.metadata, metadata)) return previous;
+    throw new LegacyImportError(400, '같은 Jira 변경 이력 ID의 업무 또는 원본 내용이 페이지마다 다릅니다.');
+  }
+  return context.put('history', groupId, { title: '변경 이력', containerId: issueId, authorId,
+    createdAt: context.date(group.created, `history:${groupId}`), metadata,
+    references: [...ref('issue', issueId, 'historyOf'), ...ref('identity', authorId, 'author')] });
+}
+
+function restIssueLocation(value: unknown, changelog = false): { alias: string; base: string } | null {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+    const route = /^(.*?)\/rest\/api\/(?:2|3|latest)\/issue\/([1-9]\d*|[A-Z][A-Z0-9_]*-\d+)(\/changelog)?\/?$/.exec(url.pathname);
+    return route && Boolean(route[3]) === changelog ? { alias: route[2], base: url.origin + route[1] } : null;
+  } catch {
+    return null;
+  }
+}
+
+type JiraHistoryPage = {
+  owner: ReturnType<typeof restIssueLocation>; path: string; start: number; total: number; groups: unknown[];
+};
+type JiraRestIssueHistory = {
+  location: ReturnType<typeof restIssueLocation>; embeddedIds: string[]; embeddedTotal: number | null | undefined;
+};
+
+function historyPageCount(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  const count = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
+function standaloneHistoryPage(root: ObjectValue, path: string): JiraHistoryPage | null {
+  const owner = restIssueLocation(root.self, true);
+  const { values, startAt, total } = root;
+  if (!Array.isArray(values) || !values.every(value => Array.isArray(obj(value).items)) || !owner && !values.length ||
+      typeof startAt !== 'number' || !Number.isSafeInteger(startAt) || startAt < 0 ||
+      typeof total !== 'number' || !Number.isSafeInteger(total) || total < startAt || values.length > total - startAt) return null;
+  return { owner, path, start: startAt, total, groups: values };
+}
+
+function applyStandaloneHistory(context: Context): void {
+  if (!context.historyPages.length) return;
+  const issuesByAlias = new Map<string, Set<LegacyRecord>>();
+  for (const issue of context.restIssues.keys()) {
+    for (const alias of [issue.sourceId, str(issue.metadata.key)]) {
+      if (!alias) continue;
+      const candidates = issuesByAlias.get(alias) ?? new Set<LegacyRecord>();
+      candidates.add(issue);
+      issuesByAlias.set(alias, candidates);
+    }
+  }
+  const pagesByIssue = new Map<LegacyRecord, JiraHistoryPage[]>();
+  for (const page of context.historyPages) {
+    const candidates = page.owner && issuesByAlias.get(page.owner.alias);
+    const issue = candidates && candidates.size === 1 ? candidates.values().next().value : undefined;
+    const location = issue && context.restIssues.get(issue)?.location;
+    if (!issue || !page.owner || !location || location.base !== page.owner.base ||
+        ![issue.sourceId, issue.metadata.key].includes(location.alias)) {
+      context.warn('HISTORY_PAGE_OWNER_UNRESOLVED', 'REST 변경 이력 페이지와 같은 원본의 이슈를 확인할 수 없습니다.', null, page.path);
+      continue;
+    }
+    const pages = pagesByIssue.get(issue) ?? [];
+    pages.push(page);
+    pagesByIssue.set(issue, pages);
+  }
+  const completenessByIssue = new Map<string, boolean>();
+  const issuesWithPartial = new Set(context.dataset.diagnostics.filter(item => item.code === 'HISTORY_PARTIAL').map(item => item.recordId));
+  for (const [issue, pages] of pagesByIssue) {
+    const byOffset = new Map<number, string>();
+    const ids = new Set<string>();
+    const total = pages[0].total;
+    let consistent = true;
+    for (const [pageIndex, page] of pages.entries()) {
+      if (page.total !== total) consistent = false;
+      for (const [index, raw] of page.groups.entries()) {
+        const group = jsonHistoryGroup(context, raw, issue.sourceId, `json:${issue.sourceId}:history-page:${pageIndex}:${index}`, true);
+        const offset = page.start + index;
+        const before = byOffset.get(offset);
+        if (group.metadata.syntheticId || before && before !== group.sourceId || !before && ids.has(group.sourceId)) consistent = false;
+        byOffset.set(offset, group.sourceId);
+        ids.add(group.sourceId);
+      }
+    }
+    const embedded = context.restIssues.get(issue)!;
+    const complete = consistent && byOffset.size === total && embedded.embeddedIds.every(id => ids.has(id)) &&
+      (embedded.embeddedTotal === undefined || embedded.embeddedTotal === total);
+    completenessByIssue.set(issue.id, complete);
+    if (!complete && !issuesWithPartial.has(issue.id)) {
+      context.warn('HISTORY_PARTIAL', '제공된 REST 변경 이력 페이지의 범위를 모두 확인하지 못했습니다.', issue.id, pages[0].path);
+    }
+  }
+  context.dataset.diagnostics = context.dataset.diagnostics.filter(item => !item.recordId || !completenessByIssue.has(item.recordId) ||
+    item.code !== 'HISTORY_NOT_PROVIDED' && !(item.code === 'HISTORY_PARTIAL' && completenessByIssue.get(item.recordId)));
 }
 
 const csvSnapshotFields = new Map<string, JiraMigrationIssueField>([
@@ -44,6 +159,8 @@ class Context{
   readonly scheduleDates=new JiraDateProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   readonly sprints=new JiraSprintProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
+  readonly restIssues = new Map<LegacyRecord, JiraRestIssueHistory>();
+  readonly historyPages: JiraHistoryPage[] = [];
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
   ensure(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord|undefined{const sourceId=str(id);if(!sourceId)return undefined;return this.byId.get(`${kind}:${sourceId}`)||this.put(kind,sourceId,value);}
@@ -87,6 +204,7 @@ class Context{
     return item;
   }
   finish():LegacyDataset{
+    applyStandaloneHistory(this);
     this.scheduleDates.apply();
     this.sprints.apply(this.dataset);
     for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
@@ -312,10 +430,20 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   if(Number(commentEnvelope.total)>comments.length||Number(commentEnvelope.startAt)>0)context.warn('COMMENTS_PARTIAL','REST 댓글 페이지 일부만 제공되었습니다.',item.id,path);
   for(let commentIndex=0;commentIndex<comments.length;commentIndex++){const comment=obj(comments[commentIndex]),sourceId=str(comment.id),commentId=sourceId||`json:${id}:comment:${commentIndex}`,author=context.identity(comment.author),body=comment.body;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:author,createdAt:context.date(comment.created,`comment:${commentId}`),updatedAt:context.date(comment.updated,`comment:${commentId}`),text:typeof body==='object'&&body!==null?JSON.stringify(body):str(body),textFormat:typeof body==='object'&&body!==null?'adf':'jira-wiki',metadata:jiraVisibilityMetadata(comment,!sourceId),references:[...ref('issue',id,'commentOn'),...ref('identity',author,'author')]});}
   for(let attachmentIndex=0;attachmentIndex<list(fields.attachments||fields.attachment).length;attachmentIndex++){const attachment=obj(list(fields.attachments||fields.attachment)[attachmentIndex]);context.attachment(str(attachment.id)||`json:${id}:attachment:${attachmentIndex}`,id,attachment);}
-  const changelog=obj(input.changelog),history=importers?list(fields.history):list(changelog.histories||changelog.values);
-  if(Number(changelog.total)>history.length||Number(changelog.startAt)>0)context.warn('HISTORY_PARTIAL','REST 변경 이력 페이지 일부만 제공되었습니다.',item.id,path);
-  if(!importers&&!input.changelog)context.warn('HISTORY_NOT_PROVIDED','REST 문서에 changelog가 없습니다. 변경 이력 보존을 확정할 수 없습니다.',item.id,path);
-  for(let historyIndex=0;historyIndex<history.length;historyIndex++){const group=obj(history[historyIndex]),groupId=str(group.id)||`json:${id}:history:${historyIndex}`,author=context.identity(group.author);context.put('history',groupId,{title:'변경 이력',containerId:id,authorId:author,createdAt:context.date(group.created,`history:${groupId}`),metadata:{items:list(group.items).map(raw=>selected(obj(raw),['field','fieldId','fieldtype','fieldType','from','fromString','to','toString']))},references:[...ref('issue',id,'historyOf'),...ref('identity',author,'author')]});}
+  const changelog = obj(input.changelog);
+  const embedded = Array.isArray(changelog.histories) ? changelog.histories : Array.isArray(changelog.values) ? changelog.values : undefined;
+  const history = importers ? list(fields.history) : embedded ?? [];
+  const embeddedIds = history.map((group, index) => jsonHistoryGroup(context, group, id, `json:${id}:history:${index}`).sourceId);
+  if (!importers) {
+    const total = historyPageCount(changelog.total), startAt = historyPageCount(changelog.startAt);
+    if (!embedded) {
+      context.warn('HISTORY_NOT_PROVIDED', 'REST 문서에서 변경 이력 배열을 확인할 수 없습니다.', item.id, path);
+    } else if (total !== undefined && total !== embedded.length || startAt !== undefined && startAt !== 0 ||
+        embedded.some(group => !Array.isArray(obj(group).items))) {
+      context.warn('HISTORY_PARTIAL', 'REST 변경 이력 페이지 일부만 확인할 수 있습니다.', item.id, path);
+    }
+    context.restIssues.set(item, { location: restIssueLocation(input.self), embeddedIds, embeddedTotal: total });
+  }
   const worklogEnvelope=obj(fields.worklog),worklogs=importers?list(fields.worklogs):list(worklogEnvelope.worklogs);if(Number(worklogEnvelope.total)>worklogs.length||Number(worklogEnvelope.startAt)>0)context.warn('WORKLOGS_PARTIAL','REST 작업 시간 기록 페이지 일부만 제공되었습니다.',item.id,path);
   for(let index=0;index<worklogs.length;index++){
     const worklog=obj(worklogs[index]),sourceId=str(worklog.id),worklogId=`worklog:${sourceId||`${id}:${index}`}`,author=context.identity(worklog.author);
@@ -384,7 +512,14 @@ function parseJson(context:Context,path:string,source:string):void{
     const dateFields=declareRestFields(context,root,path);
     for(let index=0;index<root.issues.length;index++)issueJson(context,obj(root.issues[index]),'',path,index,false,dateFields);
   }else if(root.fields&&(root.id||root.key)){context.warn('JSON_REST_DIALECT','단일 Jira REST 이슈 JSON을 분석했습니다.',null,path,'info');issueJson(context,root,'',path,0,false,declareRestFields(context,root,path));}
-  else{context.warn('JSON_DIALECT_UNSUPPORTED','지원하는 Jira REST 검색/단일 이슈 또는 Importers JSON 구조가 아닙니다.',null,path,'error');context.unsupported('json:unrecognized-root');}
+  else {
+    const page = standaloneHistoryPage(root, path);
+    if (page) context.historyPages.push(page);
+    else {
+      context.warn('JSON_DIALECT_UNSUPPORTED','지원하는 Jira REST 검색/단일 이슈/변경 이력 또는 Importers JSON 구조가 아닙니다.',null,path,'error');
+      context.unsupported('json:unrecognized-root');
+    }
+  }
 }
 
 function rssDateValue(custom: LegacyXmlNode): unknown {
@@ -479,9 +614,30 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (Object.hasOwn(v,'assignee')) jiraSnapshotFields.push('assigneeId');
     context.put('issue',id,{title:str(v.summary),containerId:projectId||null,parentId:parent||null,authorId:creator,createdAt:context.date(v.created,`issue:${id}`),updatedAt:context.date(v.updated,`issue:${id}`),text:str(v.description),textFormat:'jira-wiki',metadata:{key,fields,jiraSnapshotFields},references:[...ref('project',projectId,'project'),...ref('identity',creator,'creator'),...ref('identity',resolveActor(v.assignee),'assignee'),...ref('identity',resolveActor(v.reporter),'reporter'),...ref('issue',parent,'parent'),...['issuetype','status','priority','resolution'].flatMap(name=>ref('option',v[name]?`builtin:${name}:${str(v[name])}`:'',name))]});
   }
-  const linkTypes=new Map(values.filter(row=>row.name==='IssueLinkType').map(row=>[str(row.value.id),row.value])),groups=new Map(values.filter(row=>row.name==='ChangeGroup').map(row=>[str(row.value.id),row.value]));
-  const historyItems=new Map<string,LegacyValue[]>();for(const{name,value:v}of values)if(name==='ChangeItem'){const group=str(v.group),items=historyItems.get(group)||[];items.push(selected(v,['id','field','fieldtype','oldvalue','oldstring','newvalue','newstring']));historyItems.set(group,items);}
-  for(const[groupId,v]of groups){const author=resolveActor(v.author);context.put('history',groupId,{title:'변경 이력',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created,`history:${groupId}`),metadata:{items:historyItems.get(groupId)||[]},references:[...ref('issue',v.issue,'historyOf'),...ref('identity',author,'author')]});}
+  const linkTypes=new Map(values.filter(row=>row.name==='IssueLinkType').map(row=>[str(row.value.id),row.value]));
+  const groups = new Map<string, ObjectValue>();
+  const historyItems = new Map<string, LegacyValue[]>();
+  for (const { name, value } of values) {
+    if (name === 'ChangeGroup') {
+      const groupId = str(value.id);
+      if (groups.has(groupId)) throw new LegacyImportError(400, 'Jira 백업에 중복된 ChangeGroup ID가 있습니다.');
+      groups.set(groupId, value);
+    } else if (name === 'ChangeItem') {
+      const { group, ...item } = value;
+      const groupId = str(group);
+      const items = historyItems.get(groupId) ?? [];
+      items.push({ ...selected(item, ['id', 'field', 'fieldtype', 'fieldId', 'fieldType', 'oldvalue', 'oldstring', 'newvalue', 'newstring']),
+        ...jiraVisibilityMetadata(item, false) });
+      historyItems.set(groupId, items);
+    }
+  }
+  for (const [groupId, value] of groups) {
+    const authorId = resolveActor(value.author);
+    context.put('history', groupId, { title: '변경 이력', containerId: str(value.issue) || null, authorId,
+      createdAt: context.date(value.created, `history:${groupId}`),
+      metadata: { ...jiraVisibilityMetadata(value, !stableHistoryId(value.id)), items: historyItems.get(groupId) ?? [] },
+      references: [...ref('issue', value.issue, 'historyOf'), ...ref('identity', authorId, 'author')] });
+  }
   for(const[groupId]of historyItems)if(!groups.has(groupId)){context.warn('CHANGE_GROUP_MISSING','변경 항목의 ChangeGroup이 없습니다.',null,path,'error');context.unsupported('orphan:ChangeItem',(historyItems.get(groupId)||[]).length);}
   const handled=new Set(['User','OSUser','CwdUser','ApplicationUser','Project','Issue','CustomField','CustomFieldOption','Status','IssueType','Priority','Resolution','Workflow','ChangeGroup','ChangeItem','IssueLinkType']);
   for(const{name,value:v,node}of values){

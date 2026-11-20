@@ -17,7 +17,8 @@ import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
-import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
+import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -77,30 +78,6 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
   }
   const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:Object.fromEntries(statuses.map(state=>[state.id,suggestCategory(state.label)])),issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};
   return{packages:packages.map(pkg=>structuredClone(pkg.summary)),containers,identities,statuses,issueTypes,fields,defaultConfiguration};
-}
-
-function utcParts(year:number,month:number,day:number,hour=0,minute=0,second=0,millis=0):number{const date=new Date(0);date.setUTCFullYear(year,month-1,day);date.setUTCHours(hour,minute,second,millis);return date.getTime();}
-function localDate(value:string,timezone:string):string|null{
-  const match=/^(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3}))?)?)?$/.exec(value);if(!match||!isCalendarDate(value.slice(0,10)))return null;const[y,m,d,h,min,s,ms]=[Number(match[1]),Number(match[2]),Number(match[3]),Number(match[4]||0),Number(match[5]||0),Number(match[6]||0),Number((match[7]||'').padEnd(3,'0'))];if(h>23||min>59||s>59)return null;const naive=utcParts(y,m,d,h,min,s,ms),formatter=new Intl.DateTimeFormat('en-GB',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
-  const parts=(time:number)=>Object.fromEntries(formatter.formatToParts(new Date(time)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));const offsets=new Set<number>();for(const difference of [-36,0,36]){const time=naive+difference*3600000,p=parts(time);offsets.add(utcParts(p.year,p.month,p.day,p.hour,p.minute,p.second)-Math.floor(time/1000)*1000);}const candidates:number[]=[];for(const offset of offsets){const candidate=naive-offset,p=parts(candidate);if(p.year===y&&p.month===m&&p.day===d&&p.hour===h&&p.minute===min&&p.second===s)candidates.push(candidate);}return candidates.length===1?new Date(candidates[0]).toISOString():null;
-}
-// Explicit English month names avoid guessing numeric locale order. Jira's
-// documented dd/MMM/yy h:mm a export format requires a reviewed century policy.
-// https://confluence.atlassian.com/jirakb/date-format-changes-after-exporting-to-excel-119799961.html
-function jiraEnglishDate(value:string):{local:string;century:boolean}|null{
-  const match=/^(\d{1,2})\/([A-Za-z]{3})\/(\d{2}|\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(?:\s+(AM|PM))?)?$/i.exec(value);if(!match)return null;const month=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(match[2].toLowerCase())+1;if(!month)return null;let hour=Number(match[4]||0);if(match[8]){if(hour<1||hour>12)return null;hour=hour%12+(match[8].toUpperCase()==='PM'?12:0);}const century=match[3].length===2,year=century?2000+Number(match[3]):Number(match[3]),local=`${String(year).padStart(4,'0')}-${String(month).padStart(2,'0')}-${match[1].padStart(2,'0')} ${String(hour).padStart(2,'0')}:${match[5]||'00'}:${match[6]||'00'}${match[7]?`.${match[7]}`:''}`;return{local,century};
-}
-
-function sourceTimestamp(value: string | null, timezone: string): string | null {
-  if (!value) return null;
-  const english = jiraEnglishDate(value);
-  if (english) return localDate(english.local, timezone);
-  if (/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)) {
-    const parsed = /^\d{4}-\d\d-\d\d/.test(value) && !isCalendarDate(value.slice(0, 10)) ? NaN :
-      Date.parse(value.replace(/ UTC$/, 'Z').replace(/^(\d{4}-\d\d-\d\d) /, '$1T'));
-    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
-  }
-  return localDate(value, timezone);
 }
 
 function confluenceSourceVersion(row: LegacyRecord): number | null {
@@ -1071,7 +1048,14 @@ class Planner{
     return typeof mapped==='string'&&this.input.users.some(user=>user.id===mapped)?mapped:null;
   }
   author(entry:Entry,id=entry.row.authorId):string{return this.mappedAuthor(entry,id)??this.input.actorId;}
-  time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
+  time(value: string | null, entry: Entry, required = true): string | null {
+    if (!value) return required ? this.unknownTime(entry, '원본 시각이 없습니다.') : null;
+    const parsed = sourceTimestamp(value, this.configuration.timezone);
+    if (parsed && jiraEnglishDate(value)?.century) {
+      this.notice('DATE_TWO_DIGIT_CENTURY', 'Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.', 'warning', entry, true);
+    }
+    return parsed ?? this.unknownTime(entry, '원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');
+  }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
   run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
@@ -1283,7 +1267,7 @@ class Planner{
   }
   restricted(entry:Entry):boolean{
     const row=entry.row,metadata=row.metadata;
-    if(entry.pkg.dataset.source.product==='jira'&&(isRestrictedJiraHistory(row)||isRestrictedJiraAttachment(row)))return true;
+    if(entry.pkg.dataset.source.product==='jira'&&(isRestrictedJiraHistory(row)||isRestrictedJiraStatusHistory(row)||isRestrictedJiraAttachment(row)))return true;
     if((row.kind==='page'||row.kind==='comment')&&(metadata.restricted===true||metadata.hasRestrictions===true||Array.isArray(metadata.restrictions)&&metadata.restrictions.length>0||Array.isArray(metadata.permissions)&&metadata.permissions.length>0))return true;
     if(row.kind==='comment'){if(string(metadata.level)||string(metadata.rolelevel)||string(metadata.groupLevel)||string(metadata.roleLevel))return true;const visibility=object(metadata.visibility);if(Object.keys(visibility).length)return true;if(Array.isArray(metadata.visibility)&&metadata.visibility.some(value=>{const property=object(value);return property.key==='sd.public.comment'&&['true',true].includes(object(property.value).internal as string|boolean);}))return true;}
     if(row.kind==='issue'){const security=scalar(sourceField(row,'security','Security Level','Issue Security Level'));if(security!==undefined&&security!==null&&security!==false&&(typeof security==='object'?Object.keys(object(security)).some(key=>!!object(security)[key]):!!string(security)))return true;}
@@ -2694,7 +2678,8 @@ class Planner{
       const binding = issueCheckpoint ? { type: 'issue' as const, id: issueCheckpoint.issue.id, projectId: issueCheckpoint.issue.projectId }
         : pageCheckpoint ? { type: 'document' as const, id: pageCheckpoint.document.id, projectId: pageCheckpoint.document.projectId }
         : excluded ? undefined : this.bindings.get(entry.key);
-      const ownerEntry = excluded ? null : this.ownerEntry(entry);
+      const restrictedJiraHistory = entry.pkg.dataset.source.product === 'jira' && isRestrictedJiraStatusHistory(entry.row);
+      const ownerEntry = excluded || restrictedJiraHistory ? null : this.ownerEntry(entry);
       const jiraHistoryOwner = this.jiraHistoryOwners.get(entry.key);
       const jiraAttachmentOwner = this.jiraAttachmentOwners.get(entry.key);
       const owner = issueCheckpoint || pageCheckpoint ? binding : jiraHistoryOwner ? { type: 'issue' as const, id: jiraHistoryOwner.id, projectId: jiraHistoryOwner.projectId } :

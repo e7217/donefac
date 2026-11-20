@@ -401,12 +401,15 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 | `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
 | `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
+| `GET /api/issues/:id/jira-status-history?offset=0&limit=50` | 현재 티켓의 이관된 Jira 상태 변경과 각 변경의 원본 기록 ID |
 | `GET /api/issues/:id/relations` | 이관한 관계와 팀에서 직접 만든 업무 관계 |
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
 
 객체에 연결된 `notices[].recordId`는 패키지 ID와 레코드 ID를 첫 `/`로 연결한 값이다. 진단의 **원본 상세 보기**는 두 ID를 각각 인코딩해 분석 단계의 원본 조회 경로를 사용한다.
+
+Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit}`으로 반환한다. `limit`은 1~100이며 기본값은 50이다. 각 내역에는 `from`과 `to`의 원본 상태 ID·이름, 원본 작성자 이름, 확인한 시각이 포함된다. 시각을 확정할 수 있으면 `changedAt`을, 원본 값만 확인할 수 있으면 `originalChangedAt`을 사용한다. 티켓이 없어졌으면 `404`를, 확인된 Jira 상태 변경이 없으면 빈 목록을 반환한다.
 
 `configuration.sourceBaseUrls`는 선택한 분석 패키지 ID별 선택 입력이다. 기본 주소는 HTTP(S) 호스트와 서비스 경로를 사용한다. 인증 정보·쿼리·프래그먼트가 포함되면 미리보기가 적용을 막는다. Jira는 원래 업무 키, Confluence는 일반 페이지의 숫자 ID로 링크를 계산한다. 응답의 `samples[].sourceUrl`에는 생성할 정규 주소가 들어간다. 미리보기와 영수증의 `counts.atlassianLinks` 및 `counts.unlinkedAtlassianRecords`는 이관 대상 중 생성할 링크와 링크를 만들 수 없는 항목의 건수다. 누락 사유는 `notices`에 기록된다. 링크를 새 대상과 같은 트랜잭션에서 저장하며 `GET /api/atlassian-links`로 현재 링크를 읽는다.
 

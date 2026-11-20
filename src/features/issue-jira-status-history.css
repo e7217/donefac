@@ -1,0 +1,80 @@
+.issue-jira-status-history {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.issue-jira-status-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.issue-history-heading,
+.issue-jira-status-history > h3 {
+  color: #536c54;
+  font-size: 13px;
+  margin: 0;
+}
+
+.issue-history-heading {
+  margin-bottom: 14px;
+}
+
+.issue-jira-status-entries {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.issue-jira-status-entries > li {
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.issue-jira-status-transition,
+.issue-jira-status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  overflow-wrap: anywhere;
+}
+
+.issue-jira-status-transition strong {
+  min-width: 0;
+  color: #344d40;
+  font-weight: 600;
+}
+
+.issue-jira-status-transition svg {
+  color: var(--accent);
+}
+
+.issue-jira-status-meta,
+.issue-jira-status-pages {
+  color: #52645a;
+  font-size: 11px;
+  margin-top: 5px;
+}
+
+.issue-jira-status-meta button {
+  min-height: 30px;
+  padding: 5px 8px;
+  color: var(--accent);
+}
+
+.issue-jira-status-origin {
+  min-width: 0;
+  margin-top: 8px;
+}
+
+.issue-jira-status-pages span {
+  margin-right: auto;
+}
+
+.issue-jira-status-error p {
+  color: var(--danger);
+  margin-bottom: 6px;
+}

@@ -4,7 +4,8 @@ import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js'
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
-import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { jiraIssueStatusHistory } from './jira-status-history.js';
+import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import type { Store } from './store.js';
 
@@ -16,6 +17,17 @@ export function isLegacyRecordKind(value: unknown): value is LegacyRecordKind {
   return typeof value === 'string' && kinds.includes(value as LegacyRecordKind);
 }
 function fail(status: number, message: string): never { throw new SourcePreservationError(status, message); }
+function sourceRecordWindow(query: Record<string, unknown>): { offset: number; limit: number } {
+  const integer = (name: string, fallback: number, min: number, max: number) => {
+    const value = query[name];
+    if (value === undefined) return fallback;
+    if (typeof value !== 'string' || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) {
+      fail(400, '원본 기록 페이지 범위를 확인해 주세요.');
+    }
+    return Number(value);
+  };
+  return { offset: integer('offset', 0, 0, 1_000_000), limit: integer('limit', 50, 1, 100) };
+}
 function object(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(400, `${label}은 JSON 객체여야 합니다.`); return value as Record<string, unknown>; }
 function list(value: unknown, label: string, max = 1000000): unknown[] { if (!Array.isArray(value) || value.length > max) fail(400, `${label} 목록을 확인해 주세요.`); return value; }
 function string(value: unknown, label: string, max = 500): string { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\x00-\x1f\x7f]/.test(value)) fail(400, `${label} 식별자·문자열을 확인해 주세요.`); return value; }
@@ -359,6 +371,9 @@ export class SourcePreservationService {
         ON source_records(source_instance,kind,source_id) WHERE product='confluence';
       CREATE INDEX IF NOT EXISTS source_records_jira_history
         ON source_records(source_instance,kind,source_id) WHERE product='jira';
+      CREATE INDEX IF NOT EXISTS source_records_jira_unowned_change_owner
+        ON source_records(source_instance,json_extract(json,'$.record.containerId'))
+        WHERE product='jira' AND kind='history' AND owner_type IS NULL AND owner_id IS NULL;
       CREATE TABLE IF NOT EXISTS attachment_versions(id TEXT PRIMARY KEY,attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS attachment_versions_attachment ON attachment_versions(attachment_id);
       CREATE UNIQUE INDEX IF NOT EXISTS attachment_versions_local_revision
@@ -370,7 +385,12 @@ export class SourcePreservationService {
       CREATE INDEX IF NOT EXISTS issue_relations_target ON issue_relations(target_issue_id);
       CREATE UNIQUE INDEX IF NOT EXISTS issue_relations_teamspace_pair
         ON issue_relations(source_issue_id,target_issue_id,json_extract(json,'$.type')) WHERE json_extract(json,'$.origin')='teamspace';
-      CREATE TABLE IF NOT EXISTS source_bindings(product TEXT NOT NULL,source_instance TEXT NOT NULL,kind TEXT NOT NULL,source_alias TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,PRIMARY KEY(product,source_instance,kind,source_alias));`);
+      CREATE TABLE IF NOT EXISTS source_bindings(product TEXT NOT NULL,source_instance TEXT NOT NULL,kind TEXT NOT NULL,source_alias TEXT NOT NULL,target_type TEXT NOT NULL,target_id TEXT NOT NULL,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,PRIMARY KEY(product,source_instance,kind,source_alias));
+      CREATE INDEX IF NOT EXISTS source_bindings_target ON source_bindings(target_type,target_id,product,kind);`);
+    store.db.function('is_restricted_jira_status_history', { deterministic: true }, json => {
+      const archive = JSON.parse(String(json)) as SourceRecordArchive;
+      return Number(isRestrictedJiraStatusHistory(archive.record));
+    });
   }
   allImports(): SourceImport[] { return this.store.all<SourceImport>('source_imports'); }
   allRecords(): SourceRecordArchive[] { return this.store.all<SourceRecordArchive>('source_records'); }
@@ -964,8 +984,7 @@ export class SourcePreservationService {
     this.sourceImport(importId); const row = this.store.db.prepare('SELECT json FROM source_records WHERE import_id=? AND id=?').get(importId, id) as { json: string } | undefined; return row ? JSON.parse(row.json) as SourceRecordArchive : fail(404, '보존한 원본 객체를 찾을 수 없습니다.');
   }
   private page(where: string, params: (string | number)[], query: Record<string, unknown>): SourceRecordPage {
-    const integer = (name: string, fallback: number, max: number) => { const value = query[name]; if (value === undefined) return fallback; if (typeof value !== 'string' || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > max || name === 'limit' && Number(value) < 1) fail(400, '원본 기록 페이지 범위를 확인해 주세요.'); return Number(value); };
-    const offset = integer('offset', 0, 1000000), limit = integer('limit', 50, 100);
+    const { offset, limit } = sourceRecordWindow(query);
     if (query.kind !== undefined) { if (!isLegacyRecordKind(query.kind)) fail(400, '원본 객체 종류를 확인해 주세요.'); where += ' AND r.kind=?'; params.push(query.kind); }
     const total = Number((this.store.db.prepare(`SELECT COUNT(*) AS total FROM source_records r WHERE ${where}`).get(...params) as { total: number }).total);
     const rows = this.store.db.prepare(`SELECT json_remove(r.json,'$.record.text','$.record.metadata','$.record.references') AS summary,
@@ -984,7 +1003,9 @@ export class SourcePreservationService {
   }
   origins(query: Record<string, unknown>): SourceRecordPage {
     if (query.resourceType !== 'issue' && query.resourceType !== 'document') fail(400, '원본 기록 소유자 종류를 확인해 주세요.');
-    const resourceId = string(query.resourceId, '원본 기록 소유자', 200); return this.page('r.owner_type=? AND r.owner_id=?', [query.resourceType, resourceId], query);
+    const resourceId = string(query.resourceId, '원본 기록 소유자', 200);
+    return this.page(`r.owner_type=? AND r.owner_id=? AND CASE WHEN r.product='jira' AND r.kind='history'
+      THEN is_restricted_jira_status_history(r.json)=0 ELSE 1 END`, [query.resourceType, resourceId], query);
   }
   attachmentVersions(id: string): AttachmentVersion[] {
     const attachment = this.store.get<Attachment>('attachments', id); if (!attachment) fail(404, '첨부파일을 찾을 수 없습니다.');
@@ -1002,6 +1023,13 @@ export class SourcePreservationService {
     app.get('/api/source-imports/:id/records', (request, response) => response.json(this.records(String(request.params.id), query(request, ['offset', 'limit', 'kind', 'targetType', 'targetId']))));
     app.get('/api/source-imports/:id/records/:recordId', (request, response) => { query(request, []); response.json(this.record(String(request.params.id), String(request.params.recordId))); });
     app.get('/api/resource-origins', (request, response) => response.json(this.origins(query(request, ['resourceType', 'resourceId', 'kind', 'offset', 'limit']))));
+    app.get('/api/issues/:id/jira-status-history', (request, response) => {
+      response.set('Cache-Control', 'no-store');
+      const { offset, limit } = sourceRecordWindow(query(request, ['offset', 'limit']));
+      const issue = this.store.get<Issue>('issues', String(request.params.id));
+      if (!issue) fail(404, '업무를 찾을 수 없습니다.');
+      response.json(jiraIssueStatusHistory(this.store, issue, offset, limit));
+    });
     app.get('/api/attachments/:id/versions', (request, response) => { query(request, []); response.json(this.attachmentVersions(String(request.params.id))); });
   }
 }
