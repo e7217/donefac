@@ -459,6 +459,126 @@ test('360px에서 기존 Jira 업무에 새 댓글과 작업 시간 기록을 �
   }
 });
 
+test('360px에서 기존 Jira 업무에 새 원본 첨부파일을 추가하고 팀 버전과 정확한 바이트를 보존한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `JFA${id}`, targetKey = `TFA${id}`, instance = `jira-attachment-append-${id}`;
+  const teamTitle = `팀에서 편집한 첨부 업무 ${id}`, filename = `원본 자료 ${id}.bin`, teamFilename = `팀 편집 자료 ${id}.bin`;
+  const originalBytes = Buffer.from([0, 18, 128, 255, 0, 73]), teamBytes = Buffer.from([9, 0, 148, 72, 255]);
+  const newBytes = Buffer.from([44, 0, 190, 71, 9, 255]), timestamp = '2021-01-02T00:00:00Z';
+  const attachment = (sourceId: number, bytes: Buffer) =>
+    `<FileAttachment id="${sourceId}" issue="200" filename="${filename}" filesize="${bytes.length}" created="${timestamp}" version="1"/>`;
+  const exportJira = (next: boolean) => zip([
+    { path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml version="9.12">
+      <Project id="2040" pkey="${sourceKey}" name="Jira 첨부 원본 ${id}"/>
+      <Status id="1" pname="Ready"/><IssueType id="3" pname="Task"/>
+      <Issue id="200" project="2040" number="1" summary="${next ? '나중 Jira 제목' : '처음 이관한 Jira 업무'}"
+        status="1" issuetype="3" created="${timestamp}" updated="${next ? '2021-01-03T00:00:00Z' : timestamp}"/>
+      ${attachment(700, originalBytes)}${next ? attachment(710, newBytes) : ''}
+    </entity-engine-xml>`) },
+    { path: `attachments/${sourceKey}/${sourceKey}-1/700`, bytes: originalBytes },
+    ...(next ? [{ path: `attachments/${sourceKey}/${sourceKey}-1/710`, bytes: newBytes }] : []),
+  ]);
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const original = await upload(request, `jira-attachment-original-${id}.zip`, exportJira(false), instance);
+    staged.push(original);
+    const { import: first } = await importIntoProject(request, original, targetKey, `기존 Jira 이관 프로젝트 ${id}`);
+    const [projectId] = first.projectIds;
+    const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const imported = workspace.issues.find(issue => issue.projectId === projectId)!;
+    expect(imported).toBeTruthy();
+    const savedResponse = await request.patch(`/api/issues/${imported.id}`, { data: { expectedVersion: imported.version, title: teamTitle } });
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const saved = await savedResponse.json() as Issue;
+    const files = async () => {
+      const query = new URLSearchParams({ resourceType: 'issue', resourceId: saved.id });
+      const response = await request.get(`/api/attachments?${query}`);
+      expect(response.ok(), await response.text()).toBe(true);
+      return await response.json() as AttachmentHead[];
+    };
+    const [anchor] = await files();
+    expect(anchor).toMatchObject({ filename, versionCount: 1 });
+    const versionQuery = new URLSearchParams({ expectedVersionId: anchor.currentVersionId, filename: teamFilename });
+    const versionResponse = await request.post(`/api/attachments/${anchor.id}/versions?${versionQuery}`, {
+      headers: { 'Content-Type': 'application/octet-stream' }, data: teamBytes,
+    });
+    expect(versionResponse.status(), await versionResponse.text()).toBe(201);
+    const teamHead = await versionResponse.json() as AttachmentHead;
+
+    const next = await upload(request, `jira-attachment-next-${id}.zip`, exportJira(true), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append');
+    const attachments = settings.getByRole('checkbox', { name: '기존 Jira 업무에 첨부파일 추가', exact: true });
+    const standard = settings.getByRole('checkbox', { name: '기존 Jira 업무 변경분 반영', exact: true });
+    const history = settings.getByRole('checkbox', { name: '기존 Jira 업무에 댓글과 작업 시간 기록 추가', exact: true });
+    await expect(attachments).not.toBeChecked();
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await attachments.check();
+    await mode.selectOption('new');
+    await mode.selectOption('append');
+    await expect(attachments).toBeChecked();
+    await expect(standard).not.toBeChecked();
+    await expect(history).not.toBeChecked();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendTo).toMatchObject({ projectId, refreshAttachments: true });
+    expect(plan.counts).toMatchObject({ issues: 0, newJiraAttachments: 1, fileCopies: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const count = '기존 업무의 새 첨부파일 1';
+    await expect(review.getByText(count, { exact: true })).toBeVisible();
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('기존 업무에 새 첨부파일 1건 추가');
+      await dialog.accept();
+    });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
+    await expect(receipt.getByText(count, { exact: true })).toBeVisible();
+    const current = await files();
+    expect(current).toHaveLength(2);
+    expect(current.find(file => file.id === anchor.id)).toEqual(teamHead);
+    const added = current.find(file => file.id !== anchor.id)!;
+    expect(added).toMatchObject({ filename, versionCount: 1, sha256: createHash('sha256').update(newBytes).digest('hex') });
+    const after = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    expect(after.issues.filter(issue => issue.projectId === projectId)).toEqual([saved]);
+
+    await selectPackage(settings, next.filename);
+    await mode.selectOption('append');
+    await attachments.check();
+    const repeated = await preview(page, settings);
+    expect(repeated.canApply, JSON.stringify(repeated.notices)).toBe(false);
+    expect(repeated.counts).toMatchObject({ issues: 0, newJiraAttachments: 0, fileCopies: 0 });
+    await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+
+    page.once('dialog', dialog => dialog.accept());
+    await page.goto(`/#/${projectId}/issues?issue=${saved.id}`);
+    const drawer = page.getByRole('dialog', { name: teamTitle, exact: true });
+    const panel = drawer.getByRole('region', { name: '첨부파일', exact: true });
+    const download = async (link: Locator) => {
+      const [file] = await Promise.all([page.waitForEvent('download'), link.click()]);
+      return readFile((await file.path())!);
+    };
+    expect(await download(panel.getByRole('link', { name: `${filename} 다운로드`, exact: true }))).toEqual(newBytes);
+    expect(await download(panel.getByRole('link', { name: `${teamFilename} 다운로드`, exact: true }))).toEqual(teamBytes);
+    await panel.getByRole('button', { name: `${teamFilename} 버전`, exact: true }).click();
+    const versions = panel.getByRole('region', { name: `${teamFilename} 보존 버전`, exact: true });
+    const originalDownload = versions.getByRole('link', { name: `${teamFilename} 버전 1 다운로드`, exact: true });
+    await expect(originalDownload.locator('..')).toContainText('이전 버전');
+    expect(await download(originalDownload)).toEqual(originalBytes);
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집한 부모 문서의 참조를 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

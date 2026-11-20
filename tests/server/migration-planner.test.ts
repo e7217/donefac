@@ -109,6 +109,83 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
   assert.ok(notices(unverified).has('SOURCE_NO_PRIMARY_CONTENT'));
 });
 
+test('Jira supplemental attachments use stable IDs, verified bytes and the original live issue owner', () => {
+  const baseline = buildMigrationPlan(input([jira()]));
+  const [first, second] = baseline.issues;
+  const [project] = baseline.projects;
+  const [workflow] = baseline.workflows;
+  const [schema] = baseline.issueSchemas;
+  const identity = record('identity', 'alice', { title: '원래 작성자' });
+  const retainedIssue = issue('300', { metadata: { key: 'OLD-1' } });
+  const restrictedIssue = issue('2', { metadata: { key: 'OLD-2', fields: { security: [{ id: 'private' }] } } });
+  const firstHash = createHash('sha256').update('x').digest('hex');
+  const secondHash = createHash('sha256').update('y').digest('hex');
+  const file = (id: string, owner = '300', metadata: Record<string, LegacyValue> = {}) => record('attachment', id, {
+    containerId: owner, authorId: 'alice', createdAt: created, title: '같은 파일명.txt',
+    metadata: { bytesPresent: true, actualSize: 1, size: '1', sha256: firstHash, path: `attachments/${owner}/${id}`, ...metadata },
+    references: [{ kind: 'issue', sourceId: owner, relation: 'attachedTo' }],
+  });
+  const source = (id: string, rows: LegacyRecord[], diagnostics: LegacyDataset['diagnostics'] = []) => {
+    const result = pkg(id, 'jira', rows, diagnostics);
+    result.dataset.source.instanceKey = 'same-jira';
+    return result;
+  };
+  const plan = (packages: MigrationPackage[], { enabled = true, verified = true } = {}) => {
+    const request = input(packages);
+    const options = buildMigrationOptions(packages);
+    for (const user of options.identities) request.configuration.users[user.id] = actor.id;
+    request.configuration.appendTo = {
+      projectId: project.id, fields: {}, ...(enabled ? { refreshAttachments: true } : {}),
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, workflow.statuses[0].id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, schema.issueTypes[0].id])),
+    };
+    request.append = { project, workflow, schema, nextIssueNumber: 3, token: 'jira-attachments',
+      knownIssues: [{ alias: '1', issueId: first.id, projectId: project.id }, { alias: 'OLD-1', issueId: first.id, projectId: project.id },
+        { alias: '2', issueId: second.id, projectId: project.id }, { alias: 'OLD-2', issueId: second.id, projectId: project.id },
+        { alias: 'gone', issueId: 'purged-issue-id', projectId: null }],
+      attachmentIssues: [first, second], knownAttachments: [{ sourceId: '501', issueId: 'purged-issue-id' }],
+    };
+    if (verified) request.fileInfo = Object.fromEntries(packages.map(sourcePackage => [sourcePackage.summary.id,
+      Object.fromEntries(sourcePackage.dataset.records.filter(row => row.kind === 'attachment' && row.sourceId !== '503').map(row => [
+        row.metadata.path as string, { size: 1, sha256: row.sourceId === '502' ? secondHash : row.metadata.sha256 as string, mimeType: 'application/octet-stream' },
+      ])),
+    ]));
+    return buildMigrationPlan(request);
+  };
+  const originalFile = file('500');
+  const old = source('jira-original-files', [identity, retainedIssue, restrictedIssue, originalFile,
+    file('501'), file('502'), file('503'), file('504', '2'), file('505', 'gone'), file('506', '300', { syntheticId: true }),
+    file('507', '300', { size: '2' }), file('508', '300', { groupLevel: 'private' }), file('509'),
+    file('512', '300', { sha256: secondHash }), file('514')]);
+  const newer = source('jira-other-file-rows', [identity, retainedIssue, issue('3'), originalFile,
+    file('513', '3'), file('501', '3'), file('512'), file('514', '3')]);
+  const added = plan([old, newer]);
+  assert.equal(added.preview.canApply, true, JSON.stringify(added.preview.notices));
+  assert.equal(added.preview.counts.issues, 1);
+  assert.equal(added.preview.counts.newJiraAttachments, 2);
+  assert.deepEqual(added.jiraAttachmentOwners, [first.id]);
+  assert.equal(added.fileCopies.length, 3);
+  assert.ok(added.preview.requiredAcknowledgements.includes('JIRA_ATTACHMENT_RAW_ONLY'));
+  assert.equal(new Set(added.attachments.map(attachment => attachment.id)).size, 3);
+  assert.ok(added.attachmentVersions.every(version => version.attachmentId === version.id && version.sourceRevision === undefined));
+  const supplemental = added.sourceRecords.filter(row => row.jiraAttachmentAppend);
+  assert.deepEqual(supplemental.map(row => row.record.sourceId).sort(), ['500', '509']);
+  assert.ok(supplemental.every(row => row.ownerType === 'issue' && row.ownerId === first.id && row.targetProjectId === project.id &&
+    row.targetType === 'attachment' && added.attachments.some(attachment => attachment.id === row.targetId && attachment.resourceId === first.id)));
+  assert.equal(added.sourceRecords.filter(row => row.record.sourceId === '500' && row.targetType === null).length, 1);
+  assert.equal(added.sourceRecords.find(row => row.record.sourceId === '513')?.ownerId, added.issues[0].id);
+  assert.equal(plan([old], { enabled: false }).preview.canApply, false);
+  assert.equal(plan([source('jira-file-no-manifest', [identity, retainedIssue, originalFile])], { verified: false }).preview.canApply, false);
+
+  const noPrimary = [{ id: 'no-primary', severity: 'error' as const, code: 'NO_PRIMARY_CONTENT', message: '업무 원문 없음', recordId: null, path: null }];
+  const sparse = plan([source('jira-sparse-file', [identity, file('510', 'OLD-1')], noPrimary)]);
+  assert.equal(sparse.preview.canApply, true, JSON.stringify(sparse.preview.notices));
+  assert.equal(sparse.attachments[0].resourceId, first.id);
+  const unverified = plan([source('jira-sparse-unverified-owner', [identity, file('511', '300')], noPrimary)]);
+  assert.equal(unverified.preview.canApply, false);
+  assert.ok(notices(unverified).has('SOURCE_NO_PRIMARY_CONTENT'));
+});
+
 test('Jira refresh clears explicit blank CSV fields while protecting malformed values and source-unchanged mappings', () => {
   const snapshot = (id: string, extension: 'json' | 'csv', data: string): MigrationPackage => {
     const filename = `issues.${extension}`;

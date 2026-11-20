@@ -13,7 +13,7 @@ import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,M
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
-import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -226,6 +226,7 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
 type JiraHistoryIssue=Pick<Issue,'id'|'projectId'|'key'|'title'>;
+type JiraChildScope = { durable: Map<string, string>; blocked: Set<string>; sourceErrors: Set<string> };
 type JiraCustomFieldOption = MigrationOptions['fields'][number];
 type JiraCustomFieldReview = NonNullable<JiraMigrationIssueReview['customFields']>[number];
 interface JiraCustomFieldConversion {
@@ -283,9 +284,11 @@ class Planner{
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
   private jiraHistoryOwners = new Map<string, JiraHistoryIssue>();
   private knownJiraHistory = new Set<string>();
+  private jiraAttachmentOwners = new Map<string, AttachmentOwner>();
+  private knownJiraAttachments = new Set<string>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
-  private missingHistoryPrimaryNotices: { message: string; entry?: Entry }[] = [];
+  private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
   private boundIssues = new Map<string, KnownIssue>();
   private boundPages = new Map<string, KnownPage>();
   private boundPageIdsByTitle = new Map<string, Set<string>>();
@@ -354,6 +357,9 @@ class Planner{
     if (mapping.refreshHistory === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
       this.knownJiraHistory.add(JSON.stringify([kind, sourceId]));
     }
+    if (mapping.refreshAttachments === true) for (const { sourceId } of append.knownAttachments ?? []) {
+      this.knownJiraAttachments.add(sourceId);
+    }
     for (const entry of this.entries) {
       if (entry.row.kind === 'issue' || entry.row.kind === 'relation' || this.excluded.has(entry.key)) continue;
       const owner = this.ownerEntry(entry);
@@ -363,6 +369,11 @@ class Planner{
           this.retainedEntries.add(entry.key);
           continue;
         }
+      }
+      if (mapping.refreshAttachments === true && entry.pkg.dataset.source.product === 'jira' && entry.row.kind === 'attachment' &&
+          (!owner || this.knownJiraAttachments.has(entry.row.sourceId))) {
+        this.retainedEntries.add(entry.key);
+        continue;
       }
       if (owner ? this.retainedEntries.has(owner.key) : this.hasRetainedOwner(entry)) this.retainedEntries.add(entry.key);
     }
@@ -1074,8 +1085,9 @@ class Planner{
       if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
       const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
       if (diagnostic.code === 'NO_PRIMARY_CONTENT' && (this.result.appendPages && config.appendPagesTo?.refreshHistory === true ||
-          this.result.append && config.appendTo?.refreshHistory === true && pkg.dataset.source.format === 'jira-backup-xml')) {
-        this.missingHistoryPrimaryNotices.push({ message: diagnostic.message, entry });
+          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshAttachments === true) &&
+          pkg.dataset.source.format === 'jira-backup-xml')) {
+        this.deferredPrimaryNotices.push({ message: diagnostic.message, entry });
       } else this.notice(`SOURCE_${diagnostic.code}`, diagnostic.message, 'error', entry);
     }
       for(const warning of pkg.dataset.diagnostics.filter(notice=>notice.severity==='warning')){const key=warning.recordId?`${pkg.summary.id}/${warning.recordId}`:null;if(key&&(this.excluded.has(key)||this.retainedEntries.has(key)))continue;if(['DATE_TIMEZONE_UNRESOLVED','CONFLUENCE_TIMEZONE_UNKNOWN','MISSING_REFERENCE','CONFLUENCE_STORAGE_REFERENCES_UNRESOLVED'].includes(warning.code))continue;this.notice(`SOURCE_${warning.code}`,warning.message,'warning',warning.recordId?this.entryByKey.get(`${pkg.summary.id}/${warning.recordId}`):undefined,true);}
@@ -1084,7 +1096,7 @@ class Planner{
   }
   restricted(entry:Entry):boolean{
     const row=entry.row,metadata=row.metadata;
-    if(entry.pkg.dataset.source.product==='jira'&&isRestrictedJiraHistory(row))return true;
+    if(entry.pkg.dataset.source.product==='jira'&&(isRestrictedJiraHistory(row)||isRestrictedJiraAttachment(row)))return true;
     if((row.kind==='page'||row.kind==='comment')&&(metadata.restricted===true||metadata.hasRestrictions===true||Array.isArray(metadata.restrictions)&&metadata.restrictions.length>0||Array.isArray(metadata.permissions)&&metadata.permissions.length>0))return true;
     if(row.kind==='comment'){if(string(metadata.level)||string(metadata.rolelevel)||string(metadata.groupLevel)||string(metadata.roleLevel))return true;const visibility=object(metadata.visibility);if(Object.keys(visibility).length)return true;if(Array.isArray(metadata.visibility)&&metadata.visibility.some(value=>{const property=object(value);return property.key==='sd.public.comment'&&['true',true].includes(object(property.value).internal as string|boolean);}))return true;}
     if(row.kind==='issue'){const security=scalar(sourceField(row,'security','Security Level','Issue Security Level'));if(security!==undefined&&security!==null&&security!==false&&(typeof security==='object'?Object.keys(object(security)).some(key=>!!object(security)[key]):!!string(security)))return true;}
@@ -1528,7 +1540,64 @@ class Planner{
     this.result.confluenceAttachmentOwners = [...new Set([...this.confluenceAttachmentOwners.values()].map(owner => owner.id))];
   }
 
+  private createExistingJiraFiles(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshAttachments !== true) return;
+    const issues = new Map(append.attachmentIssues?.filter(issue => issue.projectId === append.project.id).map(issue => [issue.id, issue]));
+    const scope = this.jiraChildScope(append);
+    const groups = new Map<string, Entry[]>();
+    let rawOnly = 0;
+    for (const entry of this.entries) {
+      if (entry.pkg.dataset.source.product !== 'jira' || entry.row.kind !== 'attachment' || this.excluded.has(entry.key)) continue;
+      const sourceId = jiraAttachmentSourceId(entry.row);
+      if (!sourceId) {
+        if (this.retainedEntries.has(entry.key)) rawOnly++;
+        continue;
+      }
+      if (this.knownJiraAttachments.has(sourceId)) continue;
+      const entries = groups.get(sourceId) ?? [];
+      entries.push(entry);
+      groups.set(sourceId, entries);
+    }
+    for (const entries of groups.values()) {
+      const retained = entries.filter(entry => this.retainedEntries.has(entry.key));
+      if (!retained.length) continue;
+      if (retained.length !== entries.length) {
+        // One Jira attachment cannot refer to both a new and an existing issue.
+        for (const entry of entries) this.retainedEntries.add(entry.key);
+        rawOnly += entries.length;
+        continue;
+      }
+      const [first] = retained;
+      const issue = this.resolveJiraChildOwner(first, jiraAttachmentOwnerAliases(first.row), issues, scope);
+      if (!issue) {
+        rawOnly += retained.length;
+        continue;
+      }
+      const verified = retained.map(entry => {
+        const evidence = jiraAttachmentFileEvidence(entry.row);
+        if (!evidence) return null;
+        const file = this.input.fileInfo?.[entry.pkg.summary.id]?.[evidence.path];
+        if (!file || file.size !== evidence.size || file.sha256 !== evidence.sha256 || file.size > MAX_FILE_BYTES ||
+            this.resolveJiraChildOwner(entry, jiraAttachmentOwnerAliases(entry.row), issues, scope)?.id !== issue.id) return null;
+        return JSON.stringify([attachmentFilename(entry.row), file.size, file.sha256, file.mimeType, entry.row.createdAt, this.author(entry)]);
+      });
+      if (!verified[0] || verified.some(signature => signature !== verified[0])) {
+        rawOnly += retained.length;
+        continue;
+      }
+      const owner: AttachmentOwner = { type: 'issue', id: issue.id, projectId: issue.projectId };
+      this.createAttachmentGroup(first, [first], owner);
+      if (this.bindings.has(first.key)) this.jiraAttachmentOwners.set(first.key, owner);
+    }
+    if (rawOnly) this.notice('JIRA_ATTACHMENT_RAW_ONLY',
+      `업무 연결, 원본 ID, 접근 범위 또는 파일 바이트를 확인할 수 없는 Jira 첨부 ${rawOnly}건은 원문과 메타데이터로 보관합니다.`, 'warning', undefined, true);
+    this.result.jiraAttachmentOwners = [...new Set([...this.jiraAttachmentOwners.values()].map(owner => owner.id))];
+    Object.assign(this.result.preview.counts, { newJiraAttachments: this.jiraAttachmentOwners.size, retainedRecords: this.retainedEntries.size });
+  }
+
   createFiles():void{
+    this.createExistingJiraFiles();
     this.indexConfluenceAttachmentSeries();
     const sourceLocations = this.confluenceAttachmentLocations();
     const groups = new Map<Entry, Entry[]>();
@@ -2084,10 +2153,9 @@ class Planner{
       note, version: 1, createdAt: this.input.now, updatedAt: this.input.now, sourceRecordId: this.archiveIds.get(entry.key)!,
     });
   }
-  private resolveJiraHistoryOwner(entry: Entry, issues: ReadonlyMap<string, JiraHistoryIssue>, durable: ReadonlyMap<string, string>, blocked: ReadonlySet<string>,
-    sourceErrors: ReadonlySet<string>): JiraHistoryIssue | undefined {
+  private resolveJiraChildOwner<T extends Pick<Issue, 'id' | 'projectId'>>(entry: Entry, aliases: string[] | null,
+    issues: ReadonlyMap<string, T>, { durable, blocked, sourceErrors }: JiraChildScope): T | undefined {
     if (sourceErrors.has(entry.key) || this.restricted(entry)) return undefined;
-    const aliases = jiraHistoryOwnerAliases(entry.row);
     if (!aliases) return undefined;
     const [ownerId, ...others] = aliases.map(alias => this.originalIssue(alias)?.id);
     if (!ownerId || blocked.has(ownerId) || others.some(id => id !== ownerId)) return undefined;
@@ -2105,26 +2173,33 @@ class Planner{
     }
     return issues.get(ownerId);
   }
-  private createJiraHistory(): void {
-    const append = this.input.append;
-    if (!append || this.configuration.appendTo?.refreshHistory !== true) return;
-    const issues = new Map(append.historyIssues?.filter(issue => issue.projectId === append.project.id).map(issue => [issue.id, issue]));
+  private jiraChildScope(append: NonNullable<MigrationPlanningInput['append']>): JiraChildScope {
     const durable = new Map(append.knownIssues.filter(issue => issue.projectId === append.project.id).map(issue => [issue.alias, issue.issueId]));
     const blocked = new Set<string>();
     const sourceErrors = new Set(this.input.packages.flatMap(({ summary, dataset }) => dataset.diagnostics
       .filter(diagnostic => diagnostic.severity === 'error' && diagnostic.recordId)
       .map(diagnostic => `${summary.id}/${diagnostic.recordId}`)));
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (entry.pkg.dataset.source.product !== 'jira' || row.kind !== 'issue' ||
+          !(this.excluded.has(entry.key) || sourceErrors.has(entry.key) || isRestrictedJiraHistoryOwner(row) || this.restricted(entry))) continue;
+      for (const alias of [row.sourceId, string(row.metadata.key)]) {
+        const issueId = this.originalIssue(alias)?.id;
+        if (issueId) blocked.add(issueId);
+      }
+    }
+    return { durable, blocked, sourceErrors };
+  }
+  private createJiraHistory(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshHistory !== true) return;
+    const issues = new Map(append.historyIssues?.filter(issue => issue.projectId === append.project.id).map(issue => [issue.id, issue]));
+    const scope = this.jiraChildScope(append);
     const groups = new Map<string, { kind: 'comment' | 'worklog'; entries: Entry[] }>();
     let rawOnly = 0;
     for (const entry of this.entries) {
       if (entry.pkg.dataset.source.product !== 'jira') continue;
       const { row } = entry;
-      if (row.kind === 'issue' && (this.excluded.has(entry.key) || sourceErrors.has(entry.key) || isRestrictedJiraHistoryOwner(row) || this.restricted(entry))) {
-        for (const alias of [row.sourceId, string(row.metadata.key)]) {
-          const issueId = this.originalIssue(alias)?.id;
-          if (issueId) blocked.add(issueId);
-        }
-      }
       if (this.excluded.has(entry.key) || !jiraHistoryKind(row)) continue;
       const source = jiraHistorySourceKey(row);
       if (!source) {
@@ -2147,12 +2222,12 @@ class Planner{
       }
       if (!retained.length) continue;
       const [entry, ...duplicates] = retained;
-      const owner = this.resolveJiraHistoryOwner(entry, issues, durable, blocked, sourceErrors);
+      const owner = this.resolveJiraChildOwner(entry, jiraHistoryOwnerAliases(entry.row), issues, scope);
       const authorId = this.mappedAuthor(entry);
       const raw = duplicates.length ? JSON.stringify(entry.row) : null;
       if (!owner || !authorId || duplicates.some(duplicate =>
         JSON.stringify(duplicate.row) !== raw || this.mappedAuthor(duplicate) !== authorId ||
-        this.resolveJiraHistoryOwner(duplicate, issues, durable, blocked, sourceErrors)?.id !== owner.id)) {
+        this.resolveJiraChildOwner(duplicate, jiraHistoryOwnerAliases(duplicate.row), issues, scope)?.id !== owner.id)) {
         rawOnly += retained.length;
         continue;
       }
@@ -2206,8 +2281,9 @@ class Planner{
         : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
       const jiraHistoryOwner = this.jiraHistoryOwners.get(entry.key);
+      const jiraAttachmentOwner = this.jiraAttachmentOwners.get(entry.key);
       const owner = issueCheckpoint || pageCheckpoint ? binding : jiraHistoryOwner ? { type: 'issue' as const, id: jiraHistoryOwner.id, projectId: jiraHistoryOwner.projectId } :
-        this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
+        jiraAttachmentOwner ?? this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
         (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
@@ -2225,6 +2301,7 @@ class Planner{
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
         ...(jiraHistoryOwner ? { jiraHistoryAppend: true } : {}),
+        ...(jiraAttachmentOwner ? { jiraAttachmentAppend: true } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
         ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
@@ -2259,7 +2336,7 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
-    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length) for (const { message, entry } of this.missingHistoryPrimaryNotices) {
+    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length) for (const { message, entry } of this.deferredPrimaryNotices) {
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
     }
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
@@ -2285,8 +2362,10 @@ class Planner{
         ...(sourceUrl ? { sourceUrl } : {}),
       });
     }
-    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendTo?.refreshHistory) {
+    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendTo?.refreshAttachments) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 첨부나 다른 업무 변경분이 없습니다.', 'error');
+      } else if (this.configuration.appendTo?.refreshHistory) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무·댓글·작업 시간이나 기존 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');

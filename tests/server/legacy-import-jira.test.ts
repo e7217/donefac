@@ -121,6 +121,22 @@ test('duplicate source IDs, malformed CSV/JSON/XML and unsupported input cannot 
   const unknown=parse('unknown.json','{"credentials":{"password":"NEVER_COPY"}}');assert.ok(codes(unknown).has('JSON_DIALECT_UNSUPPORTED'));assert.ok(!JSON.stringify(unknown).includes('NEVER_COPY'));const noSource=parseJira(new Map([['readme.txt',Buffer.from('not an export')]]),'synthetic');assert.ok(codes(noSource).has('JIRA_INPUT_NOT_FOUND'));assert.ok(noSource.diagnostics.some(item=>item.severity==='error'));
 });
 
+test('Jira attachment analysis distinguishes recovered original IDs from positional fallbacks', () => {
+  const bytes = Buffer.from('synthetic Jira attachment');
+  const json = JSON.stringify({ issues: [{ id: '10', key: 'OLD-1', fields: { summary: '파일 업무', attachment: [
+    { filename: 'recovered.txt', content: 'https://jira.example.test/secure/attachment/70/recovered.txt' },
+    { filename: 'position-only.txt', groupLevel: 'limited' },
+  ] } }] });
+  const data = parse('rest.json', json, new Map([['attachments/OLD/OLD-1/70', bytes]]));
+  const stable = find(data, 'attachment:70');
+  assert.equal(stable.metadata.syntheticId, undefined);
+  assert.equal(stable.metadata.actualSize, bytes.length);
+  assert.equal(stable.metadata.sha256, createHash('sha256').update(bytes).digest('hex'));
+  const fallback = find(data, 'attachment:json:10:attachment:1');
+  assert.equal(fallback.metadata.syntheticId, true);
+  assert.equal(fallback.metadata.groupLevel, 'limited');
+});
+
 test('multiple REST shard files retain coverage warnings and exact attachment ambiguity remains visible',()=>{
   const first={startAt:0,total:2,issues:[{id:'1',key:'OLD-1',fields:{summary:'첫 번째',attachment:[{id:'99',filename:'same.txt'}]}}]},second={startAt:1,total:2,issues:[{id:'2',key:'OLD-2',fields:{summary:'두 번째'}}]};const data=parseJira(new Map([['page-1.json',Buffer.from(JSON.stringify(first))],['page-2.json',Buffer.from(JSON.stringify(second))],['attachments/A/99',Buffer.from('a')],['attachments/B/99',Buffer.from('b')]]),'synthetic');assert.equal(data.records.filter(item=>item.kind==='issue').length,2);assert.equal(find(data,'attachment:99').metadata.bytesPresent,false);assert.equal(find(data,'attachment:99').metadata.path,null);assert.ok(codes(data).has('ATTACHMENT_PATH_AMBIGUOUS'));assert.ok(codes(data).has('ISSUES_PARTIAL'));assert.ok(codes(data).has('HISTORY_NOT_PROVIDED'));
 });

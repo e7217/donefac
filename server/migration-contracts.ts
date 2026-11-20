@@ -49,6 +49,8 @@ export interface MigrationAppendContext {
   refreshIssues?: MigrationJiraRefreshCandidate[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
   knownHistory?: { kind: 'comment' | 'worklog'; sourceId: string; issueId: string }[];
+  attachmentIssues?: Pick<Issue, 'id' | 'projectId'>[];
+  knownAttachments?: { sourceId: string; issueId: string }[];
 }
 export interface MigrationPageAppendContext {
   project: Project;
@@ -79,6 +81,7 @@ export interface PreparedMigration {
   appendPages?: { projectId: string; token: string };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
+  jiraAttachmentOwners?: string[];
   documentUpdates?: MigrationConfluenceDocumentUpdate[];
   confluenceAttachmentOwners?: string[];
   confluenceHistoryOwners?: string[];

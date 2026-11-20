@@ -18,6 +18,7 @@ const jiraRefreshCountLabels = {
   updatedIssues: '변경 업무', updatedFields: '기본 필드 반영', conflictingFields: '현재 값을 유지할 기본 필드', skippedIssueUpdates: '변경을 건너뛴 업무',
   updatedCustomFields: '사용자 정의 속성 반영', conflictingCustomFields: '현재 값을 유지할 사용자 정의 속성',
   newJiraComments: '기존 업무의 새 댓글', newJiraWorklogs: '기존 업무의 새 작업 시간 기록',
+  newJiraAttachments: '기존 업무의 새 첨부파일',
 };
 const confluenceRefreshCountLabels = {
   updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',
@@ -49,7 +50,7 @@ const destinationMode = (configuration: MigrationConfiguration | null | undefine
 type RefreshProduct = 'Jira' | 'Confluence';
 function refreshProduct(configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined {
   const issues = configuration?.appendTo;
-  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory) return 'Jira';
+  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory || issues?.refreshAttachments) return 'Jira';
   const pages = configuration?.appendPagesTo;
   if (pages?.refreshExisting || pages?.refreshAttachments || pages?.refreshHistory) return 'Confluence';
 }
@@ -64,10 +65,11 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
   if (product === 'Jira') {
-    const { updatedCustomFields, newJiraComments, newJiraWorklogs } = counts;
+    const { updatedCustomFields, newJiraComments, newJiraWorklogs, newJiraAttachments } = counts;
     if (updatedCustomFields) actions.push(`사용자 정의 속성 ${updatedCustomFields.toLocaleString()}건 반영`);
     if (newJiraComments) actions.push(`기존 업무에 새 댓글 ${newJiraComments.toLocaleString()}건 추가`);
     if (newJiraWorklogs) actions.push(`기존 업무에 새 작업 시간 기록 ${newJiraWorklogs.toLocaleString()}건 추가`);
+    if (newJiraAttachments) actions.push(`기존 업무에 새 첨부파일 ${newJiraAttachments.toLocaleString()}건 추가`);
   } else {
     const { newConfluenceAttachments, newConfluenceAttachmentVersions, newConfluenceComments, newConfluenceRevisions } = counts;
     if (newConfluenceAttachments) actions.push(`기존 문서에 새 첨부 ${newConfluenceAttachments.toLocaleString()}건 추가`);
@@ -215,6 +217,9 @@ function ActorMigration(props: FeatureProps) {
           </RefreshOption>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshHistory" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무에 댓글과 작업 시간 기록 추가">
             사용자 매핑에서 지정한 팀원을 작성자로 연결합니다. 작성자를 확인하기 어려운 기록은 원본에 보관합니다.
+          </RefreshOption>}
+          {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshAttachments" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무에 첨부파일 추가">
+            원본 ID와 파일 내용을 확인해 첨부파일을 추가합니다. 패키지에 파일이 누락된 경우 원본 정보가 보존됩니다.
           </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
             최신 원본의 제목과 본문을 현재 문서와 비교합니다. 팀에서 바꾼 제목이나 본문은 그대로 유지합니다.

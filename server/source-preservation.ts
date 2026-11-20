@@ -3,7 +3,7 @@ import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
-import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import type { Store } from './store.js';
 
@@ -44,8 +44,10 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
   const refresh = Object.hasOwn(append, 'refreshExisting');
   const custom = Object.hasOwn(append, 'refreshCustomFields');
   const history = Object.hasOwn(append, 'refreshHistory');
-  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) || (refresh && append.refreshExisting !== true) ||
-      (custom && append.refreshCustomFields !== true) || (history && append.refreshHistory !== true)) {
+  const attachments = Object.hasOwn(append, 'refreshAttachments');
+  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) + Number(attachments) ||
+      (refresh && append.refreshExisting !== true) || (custom && append.refreshCustomFields !== true) ||
+      (history && append.refreshHistory !== true) || (attachments && append.refreshAttachments !== true)) {
     fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
   }
   return {
@@ -56,6 +58,7 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     ...(refresh ? { refreshExisting: true } : {}),
     ...(custom ? { refreshCustomFields: true } : {}),
     ...(history ? { refreshHistory: true } : {}),
+    ...(attachments ? { refreshAttachments: true } : {}),
   };
 }
 export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
@@ -282,13 +285,16 @@ function confluenceArchiveKey(record: SourceRecordArchive, kind = record.record.
 }
 interface EarlierAttachments { versions: AttachmentVersion[]; records: SourceRecordArchive[] }
 interface AppliedConfluenceHistory { owners: Set<string>; commentIds: Set<string>; revisionIds: Set<string> }
-interface AppliedJiraHistory {
-  owners: Set<string>;
+interface AppliedJiraChildren {
+  historyOwners: Set<string>;
+  attachmentOwners: Set<string>;
   comments: Map<string, string>;
   worklogs: Map<string, string>;
+  attachments: Map<string, string>;
 }
 interface JiraIssueOrigin { alias: string; issueId: string; projectId: string; sourceProjectId: string; archiveId: string }
 interface JiraHistoryArchive { kind: 'comment' | 'worklog'; sourceId: string; issueId: string; archiveId: string }
+interface JiraAttachmentArchive { sourceId: string; issueId: string; archiveId: string }
 function jiraIssueAliases(record: LegacyRecord): string[] {
   const key = record.metadata.key;
   return typeof key === 'string' && key !== record.sourceId ? [record.sourceId, key] : [record.sourceId];
@@ -398,13 +404,21 @@ export class SourcePreservationService {
         AND (json_type(history.json,'$.jiraHistoryAppend')='true' ${legacyWorklogs})
       ORDER BY kind,sourceId,archiveId`).all(instanceKey, JSON.stringify(selected.comment), instanceKey, JSON.stringify(selected.worklog)) as unknown as JiraHistoryArchive[];
   }
+  jiraKnownAttachments(instanceKey: string, sourceIds: string[]): JiraAttachmentArchive[] {
+    if (!sourceIds.length) return [];
+    // The archive link remains authoritative even when the file or its issue was removed.
+    return this.store.db.prepare(`SELECT id AS archiveId,owner_id AS issueId,source_id AS sourceId FROM source_records
+      WHERE product='jira' AND source_instance=? AND kind='attachment' AND target_type='attachment'
+        AND owner_type='issue' AND source_id IN (SELECT value FROM json_each(?))
+      ORDER BY source_id,id`).all(instanceKey, JSON.stringify(sourceIds)) as unknown as JiraAttachmentArchive[];
+  }
   hasLocalAttachmentVersion(id: string): boolean {
     return Boolean(this.store.db.prepare(`SELECT 1 FROM attachment_versions WHERE id=? AND id<>attachment_id
       AND json_type(json,'$.localRevision')='integer' AND json_extract(json,'$.localRevision')>=2`).get(id));
   }
   versionsForAttachments(ids: string[]): AttachmentVersion[] { const result: AttachmentVersion[] = []; for (const id of new Set(ids)) result.push(...(this.store.db.prepare('SELECT json FROM attachment_versions WHERE attachment_id=? ORDER BY rowid').all(id) as { json: string }[]).map(row => JSON.parse(row.json) as AttachmentVersion)); return result; }
   validateImport(input: { imports: unknown; records: unknown; versions: unknown; relations: unknown }, context: SourcePreservationContext,
-    earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory, appliedJiraHistory?: AppliedJiraHistory): SourcePreservationData {
+    earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory, appliedJiraChildren?: AppliedJiraChildren): SourcePreservationData {
     const users = new Set(context.users.map(value => value.id)), imports = list(input.imports, '이관 영수증', 10000).map(value => parseImport(value, users)), byImport = unique(imports, '이관 영수증');
     const datasets = new Map<string, ReturnType<typeof emptyDataset>>(), packages = new Map(imports.map(value => [value.id, new Map(value.packages.map(pkg => [stable([pkg.sha256, pkg.source]), pkg]))]));
     const records = list(input.records, '보존 원본').map(raw => {
@@ -436,10 +450,18 @@ export class SourcePreservationService {
           targetType !== (jiraHistory.kind === 'comment' ? 'comment' : null))) {
         fail(400, 'Jira 댓글·작업 시간 원본의 적용 설정과 대상을 확인해 주세요.');
       }
+      const jiraAttachmentAppend = Object.hasOwn(value, 'jiraAttachmentAppend');
+      if (jiraAttachmentAppend && (value.jiraAttachmentAppend !== true || source.product !== 'jira' ||
+          !owner.configuration.appendTo?.refreshAttachments || owner.configuration.appendTo.projectId !== targetProjectId ||
+          ownerType !== 'issue' || !ownerId || value.excluded === true || targetType !== 'attachment' ||
+          !jiraAttachmentSourceId(record) || !jiraAttachmentFileEvidence(record) || isRestrictedJiraAttachment(record))) {
+        fail(400, 'Jira 첨부 원본의 적용 설정과 대상을 확인해 주세요.');
+      }
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
         ...(jiraHistory ? { jiraHistoryAppend: true } : {}),
+        ...(jiraAttachmentAppend ? { jiraAttachmentAppend: true } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
@@ -488,17 +510,22 @@ export class SourcePreservationService {
     this.validateConfluenceAttachmentRoots(versions, records, earlier);
     this.validateTargets(records, context, byVersion);
     this.validateConfluenceHistory(imports, records, context.revisions, appliedHistory);
-    this.validateJiraHistory(imports, records, appliedJiraHistory);
+    this.validateJiraChildren(imports, records, attachments, byVersion, appliedJiraChildren);
     const issues = new Map(context.issues.map(value => [value.id, value]));
     const relations = list(input.relations, '업무 관계').map(raw => { const value = object(raw, '업무 관계'), sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200), targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200); if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) fail(400, '업무 관계는 현재 존재하는 서로 다른 업무를 연결해야 합니다.'); return { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId, type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) }; });
     unique(relations, '업무 관계'); this.bindings(records); return { imports, records, versions, relations };
   }
-  private validateJiraHistory(imports: SourceImport[], records: SourceRecordArchive[], applied?: AppliedJiraHistory): void {
-    const marked = records.filter(record => record.jiraHistoryAppend);
-    if (!marked.length && !applied?.comments.size && !applied?.worklogs.size) return;
+  private validateJiraChildren(imports: SourceImport[], records: SourceRecordArchive[], attachments: Map<string, Attachment>,
+    versions: Map<string, AttachmentVersion>, applied?: AppliedJiraChildren): void {
+    const marked = records.filter(record => record.jiraHistoryAppend || record.jiraAttachmentAppend);
+    if (!marked.length && !applied?.comments.size && !applied?.worklogs.size && !applied?.attachments.size) return;
     const receipts = new Map(imports.map(receipt => [receipt.id, receipt]));
     const jira = records.filter(record => record.source.product === 'jira');
     const sourceIdentity = (record: SourceRecordArchive) => stable([record.source.instanceKey, record.record.kind, record.record.sourceId]);
+    const supplementalKey = (value: SourceRecordArchive) => value.jiraAttachmentAppend
+      ? { kind: 'attachment' as const, sourceId: jiraAttachmentSourceId(value.record)! } : jiraHistorySourceKey(value.record)!;
+    const ownerAliases = (value: SourceRecordArchive) => value.jiraAttachmentAppend
+      ? jiraAttachmentOwnerAliases(value.record) : jiraHistoryOwnerAliases(value.record);
     const issueKey = (record: SourceRecordArchive, alias: string) => stable([record.sourceImportId, record.packageSha256, record.source.instanceKey, alias]);
     const projectKey = (instance: string, projectId: string) => stable([instance, projectId]);
     const catalogKey = (instance: string, projectId: string, alias: string) => stable([instance, projectId, alias]);
@@ -526,7 +553,7 @@ export class SourcePreservationService {
           anchors.set(scope, archived);
         }
       }
-      if (record.targetType === 'comment' || record.jiraHistoryAppend) {
+      if (record.targetType === 'comment' || record.targetType === 'attachment' || record.jiraHistoryAppend) {
         const identity = sourceIdentity(record);
         linkedCounts.set(identity, (linkedCounts.get(identity) ?? 0) + 1);
       }
@@ -534,16 +561,16 @@ export class SourcePreservationService {
     const archivedProjectScopes = new Set<string>();
     const projectArchive = this.store.db.prepare(`SELECT json FROM source_records WHERE product='jira' AND source_instance=?
       AND kind='project' AND target_type='project' AND target_id=?`);
-    const markedCommentIds = new Set<string>(), verifiedWorklogSources = new Set<string>();
+    const verified = { comment: new Set<string>(), worklog: new Set<string>(), attachment: new Set<string>() };
     const alreadyStored = new Map<string, Set<string>>();
     if (applied) {
-      const selectedByInstance = new Map<string, { comment: string[]; worklog: string[]; aliases: Set<string> }>();
+      const selectedByInstance = new Map<string, { comment: string[]; worklog: string[]; attachment: string[]; aliases: Set<string> }>();
       const incomingRecordIds = new Set(marked.map(record => record.id));
       for (const history of marked) {
-        const instance = history.source.instanceKey, { kind, sourceId } = jiraHistorySourceKey(history.record)!;
-        const selected = selectedByInstance.get(instance) ?? { comment: [], worklog: [], aliases: new Set<string>() };
+        const instance = history.source.instanceKey, { kind, sourceId } = supplementalKey(history);
+        const selected = selectedByInstance.get(instance) ?? { comment: [], worklog: [], attachment: [], aliases: new Set<string>() };
         selected[kind].push(sourceId);
-        for (const alias of jiraHistoryOwnerAliases(history.record) ?? []) {
+        for (const alias of ownerAliases(history) ?? []) {
           selected.aliases.add(alias);
           for (const owner of rawIssues.get(issueKey(history, alias)) ?? []) {
             for (const candidate of jiraIssueAliases(owner.record)) selected.aliases.add(candidate);
@@ -552,7 +579,9 @@ export class SourcePreservationService {
         selectedByInstance.set(instance, selected);
       }
       for (const [instance, selected] of selectedByInstance) {
-        alreadyStored.set(instance, new Set(this.jiraKnownHistory(instance, selected).filter(value => !incomingRecordIds.has(value.archiveId))
+        const known = [...this.jiraKnownHistory(instance, selected), ...this.jiraKnownAttachments(instance, selected.attachment)
+          .map(value => ({ ...value, kind: 'attachment' as const }))];
+        alreadyStored.set(instance, new Set(known.filter(value => !incomingRecordIds.has(value.archiveId))
           .map(value => stable([value.kind, value.sourceId]))));
         const snapshots = new Map<string, SourceRecordArchive>();
         for (const origin of this.jiraIssueOrigins(instance, [...selected.aliases], 'alias')) {
@@ -568,12 +597,15 @@ export class SourcePreservationService {
         }
       }
     }
-    const invalid = () => fail(400, 'Jira 댓글·작업 시간의 이전 원본 업무 및 프로젝트 연결을 확인해 주세요.');
+    const invalid = (attachment = false) => fail(400, attachment ? 'Jira 첨부 파일의 이전 원본 업무 및 프로젝트 연결을 확인해 주세요.' :
+      'Jira 댓글·작업 시간의 이전 원본 업무 및 프로젝트 연결을 확인해 주세요.');
     for (const history of marked) {
-      const { kind, sourceId } = jiraHistorySourceKey(history.record)!;
+      const { kind, sourceId } = supplementalKey(history);
       const instance = history.source.instanceKey, projectId = history.targetProjectId!;
-      if (applied && (!applied.owners.has(history.ownerId!) || alreadyStored.get(instance)?.has(stable([kind, sourceId])))) invalid();
-      if (linkedCounts.get(sourceIdentity(history)) !== 1) invalid();
+      const isAttachment = kind === 'attachment';
+      const owners = isAttachment ? applied?.attachmentOwners : applied?.historyOwners;
+      if (applied && (!owners?.has(history.ownerId!) || alreadyStored.get(instance)?.has(stable([kind, sourceId])))) invalid(isAttachment);
+      if (linkedCounts.get(sourceIdentity(history)) !== 1) invalid(isAttachment);
       const scope = projectKey(instance, projectId);
       if (applied && !archivedProjectScopes.has(scope)) {
         for (const row of projectArchive.all(instance, projectId) as { json: string }[]) addProject(JSON.parse(row.json) as SourceRecordArchive);
@@ -586,7 +618,7 @@ export class SourcePreservationService {
         const [numeric, key] = /^\d+$/.test(a) ? [a, b] : [b, a];
         return projects?.get(numeric)?.has(key) === true && projects.has(key);
       };
-      const aliases = jiraHistoryOwnerAliases(history.record);
+      const aliases = ownerAliases(history);
       const receipt = receipts.get(history.sourceImportId)!;
       const earlier = (alias: string) => (anchors.get(catalogKey(instance, projectId, alias)) ?? []).filter(archive =>
         archive.sourceImportId !== history.sourceImportId && (applied || Date.parse(receipts.get(archive.sourceImportId)!.createdAt) <= Date.parse(receipt.createdAt)) &&
@@ -598,16 +630,23 @@ export class SourcePreservationService {
         const owners = [...direct, ...supplied.flatMap(row => jiraIssueAliases(row.record).flatMap(earlier))];
         return owners.length > 0 && owners.every(owner => owner.targetId === history.ownerId &&
           supplied.every(row => sameProject(owner.record.containerId!, row.record.containerId!)));
-      })) invalid();
-      if (kind === 'comment') {
-        if (markedCommentIds.has(history.targetId!) || applied && applied.comments.get(history.targetId!) !== history.ownerId) invalid();
-        markedCommentIds.add(history.targetId!);
-      } else {
-        if (applied && applied.worklogs.get(history.id) !== history.ownerId) invalid();
-        verifiedWorklogSources.add(history.id);
+      })) invalid(isAttachment);
+      const targetId = kind === 'worklog' ? history.id : history.targetId!;
+      const targets = kind === 'comment' ? applied?.comments : kind === 'worklog' ? applied?.worklogs : applied?.attachments;
+      if (verified[kind].has(targetId) || applied && targets?.get(targetId) !== history.ownerId) invalid(isAttachment);
+      if (isAttachment && attachments.has(targetId)) {
+        const original = versions.get(targetId);
+        const evidence = jiraAttachmentFileEvidence(history.record)!;
+        if (!original || original.attachmentId !== targetId || original.sourceRecordId !== history.id ||
+            original.resourceId !== history.ownerId || original.resourceType !== 'issue' ||
+            original.size !== evidence.size || original.sha256 !== evidence.sha256) {
+          fail(400, 'Jira 첨부 파일의 기준 버전과 원본 바이트 확인값이 다릅니다.');
+        }
       }
+      verified[kind].add(targetId);
     }
-    if (applied && (markedCommentIds.size !== applied.comments.size || verifiedWorklogSources.size !== applied.worklogs.size)) invalid();
+    if (applied && (verified.comment.size !== applied.comments.size || verified.worklog.size !== applied.worklogs.size)) invalid();
+    if (applied && verified.attachment.size !== applied.attachments.size) invalid(true);
   }
   confluenceArchivedRecord(archive: SourceRecordArchive, kind: ConfluenceArchiveKind, sourceId: string): LegacyRecord | undefined {
     const rows = this.store.db.prepare(`SELECT json FROM source_records WHERE import_id=? AND product='confluence' AND source_instance=?
@@ -819,12 +858,15 @@ export class SourcePreservationService {
     const owners = new Set(prepared.confluenceHistoryOwners);
     const appliedHistory = { owners, commentIds: new Set(prepared.comments.filter(comment => owners.has(comment.resourceId)).map(comment => comment.id)),
       revisionIds: new Set(prepared.revisions.filter(revision => revision.confluenceSourceVersion !== undefined).map(revision => revision.id)) };
-    const jiraOwners = new Set(prepared.jiraHistoryOwners);
-    const appliedJiraHistory = { owners: jiraOwners,
-      comments: new Map(prepared.comments.filter(comment => jiraOwners.has(comment.resourceId)).map(comment => [comment.id, comment.resourceId])),
-      worklogs: new Map((prepared.worklogs ?? []).filter(worklog => jiraOwners.has(worklog.issueId)).map(worklog => [worklog.sourceRecordId!, worklog.issueId])) };
+    const historyOwners = new Set(prepared.jiraHistoryOwners);
+    const attachmentOwners = new Set(prepared.jiraAttachmentOwners);
+    const appliedJiraChildren = { historyOwners, attachmentOwners,
+      comments: new Map(prepared.comments.filter(comment => historyOwners.has(comment.resourceId)).map(comment => [comment.id, comment.resourceId])),
+      worklogs: new Map((prepared.worklogs ?? []).filter(worklog => historyOwners.has(worklog.issueId)).map(worklog => [worklog.sourceRecordId!, worklog.issueId])),
+      attachments: new Map(prepared.attachments.filter(attachment => attachmentOwners.has(attachment.resourceId))
+        .map(attachment => [attachment.id, attachment.resourceId])) };
     const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations },
-      context, earlier, appliedHistory, appliedJiraHistory);
+      context, earlier, appliedHistory, appliedJiraChildren);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');

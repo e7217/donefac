@@ -223,6 +223,75 @@ test('Jira supplemental history validates immutable source anchors and finds del
   } finally { f.close(); }
 });
 
+test('Jira supplemental attachments keep tombstones and require the original issue and exact base version', () => {
+  const f = fixture(); try {
+    const issue = f.prepared.issues[0], [pkg] = f.prepared.sourceImport.packages;
+    const owner = { ownerType: 'issue', ownerId: issue.id, targetProjectId: issue.projectId } as const;
+    f.originalIssue.record.containerId = 'P-1';
+    const sourceFile = (sourceId: string, sourceImportId: string, sha256: string) => {
+      const attachment: Attachment = { id: randomUUID(), resourceType: 'issue', resourceId: issue.id, filename: 'report.bin',
+        mimeType: 'application/octet-stream', size: 3, sha256, authorId: 'mapped', createdAt: old };
+      const archive = f.archive('attachment', sourceId, { ...owner, sourceImportId, targetType: 'attachment', targetId: attachment.id });
+      archive.record.containerId = '100';
+      archive.record.references = [{ kind: 'issue', sourceId: 'OLD-100', relation: 'attachedTo' }];
+      archive.record.metadata = { path: `attachments/OLD-100/${sourceId}`, bytesPresent: true, actualSize: attachment.size, sha256 };
+      const version: AttachmentVersion = { ...attachment, attachmentId: attachment.id, versionLabel: '원본', sourceImportId, sourceRecordId: archive.id };
+      return { attachment, archive, version };
+    };
+    const former = sourceFile('701', f.prepared.sourceImport.id, 'e'.repeat(64));
+    f.prepared.attachments.push(former.attachment);
+    f.prepared.attachmentVersions.push(former.version);
+    f.prepared.sourceRecords.push(former.archive);
+    f.store.put('attachments', former.attachment);
+    persist(f);
+    f.store.db.prepare('DELETE FROM attachments WHERE id=?').run(former.attachment.id);
+    assert.deepEqual(f.service.jiraKnownAttachments(pkg.source.instanceKey, ['701', '702']).map(row => ({ ...row })), [
+      { sourceId: '701', issueId: issue.id, archiveId: former.archive.id },
+    ]);
+    assert.deepEqual(f.service.jiraKnownAttachments('unrelated-instance', ['701']), []);
+
+    const id = randomUUID(), next = structuredClone(f.prepared), added = sourceFile('702', id, 'd'.repeat(64));
+    added.archive.jiraAttachmentAppend = true;
+    next.sourceImport = { ...next.sourceImport, id, projectIds: [issue.projectId], packages: [pkg], counts: {},
+      configuration: { ...next.sourceImport.configuration, projects: [], packageIds: [pkg.stagingId], sourceBaseUrls: {},
+        appendTo: { projectId: issue.projectId, statuses: {}, issueTypes: {}, fields: {}, refreshAttachments: true } } };
+    next.issues = [];
+    next.comments = [];
+    next.jiraAttachmentOwners = [issue.id];
+    next.attachments = [added.attachment];
+    next.attachmentVersions = [added.version];
+    next.sourceRecords = [added.archive];
+    next.issueRelations = [];
+    f.store.put('attachments', added.attachment);
+    const wrong = structuredClone(next);
+    wrong.sourceRecords[0].record.sourceId = '701';
+    wrong.sourceRecords[0].record.id = 'attachment:701';
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(wrong)), isError());
+    assert.equal(f.service.hasImport(id), false);
+    f.store.transaction(() => f.service.persistPrepared(next));
+    const backup = data(f);
+    assert.deepEqual(f.service.validateImport(backup, f.context()), backup);
+
+    const changed = (modify: (value: typeof backup, context: SourcePreservationContext) => void) => {
+      const forged = structuredClone(backup);
+      for (const receipt of forged.imports) delete receipt.integrity;
+      const context = f.context();
+      modify(forged, context);
+      assert.throws(() => f.service.validateImport(forged, context), isError());
+    };
+    changed(value => { delete value.imports.find(row => row.id === id)!.configuration.appendTo?.refreshAttachments; });
+    changed(value => { value.records.find(row => row.id === added.archive.id)!.record.references[0].sourceId = 'unknown-issue'; });
+    changed(value => { value.versions = value.versions.filter(row => row.id !== added.version.id); });
+    changed((value, context) => {
+      value.versions.find(row => row.id === added.version.id)!.sha256 = 'f'.repeat(64);
+      context.attachments.find(row => row.id === added.attachment.id)!.sha256 = 'f'.repeat(64);
+    });
+    f.store.db.prepare('DELETE FROM attachments WHERE id=?').run(added.attachment.id);
+    assert.equal(f.service.jiraKnownAttachments(pkg.source.instanceKey, ['702'])[0]?.archiveId, added.archive.id);
+    assert.doesNotThrow(() => f.service.validateImport(data(f), f.context()));
+  } finally { f.close(); }
+});
+
 test('Confluence attachment extensions retain a validated source root and yield to manually added versions', () => {
   const f = fixture(); try {
     const anchor = f.prepared.attachments[0];

@@ -531,6 +531,142 @@ test('Jira history append preserves local and deleted records and restores exact
   assert.equal((await readWorklogs()).entries.find(row => row.note === '티켓 객체가 빠진 작업 시간')?.durationSeconds, 97);
 });
 
+test('Jira attachment append adds exact new source bytes while preserving team versions and deletion history', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const source = 'synthetic-jira-file-append';
+  const date = '2020-09-01T00:00:00Z';
+  const originalBytes = Buffer.from('Jira 최초 파일\x00\r\n');
+  const removedBytes = Buffer.from('처음 옮겼다가 삭제한 파일');
+  const newBytes = Buffer.from('같은 이름의 새 Jira 파일\x00🙂');
+  const manualBytes = Buffer.from('팀에서 직접 올린 최신 버전');
+  const movedBytes = Buffer.from('원본 ID는 같지만 다른 바이트');
+  const attachment = (id: string, filename: string, size: number, extra = '') =>
+    `<FileAttachment id="${id}" issue="100" filename="${filename}" filesize="${size}" author="old-author" created="${date}" ${extra}/>`;
+  const primary = `<Project id="42" pkey="OLD" name="Jira 파일 프로젝트"/><Status id="1" pname="Open"/><IssueType id="3" pname="Task"/>` +
+    `<Issue id="100" project="42" number="1" summary="원본 파일 티켓" status="1" issuetype="3" created="${date}" updated="${date}"/>`;
+  const upload = (name: string, rows: string[], files: [string, Buffer][], includeIssue = true) => f.upload(zip([
+    { path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml>${includeIssue ? primary : ''}${rows.join('')}</entity-engine-xml>`) },
+    ...files.map(([id, bytes]) => ({ path: `attachments/OLD/OLD-1/${id}`, bytes })),
+  ]), `${name}.zip`, 'jira', source);
+  const initialPack = await upload('jira-files-initial', [attachment('700', 'report.bin', originalBytes.length), attachment('710', 'removed.bin', removedBytes.length)],
+    [['700', originalBytes], ['710', removedBytes]]);
+  const first = await f.apply(await f.preview(await f.configuration(initialPack, 'JAFT')));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  const ticket = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.projectId === projectId)!;
+  const issue = await ticket();
+  const list = () => f.call<AttachmentHead[]>(`/attachments?resourceType=issue&resourceId=${issue.id}`).then(result => result.data);
+  const initialFiles = await list();
+  const anchor = initialFiles.find(file => file.filename === 'report.bin')!;
+  const deleted = initialFiles.find(file => file.filename === 'removed.bin')!;
+  const trashed = await f.call<{trashItemId: string}>(`/attachments/${deleted.id}?expectedVersionId=${deleted.currentVersionId}`, 'DELETE', undefined, deleted.authorId);
+  assert.equal(trashed.status, 200);
+  assert.equal((await f.call(`/trash/items/${trashed.data.trashItemId}`, 'DELETE', undefined, deleted.authorId)).status, 200);
+  const local = await fetch(`${f.base}/attachments/${anchor.id}/versions?${new URLSearchParams({ filename: 'report.bin', expectedVersionId: anchor.id })}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(manualBytes),
+  });
+  assert.equal(local.status, 201);
+  const manualHead = await local.json() as AttachmentHead;
+  const existingFiles = await list();
+  const expectedBytes = async (id: string, bytes: Buffer) => {
+    const response = await fetch(`${f.base}/attachment-versions/${id}/download`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  };
+  async function settings(pkg: LegacyPackageSummary): Promise<MigrationConfiguration> {
+    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    const target = options.appendTarget;
+    assert.equal(target?.projectId, projectId);
+    return { ...options.defaultConfiguration, appendTo: { projectId, refreshAttachments: true,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target!.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target!.issueTypes.find(type => type.name === option.label)!.id])),
+      fields: {},
+    } };
+  }
+  const delta = await upload('jira-files-delta', [attachment('700', 'report.bin', movedBytes.length), attachment('701', 'report.bin', newBytes.length),
+    attachment('710', 'removed.bin', removedBytes.length), attachment('711', 'missing.bin', 13),
+    attachment('712', 'restricted.bin', movedBytes.length, 'grouplevel="private"'),
+  ], [['700', movedBytes], ['701', newBytes], ['710', removedBytes], ['712', movedBytes]]);
+  const config = await settings(delta);
+  const disabled = structuredClone(config);
+  delete disabled.appendTo?.refreshAttachments;
+  assert.equal((await f.preview(disabled)).canApply, false);
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.issues, 0);
+  assert.equal(plan.counts.newJiraAttachments, 1);
+  assert.equal(plan.counts.fileCopies, 1);
+  const stale = await f.preview(config);
+  const bundle = join(f.dir, 'legacy-imports', `${delta.id}.bundle`);
+  const uploadedBytes = readFileSync(bundle);
+  try {
+    const changed = Buffer.from(uploadedBytes);
+    changed[changed.length - 1] ^= 1;
+    writeFileSync(bundle, changed);
+    assert.equal((await f.apply(plan)).status, 409);
+  } finally { writeFileSync(bundle, uploadedBytes); }
+
+  const uploads = join(f.dir, 'uploads');
+  const filesBefore = readdirSync(uploads).sort();
+  f.db.exec(`CREATE TRIGGER fail_jira_attachment_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Jira attachment receipt failure'); END;`);
+  try { assert.equal((await f.apply(plan)).status, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_jira_attachment_receipt'); }
+  assert.deepEqual(await list(), existingFiles);
+  assert.deepEqual(readdirSync(uploads).sort(), filesBefore);
+  const result = await f.apply(plan);
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  assert.equal((await f.apply(plan)).data.duplicate, true);
+  assert.equal((await f.apply(stale)).status, 409);
+  assert.deepEqual(await ticket(), issue);
+  const finalFiles = await list();
+  const added = finalFiles.find(file => file.id !== anchor.id)!;
+  assert.equal(finalFiles.length, 2);
+  assert.equal(added.filename, 'report.bin');
+  assert.equal(added.versionCount, 1);
+  assert.equal(finalFiles.find(file => file.id === anchor.id)?.currentVersionId, manualHead.currentVersionId);
+  await expectedBytes(anchor.id, originalBytes);
+  await expectedBytes(manualHead.currentVersionId, manualBytes);
+  await expectedBytes(added.id, newBytes);
+  assert.equal((await f.preview(config)).canApply, false);
+
+  const archived = await f.call<{trashItemId: string}>(`/attachments/${added.id}?expectedVersionId=${added.id}`, 'DELETE', undefined, added.authorId);
+  assert.equal(archived.status, 200);
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[] };
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.deepEqual(backup.sourceRecords.filter(row => row.jiraAttachmentAppend).map(row => row.record.sourceId), ['701']);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 44 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  assert.equal((await f.preview(config)).canApply, false);
+  assert.equal((await f.call(`/trash/items/${archived.data.trashItemId}/restore`, 'POST', undefined, added.authorId)).status, 200);
+  await expectedBytes(added.id, newBytes);
+
+  const sparseBytes = Buffer.from('업무 객체 없이 내보낸 파일');
+  const sparse = await upload('jira-sparse-files', [attachment('730', 'sparse.bin', sparseBytes.length)], [['730', sparseBytes]], false);
+  const sparsePlan = await f.preview(await settings(sparse));
+  assert.equal(sparsePlan.canApply, true, JSON.stringify(sparsePlan.notices));
+  assert.equal(sparsePlan.counts.newJiraAttachments, 1);
+  assert.equal((await f.apply(sparsePlan)).status, 201);
+  await expectedBytes((await list()).find(file => file.filename === 'sparse.bin')!.id, sparseBytes);
+
+  const combined = await upload('jira-files-and-comments', [attachment('740', 'combined.bin', newBytes.length),
+    `<Action id="840" issue="100" author="old-author" type="comment" created="${date}" body="새 파일과 함께 이관한 댓글"/>`,
+  ], [['740', newBytes]], false);
+  const combinedSettings = await settings(combined);
+  combinedSettings.appendTo!.refreshHistory = true;
+  for (const identity of Object.keys(combinedSettings.users)) combinedSettings.users[identity] = 'user-jun';
+  const combinedPlan = await f.preview(combinedSettings);
+  assert.equal(combinedPlan.canApply, true, JSON.stringify(combinedPlan.notices));
+  assert.equal(combinedPlan.counts.newJiraAttachments, 1);
+  assert.equal(combinedPlan.counts.newJiraComments, 1);
+  const combinedResult = await f.apply(combinedPlan);
+  assert.equal(combinedResult.status, 201, JSON.stringify(combinedResult.data));
+  assert.ok((await f.call<Comment[]>(`/comments?resourceType=issue&resourceId=${issue.id}`)).data.some(row => row.body === '새 파일과 함께 이관한 댓글'));
+  await expectedBytes((await list()).find(file => file.filename === 'combined.bin')!.id, newBytes);
+});
+
 const gitlabPath = '/integrations/gitlab';
 const historicAt = '2020-01-02T00:00:00.000Z';
 const syntheticSecret = 'migration-gitlab-synthetic-secret';

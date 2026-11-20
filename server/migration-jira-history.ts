@@ -19,13 +19,40 @@ export function jiraHistorySourceKey(record: LegacyRecord): { kind: JiraHistoryK
 
 const ownerRelations = new Set(['commentOn', 'worklogOf', 'historyOf', 'container-content', 'body-owner', 'attachedTo']);
 
-export function jiraHistoryOwnerAliases(record: LegacyRecord): string[] | null {
-  const kind = jiraHistoryKind(record);
-  const relation = kind === 'comment' ? 'commentOn' : 'worklogOf';
+function jiraChildOwnerAliases(record: LegacyRecord, relation: string): string[] | null {
   const references = record.references.filter(reference => ownerRelations.has(reference.relation));
-  if (!kind || !record.containerId || !references.length || references.some(reference =>
+  if (!record.containerId || !references.length || references.some(reference =>
     reference.kind !== 'issue' || reference.relation !== relation || !reference.sourceId)) return null;
   return [...new Set([record.containerId, ...references.map(reference => reference.sourceId)])];
+}
+
+export function jiraHistoryOwnerAliases(record: LegacyRecord): string[] | null {
+  const kind = jiraHistoryKind(record);
+  return kind ? jiraChildOwnerAliases(record, kind === 'comment' ? 'commentOn' : 'worklogOf') : null;
+}
+
+export function jiraAttachmentSourceId(record: LegacyRecord): string | null {
+  return record.kind === 'attachment' && record.metadata.syntheticId !== true &&
+    /^[a-z\d][a-z\d_.-]{0,199}$/i.test(record.sourceId) ? record.sourceId : null;
+}
+
+export function jiraAttachmentOwnerAliases(record: LegacyRecord): string[] | null {
+  return record.kind === 'attachment' ? jiraChildOwnerAliases(record, 'attachedTo') : null;
+}
+
+export function jiraAttachmentFileEvidence(record: LegacyRecord): { path: string; size: number; sha256: string } | null {
+  const { bytesPresent, actualSize, size: declaredSize, sha256, path } = record.metadata;
+  // Each Jira attachment ID identifies its own file. A version relationship
+  // from another format does not prove the origin of a Jira attachment.
+  if (record.kind !== 'attachment' || bytesPresent !== true || record.metadata.currentVersionId || record.metadata.originalVersionId ||
+      record.references.some(ref => ref.relation === 'current-version' || ref.relation === 'original-version') ||
+      typeof path !== 'string' || !path || record.metadata.packagePath && record.metadata.packagePath !== path ||
+      typeof actualSize !== 'number' || !Number.isSafeInteger(actualSize) || actualSize < 1 ||
+      typeof sha256 !== 'string' || !/^[a-f\d]{64}$/.test(sha256)) return null;
+  if (declaredSize !== null && declaredSize !== undefined && declaredSize !== '' &&
+      (typeof declaredSize !== 'number' && (typeof declaredSize !== 'string' || !/^\d+$/.test(declaredSize.trim())) ||
+      Number(declaredSize) !== actualSize)) return null;
+  return { path, size: actualSize, sha256 };
 }
 
 const commentRestrictionNames = new Set([
@@ -58,9 +85,7 @@ function restrictedCommentProperty(value: LegacyValue): boolean {
   return nonemptyRestriction(details.internal) || details.public === false || details.public === 'false';
 }
 
-export function isRestrictedJiraHistory(record: LegacyRecord): boolean {
-  if (isJiraWorklog(record)) return isRestrictedJiraWorklog(record);
-  if (record.kind !== 'comment') return false;
+function hasJiraVisibilityRestriction(record: LegacyRecord): boolean {
   return Object.entries(record.metadata).some(([name, value]) => {
     const normalized = attributeName(name);
     if (normalized === 'public') return value === false || value === 'false' || value === 0 || value === '0';
@@ -72,6 +97,14 @@ export function isRestrictedJiraHistory(record: LegacyRecord): boolean {
     }
     return commentRestrictionNames.has(normalized) && nonemptyRestriction(value);
   });
+}
+
+export function isRestrictedJiraHistory(record: LegacyRecord): boolean {
+  return isJiraWorklog(record) ? isRestrictedJiraWorklog(record) : record.kind === 'comment' && hasJiraVisibilityRestriction(record);
+}
+
+export function isRestrictedJiraAttachment(record: LegacyRecord): boolean {
+  return record.kind === 'attachment' && hasJiraVisibilityRestriction(record);
 }
 
 const issueSecurityFields = new Set(['security', 'securitylevel', 'issuesecuritylevel']);

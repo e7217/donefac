@@ -512,6 +512,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const newJiraComments = value.comments.filter(comment => issueHistoryOwners.has(comment.resourceId)).length;
       const newJiraWorklogs = importedWorklogs.filter(worklog => issueHistoryOwners.has(worklog.issueId)).length;
       const hasJiraHistory = newJiraComments > 0 || newJiraWorklogs > 0;
+      const jiraAttachmentOwners = new Set(value.jiraAttachmentOwners ?? []);
+      const newJiraAttachments = value.attachments.filter(file => jiraAttachmentOwners.has(file.resourceId)).length;
       const attachmentOwners = new Set(value.confluenceAttachmentOwners ?? []);
       const newConfluenceAttachments = value.attachments.filter(file => attachmentOwners.has(file.resourceId)).length;
       const newConfluenceVersions = value.attachmentVersions.filter(version => version.sourceRevision !== undefined).length;
@@ -560,21 +562,33 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         const historyRecords = value.sourceRecords.filter(record => record.jiraHistoryAppend === true);
         const commentTargets = new Map(historyRecords.filter(record => record.targetType === 'comment').map(record => [record.targetId, record.ownerId]));
         const worklogSources = new Map(historyRecords.filter(record => record.record.kind === 'history').map(record => [record.id, record.ownerId]));
+        const attachmentTargets = new Map(value.sourceRecords.filter(record => record.jiraAttachmentAppend === true).map(record => [record.targetId, record.ownerId]));
+        const incomingAttachments = new Map(value.attachments.map(file => [file.id, file.resourceId]));
+        const rootVersions = new Set(value.attachmentVersions.filter(version => version.id === version.attachmentId).map(version => version.id));
         if (issueHistoryOwners.size && (value.preview.configuration.appendTo?.refreshHistory !== true ||
             [...issueHistoryOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
           fail('댓글과 작업 시간을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
         }
+        if (jiraAttachmentOwners.size && (value.preview.configuration.appendTo?.refreshAttachments !== true ||
+            [...jiraAttachmentOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
+          fail('첨부파일을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
+        }
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || value.revisions.length ||
-            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory) ||
+            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !newJiraAttachments) ||
             !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
               issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id)) ||
             value.comments.some(comment => comment.resourceType !== 'issue' || store.get('comments', comment.id) ||
               (!newIssueIds.has(comment.resourceId) && (!issueHistoryOwners.has(comment.resourceId) || commentTargets.get(comment.id) !== comment.resourceId))) ||
             importedWorklogs.some(worklog => worklog.projectId !== projectId || (!newIssueIds.has(worklog.issueId) &&
               (!issueHistoryOwners.has(worklog.issueId) || worklogSources.get(worklog.sourceRecordId ?? '') !== worklog.issueId))) ||
-            value.attachments.some(file => file.resourceType !== 'issue' || !newIssueIds.has(file.resourceId))) {
+            value.attachments.some(file => file.resourceType !== 'issue' || store.get('attachments', file.id) || store.get('attachment_versions', file.id) ||
+              (!newIssueIds.has(file.resourceId) && (!jiraAttachmentOwners.has(file.resourceId) || attachmentTargets.get(file.id) !== file.resourceId ||
+                !rootVersions.has(file.id)))) ||
+            value.attachmentVersions.some(version => version.resourceType !== 'issue' || incomingAttachments.get(version.attachmentId) !== version.resourceId ||
+              (attachmentTargets.has(version.attachmentId) && (version.id !== version.attachmentId ||
+                version.localRevision !== undefined || version.sourceRevision !== undefined)))) {
           fail('기존 프로젝트에 추가할 업무의 범위나 번호가 올바르지 않습니다.',409);
         }
         if (value.issues.length) store.db.prepare(`INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id)
@@ -626,12 +640,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length || hasJiraHistory ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length || hasJiraHistory || newJiraAttachments ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (newJiraComments) details.push(`기존 업무에 원본 댓글 ${newJiraComments}개 추가`);
       if (newJiraWorklogs) details.push(`기존 업무에 원본 작업 시간 ${newJiraWorklogs}개 추가`);
+      if (newJiraAttachments) details.push(`기존 업무에 원본 첨부파일 ${newJiraAttachments}개 추가`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
       if (newConfluenceAttachments) details.push(`기존 문서에 첨부 ${newConfluenceAttachments}개 추가`);
       if (newConfluenceVersions) details.push(`기존 첨부에 버전 ${newConfluenceVersions}개 추가`);
@@ -1383,6 +1398,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshHistory!==undefined))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraHistoryAppend')))
     ))fail('기존 Jira 업무의 댓글과 작업 시간 이관에는 schemaVersion 44 백업이 필요합니다.');
+    if(data.schemaVersion<45&&(
+      (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshAttachments!==undefined))||
+      (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraAttachmentAppend')))
+    ))fail('기존 Jira 업무의 첨부파일 추가 이관에는 schemaVersion 45 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
