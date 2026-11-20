@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import {
-  ISSUE_BULK_EDIT_LIMIT, PRIORITY, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  ISSUE_BULK_EDIT_LIMIT, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditValues,
+  type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
 } from '../shared/types.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
 import type { Store } from './store.js';
@@ -18,10 +19,16 @@ interface BulkEditHooks<T extends { issue: Issue }> {
   prepare(before: Issue, changes: IssueBulkEditChanges): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
-interface BulkEditProposal extends IssueBulkEditPreviewInput {
-  id: string;
+interface StatusMigrationHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
+  workflow(projectId: string): ProjectWorkflow;
+}
+interface BulkEditScope extends IssueBulkEditPreviewInput {
   projectId: string;
   actorId: string;
+  migrationFromStatusId?: string;
+}
+interface BulkEditProposal extends BulkEditScope {
+  id: string;
   removeAfter: string;
   configurationToken: string;
   rows: IssueBulkEditRow[];
@@ -90,6 +97,16 @@ function parseApply(raw: unknown): string {
   return input.previewId;
 }
 
+function parseStatusMigration(raw: unknown): WorkflowStatusMigrationPreviewInput {
+  const input = object(raw);
+  const { fromStatusId, toStatusId, expectedWorkflowVersion } = input;
+  if (Object.keys(input).length !== 3 || !isId(fromStatusId) || !isId(toStatusId) || fromStatusId === toStatusId
+      || typeof expectedWorkflowVersion !== 'number' || !Number.isSafeInteger(expectedWorkflowVersion) || expectedWorkflowVersion < 1) {
+    fail(400, '서로 다른 출발·도착 상태와 확인한 워크플로 버전을 입력해 주세요.');
+  }
+  return { fromStatusId, toStatusId, expectedWorkflowVersion };
+}
+
 function values({ status, priority, assigneeId }: Issue): IssueBulkEditValues {
   return { status, priority, assigneeId };
 }
@@ -151,6 +168,28 @@ export class IssueBulkEditService {
     return issues;
   }
 
+  private statusCohort(projectId: string, statusId: string): Issue[] {
+    const rows = this.store.db.prepare(`SELECT json FROM issues
+      WHERE project_id = ? AND json_extract(json, '$.status') = ? ORDER BY rowid LIMIT ?`)
+      .all(projectId, statusId, WORKFLOW_STATUS_MIGRATION_LIMIT + 1) as { json: string }[];
+    return rows.map(row => JSON.parse(row.json) as Issue);
+  }
+
+  private review<T extends { issue: Issue }>(scope: BulkEditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
+    const rows = issues.map(issue => candidate(issue, scope.changes, hooks.prepare).row);
+    const counts = { changed: 0, unchanged: 0, blocked: 0 };
+    for (const row of rows) counts[row.outcome]++;
+    if (counts.blocked || !counts.changed) return { previewId: null, expiresAt: null, rows, ...counts };
+
+    const id = randomUUID();
+    const expiresAt = after(AUTO_PREVIEW_TTL_MS);
+    const proposal: BulkEditProposal = {
+      ...scope, id, removeAfter: expiresAt, rows, configurationToken: hooks.configurationToken(scope.projectId),
+    };
+    this.store.put(TABLE, proposal);
+    return { previewId: id, expiresAt, rows, ...counts };
+  }
+
   private preview<T extends { issue: Issue }>(projectId: string, request: Request, hooks: BulkEditHooks<T>): IssueBulkEditPreview {
     const input = parsePreview(request.body);
     const actorId = hooks.actor(request);
@@ -158,32 +197,50 @@ export class IssueBulkEditService {
       this.prune();
       if (!this.store.get('projects', projectId)) fail(404, '프로젝트를 찾을 수 없습니다.');
       const issues = this.loadIssues(projectId, input.issues, 404);
-      const rows = issues.map(issue => candidate(issue, input.changes, hooks.prepare).row);
-      const counts = { changed: 0, unchanged: 0, blocked: 0 };
-      for (const row of rows) counts[row.outcome]++;
-      if (counts.blocked || !counts.changed) return { previewId: null, expiresAt: null, rows, ...counts };
-
-      const id = randomUUID();
-      const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-      const proposal: BulkEditProposal = {
-        ...input, id, projectId, actorId, removeAfter: expiresAt, rows, configurationToken: hooks.configurationToken(projectId),
-      };
-      this.store.put(TABLE, proposal);
-      return { previewId: id, expiresAt, rows, ...counts };
+      return this.review({ ...input, projectId, actorId }, issues, hooks);
     });
   }
 
-  private apply<T extends { issue: Issue }>(projectId: string, request: Request, hooks: BulkEditHooks<T>): IssueBulkEditResult {
+  private previewStatusMigration<T extends { issue: Issue }>(projectId: string, request: Request, hooks: StatusMigrationHooks<T>): IssueBulkEditPreview {
+    const { fromStatusId, toStatusId, expectedWorkflowVersion } = parseStatusMigration(request.body);
+    const actorId = hooks.actor(request);
+    return this.store.transaction(() => {
+      this.prune();
+      const workflow = hooks.workflow(projectId);
+      if (workflow.version !== expectedWorkflowVersion) fail(409, STALE_MESSAGE, { currentVersion: workflow.version });
+      if (![fromStatusId, toStatusId].every(id => workflow.statuses.some(status => status.id === id))) {
+        fail(400, '이 프로젝트의 출발·도착 상태를 선택해 주세요.');
+      }
+      const issues = this.statusCohort(projectId, fromStatusId);
+      if (issues.length > WORKFLOW_STATUS_MIGRATION_LIMIT) {
+        fail(422, `한 번에 활성 업무 ${WORKFLOW_STATUS_MIGRATION_LIMIT}개까지 상태를 이관할 수 있습니다.`, { limit: WORKFLOW_STATUS_MIGRATION_LIMIT });
+      }
+      return this.review({
+        projectId, actorId, migrationFromStatusId: fromStatusId,
+        issues: issues.map(({ id, version }) => ({ id, expectedVersion: version })),
+        changes: { status: toStatusId },
+      }, issues, hooks);
+    });
+  }
+
+  private apply<T extends { issue: Issue }>(projectId: string, request: Request, hooks: BulkEditHooks<T>, statusMigration = false): IssueBulkEditResult {
     const previewId = parseApply(request.body);
     const actorId = hooks.actor(request);
     return this.store.transaction(() => {
       const proposal = this.store.get<BulkEditProposal>(TABLE, previewId);
-      if (!proposal || proposal.projectId !== projectId || proposal.actorId !== actorId) fail(404, '적용할 미리보기를 찾을 수 없습니다.');
+      if (!proposal || proposal.projectId !== projectId || proposal.actorId !== actorId || Boolean(proposal.migrationFromStatusId) !== statusMigration) {
+        fail(404, '적용할 미리보기를 찾을 수 없습니다.');
+      }
       if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
       if (!this.store.get('projects', projectId) || proposal.configurationToken !== hooks.configurationToken(projectId)) fail(409, STALE_MESSAGE);
 
-      const issues = this.loadIssues(projectId, proposal.issues, 409);
+      // The migration preview represents the whole active source status, so an issue newly entering or leaving it also invalidates the review.
+      const issues = proposal.migrationFromStatusId
+        ? this.statusCohort(projectId, proposal.migrationFromStatusId)
+        : this.loadIssues(projectId, proposal.issues, 409);
+      if (proposal.migrationFromStatusId && (issues.length !== proposal.issues.length || issues.some(({ id, version }, index) =>
+        id !== proposal.issues[index].id || version !== proposal.issues[index].expectedVersion))) fail(409, STALE_MESSAGE);
       const prepared = issues.map(issue => candidate(issue, proposal.changes, hooks.prepare));
       if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
 
@@ -213,6 +270,15 @@ export class IssueBulkEditService {
     });
     app.post('/api/projects/:projectId/issues/bulk-apply', (request, response) => {
       response.set('Cache-Control', 'no-store').json(this.apply(request.params.projectId, request, hooks));
+    });
+  }
+
+  registerStatusMigrationRoutes<T extends { issue: Issue }>(app: Express, hooks: StatusMigrationHooks<T>): void {
+    app.post('/api/projects/:projectId/workflow/status-migration-preview', (request, response) => {
+      response.set('Cache-Control', 'no-store').json(this.previewStatusMigration(request.params.projectId, request, hooks));
+    });
+    app.post('/api/projects/:projectId/workflow/status-migration-apply', (request, response) => {
+      response.set('Cache-Control', 'no-store').json(this.apply(request.params.projectId, request, hooks, true));
     });
   }
 }

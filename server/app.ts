@@ -359,9 +359,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
   const issueAssignments=new IssueAssignmentRulesService(store);
-  const prepareIssueChange=(before:Issue,proposed:Issue,assigneeExplicit=false)=>{
-    const decision=issueAssignments.decide(before,proposed,assigneeExplicit);
-    const issue=validateIssue(decision?.outcome==='assigned'?{...proposed,assigneeId:decision.assigneeId}:proposed,before);
+  type IssueChangeOptions = { assigneeExplicit?: boolean; checkTransition?: boolean };
+  const prepareIssueChange=(before:Issue,proposed:Issue,options:IssueChangeOptions={})=>{
+    const decision=issueAssignments.decide(before,proposed,options.assigneeExplicit ?? false);
+    const issue=validateIssue(decision?.outcome==='assigned'?{...proposed,assigneeId:decision.assigneeId}:proposed,before,options);
     issue.completedAt=done(issue)?(before.completedAt||issue.updatedAt):null;
     return {issue,decision};
   };
@@ -617,25 +618,40 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
-  const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, assigneeExplicit=false) => {
+  const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
     const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
     const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
-    return {...prepareIssueChange(old,proposed,assigneeExplicit),fields};
+    return {...prepareIssueChange(old,proposed,options),fields};
   };
-  const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,fields}:ReturnType<typeof prepareIssueUpdate>) => {
+  const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,fields}:ReturnType<typeof prepareIssueUpdate>, history?: { action: string; detail: string }) => {
     const actorId=actor(req);
-    store.put('issues',issue);activity(req,'issue',issue.id,'티켓 변경',`${issue.key}: ${fields.join(', ')}`);
+    store.put('issues',issue);activity(req,'issue',issue.id,history?.action ?? '티켓 변경',history?.detail ?? `${issue.key}: ${fields.join(', ')}`);
     if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actorId,'issue-assigned',[issue.assigneeId],issue.updatedAt);
     commitIssueAssignment(decision,old,issue,actorId,'user');
     return issue;
   };
   const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => commitIssueUpdate(req,old,prepareIssueUpdate(old,values));
+  const issueEditConfiguration = (projectId: string) => JSON.stringify([
+    workflows.get(projectId).version, issueSchemas.get(projectId).version, issueAssignments.revisions(projectId),
+  ]);
   issueBulkEdit.registerRoutes(app,{
     actor,
-    configurationToken:projectId=>JSON.stringify([workflows.get(projectId).version,issueSchemas.get(projectId).version,issueAssignments.revisions(projectId)]),
-    prepare:(before,changes)=>prepareIssueUpdate(before,changes,Object.hasOwn(changes,'assigneeId')),
+    configurationToken:issueEditConfiguration,
+    prepare:(before,changes)=>prepareIssueUpdate(before,changes,{assigneeExplicit:Object.hasOwn(changes,'assigneeId')}),
     commit:commitIssueUpdate,
+  });
+  issueBulkEdit.registerStatusMigrationRoutes(app,{
+    actor,
+    configurationToken:issueEditConfiguration,
+    workflow:projectId=>workflows.get(projectId),
+    prepare:(before,changes)=>prepareIssueUpdate(before,{status:changes.status},{checkTransition:false}),
+    commit(req,before,change){
+      const {statuses}=workflows.get(before.projectId);
+      const from=statuses.find(status=>status.id===before.status)?.label ?? before.status;
+      const to=statuses.find(status=>status.id===change.issue.status)?.label ?? change.issue.status;
+      commitIssueUpdate(req,before,change,{action:'워크플로 상태 이관',detail:`${before.key} · ${from} → ${to}`});
+    },
   });
   app.get('/api/projects/:id/issue-order',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueOrders.get(req.params.id));

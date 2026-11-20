@@ -115,6 +115,14 @@ curl --fail-with-body \
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
+## 워크플로 상태 일괄 이동
+
+`POST /api/projects/:projectId/workflow/status-migration-preview`에 `{fromStatusId,toStatusId,expectedWorkflowVersion}`을 보낸다. 두 상태 ID는 같은 프로젝트의 저장된 워크플로에서 고른다. 서버가 출발 상태인 활성 티켓 전체를 조회하며 최대 1,000건을 검토한다. 응답 형식은 [업무 일괄 편집](#업무-일괄-편집) 미리보기와 같다. 이동할 업무가 없거나 검증이 차단된 업무가 있으면 `previewId`가 `null`이다.
+
+상태 매핑에는 도착 상태와 업무 양식의 필수 입력을 적용하고 해당하는 자동 배정 규칙을 평가한다. 개별 업무에 정의한 출발→도착 전이의 방향·유형·전이별 필수 입력 규칙은 일반 상태 변경에 적용된다. 미리보기의 티켓·활동·알림에는 변경이 없다.
+
+`POST /api/projects/:projectId/workflow/status-migration-apply`에 `{previewId}`를 보낸다. 검토한 작업자와 프로젝트가 일치해야 한다. 출발 상태의 티켓이 추가·삭제·이동되거나 대상 버전과 워크플로·양식·배정 규칙이 바뀌면 전체 적용을 거절한다. 상태 변화, 필요한 완료 시각, 활동·보고서·알림·발신 이벤트를 한 트랜잭션에 기록한다. 동일한 미리보기 ID로 7일간 완료 결과를 다시 받을 수 있다. 두 단계는 브라우저용 `/api` 경로에 있다.
+
 ## 문서에서 후속 업무 만들기
 
 브라우저의 `POST /api/documents/:id/follow-up-issues`에 `{requestId, expectedDocumentVersion, issue}`를 보낸다. `requestId`는 새 요청마다 생성하는 UUID v4이며 `issue`는 일반 티켓 생성과 같은 입력을 사용한다. 프로젝트 문서는 현재 문서의 프로젝트를 사용하고, 공통 문서는 `issue.projectId`를 지정한다. 신규 요청은 문서 버전을 검사하고 업무, 번호, 연결 및 활동 기록을 함께 저장한다. 최초 응답은 `201`과 `{issue, link, duplicate:false}`를 반환한다.

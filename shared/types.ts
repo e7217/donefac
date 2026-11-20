@@ -335,6 +335,12 @@ export interface Issue {
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export const ISSUE_BULK_EDIT_LIMIT = 100;
+export const WORKFLOW_STATUS_MIGRATION_LIMIT = 1_000;
+export interface WorkflowStatusMigrationPreviewInput {
+  fromStatusId: string;
+  toStatusId: string;
+  expectedWorkflowVersion: number;
+}
 export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'>;
 export type IssueBulkEditChanges = Partial<IssueBulkEditValues>;
 export interface IssueBulkEditPreviewInput {
