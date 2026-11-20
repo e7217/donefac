@@ -161,7 +161,10 @@ export interface LegacyDiagnosticPage { diagnostics:LegacyDiagnostic[]; total:nu
 export interface MigrationContainerOption { id:string;packageId:string;sourceProjectId:string;name:string;proposedKey:string;issueCount:number;documentCount:number }
 export interface MigrationValueOption { id:string;packageId:string;sourceValue:string;label:string }
 export interface MigrationIdentityOption extends MigrationValueOption { email:string|null }
-export interface MigrationFieldOption extends MigrationValueOption { suggestedKind:CustomFieldKind|'archive' }
+export interface MigrationFieldOption extends MigrationValueOption {
+  suggestedKind: CustomFieldKind | 'archive';
+  projectedDate?: 'startDate' | 'endDate';
+}
 export interface MigrationAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceProjectId: string;
   statuses: WorkflowStatus[]; issueTypes: IssueTypeDefinition[]; fields: CustomFieldDefinition[];
@@ -223,7 +226,7 @@ export interface MigrationPreview {
   id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
   projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
-  samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string}[];
+  samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
 }

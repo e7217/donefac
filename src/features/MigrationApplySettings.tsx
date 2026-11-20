@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
-import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
+import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -33,6 +33,9 @@ const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', labels: '라벨',
   startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량',
 };
+function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>) {
+  return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
+}
 const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문' };
 const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
 const appendLabels = {
@@ -262,7 +265,7 @@ function ActorMigration(props: FeatureProps) {
         {mode === 'new' && <>
         <MappingSection title="상태 매핑"><Paged title="상태 매핑" items={options.statuses} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`상태 매핑 ${item.label}`} value={configuration.statuses[item.id] || 'todo'} onChange={event => mapValue('statuses', item.id, event.target.value as StatusCategory)}>{Object.entries(categoryLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
         <MappingSection title="업무 유형 매핑"><Paged title="업무 유형 매핑" items={options.issueTypes} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`유형 매핑 ${item.label}`} value={configuration.issueTypes[item.id] ?? ''} onChange={event => mapValue('issueTypes', item.id, event.target.value || null)}><option value="">원본 유형을 새 유형으로 생성</option>{ISSUE_TYPES.map(type => <option value={type} key={type}>{type}</option>)}</select></MappingRow>} /></MappingSection>
-        <MappingSection title="사용자 정의 속성 매핑"><p>원본 보관만 선택한 속성도 원본 기록에 남습니다. 변환할 값이 선택한 속성 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
+        <MappingSection title="사용자 정의 속성 매핑"><p>선택한 원본 속성을 업무 양식에 추가할 수 있습니다. 변환할 값이 선택한 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={sourceMappingDetail(item)}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).map(([id, label]) => <option key={id} value={id}>{id === 'archive' && item.projectedDate ? '일정과 원본 기록에 반영' : label}</option>)}</select></MappingRow>} /></MappingSection>
         </>}
         <MappingSection title="원본 주소와 제외 항목">
           <p>패키지별 원본 사이트 주소를 입력할 수 있습니다. 별도 설치 경로가 있는 서버는 그 경로까지 입력하세요.</p>
@@ -292,6 +295,7 @@ function ActorMigration(props: FeatureProps) {
       <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending)} onExclude={stageExclusions} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
+        {item.schedule && <p>일정 · {item.schedule.startDate ?? '시작일 미정'} ~ {item.schedule.endDate ?? '종료일 미정'}</p>}
         {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
         <pre>{item.plainText.slice(0, 2000)}</pre>{item.plainText.length > 2000 && <small>견본은 2,000자까지 표시합니다. 원본 기록에는 전체 원문을 보존합니다.</small>}
       </div>} /></MappingSection>
@@ -553,14 +557,14 @@ function AppendMappings({ options, target, value, onChange }: {
 }
 
 function AppendMappingSection({ title, label, options, choices, value, emptyLabel, onChange }: {
-  title: string; label: string; options: MigrationValueOption[]; choices: MappingChoice[]; value: Record<string, string | null>;
+  title: string; label: string; options: (MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>)[]; choices: MappingChoice[]; value: Record<string, string | null>;
   emptyLabel: string; onChange: (optionId: string, targetId: string) => void;
 }) {
   if (!options.length) return null;
   return <MappingSection title={title}><Paged title={label} items={options} label={option => `${option.label} ${option.sourceValue}`} render={option =>
-    <MappingRow label={option.label} detail={option.sourceValue}>
+    <MappingRow label={option.label} detail={sourceMappingDetail(option)}>
       <select className="field" aria-label={`${label} ${option.label}`} value={value[option.id] || ''} onChange={event => onChange(option.id, event.target.value)}>
-        <option value="">{emptyLabel}</option>
+        <option value="">{option.projectedDate ? '일정과 원본 기록에 반영' : emptyLabel}</option>
         {choices.map(choice => <option value={choice.id} key={choice.id}>{choice.label}{choice.detail ? ` · ${choice.detail}` : ''}</option>)}
       </select>
     </MappingRow>} /></MappingSection>;

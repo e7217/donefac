@@ -28,6 +28,10 @@ const object=(value:unknown):Record<string,unknown>=>value&&typeof value==='obje
 const scalar=(value:unknown):unknown=>Array.isArray(value)&&value.length===1?scalar(value[0]):value;
 const fieldMap=(row:LegacyRecord)=>object(row.metadata.fields);
 const normalizedName=(value:string)=>value.replace(/[\s_/-]/g,'').toLowerCase();
+const jiraScheduleEndpoints = ['startDate', 'endDate'] as const;
+type JiraScheduleEndpoint = typeof jiraScheduleEndpoints[number];
+const jiraScheduleLabels = { startDate: '시작일', endDate: '종료일' } satisfies Record<JiraScheduleEndpoint, string>;
+const projectedJiraDate = (row: LegacyRecord, field: JiraScheduleEndpoint): unknown => object(row.metadata.jiraProjectedDates)[field];
 function sourceField(row:LegacyRecord,...names:string[]):unknown{const fields=fieldMap(row);const name=Object.keys(fields).find(name=>names.some(candidate=>normalizedName(name)===normalizedName(candidate)));return name===undefined?undefined:fields[name];}
 function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
   const raw = scalar(sourceField(row, kind, kind === 'issuetype' ? 'type' : 'status') ?? row.metadata[kind]);
@@ -51,8 +55,20 @@ function proposedKey(value:string,id:string):string{const key=value.toUpperCase(
 export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOptions{
   const containers:MigrationOptions['containers']=[],identities:MigrationOptions['identities']=[],statuses:MigrationValueOption[]=[],issueTypes:MigrationValueOption[]=[],fields:MigrationOptions['fields']=[];
   for(const pkg of packages){const index=packageIndex(pkg),containerRows=new Map<string,{issueCount:number;documentCount:number}>(),identityIds=new Set<string>(),statusValues=new Map<string,string>(),typeValues=new Map<string,string>();
+    const projectedSources = new Map<string, JiraScheduleEndpoint>();
+    if (pkg.dataset.source.product === 'jira') for (const row of pkg.dataset.records) {
+      for (const field of jiraScheduleEndpoints) {
+        const id = object(row.metadata.jiraProjectedDateSources)[field];
+        if (typeof id === 'string') projectedSources.set(id, field);
+      }
+    }
     for(const row of pkg.dataset.records){if(row.kind==='project')containerRows.set(row.sourceId,{issueCount:0,documentCount:0});if(row.kind==='identity')identityIds.add(row.sourceId);if(row.authorId)identityIds.add(row.authorId);for(const ref of row.references)if(ref.kind==='identity')identityIds.add(ref.sourceId);}
-    for(const row of pkg.dataset.records){if(row.kind==='issue'||row.kind==='page'){const id=containerFor(pkg,row,index),count=containerRows.get(id)||{issueCount:0,documentCount:0};if(row.kind==='issue'){count.issueCount++;const state=builtin(pkg,row,'status',index),type=builtin(pkg,row,'issuetype',index);statusValues.set(state.value,state.label);typeValues.set(type.value,type.label);}else count.documentCount++;containerRows.set(id,count);}if(customField(row))fields.push({id:optionId(pkg.summary.id,'field',row.sourceId),packageId:pkg.summary.id,sourceValue:row.sourceId,label:row.title||row.sourceId,suggestedKind:suggestedKind(row)});}
+    for(const row of pkg.dataset.records){if(row.kind==='issue'||row.kind==='page'){const id=containerFor(pkg,row,index),count=containerRows.get(id)||{issueCount:0,documentCount:0};if(row.kind==='issue'){count.issueCount++;const state=builtin(pkg,row,'status',index),type=builtin(pkg,row,'issuetype',index);statusValues.set(state.value,state.label);typeValues.set(type.value,type.label);}else count.documentCount++;containerRows.set(id,count);}if(customField(row)){
+      const projectedDate = projectedSources.get(row.sourceId);
+      fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
+        sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : suggestedKind(row),
+        ...(projectedDate ? { projectedDate } : {}) });
+    }}
     for(const[sourceProjectId,count]of containerRows){const row=index.get(`project:${sourceProjectId}`),name=row?.title||(sourceProjectId==='__unassigned__'?'원본 프로젝트 미지정':sourceProjectId);containers.push({id:optionId(pkg.summary.id,'container',sourceProjectId),packageId:pkg.summary.id,sourceProjectId,name,proposedKey:proposedKey(string(row?.metadata.key||row?.metadata.pkey||row?.metadata.spaceKey)||sourceProjectId,pkg.summary.id+sourceProjectId),...count});}
     for(const id of identityIds){const row=index.get(`identity:${id}`);identities.push({id:optionId(pkg.summary.id,'identity',id),packageId:pkg.summary.id,sourceValue:id,label:row?.title||id,email:string(row?.metadata.emailAddress||row?.metadata.email)||null});}
     for(const[value,label]of statusValues)statuses.push({id:optionId(pkg.summary.id,'status',value),packageId:pkg.summary.id,sourceValue:value,label});for(const[value,label]of typeValues)issueTypes.push({id:optionId(pkg.summary.id,'issuetype',value),packageId:pkg.summary.id,sourceValue:value,label});
@@ -204,6 +220,11 @@ function jiraSnapshotValue(row: LegacyRecord, names: readonly string[]): unknown
   }
 }
 
+function jiraCalendarValue(row: LegacyRecord, field: keyof typeof jiraCalendarFields): unknown {
+  const standard = jiraSnapshotValue(row, jiraCalendarFields[field]);
+  return standard === undefined && field !== 'dueDate' ? projectedJiraDate(row, field) : standard;
+}
+
 function jiraLabels(row: LegacyRecord): unknown {
   if (Array.isArray(row.metadata.jiraSnapshotLabels)) return row.metadata.jiraSnapshotLabels;
   const raw = sourceField(row, 'labels');
@@ -238,7 +259,12 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
         const raw = jiraLabels(row);
         return jiraLabelValues(raw)?.sort() ?? raw;
       }
-      case 'startDate': case 'endDate': case 'dueDate': return jiraSnapshotValue(row, jiraCalendarFields[field]) ?? '';
+      case 'startDate': case 'endDate': case 'dueDate': {
+        const value = jiraCalendarValue(row, field);
+        if (value === '') return null;
+        const observed = row.metadata.jiraSnapshotFields;
+        return value === undefined && Array.isArray(observed) && observed.includes(field) ? null : value;
+      }
       case 'estimate': return jiraSnapshotValue(row, ['estimate']) ?? '';
     }
   };
@@ -512,14 +538,16 @@ class Planner{
       if (labels) values.labels = labels;
       else unavailable('라벨');
     }
-    for (const [field, names] of Object.entries(jiraCalendarFields) as [keyof typeof jiraCalendarFields, readonly string[]][]) {
-      const raw = jiraSnapshotValue(row, names);
+    for (const field of [...jiraScheduleEndpoints, 'dueDate'] as const) {
+      const raw = jiraCalendarValue(row, field);
       if (raw === undefined && !explicit.includes(field)) continue;
       if (raw === undefined || raw === null || raw === '') values[field] = null;
       else {
-        const date = sourceCalendarDate(string(raw), this.configuration.timezone);
+        const projected = field !== 'dueDate' && jiraSnapshotValue(row, jiraCalendarFields[field]) === undefined;
+        const date = projected ? this.parseProjectedJiraDate(entry, field, raw, 'warning') :
+          sourceCalendarDate(string(raw), this.configuration.timezone);
         if (date) values[field] = date;
-        else unavailable(field === 'startDate' ? '시작일' : field === 'endDate' ? '종료일' : '마감일');
+        else if (!projected) unavailable(field === 'dueDate' ? '마감일' : jiraScheduleLabels[field]);
       }
     }
     const rawEstimate = jiraSnapshotValue(row, ['estimate']);
@@ -701,6 +729,15 @@ class Planner{
     const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
     const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
       .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
+    const sourceDateWarnings = new Map<string, string[]>();
+    for (const pkg of this.input.packages) for (const diagnostic of pkg.dataset.diagnostics) {
+      if (diagnostic.recordId && diagnostic.code === 'JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS') {
+        const key = `${pkg.summary.id}/${diagnostic.recordId}`;
+        const messages = sourceDateWarnings.get(key) ?? [];
+        messages.push(diagnostic.message);
+        sourceDateWarnings.set(key, messages);
+      }
+    }
     const review: JiraMigrationIssueReview[] = [];
     const updates: NonNullable<PreparedMigration['issueUpdates']> = [];
     const seen = new Set<string>();
@@ -733,6 +770,9 @@ class Planner{
         skippedIssueUpdates++;
         this.notice('JIRA_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 수정 시각을 확인할 수 없어 변경분은 적용하지 않습니다.', 'info', entry);
         continue;
+      }
+      if (reviewStandard) for (const message of sourceDateWarnings.get(entry.key) ?? []) {
+        this.notice('SOURCE_JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS', message, 'warning', entry, true);
       }
       if ([reviewStandard ? previous.archive.record.updatedAt : null, reviewCustom ? customBaseline.archive.record.updatedAt : null,
         entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
@@ -770,6 +810,13 @@ class Planner{
           canCheckpoint = true;
           updatedFields++;
         } else conflictingFields++;
+      }
+      if (accepted.startDate !== undefined || accepted.endDate !== undefined) {
+        const start = accepted.startDate === undefined ? issue.startDate : accepted.startDate;
+        const end = accepted.endDate === undefined ? issue.endDate : accepted.endDate;
+        if (start && end && start > end) {
+          this.notice('ISSUE_DATE_RANGE', '현재 업무와 반영할 날짜를 합치면 시작일이 종료일보다 늦습니다.', 'error', entry);
+        }
       }
       const custom = reviewCustom ? this.reviewJiraCustomFields(entry, issue, accepted, customBaseline, definitions) : undefined;
       if (custom) { updatedCustomFields += custom.updated; conflictingCustomFields += custom.conflicts; }
@@ -1258,11 +1305,14 @@ class Planner{
         issueNumbers.set(project.id, number);
         const assigneeRef=row.references.find(reference=>reference.kind==='identity'&&reference.relation==='assignee'),assigneeSource=assigneeRef?.sourceId||string(scalar(sourceField(row,'assignee'))),mappedAssignee=assigneeSource?this.configuration.users[optionId(entry.pkg.summary.id,'identity',assigneeSource)]:null;
         const labelsRaw=sourceField(row,'labels')??row.metadata.labels,labels=(Array.isArray(labelsRaw)?labelsRaw:typeof labelsRaw==='string'?labelsRaw.split(/[;,]/):[]).map(value=>string(value));if(labels.some(label=>label.length>60))this.notice('LABEL_LIMIT','원본 라벨이 현재60자 제한을 넘습니다.','error',entry);
-        const start=this.issueDate(sourceField(row,'startDate','Start date','Start'),entry),end=this.issueDate(sourceField(row,'endDate','End date','End'),entry),due=this.issueDate(sourceField(row,'dueDate','due','duedate'),entry);if(start&&end&&start>end)this.notice('ISSUE_DATE_RANGE','시작일이 종료일보다 늦습니다.','error',entry);
+        const start = this.initialJiraScheduleDate(entry, 'startDate');
+        const end = this.initialJiraScheduleDate(entry, 'endDate');
+        const due = this.issueDate(sourceField(row, 'dueDate', 'due', 'duedate'), entry);
+        if (start && end && start > end) this.notice('ISSUE_DATE_RANGE','시작일이 종료일보다 늦습니다.','error',entry);
         const rawEstimate=sourceField(row,'estimate'),estimate=rawEstimate===undefined||rawEstimate===null||rawEstimate===''?null:Number(rawEstimate);if(estimate!==null&&(!Number.isFinite(estimate)||estimate<0||estimate>100000))this.notice('ESTIMATE_ARCHIVED','예상 작업량의 단위/범위를 현재 숫자로 옮기지 않고 원본으로 보관합니다.','warning',entry,true);
         const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:this.priority(sourceField(row,'priority')),assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
         if (mapping) this.mapAppendFields(entry, issue, schema, mapping.fields);
-        else for(const option of new Set(Object.keys(fieldMap(row)).map(name=>this.fieldOptions.get(entry.pkg.summary.id)?.get(name)).filter((option):option is MigrationOptions['fields'][number]=>!!option))){const sourceDefinition=this.sourceEntry(entry,'field',option.sourceValue)?.row;if(!sourceDefinition)continue;const fields=fieldMap(row),raw=Object.hasOwn(fields,option.sourceValue)?fields[option.sourceValue]:fields[option.sourceValue.replace(/^csv:/,'')];if(raw===undefined)continue;const kind=this.configuration.fields[option.id];if(kind==='archive'){this.notice('FIELD_ARCHIVED',`필드 '${option.label}' 값은 원본 보관함에만 유지합니다.`,'warning',entry,true);continue;}const fieldId=`f_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,option.sourceValue).slice(0,24)}`;let definition=schema.fields.find(field=>field.id===fieldId);if(definition&&definition.kind!==kind)this.notice('FIELD_MAPPING_CONFLICT','같은 원본 필드를 다른 자료형으로 매핑했습니다.','error',entry);if(!definition){definition={id:fieldId,name:option.label,description:sourceDefinition.text.slice(0,20000),kind:kind as CustomFieldKind,required:false,issueTypes:[],options:[],archived:false};if(kind==='select'||kind==='multi_select')definition.options=(this.sourceOptions.get(entry.pkg.summary.id)?.get(option.sourceValue)||[]).map(row=>({id:`o_${hash(fieldId,string(row.metadata.originalId)||row.sourceId).slice(0,24)}`,name:row.title,archived:['Y','true','1'].includes(string(row.metadata.disabled))}));schema.fields.push(definition);}issue.customFields![fieldId]=this.convertField(entry,option.sourceValue,definition,raw);}
+        else for(const option of new Set(Object.keys(fieldMap(row)).map(name=>this.fieldOptions.get(entry.pkg.summary.id)?.get(name)).filter((option):option is MigrationOptions['fields'][number]=>!!option))){const sourceDefinition=this.sourceEntry(entry,'field',option.sourceValue)?.row;if(!sourceDefinition)continue;const fields=fieldMap(row),raw=Object.hasOwn(fields,option.sourceValue)?fields[option.sourceValue]:fields[option.sourceValue.replace(/^csv:/,'')];if(raw===undefined)continue;const kind=this.configuration.fields[option.id];if(kind==='archive'){this.noticeArchivedCustomField(entry, option);continue;}const fieldId=`f_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,option.sourceValue).slice(0,24)}`;let definition=schema.fields.find(field=>field.id===fieldId);if(definition&&definition.kind!==kind)this.notice('FIELD_MAPPING_CONFLICT','같은 원본 필드를 다른 자료형으로 매핑했습니다.','error',entry);if(!definition){definition={id:fieldId,name:option.label,description:sourceDefinition.text.slice(0,20000),kind:kind as CustomFieldKind,required:false,issueTypes:[],options:[],archived:false};if(kind==='select'||kind==='multi_select')definition.options=(this.sourceOptions.get(entry.pkg.summary.id)?.get(option.sourceValue)||[]).map(row=>({id:`o_${hash(fieldId,string(row.metadata.originalId)||row.sourceId).slice(0,24)}`,name:row.title,archived:['Y','true','1'].includes(string(row.metadata.disabled))}));schema.fields.push(definition);}issue.customFields![fieldId]=this.convertField(entry,option.sourceValue,definition,raw);}
         if(row.textFormat!=='plain'&&row.textFormat!=='none')this.notice('ISSUE_DESCRIPTION_PLAIN_TEXT','업무 설명은 현재 일반 텍스트로 변환합니다. 원래 서식·본문은 원본 보관함에 유지합니다.','warning',entry,true);
       }
     }
@@ -1279,8 +1329,8 @@ class Planner{
       const raw = Object.hasOwn(fields, option.sourceValue) ? fields[option.sourceValue] : fields[option.sourceValue.replace(/^csv:/, '')];
       if (raw === undefined) continue;
       const fieldId = fieldMappings[option.id];
-      if (fieldId === null) {
-        this.notice('FIELD_ARCHIVED', `필드 '${option.label}' 값은 원본 보관함에만 유지합니다.`, 'warning', entry, true);
+      if (fieldId === null || fieldId === undefined && option.projectedDate) {
+        this.noticeArchivedCustomField(entry, option);
         continue;
       }
       const field = schema.fields.find(value => value.id === fieldId);
@@ -1294,6 +1344,27 @@ class Planner{
       }
       issue.customFields![field.id] = this.convertField(entry, option.sourceValue, field, raw);
     }
+  }
+  private noticeArchivedCustomField(entry: Entry, option: MigrationOptions['fields'][number]): void {
+    const consumed = option.projectedDate && jiraSnapshotValue(entry.row, jiraCalendarFields[option.projectedDate]) === undefined &&
+      object(entry.row.metadata.jiraProjectedDateSources)[option.projectedDate] === option.sourceValue;
+    if (!consumed) this.notice('FIELD_ARCHIVED', `필드 '${option.label}' 값은 원본 보관함에만 유지합니다.`, 'warning', entry, true);
+  }
+  private initialJiraScheduleDate(entry: Entry, field: JiraScheduleEndpoint): string | null {
+    const standard = jiraSnapshotValue(entry.row, jiraCalendarFields[field]);
+    if (standard !== undefined) return this.issueDate(standard, entry);
+    const raw = projectedJiraDate(entry.row, field);
+    if (raw === undefined || raw === null) return null;
+    return this.parseProjectedJiraDate(entry, field, raw, 'error');
+  }
+  private parseProjectedJiraDate(entry: Entry, field: JiraScheduleEndpoint, raw: unknown, severity: 'warning' | 'error'): string | null {
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    const date = value && this.timezoneValid ? sourceCalendarDate(value, this.configuration.timezone) : null;
+    if (!date) this.notice('JIRA_SCHEDULE_DATE_INVALID', `Jira 원본의 일정 ${jiraScheduleLabels[field]} 값을 날짜로 해석할 수 없습니다.`, severity, entry);
+    else if (jiraEnglishDate(value)?.century) {
+      this.notice('DATE_TWO_DIGIT_CENTURY', 'Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.', 'warning', entry, true);
+    }
+    return date || null;
   }
   issueDate(value:unknown,entry:Entry):string|null{value=scalar(value);if(value===undefined||value===null||value==='')return null;const raw=string(value);if(isCalendarDate(raw))return raw;const timestamp=this.time(raw,entry,false);if(!timestamp)return null;const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:this.timezoneValid?this.configuration.timezone:'UTC',year:'numeric',month:'2-digit',day:'2-digit'}),parts=Object.fromEntries(formatter.formatToParts(new Date(timestamp)).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));return`${parts.year}-${parts.month}-${parts.day}`;}
   priority(value:unknown):Issue['priority']{value=scalar(value);const label=string(object(value).name||object(value).text||value);if(/urgent|highest|blocker|긴급/i.test(label))return'urgent';if(/high|critical|높음/i.test(label))return'high';if(/low|minor|trivial|낮음/i.test(label))return'low';return'medium';}
@@ -2611,6 +2682,7 @@ class Planner{
         recordId: entry.key, targetType: binding.type, title: item.title,
         plainText: plainText.slice(0, 3000) + (plainText.length > 3000 ? '\n[미리보기 일부만 표시]' : ''),
         ...(sourceUrl ? { sourceUrl } : {}),
+        ...('startDate' in item && (item.startDate || item.endDate) ? { schedule: { startDate: item.startDate, endDate: item.endDate } } : {}),
       });
     }
     if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {

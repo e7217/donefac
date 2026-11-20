@@ -3,6 +3,7 @@ import { posix } from 'node:path';
 import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKind,LegacyReference,LegacyValue } from '../shared/types.js';
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
+import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 
 // Primary dialect references: Jira search export documentation, Importers JSON
@@ -12,6 +13,8 @@ import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 // https://docs.atlassian.com/software/jira/docs/api/9.12.38/constant-values.html
 
 type ObjectValue=Record<string,unknown>;
+type ProjectedDateField = { role: JiraDateRole; sourceId: string };
+const ambiguousDateValue = Symbol('ambiguous Jira date value');
 const obj=(value:unknown):ObjectValue=>value&&typeof value==='object'&&!Array.isArray(value)?value as ObjectValue:{};
 const str=(value:unknown):string=>typeof value==='string'?value:typeof value==='number'||typeof value==='boolean'?String(value):'';
 const list=(value:unknown):unknown[]=>Array.isArray(value)?value:[];
@@ -37,6 +40,7 @@ const csvSnapshotFields = new Map<string, JiraMigrationIssueField>([
 
 class Context{
   dataset:LegacyDataset;byId=new Map<string,LegacyRecord>();fileNames=new Map<string,string[]>();
+  readonly scheduleDates=new JiraDateProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
   ensure(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord|undefined{const sourceId=str(id);if(!sourceId)return undefined;return this.byId.get(`${kind}:${sourceId}`)||this.put(kind,sourceId,value);}
@@ -79,7 +83,7 @@ class Context{
       ? '첨부 ID에 대응하는 파일이 여러 개여서 선택하지 않았습니다.' : '첨부 메타데이터는 보존했지만 패키지 안의 파일 바이트를 찾지 못했습니다.', item.id);
     return item;
   }
-  finish():LegacyDataset{const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;}
+  finish():LegacyDataset{this.scheduleDates.apply();const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;}
 }
 
 function csvRows(source:string,delimiter:string):string[][]{
@@ -106,11 +110,27 @@ function parseCsv(context:Context,path:string,source:string):void{
   const customHeaders = [...new Set(headers.filter(name => /^Custom field\s*\(/i.test(name)))];
   const customFieldIds = customHeaders.map(name => `csv:${name}`);
   for (const name of customHeaders) context.field(`csv:${name}`, name, 'csv-unspecified');
+  const dateColumns = headers.flatMap((header, column) => {
+    const role = jiraScheduleDateRole(/^Custom field \(([^()]+)\)$/i.exec(header)?.[1] ?? '');
+    if (!role) return [];
+    const sourceId = `csv:${header}`;
+    context.scheduleDates.declare(role, sourceId, true, path);
+    return [{ role, sourceId, column }];
+  });
+  for (const role of ['startDate', 'endDate'] as const) {
+    if (dateColumns.filter(column => column.role === role).length > 1) context.scheduleDates.reject(role, path);
+  }
   for(let rowIndex=0;rowIndex<rows.length;rowIndex++){const row=rows[rowIndex];if(row.every(value=>!value))continue;if(row.length!==headers.length)context.warn('CSV_COLUMN_COUNT_MISMATCH','CSV 행의 열 개수가 헤더와 다릅니다.',null,`${path}:${rowIndex+2}`,'error');const get=(...names:string[])=>row[headers.findIndex(header=>names.some(name=>header.toLowerCase()===name.toLowerCase()))]||'',key=get('Issue key','Key'),id=get('Issue id')||key||`csv:${path}:${rowIndex+2}`,projectId=get('Project id','Project key')||key.replace(/-\d+$/,'');if(projectId)context.ensure('project',projectId,{title:get('Project name')||get('Project key')||projectId,metadata:{key:get('Project key')||key.replace(/-\d+$/,'')}});const authorId=context.identity(get('Creator','Reporter')),assignee=context.identity(get('Assignee')),parent=get('Parent id','Parent');const metadata:Record<string,LegacyValue>={key,dialect:'search-csv',fields:{},jiraSnapshotFields:[...new Set(headers.map(header=>csvSnapshotFields.get(header.toLowerCase())).filter(field=>field!==undefined))]};const item=context.put('issue',id,{title:get('Summary'),containerId:projectId||null,parentId:parent||null,authorId,createdAt:context.date(get('Created'),`issue:${id}`),updatedAt:context.date(get('Updated'),`issue:${id}`),text:get('Description'),textFormat:'jira-wiki',metadata,references:[...ref('project',projectId,'project'),...ref('identity',authorId,'reporter'),...ref('identity',assignee,'assignee'),...ref('issue',parent,'parent')]});const fields=item.metadata.fields as Record<string,LegacyValue>;
     if (row.length === headers.length && customFieldIds.length) item.metadata.jiraSnapshotCustomFields = customFieldIds;
     for(let column=0;column<headers.length;column++){const name=headers[column],value=row[column]||'';if(!value)continue;if(/^Comment$/i.test(name)){const parts=value.split(';'),structured=parts.length>=3;const commentId=`csv:${id}:comment:${column}`,actor=structured?context.identity(parts[1]):null;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:actor,createdAt:structured?context.date(parts[0],`comment:${commentId}`):null,text:structured?parts.slice(2).join(';'):value,textFormat:'jira-wiki',metadata:{sourceColumn:column,structured,syntheticId:true},references:[...ref('issue',id,'commentOn'),...ref('identity',actor,'author')]});if(!structured)context.warn('CSV_COMMENT_ATTRIBUTION_UNRESOLVED','댓글 원문은 보존했지만 작성자·시각 구분 형식을 확인하지 못했습니다.',item.id);}
       else if(/^Attachment$/i.test(name)){const parts=value.split(';'),uri=parts.at(-1)||'',filename=parts.length>=4?parts.slice(2,-1).join(';'):uri.split('/').at(-1)||value;context.attachment(`csv:${id}:attachment:${column}`,id,{name:filename,uri,attacher:parts.length>=4?parts[1]:'',created:parts.length>=4?parts[0]:''});}
       else{const previous=Object.hasOwn(fields,name)?fields[name]:undefined;Object.defineProperty(fields,name,{value:previous===undefined?value:Array.isArray(previous)?[...previous,value]:[previous,value],enumerable:true,writable:true,configurable:true});if(/^(?:Status|Priority|Issue Type|Resolution|Component\/s|Fix Version\/s|Affects Version\/s)$/i.test(name)){const fieldId=`csv:${name}`;context.field(fieldId,name,'csv-label-only');const optionId=context.option(fieldId,value);item.references.push(...ref('option',optionId,name));}}
+    }
+    if (row.length === headers.length) {
+      for (const { role, sourceId, column } of dateColumns) {
+        const value = row[column];
+        context.scheduleDates.observe(item, role, sourceId, value.trim() ? value : null, path, true);
+      }
     }
   }
   context.warn('CSV_HISTORY_NOT_PROVIDED','검색 CSV는 완전한 변경 이력이나 첨부 바이트를 보장하지 않습니다. 실제 제공된 댓글·첨부 열만 분석했습니다.',null,path);
@@ -125,7 +145,7 @@ function jiraCustomUser(context: Context, value: unknown, fieldType: string): st
   return stableId || legacyId && (legacyProfile || typedUser) ? context.identity(profile) : null;
 }
 
-function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean):void{
+function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean,dateFields:ProjectedDateField[]=[]):void{
   const fields=importers?input:obj(input.fields),id=str(input.id||input.externalId||input.key)||`json:${path}:${index}`,key=str(input.key),project=obj(fields.project),containerId=str(project.id||project.key)||projectId;
   if(containerId)context.ensure('project',containerId,{title:str(project.name)||containerId,metadata:{key:str(project.key)||projectId}});
   const authorId=context.identity(fields.creator||fields.reporter),assignee=context.identity(fields.assignee),parent=obj(fields.parent),parentId=str(parent.id||parent.key)||str(fields.parent),description=fields.description;
@@ -138,6 +158,9 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   const jiraScheduleFields = Object.fromEntries(scheduleValues.filter(name=>Object.hasOwn(fields,name) &&
     (fields[name] === null || typeof fields[name] === 'string' || typeof fields[name] === 'number')).map(name=>[name,jsonValue(fields[name])]));
   if (Object.keys(jiraScheduleFields).length) item.metadata.jiraScheduleFields = jiraScheduleFields;
+  for (const { role, sourceId } of dateFields) {
+    if (Object.hasOwn(fields, sourceId)) context.scheduleDates.observe(item, role, sourceId, fields[sourceId], path, true);
+  }
   if(fields.security!==undefined&&fields.security!==null){const security=obj(fields.security);values.security=typeof fields.security==='boolean'?fields.security:typeof fields.security==='object'?{...selected(security,['id','name']),present:true}:str(fields.security)?{name:str(fields.security),present:true}:null;}
   for(const name of ['status','issuetype','issueType','priority','resolution','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','watches'])if(fields[name]!==undefined){values[name]=jsonValue(fields[name]);if(['status','issuetype','issueType','priority','resolution'].includes(name)){const fieldId=`builtin:${name==='issueType'?'issuetype':name}`;context.field(fieldId,name,'jira-builtin');const optionId=context.option(fieldId,fields[name]);item.references.push(...ref('option',optionId,name));}}
   for (const [name, value] of Object.entries(fields)) {
@@ -183,6 +206,20 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
   for(const name of Object.keys(fields))if(!known.has(name)&&!/^customfield_\d+$/.test(name))context.unsupported(`json-field:${name}`);
 }
+function declareRestFields(context: Context, root: ObjectValue, path: string): ProjectedDateField[] {
+  const names = obj(root.names), schemas = obj(root.schema);
+  return Object.entries(names).flatMap(([sourceId, title]) => {
+    if (!/^customfield_\d+$/.test(sourceId)) return [];
+    const schema = obj(schemas[sourceId]), type = str(schema.type), custom = str(schema.custom);
+    context.field(sourceId, str(title) || sourceId, custom || type || 'unknown');
+    const role = jiraScheduleDateRole(str(title));
+    if (!role) return [];
+    const proof = jiraRestDateProof(type, custom);
+    context.scheduleDates.declare(role, sourceId, proof, path);
+    return proof === true ? [{ role, sourceId }] : [];
+  });
+}
+
 function parseJson(context:Context,path:string,source:string):void{
   let input:unknown;try{input=JSON.parse(source);}catch{throw new LegacyImportError(400,'Jira JSON 형식이 올바르지 않습니다.');}const root=obj(input);
   if(Array.isArray(root.projects)){
@@ -193,10 +230,20 @@ function parseJson(context:Context,path:string,source:string):void{
   }else if(Array.isArray(root.issues)){
     context.warn('JSON_REST_DIALECT','Jira REST 검색 응답 JSON을 분석했습니다. 별도 페이지·첨부 바이트는 자동 조회하지 않습니다.',null,path,'info');
     if(Number(root.startAt)>0||Number(root.total)>root.issues.length)context.warn('ISSUES_PARTIAL','검색 응답의 일부 페이지입니다. 전체 이슈 개수와 파일 묶음을 대조해야 합니다.',null,path);
-    const names=obj(root.names),schemas=obj(root.schema);for(const[name,title]of Object.entries(names)){if(/^customfield_\d+$/.test(name))context.field(name,str(title)||name,str(obj(schemas[name]).custom||obj(schemas[name]).type)||'unknown');}
-    for(let index=0;index<root.issues.length;index++)issueJson(context,obj(root.issues[index]),'',path,index,false);
-  }else if(root.fields&&(root.id||root.key)){context.warn('JSON_REST_DIALECT','단일 Jira REST 이슈 JSON을 분석했습니다.',null,path,'info');issueJson(context,root,'',path,0,false);}
+    const dateFields=declareRestFields(context,root,path);
+    for(let index=0;index<root.issues.length;index++)issueJson(context,obj(root.issues[index]),'',path,index,false,dateFields);
+  }else if(root.fields&&(root.id||root.key)){context.warn('JSON_REST_DIALECT','단일 Jira REST 이슈 JSON을 분석했습니다.',null,path,'info');issueJson(context,root,'',path,0,false,declareRestFields(context,root,path));}
   else{context.warn('JSON_DIALECT_UNSUPPORTED','지원하는 Jira REST 검색/단일 이슈 또는 Importers JSON 구조가 아닙니다.',null,path,'error');context.unsupported('json:unrecognized-root');}
+}
+
+function rssDateValue(custom: LegacyXmlNode): unknown {
+  const containers = children(custom, 'customfieldvalues');
+  if (!containers.length) return undefined;
+  const [container] = containers;
+  const [value] = container.children;
+  if (containers.length > 1 || container.text.trim() || container.children.length > 1 ||
+      value && (value.name !== 'customfieldvalue' || value.children.length)) return ambiguousDateValue;
+  return value?.text;
 }
 
 function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
@@ -215,21 +262,53 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
     }
     for(const comment of child(node,'comments')?.children||[]){if(comment.name!=='comment')continue;const sourceId=comment.attributes.id,commentId=sourceId||`xml:${id}:comment:${(child(node,'comments')?.children||[]).indexOf(comment)}`,author=context.identity(comment.attributes.author);context.put('comment',commentId,{title:'댓글',containerId:id,authorId:author,createdAt:context.date(comment.attributes.created,`comment:${commentId}`),updatedAt:context.date(comment.attributes.updated,`comment:${commentId}`),text:text(comment),textFormat:'plain',metadata:{...jiraVisibilityMetadata(comment.attributes,!sourceId),bodyFormat:'search-rendered-html'},references:[...ref('issue',id,'commentOn'),...ref('identity',author,'author')]});}
     for(const attachment of child(node,'attachments')?.children||[])if(attachment.name==='attachment')context.attachment(attachment.attributes.id||`xml:${id}:attachment:${(child(node,'attachments')?.children||[]).indexOf(attachment)}`,id,attachment.attributes);
-    for(const custom of child(node,'customfields')?.children||[]){if(custom.name!=='customfield')continue;const fieldId=custom.attributes.id||`named:${text(child(custom,'customfieldname'))}`,values=(child(custom,'customfieldvalues')?.children||[]).map(value=>text(value));context.field(fieldId,text(child(custom,'customfieldname'))||fieldId,custom.attributes.key||'search-unspecified');fields[fieldId]=values;item.references.push(...ref('field',fieldId,'customField'));}
+    for (const custom of child(node,'customfields')?.children || []) {
+      if (custom.name !== 'customfield') continue;
+      const name = text(child(custom,'customfieldname'));
+      const fieldId = custom.attributes.id || `named:${name}`;
+      const values = (child(custom,'customfieldvalues')?.children || []).map(value=>text(value));
+      context.field(fieldId,name || fieldId,custom.attributes.key || 'search-unspecified');
+      fields[fieldId]=values;
+      item.references.push(...ref('field',fieldId,'customField'));
+      const role = jiraScheduleDateRole(name);
+      if (!role || !custom.attributes.id) continue;
+      const proof = jiraDatePickerProof(custom.attributes.key || '');
+      context.scheduleDates.declare(role,fieldId,proof,path);
+      if (proof === true) {
+        const value = children(custom,'customfieldname').length === 1 ? rssDateValue(custom) : ambiguousDateValue;
+        context.scheduleDates.observe(item,role,fieldId,value,path);
+      }
+    }
     for(const type of child(node,'issuelinks')?.children||[]){const typeId=type.attributes.id||text(child(type,'name'));for(const direction of ['inwardlinks','outwardlinks'])for(const link of child(type,direction)?.children||[]){const target=child(link,'issuekey'),targetId=target?.attributes.id||text(target);context.ensure('relation',`search:${id}:${typeId}:${direction}:${targetId}`,{title:text(child(type,'name'))||'업무 연결',containerId:id,metadata:{originalTypeId:typeId,direction,description:child(type,direction)?.attributes.description||'',syntheticId:true},references:[...ref('issue',id,'source'),...ref('issue',targetId,'target')]});}}
   }
   context.warn('SEARCH_XML_HISTORY_NOT_PROVIDED','검색 XML은 관리자 전체 백업이 아닙니다. 전체 상태 변경 이력·사용자 설정·첨부 바이트의 보존을 확정할 수 없습니다.',null,path);
 }
 
 function entityValues(node:LegacyXmlNode):ObjectValue{return{...node.attributes,...Object.fromEntries(node.children.map(value=>[value.name,text(value)]))};}
+function adminXmlDateValue(node: LegacyXmlNode, value: ObjectValue): unknown {
+  const dateNodes = children(node, 'datevalue'), [date] = dateNodes;
+  if (dateNodes.length > 1 || date && (date.children.length || Object.hasOwn(node.attributes,'datevalue')) ||
+      ['stringvalue','textvalue','numbervalue'].some(name=>str(value[name]).trim())) return ambiguousDateValue;
+  return value.datevalue;
+}
+
 function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   context.dataset.source.declaredVersion=root.attributes.version||null;
-  const rows=root.children,values=rows.map(node=>({name:node.name,value:entityValues(node)})),appUsers=new Map(values.filter(row=>row.name==='ApplicationUser').map(row=>[str(row.value.lowerUserName),str(row.value.userKey)]));
+  const rows=root.children,values=rows.map(node=>({name:node.name,value:entityValues(node),node})),appUsers=new Map(values.filter(row=>row.name==='ApplicationUser').map(row=>[str(row.value.lowerUserName),str(row.value.userKey)]));
+  const projectedFields = new Map<string,JiraDateRole>();
   for(const{ name,value:v }of values)if(['User','OSUser','CwdUser'].includes(name)){const username=str(v.userName||v.name||v.lowerUserName),id=appUsers.get(username.toLowerCase())||str(v.userKey)||username||str(v.id);context.ensure('identity',id,{title:str(v.displayName||v.fullName)||username||id,createdAt:context.date(v.createdDate),updatedAt:context.date(v.updatedDate),metadata:{...selected(v,['id','userName','name','lowerUserName','displayName','fullName','emailAddress','email','active']),identityIncomplete:false}});}
   for(const[username,id]of appUsers)context.ensure('identity',id,{title:username||id,metadata:{key:id,name:username,identityIncomplete:true}});
   const resolveActor=(value:unknown):string|null=>{const original=str(value);return context.identity(appUsers.get(original.toLowerCase())||original);};
   for(const{name,value:v}of values){if(name==='Project')context.put('project',v.id||v.key||v.pkey,{title:str(v.name),text:str(v.description),textFormat:'plain',authorId:resolveActor(v.lead),metadata:{...selected(v,['key','pkey','projecttype','assigneetype']),url:context.url(v.url)}});
-    else if(name==='CustomField')context.put('field',v.id,{title:str(v.name)||str(v.cfname),text:str(v.description),textFormat:'plain',metadata:selected(v,['customfieldtypekey','customfieldsearcherkey','fieldtype','cfname'])});
+    else if (name==='CustomField') {
+      const field = context.put('field',v.id,{title:str(v.name)||str(v.cfname),text:str(v.description),textFormat:'plain',metadata:selected(v,['customfieldtypekey','customfieldsearcherkey','fieldtype','cfname'])});
+      const role = jiraScheduleDateRole(field.title);
+      if (role) {
+        const proof = jiraDatePickerProof(str(v.customfieldtypekey || v.fieldtype));
+        context.scheduleDates.declare(role,field.sourceId,proof,path);
+        if (proof === true) projectedFields.set(field.sourceId,role);
+      }
+    }
     else if(['Status','IssueType','Priority','Resolution'].includes(name)){const fieldId=`builtin:${name.toLowerCase()}`;context.field(fieldId,name,'jira-builtin');context.ensure('option',`${fieldId}:${str(v.id)}`,{title:str(v.pname||v.name)||str(v.id),containerId:fieldId,metadata:selected(v,['id','description','sequence','style']),references:ref('field',fieldId,'field')});}
     else if(name==='CustomFieldOption')context.put('option',v.id,{title:str(v.value)||str(v.customvalue)||str(v.id),containerId:str(v.customfield)||null,parentId:str(v.parentoptionid)||null,metadata:selected(v,['sequence','disabled']),references:[...ref('field',v.customfield,'field'),...ref('option',v.parentoptionid,'parent')]});
     else if(name==='Workflow'){context.put('workflow',v.id||v.name,{title:str(v.name),authorId:resolveActor(v.creatorname),createdAt:context.date(v.created),updatedAt:context.date(v.updated),metadata:{descriptorPresent:!!(v.descriptor||v.workflow)}});if(v.descriptor||v.workflow)context.warn('WORKFLOW_DESCRIPTOR_NOT_CONVERTED','워크플로 이름·작성 정보만 분석했습니다. 실행 가능한 descriptor/플러그인 설정은 복사하지 않았습니다.',`workflow:${str(v.id||v.name)}`);}
@@ -246,10 +325,13 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   for(const[groupId,v]of groups){const author=resolveActor(v.author);context.put('history',groupId,{title:'변경 이력',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created,`history:${groupId}`),metadata:{items:historyItems.get(groupId)||[]},references:[...ref('issue',v.issue,'historyOf'),...ref('identity',author,'author')]});}
   for(const[groupId]of historyItems)if(!groups.has(groupId)){context.warn('CHANGE_GROUP_MISSING','변경 항목의 ChangeGroup이 없습니다.',null,path,'error');context.unsupported('orphan:ChangeItem',(historyItems.get(groupId)||[]).length);}
   const handled=new Set(['User','OSUser','CwdUser','ApplicationUser','Project','Issue','CustomField','CustomFieldOption','Status','IssueType','Priority','Resolution','Workflow','ChangeGroup','ChangeItem','IssueLinkType']);
-  for(const{name,value:v}of values){
+  for(const{name,value:v,node}of values){
     if(name==='Action'){handled.add(name);if(str(v.type)!=='comment'){context.unsupported(`Action:${str(v.type)||'unknown'}`);continue;}const id=str(v.id),author=resolveActor(v.author);context.put('comment',id,{title:'댓글',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created,`comment:${id}`),updatedAt:context.date(v.updated,`comment:${id}`),text:str(v.body),textFormat:'jira-wiki',metadata:{...selected(v,['updateauthor']),...jiraVisibilityMetadata(v,false)},references:[...ref('issue',v.issue,'commentOn'),...ref('identity',author,'author')]});}
     else if(name==='FileAttachment'){handled.add(name);context.attachment(str(v.id),str(v.issue||v.issueid),{...selected(v,['filename','filesize','mimetype','created','version']),...jiraVisibilityMetadata(v,false),author:resolveActor(v.author)});}
-    else if(name==='CustomFieldValue'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`),fieldId=str(v.customfield);if(!issue){context.warn('CUSTOM_FIELD_ISSUE_MISSING','사용자 정의 필드 값의 이슈가 없습니다.',null,path,'error');continue;}const fields=issue.metadata.fields as Record<string,LegacyValue>,value=jsonValue(Object.fromEntries(['stringvalue','textvalue','numbervalue','datevalue','parentkey','valuetype'].filter(name=>v[name]!==undefined).map(name=>[name,v[name]]))),previous=fields[fieldId];fields[fieldId]=previous===undefined?[value]:[...(Array.isArray(previous)?previous:[previous]),value];issue.references.push(...ref('field',fieldId,'customField'));if(!Object.keys(obj(value)).length)context.warn('CUSTOM_FIELD_VALUE_EMPTY','필드 값 행은 있지만 실제 값이 비어 있습니다.',issue.id);}
+    else if(name==='CustomFieldValue'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`),fieldId=str(v.customfield);if(!issue){context.warn('CUSTOM_FIELD_ISSUE_MISSING','사용자 정의 필드 값의 이슈가 없습니다.',null,path,'error');continue;}const fields=issue.metadata.fields as Record<string,LegacyValue>,value=jsonValue(Object.fromEntries(['stringvalue','textvalue','numbervalue','datevalue','parentkey','valuetype'].filter(name=>v[name]!==undefined).map(name=>[name,v[name]]))),previous=fields[fieldId];fields[fieldId]=previous===undefined?[value]:[...(Array.isArray(previous)?previous:[previous]),value];issue.references.push(...ref('field',fieldId,'customField'));if(!Object.keys(obj(value)).length)context.warn('CUSTOM_FIELD_VALUE_EMPTY','필드 값 행은 있지만 실제 값이 비어 있습니다.',issue.id);
+      const role = projectedFields.get(fieldId);
+      if (role) context.scheduleDates.observe(issue,role,fieldId,adminXmlDateValue(node,v),path);
+    }
     else if(name==='IssueLink'){handled.add(name);const type=linkTypes.get(str(v.linktype)),sourceId=str(v.source),targetId=str(v.destination);context.put('relation',v.id,{title:str(type?.linkname||type?.name)||'업무 연결',containerId:sourceId||null,metadata:{typeId:str(v.linktype),...selected(type||{},['inward','outward','style'])},references:[...ref('issue',sourceId,'source'),...ref('issue',targetId,'target')]});if(str(type?.style)==='jira_subtask'){const target=context.byId.get(`issue:${targetId}`);if(target){target.parentId=sourceId;target.references.push(...ref('issue',sourceId,'parent'));}}}
     else if(name==='RemoteIssueLink'){handled.add(name);const url=context.url(v.url),author=resolveActor(v.author);const references=ref('issue',v.issueid||v.issue,'source');if(url){const pageId=new URL(url).searchParams.get('pageId');if(pageId)references.push(...ref('page',pageId,'externalDocument'));}context.put('relation',`remote:${str(v.id)}`,{title:str(v.title)||'외부 연결',authorId:author,containerId:str(v.issueid||v.issue)||null,metadata:{url,relationship:str(v.relationship),globalId:str(v.globalid)},references});}
     else if(name==='Worklog'){handled.add(name);const author=resolveActor(v.author);context.put('history',`worklog:${str(v.id)}`,{title:'작업 시간 기록',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created),updatedAt:context.date(v.updated),text:str(v.body),textFormat:'plain',metadata:{kind:'worklog',...selected(v,['started','startDate','startdate','timeworked','timeSpentSeconds','timeSpent','role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','visibility','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'])},references:[...ref('issue',v.issue,'worklogOf'),...ref('identity',author,'author')]});}
