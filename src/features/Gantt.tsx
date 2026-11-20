@@ -40,6 +40,7 @@ import { GanttDependencyModal, type DependencyInput, type DependencyPrefill, typ
 import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDependencyFindings';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt } from './GanttDateRangePicker';
+import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
 import './issues.css';
 import './gantt.css';
 
@@ -134,6 +135,7 @@ function ProjectGantt(props: GanttProps) {
   const [datePreviewFocusTarget, setDatePreviewFocusTarget] = useState<HTMLButtonElement | null>(null);
   const [cascade, setCascade] = useState<CascadeReview | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [schedulePredecessor, setSchedulePredecessor] = useState<SchedulePredecessor | null>(null);
   const [busy, setBusy] = useState(false);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const [undoId, setUndoId] = useState<string | null>(null);
@@ -182,6 +184,7 @@ function ProjectGantt(props: GanttProps) {
   const handledFocusRequest = useRef<string | null>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const createTrigger = useRef<HTMLButtonElement>(null);
+  const successorTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
@@ -243,6 +246,10 @@ function ProjectGantt(props: GanttProps) {
   }
   function closeCreateForm() {
     if (canLeave()) finishCreating();
+  }
+  function closeSuccessorCreation() {
+    setSchedulePredecessor(null);
+    requestAnimationFrame(() => successorTrigger.current?.focus({ preventScroll: true }));
   }
   function toggleWorkload(view: 'project' | 'team') {
     const activeDraft = workloadView === 'team' ? TEAM_CAPACITY_DRAFT : PROJECT_CAPACITY_DRAFT;
@@ -381,8 +388,9 @@ function ProjectGantt(props: GanttProps) {
     return () => cancelAnimationFrame(frame);
   }, [dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
-  const linkAnchor = selectedIssues.length === 1 && projectIssues.some(issue => issue.projectId === selectedIssues[0].projectId && issue.id !== selectedIssues[0].id)
-    ? selectedIssues[0] : null;
+  const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
+  const linkAnchor = selectedAnchor && projectIssues.some(issue => issue.projectId === selectedAnchor.projectId && issue.id !== selectedAnchor.id)
+    ? selectedAnchor : null;
   const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope ? issues : [];
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
   const datePickerRow = datePicker ? issueRows.get(datePicker.issue.id) : undefined;
@@ -794,7 +802,7 @@ function ProjectGantt(props: GanttProps) {
   }
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
-  return <div className="gantt-feature" onKeyDown={event => {
+  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor)} onKeyDown={event => {
     if (cascade || event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape') return;
     if (preview && datePreviewFocusTarget && !busy) closePreview();
     else if (activeDatePicker) cancelDatePicking();
@@ -863,6 +871,9 @@ function ProjectGantt(props: GanttProps) {
         { anchor: { issueId: linkAnchor.id, otherRole: 'successor' } })}>
         <Link2 size={15} aria-hidden="true" />선택 업무에서 연결
       </button>}
+      {selectedAnchor && <button ref={successorTrigger} className="btn" type="button" disabled={busy} onClick={() => {
+        if (canLeave()) setSchedulePredecessor(selectedAnchor);
+      }}><Plus size={15} aria-hidden="true" />새 후행 업무 추가</button>}
     </div>
     {linkPicker && <GanttLinkPrompt source={sourceRow && pickedSource ? { key: sourceRow.issue.key, endpoint: pickedSource.endpoint } : null}
       canPick={hasVisibleLinkPair} onReset={() => {
@@ -1100,7 +1111,9 @@ function ProjectGantt(props: GanttProps) {
         setPlanShift(null);
         notify(result.updated.length ? `계획과 ${result.updated.length}개 업무의 일정을 이동했습니다.` : '계획 일정을 이동했습니다.');
       }} />}
-  </div>;
+  </div>
+    {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor} onClose={closeSuccessorCreation} />}
+  </>;
 }
 
 function GanttConnector({ dependency, predecessor, successor, range, dayWidth, drag, critical, conflict }: {

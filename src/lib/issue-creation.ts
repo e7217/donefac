@@ -11,8 +11,8 @@ export function createIssueAttempt(actorId: string, input: Record<string, unknow
   return { actorId, body: JSON.stringify({ ...input, requestId: newRequestId() }) };
 }
 
-export async function requestIssueCreation(attempt: IssueCreationAttempt, projectId: string): Promise<Issue> {
-  const issue = await api<Issue>('/issues', {
+export async function requestIssueCreation(attempt: IssueCreationAttempt, projectId: string, path = '/issues'): Promise<Issue> {
+  const issue = await api<Issue>(path, {
     method: 'POST', headers: { 'X-Actor-Id': attempt.actorId }, body: attempt.body,
   });
   if (typeof issue?.id !== 'string' || !issue.id || typeof issue.key !== 'string' || !issue.key || issue.projectId !== projectId) {

@@ -12,7 +12,7 @@ import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { findIssueDocumentReferences } from '../../shared/document-references';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
-import { NewIssueModal } from './NewIssueModal';
+import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
@@ -83,6 +83,18 @@ function IssuePanelContent(props: IssuePanelProps) {
     setChildCreation(null);
     requestAnimationFrame(() => childCreationTrigger.current?.focus({ preventScroll: true }));
   }, []);
+  const [schedulePredecessor, setSchedulePredecessor] = useState<SchedulePredecessor | null>(null);
+  const successorCreationTrigger = useRef<HTMLButtonElement>(null);
+  function closeSuccessorCreation() {
+    setSchedulePredecessor(null);
+    requestAnimationFrame(() => successorCreationTrigger.current?.focus({ preventScroll: true }));
+  }
+  function focusCreatedSuccessor(successor: Issue) {
+    requestAnimationFrame(() => {
+      const button = issuePanel.current?.querySelector<HTMLButtonElement>(`[data-related-schedule-issue="${CSS.escape(successor.id)}"]`);
+      button?.focus();
+    });
+  }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const dependencyBusyRef = useRef(false);
@@ -221,7 +233,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [manageFocus]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || dependencyEditor || previewDocumentId) return;
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || schedulePredecessor || dependencyEditor || previewDocumentId) return;
       if (manageFocus) {
         event.preventDefault();
         event.stopPropagation();
@@ -230,7 +242,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation, dependencyEditor, manageFocus, previewDocumentId]);
+  }, [closePanel, saving, childCreation, schedulePredecessor, dependencyEditor, manageFocus, previewDocumentId]);
 
   function keepIssuePanelFocus(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key !== 'Tab' || event.defaultPrevented) return;
@@ -404,8 +416,8 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <>
-    <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor || previewDocument)} onMouseDown={event => {
-      if (event.target === event.currentTarget && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
+    <div className="issue-panel-backdrop" inert={Boolean(childCreation || schedulePredecessor || dependencyEditor || previewDocument)} onMouseDown={event => {
+      if (event.target === event.currentTarget && !saving && !childCreation && !schedulePredecessor && !dependencyEditor && !dependencyBusyRef.current) closePanel();
     }}><aside ref={issuePanel} className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
       tabIndex={manageFocus ? -1 : undefined} onKeyDown={manageFocus ? keepIssuePanelFocus : undefined}>
     <header className="issue-panel-header">
@@ -452,16 +464,18 @@ function IssuePanelContent(props: IssuePanelProps) {
             <button ref={addPredecessorButton} className="btn" type="button" disabled={!hasOtherIssueInProject || saving || dependencyBusy}
               onClick={event => openDependencyEditor(event.currentTarget, 'predecessor')}><Plus size={14} aria-hidden="true" />선행 업무 추가</button>
             <button className="btn" type="button" disabled={!hasOtherIssueInProject || saving || dependencyBusy}
-              onClick={event => openDependencyEditor(event.currentTarget, 'successor')}><Plus size={14} aria-hidden="true" />후행 업무 추가</button>
+              onClick={event => openDependencyEditor(event.currentTarget, 'successor')}><Link2 size={14} aria-hidden="true" />기존 후행 업무 연결</button>
+            <button ref={successorCreationTrigger} className="btn" type="button" disabled={saving || dependencyBusy}
+              onClick={() => setSchedulePredecessor(issue)}><Plus size={14} aria-hidden="true" />새 후행 업무 추가</button>
           </div>
         </div>
-        {!dependencies.length && <p className="issue-section-empty">{hasOtherIssueInProject ? '연결된 선행·후행 업무가 없습니다.' : '같은 프로젝트에 업무를 추가하면 연결할 수 있습니다.'}</p>}
+        {!dependencies.length && <p className="issue-section-empty">연결된 선행·후행 업무가 없습니다.</p>}
         {dependencies.map(dependency => {
           const otherIsSuccessor = dependency.predecessorId === issueId;
           const related = data.issues.find(value => value.id === (otherIsSuccessor ? dependency.successorId : dependency.predecessorId));
           if (!related) return null;
           return <div className="issue-schedule-relation" key={dependency.id}>
-            <button type="button" className="issue-related-row" onClick={() => navigateIssue(related.id)}>
+            <button type="button" className="issue-related-row" data-related-schedule-issue={related.id} onClick={() => navigateIssue(related.id)}>
               <span className="muted">{otherIsSuccessor ? '후행' : '선행'}</span>
               <span className="issue-key">{related.key}</span>
               <span className="issue-dependency-description"><span>{related.title}</span><small>{dependencyLabel(dependency)}</small></span>
@@ -560,6 +574,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
+    {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
+      onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
       anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}
       relationReview={relationScheduleReview && { sourceIssueId: relationScheduleReview.relation.sourceIssueId,

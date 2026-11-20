@@ -1042,6 +1042,44 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,req.body));
     res.status(result.duplicate?200:201).json(result.issue);
   });
+  app.post('/api/issues/:id/schedule-successors', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (Object.keys(input).some(key => !['requestId', 'expectedPredecessorVersion', 'expectedCalendarVersion', 'type', 'lagDays', 'issue'].includes(key))) {
+      return fail('후행 업무 생성 요청을 확인해 주세요.');
+    }
+    const { expectedPredecessorVersion, expectedCalendarVersion, type, lagDays, issue } = input;
+    if (typeof expectedPredecessorVersion !== 'number' || !Number.isSafeInteger(expectedPredecessorVersion) || expectedPredecessorVersion < 1 ||
+        typeof expectedCalendarVersion !== 'number' || !Number.isSafeInteger(expectedCalendarVersion) || expectedCalendarVersion < 1) {
+      return fail('선행 업무와 작업 달력의 버전을 확인해 주세요.');
+    }
+    if (!isDependencyType(type) || !isDependencyLag(lagDays)) {
+      return fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
+    }
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail('생성할 후행 업무 정보를 확인해 주세요.');
+    const issueInput = issue as Record<string, unknown>;
+    const predecessorId = String(req.params.id);
+    const result = issueCreation.create(() => actor(req), input, () => {
+      const predecessor = store.get<Issue>('issues', predecessorId);
+      if (!predecessor) return fail('선행 업무를 찾을 수 없습니다.', 404, { reason: 'predecessor_missing' });
+      if (predecessor.version !== expectedPredecessorVersion) {
+        return fail('선행 업무가 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.', 409,
+          { reason: 'predecessor_changed', currentVersion: predecessor.version });
+      }
+      const calendar = calendars.get(predecessor.projectId);
+      if (calendar.version !== expectedCalendarVersion) {
+        return fail('작업 달력이 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.', 409,
+          { reason: 'calendar_changed', currentVersion: calendar.version });
+      }
+      if (Object.hasOwn(issueInput, 'projectId') && issueInput.projectId !== predecessor.projectId) {
+        return fail('후행 업무는 선행 업무와 같은 프로젝트에 만들어 주세요.');
+      }
+      const successor = createIssueInTransaction(req, { ...issueInput, projectId: predecessor.projectId });
+      saveNewDependency(req, { id: uid(), predecessorId, successorId: successor.id, type, lagDays, version: 1 });
+      activity(req, 'issue', predecessor.id, '후행 업무 생성', `${successor.key} ${successor.title}`);
+      return successor;
+    }, { predecessorId });
+    res.status(result.duplicate ? 200 : 201).json(result.issue);
+  });
   app.post('/api/issues/:id/children', (req, res) => {
     const result = issueChildren.create({ parentId: String(req.params.id), actorId: actor(req), body: req.body }, {
       checkParentVersion: checkVersion,

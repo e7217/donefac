@@ -29,8 +29,8 @@ export class IssueCreationService {
     )`);
   }
 
-  create(actorId: () => string, input: IssueInput, create: () => Issue): { issue: Issue; duplicate: boolean } {
-    if (!Object.hasOwn(input, 'requestId')) {
+  create(actorId: () => string, input: IssueInput, create: () => Issue, scheduleScope?: { predecessorId: string }): { issue: Issue; duplicate: boolean } {
+    if (!scheduleScope && !Object.hasOwn(input, 'requestId')) {
       return { issue: this.store.transaction(create), duplicate: false };
     }
     const requestId = input.requestId;
@@ -38,7 +38,10 @@ export class IssueCreationService {
       throw new IssueCreationError(400, '업무 생성 요청 ID를 확인해 주세요.', { reason: 'invalid_request_id' });
     }
     const id = requestId.toLowerCase();
-    const digest = fingerprint(input);
+    // Ordinary receipts are bare hashes. The route-owned prefix prevents a generic request body from matching a scheduled create.
+    const digest = scheduleScope
+      ? `schedule-successor:${fingerprint({ ...input, predecessorId: scheduleScope.predecessorId })}`
+      : fingerprint(input);
     return this.store.transaction(() => {
       const author = actorId();
       const receipt = this.store.db.prepare(`SELECT actor_id AS actorId, project_id AS projectId,

@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentSectionHash, markdownImportSectionId } from '../../shared/document-sections.js';
-import type { ApiKeyCreated, DocPage, DocRevision, Issue, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DependencyType, DocPage, DocRevision, Issue, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actorId = 'user-seo';
@@ -171,6 +171,137 @@ test('public API creation retries retain the fixed actor and enforce write and p
   const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(workspace.issues.filter(value => value.title === input.title), [issue]);
   assert.equal(workspace.activities.find(value => value.resourceId === issue.id && value.action === '티켓 생성')?.actorId, actorId);
+});
+
+const successorPath = (id: string) => `/issues/${id}/schedule-successors`;
+function successorRequest(predecessor: Issue, calendar: WorkCalendar, issue: Record<string, unknown>,
+  type: DependencyType = 'FS', lagDays = 0) {
+  return { requestId: randomUUID(), expectedPredecessorVersion: predecessor.version, expectedCalendarVersion: calendar.version,
+    type, lagDays, issue };
+}
+
+test('a new successor uses normal issue fields and one scheduled edge for every dependency type', async t => {
+  const { call } = await fixture(t);
+  const { data: predecessor } = await call<Issue>('/issues', 'POST', {
+    projectId, title: '선행 업무', startDate: '2026-11-24', endDate: '2026-11-26',
+  }, 201);
+  const { data: calendar } = await call<WorkCalendar>(`/projects/${projectId}/calendar`);
+  const variants = [['FS', 0], ['SS', -3650], ['FF', 2], ['SF', 3650]] as const;
+  for (const [type, lagDays] of variants) {
+    const issueFields = { title: `${type} 후행 업무`, startDate: '2026-11-23', endDate: '2026-11-23', assigneeId };
+    const payload = successorRequest(predecessor, calendar, issueFields, type, lagDays);
+    const { data: successor } = await call<Issue>(successorPath(predecessor.id), 'POST', payload, 201);
+    assert.equal(successor.projectId, projectId);
+    assert.equal(successor.parentId, null);
+    assert.equal(successor.startDate, issueFields.startDate);
+    assert.equal(successor.endDate, issueFields.endDate);
+    assert.equal(successor.assigneeId, assigneeId);
+    const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+    assert.deepEqual(workspace.dependencies.filter(link => link.successorId === successor.id)
+      .map(({ predecessorId, type, lagDays, version }) => ({ predecessorId, type, lagDays, version })),
+    [{ predecessorId: predecessor.id, type, lagDays, version: 1 }]);
+    const activities = workspace.activities.filter(activity => activity.resourceId === successor.id);
+    assert.equal(activities.length, 2);
+    assert.ok(activities.every(activity => activity.actorId === actorId));
+    assert.ok(activities.some(activity => activity.action === '티켓 생성'));
+    assert.ok(activities.some(activity => activity.action === '선행 업무 연결' && activity.detail === predecessor.key));
+    assert.ok(workspace.activities.some(activity => activity.resourceId === predecessor.id && activity.actorId === actorId &&
+      activity.action === '후행 업무 생성' && activity.detail === `${successor.key} ${successor.title}`));
+    if (type === 'FS') {
+      const { data: preview } = await call<SchedulePreview>('/schedule/preview', 'POST', { issueIds: [successor.id], days: 0 });
+      assert.ok(preview.warnings.some(warning => warning.startsWith(`${predecessor.key} → ${successor.key}`)));
+    }
+  }
+});
+
+test('schedule successor receipts are scoped to the actor and predecessor and replay after calendar and link changes', async t => {
+  const { call, restart } = await fixture(t);
+  const { data: predecessor } = await call<Issue>('/issues', 'POST', { projectId, title: '버전 확인 선행 업무' }, 201);
+  const { data: otherPredecessor } = await call<Issue>('/issues', 'POST', { projectId, title: '다른 선행 업무' }, 201);
+  const calendarPath = `/projects/${projectId}/calendar`;
+  const { data: calendar } = await call<WorkCalendar>(calendarPath);
+  const payload = successorRequest(predecessor, calendar, { title: '한번만 만들 후행 업무', startDate: null }, 'FF');
+  const path = successorPath(predecessor.id);
+  const reordered = { issue: { startDate: null, title: payload.issue.title }, lagDays: payload.lagDays, type: payload.type,
+    expectedCalendarVersion: payload.expectedCalendarVersion, expectedPredecessorVersion: payload.expectedPredecessorVersion,
+    requestId: payload.requestId.toUpperCase() };
+  const results = await Promise.all([payload, reordered].map(input => call<Issue>(path, 'POST', input, [200, 201])));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  const successor = results[0].data;
+  assert.deepEqual(results[1].data, successor);
+  assert.equal(successor.startDate, null);
+  assert.equal(successor.endDate, null);
+  const conflict = async (route: string, input: unknown, actor?: string) =>
+    assert.equal((await call<Failure>(route, 'POST', input, 409, actor)).data.details.reason, 'request_conflict');
+  await conflict(path, { ...payload, lagDays: 1 });
+  await conflict(path, { ...payload, issue: { ...payload.issue, title: '변경된 입력' } });
+  await conflict(successorPath(otherPredecessor.id), payload);
+  await conflict(path, payload, assigneeId);
+  await conflict('/issues', { ...payload, projectId, predecessorId: predecessor.id, title: payload.issue.title });
+  const genericInput = { ...payload, requestId: randomUUID() };
+  await call<Issue>('/issues', 'POST', { ...genericInput, projectId, type: predecessor.type, title: '일반 생성' }, 201);
+  await conflict(path, genericInput);
+
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  const dependency = workspace.dependencies.find(link => link.successorId === successor.id);
+  assert.ok(dependency);
+  await call(`/dependencies/${dependency.id}?expectedVersion=${dependency.version}`, 'DELETE');
+  await call(`/issues/${predecessor.id}`, 'PATCH', { title: '선행 업무 수정', expectedVersion: predecessor.version });
+  await call(calendarPath, 'PATCH', { name: '수정한 작업 달력', expectedVersion: calendar.version });
+  await restart();
+  assert.deepEqual((await call<Issue>(path, 'POST', reordered)).data, successor);
+  const { data: current } = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(current.issues.filter(issue => issue.title === payload.issue.title), [successor]);
+  assert.equal(current.dependencies.some(link => link.successorId === successor.id), false);
+  const { data: deleted } = await call<{ trashEntryId: string }>(`/issues/${successor.id}?expectedVersion=${successor.version}`, 'DELETE');
+  assert.ok(deleted.trashEntryId);
+  assert.equal((await call<Failure>(path, 'POST', payload, 409)).data.details.reason, 'result_unavailable');
+});
+
+test('successor creation validates versions and the workflow, and rolls back the issue, edge, and receipt on failure', async t => {
+  const { call, enableOutbox, observer, sideEffects } = await fixture(t);
+  await enableOutbox();
+  const { data: predecessor } = await call<Issue>('/issues', 'POST', { projectId, title: '원자적으로 연결할 업무' }, 201);
+  const { data: calendar } = await call<WorkCalendar>(`/projects/${projectId}/calendar`);
+  const path = successorPath(predecessor.id);
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const { data: workflow } = await call<ProjectWorkflow>(workflowPath);
+  await call(workflowPath, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [...workflow.fieldRules, { issueType: predecessor.type, statusId: workflow.initialStatusId, requiredFields: ['description'] }] });
+
+  const payload = successorRequest(predecessor, calendar, { title: '연결 결과를 한번만 저장', assigneeId, type: predecessor.type });
+  const receiptAndEffects = () => [...sideEffects(), Number(observer.prepare('SELECT COUNT(*) AS total FROM dependencies').get()?.total)];
+  const before = receiptAndEffects();
+  const missingSource = await call<Failure>(successorPath('unknown-predecessor'), 'POST', payload, 404);
+  assert.equal(missingSource.data.details.reason, 'predecessor_missing');
+  for (const request of [
+    { ...payload, requestId: undefined }, { ...payload, requestId: '00000000-0000-1000-8000-000000000000' },
+    { ...payload, expectedPredecessorVersion: '1' }, { ...payload, expectedCalendarVersion: 0 },
+    { ...payload, lagDays: 3651 }, { ...payload, type: 'unknown' }, { ...payload, predecessorId: 'spoofed' },
+    { ...payload, issue: null }, { ...payload, issue: { ...payload.issue, projectId: 'project-team' } },
+  ]) await call(path, 'POST', request, 400);
+  for (const [field, reason, version] of [
+    ['expectedPredecessorVersion', 'predecessor_changed', predecessor.version],
+    ['expectedCalendarVersion', 'calendar_changed', calendar.version],
+  ] as const) {
+    const { data } = await call<Failure>(path, 'POST', { ...payload, [field]: version + 1 }, 409);
+    assert.deepEqual(data.details, { reason, currentVersion: version });
+  }
+  await call(path, 'POST', payload, 422);
+  assert.deepEqual(receiptAndEffects(), before);
+
+  const complete = { ...payload, issue: { ...payload.issue, description: '워크플로에서 요구하는 설명' } };
+  for (const table of ['dependencies', 'issue_creation_requests']) {
+    observer.exec(`CREATE TRIGGER fail_successor_write BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT,'synthetic successor write failure'); END`);
+    try {
+      await call(path, 'POST', complete, 500);
+      assert.deepEqual(receiptAndEffects(), before);
+    } finally { observer.exec('DROP TRIGGER fail_successor_write'); }
+  }
+  const { data: successor } = await call<Issue>(path, 'POST', complete, 201);
+  assert.equal(successor.key, `NEO-${before[0]}`);
+  assert.deepEqual((await call<Issue>(path, 'POST', complete)).data, successor);
+  assert.deepEqual(receiptAndEffects(), before.map((value, index) => value + (index === 2 ? 3 : 1)));
 });
 
 test('document create retries bind imported section links once with one draft and one revision', async t => {

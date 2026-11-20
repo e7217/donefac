@@ -1,0 +1,37 @@
+.issue-successor-schedule {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e5ece5;
+  border-radius: 7px;
+  background: #f8fbf8;
+}
+
+.issue-successor-proposal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: #536b5b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.issue-successor-proposal > .btn { margin-inline-start: auto; }
+
+.issue-successor-warning {
+  margin: 0;
+  color: #86552f;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.issue-successor-review {
+  display: grid;
+  gap: 3px;
+  color: #536b5b;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
