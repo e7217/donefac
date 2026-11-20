@@ -297,6 +297,32 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export const ISSUE_BULK_EDIT_LIMIT = 100;
+export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'>;
+export type IssueBulkEditChanges = Partial<IssueBulkEditValues>;
+export interface IssueBulkEditPreviewInput {
+  issues: { id: string; expectedVersion: number }[];
+  changes: IssueBulkEditChanges;
+}
+export interface IssueBulkEditRow extends Pick<Issue, 'id' | 'key' | 'title'> {
+  outcome: 'changed' | 'unchanged' | 'blocked';
+  before: IssueBulkEditValues;
+  after: IssueBulkEditValues | null;
+  reason: string | null;
+}
+export interface IssueBulkEditPreview {
+  previewId: string | null;
+  expiresAt: string | null;
+  rows: IssueBulkEditRow[];
+  changed: number;
+  unchanged: number;
+  blocked: number;
+}
+export interface IssueBulkEditResult {
+  previewId: string;
+  updated: Pick<Issue, 'id' | 'key' | 'version'>[];
+  unchanged: number;
+}
 export interface WorklogEntry {
   id: string;
   issueId: string;

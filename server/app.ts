@@ -21,6 +21,7 @@ import { DocumentFollowUpError, DocumentFollowUpService } from './document-follo
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
+import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
 import { AutomationService, AutomationError } from './automation.js';
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
@@ -132,6 +133,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const documentPublication=new DocumentPublicationService(store,notifications,documentSubscribers);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
   const issueOrders = new IssueOrderService(store);
+  const issueBulkEdit = new IssueBulkEditService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
   reportLedger.start();
   const reports=new ReportingService(store,reportLedger);
@@ -356,8 +358,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
   const issueAssignments=new IssueAssignmentRulesService(store);
-  const prepareIssueChange=(before:Issue,proposed:Issue)=>{
-    const decision=issueAssignments.decide(before,proposed);
+  const prepareIssueChange=(before:Issue,proposed:Issue,assigneeExplicit=false)=>{
+    const decision=issueAssignments.decide(before,proposed,assigneeExplicit);
     const issue=validateIssue(decision?.outcome==='assigned'?{...proposed,assigneeId:decision.assigneeId}:proposed,before);
     issue.completedAt=done(issue)?(before.completedAt||issue.updatedAt):null;
     return {issue,decision};
@@ -611,16 +613,26 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
-  const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => {
+  const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, assigneeExplicit=false) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
     const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
-    const {issue,decision}=prepareIssueChange(old,{...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()});
+    const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
+    return {...prepareIssueChange(old,proposed,assigneeExplicit),fields};
+  };
+  const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,fields}:ReturnType<typeof prepareIssueUpdate>) => {
     const actorId=actor(req);
     store.put('issues',issue);activity(req,'issue',issue.id,'티켓 변경',`${issue.key}: ${fields.join(', ')}`);
     if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actorId,'issue-assigned',[issue.assigneeId],issue.updatedAt);
     commitIssueAssignment(decision,old,issue,actorId,'user');
     return issue;
   };
+  const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => commitIssueUpdate(req,old,prepareIssueUpdate(old,values));
+  issueBulkEdit.registerRoutes(app,{
+    actor,
+    configurationToken:projectId=>JSON.stringify([workflows.get(projectId).version,issueSchemas.get(projectId).version,issueAssignments.revisions(projectId)]),
+    prepare:(before,changes)=>prepareIssueUpdate(before,changes,Object.hasOwn(changes,'assigneeId')),
+    commit:commitIssueUpdate,
+  });
   app.get('/api/projects/:id/issue-order',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueOrders.get(req.params.id));
   });
@@ -1238,6 +1250,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousWorklogs=worklogs.clearForRestore();
       timeReservations.clearForRestore();
       documentFollowUp.clearForImport();
+      issueBulkEdit.resetForImport();
       outbound.resetForImport();
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       migrations.resetForNativeImport();
@@ -1306,7 +1319,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof IssueAssignmentRulesError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

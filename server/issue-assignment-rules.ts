@@ -101,9 +101,9 @@ function mismatch(rule: IssueAssignmentRule, before: Issue, proposed: Issue): st
   return null;
 }
 
-function decision(rule: IssueAssignmentRule, before: Issue, proposed: Issue): IssueAssignmentDecision {
+function decision(rule: IssueAssignmentRule, before: Issue, proposed: Issue, assigneeExplicit = false): IssueAssignmentDecision {
   const { assigneeId } = proposed;
-  if (assigneeId !== before.assigneeId) return { rule, assigneeId, outcome: 'skipped', reason: '업무 변경에서 직접 지정한 담당자를 적용했습니다.' };
+  if (assigneeExplicit || assigneeId !== before.assigneeId) return { rule, assigneeId, outcome: 'skipped', reason: '업무 변경에서 직접 지정한 담당자를 적용했습니다.' };
   if (assigneeId === rule.assigneeId) return { rule, assigneeId, outcome: 'unchanged', reason: '이미 규칙의 담당자로 지정되어 있습니다.' };
   if (assigneeId !== null && rule.mode === 'unassigned') return { rule, assigneeId, outcome: 'skipped', reason: '업무에 이미 지정된 담당자를 유지했습니다.' };
   return { rule, assigneeId: rule.assigneeId, outcome: 'assigned', reason: '규칙에 따라 담당자를 배정했습니다.' };
@@ -137,10 +137,14 @@ export class IssueAssignmentRulesService {
     return rows.map(row => JSON.parse(row.json) as IssueAssignmentRule);
   }
 
-  decide(before: Issue, proposed: Issue): IssueAssignmentDecision | null {
+  revisions(projectId: string): [string, number][] {
+    return this.projectRules(projectId).map(({ id, version }) => [id, version]);
+  }
+
+  decide(before: Issue, proposed: Issue, assigneeExplicit = false): IssueAssignmentDecision | null {
     if (before.status === proposed.status) return null;
     const rule = this.projectRules(before.projectId).find(rule => rule.enabled && mismatch(rule, before, proposed) === null);
-    return rule ? decision(rule, before, proposed) : null;
+    return rule ? decision(rule, before, proposed, assigneeExplicit) : null;
   }
 
   /** The issue write and its assignment result share the caller's transaction. */

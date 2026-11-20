@@ -1,8 +1,8 @@
 'use client';
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, Plus, Search, X } from 'lucide-react';
-import { PRIORITY, type FeatureProps, type Issue, type IssueFieldFilter, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
+import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueFieldFilter, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
@@ -10,6 +10,7 @@ import { CustomFieldSummary, IssueTypeName } from './CustomFields';
 import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
+import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
@@ -89,6 +90,7 @@ export function Issues(props: FeatureProps) {
   const [dropTarget, setDropTarget] = useState<BoardDrop | null>(null);
   const pendingMutation = useRef(false);
   const drag = useRef<BoardDrag | null>(null);
+  const bulkToggle = useRef<HTMLButtonElement>(null);
   const order = isAll(projectId) ? undefined : data.issueOrders?.find(value => value.projectId === projectId);
   const ordering = Boolean(order) && orderEditProject === projectId;
   const notice = orderNotice?.projectId === projectId ? orderNotice : null;
@@ -96,6 +98,8 @@ export function Issues(props: FeatureProps) {
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
   const issues = projectIssues.filter(matchesIssue);
+  const bulk = useIssueBulkEdit(props, issues);
+  const projectSelected = data.projects.some(project => project.id === projectId);
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
   const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter);
@@ -121,6 +125,15 @@ export function Issues(props: FeatureProps) {
     setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
     updateFieldFilter(undefined);
     setFieldEditorEpoch(epoch => epoch + 1);
+  }
+  function closeBulkEdit() {
+    if (bulk.close()) bulkToggle.current?.focus({ preventScroll: true });
+  }
+  function toggleBulkEdit() {
+    if (bulk.active) { closeBulkEdit(); return; }
+    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    setOrderEditProject(null);
+    bulk.open();
   }
   async function changeStatus(issue: Issue, next: IssueStatus) {
     if (issue.status === next || pendingMutation.current) return;
@@ -233,23 +246,25 @@ export function Issues(props: FeatureProps) {
   return <div className="issues-feature">
     <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
       <div className="issue-heading-actions">
-        {data.projects.some(project => project.id === projectId) && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
+        {projectSelected && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
         <button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button>
       </div>
     </div>
     <div className="issue-toolbar">
-      <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} onClick={() => setView('board')}><Columns3 size={16} /> 보드</button></div>
-      <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} onChange={e => setQuery(e.target.value)} /></div>
-      <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
-      <select className="issue-filter" aria-label="담당자 필터" value={assignee} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
-      <select className="issue-filter" aria-label="유형 필터" value={type} onChange={e => setType(e.target.value)}><option value="all">모든 유형</option>{type !== 'all' && !issueTypes.some(item => item.id === type) && <option value={type}>{type} (저장된 조건)</option>}{issueTypes.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (보관됨)' : ''}</option>)}</select>
-      {order && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
-      {activeFilters && <button className="btn btn-ghost issue-clear-filter" onClick={clearFilters}><X size={14} /> 초기화</button>}
+      <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} disabled={bulk.busy} onClick={() => { if (!bulk.active || bulk.close()) setView('board'); }}><Columns3 size={16} /> 보드</button></div>
+      <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} disabled={bulk.locked} onChange={e => setQuery(e.target.value)} /></div>
+      <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} disabled={bulk.locked} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
+      <select className="issue-filter" aria-label="담당자 필터" value={assignee} disabled={bulk.locked} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
+      <select className="issue-filter" aria-label="유형 필터" value={type} disabled={bulk.locked} onChange={e => setType(e.target.value)}><option value="all">모든 유형</option>{type !== 'all' && !issueTypes.some(item => item.id === type) && <option value={type}>{type} (저장된 조건)</option>}{issueTypes.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (보관됨)' : ''}</option>)}</select>
+      {order && !bulk.active && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
+      {projectSelected && view === 'list' && <button ref={bulkToggle} type="button" className="btn btn-ghost issue-bulk-toggle" aria-pressed={bulk.active}
+        disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
+      {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
-    {!isAll(projectId) && (schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters
+    {!isAll(projectId) && (schema.fields.length > 0 || fieldFilter) && <fieldset className="issue-bulk-filter-controls" disabled={bulk.locked}><IssueFieldFilters
       key={`${projectId}:${fieldEditorEpoch}`} schema={schema} users={data.users} value={fieldFilter}
       onApply={updateFieldFilter} notify={notify}
-    />}
+    /></fieldset>}
     <SavedViews projectId={projectId} actorId={props.actorId}
       current={{layout:view,filters}}
       onApply={applySavedView} notify={notify} />
@@ -258,12 +273,16 @@ export function Issues(props: FeatureProps) {
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
     </div>}
-    {view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr><th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
+    {bulk.active && <IssueBulkEdit editor={bulk} statuses={statuses} users={data.users} onClose={closeBulkEdit} />}
+    {view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
       const user = data.users.find(u => u.id === issue.assigneeId);
-      return <tr key={issue.id} data-issue-id={issue.id}>
+      const selected = bulk.active && bulk.selectedIds.has(issue.id);
+      return <tr key={issue.id} data-issue-id={issue.id} className={selected ? 'issue-bulk-selected' : undefined}>
+        {bulk.active && <td className="issue-bulk-selection"><label className="issue-bulk-select-control"><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected}
+          disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} /></label></td>}
         <td><button className="issue-title-button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} />{issue.parentId && <span className="issue-child-mark">하위</span>}</button>
           <CustomFieldSummary data={data} issue={issue} limit={2} />{controls(issue, issues, index)}</td>
-        <td><span className="issue-status-select"><StatusDot color={statusMeta(data, issue.projectId, issue.status).color} /><select aria-label={`${issue.key} 상태`} value={issue.status} disabled={Boolean(busy)} onChange={e => changeStatus(issue, e.target.value as IssueStatus)}>{allowedNextStatuses(data, issue).map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></span></td>
+        <td><span className="issue-status-select"><StatusDot color={statusMeta(data, issue.projectId, issue.status).color} /><select aria-label={`${issue.key} 상태`} value={issue.status} disabled={Boolean(busy) || bulk.active} onChange={e => changeStatus(issue, e.target.value as IssueStatus)}>{allowedNextStatuses(data, issue).map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></span></td>
         <td><span className="issue-priority"><PriorityIcon value={issue.priority} />{PRIORITY[issue.priority]}</span></td>
         <td>{user ? <span className="issue-assignee"><span className="issue-avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span>{user.name}</span> : <span className="muted">미지정</span>}</td>
         <td className="issue-date-cell">{dateLabel(issue.endDate || issue.dueDate)}</td>
