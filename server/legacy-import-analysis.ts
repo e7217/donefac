@@ -18,7 +18,10 @@ function detect(files:Map<string,Buffer>):'jira'|'confluence'{
   throw new LegacyImportError(400,'원본 형식을 찾지 못했습니다. 제품을 직접 선택하거나 XML/CSV/JSON 내보내기 파일을 확인해 주세요.');
 }
 export async function analyzeLegacyPackage(input:{path:string;filename:string;instanceKey:string;product:'auto'|'jira'|'confluence'}):Promise<LegacyAnalysis>{
-  const archive=await readLegacyArchive(readFileSync(input.path),input.filename),product=input.product==='auto'?detect(archive.files):input.product;
+  return analyzeLegacyPackageBytes({bytes:readFileSync(input.path),filename:input.filename,instanceKey:input.instanceKey,product:input.product});
+}
+export async function analyzeLegacyPackageBytes(input:{bytes:Buffer;filename:string;instanceKey:string;product:'auto'|'jira'|'confluence'}):Promise<LegacyAnalysis>{
+  const archive=await readLegacyArchive(input.bytes,input.filename),product=input.product==='auto'?detect(archive.files):input.product;
   const dataset=product==='jira'?parseJira(archive.files,input.instanceKey):parseConfluence(archive.files,input.instanceKey);
   classifyMissingReferences(dataset);
   if(!dataset.records.some(value=>['issue','page'].includes(value.kind)))diagnostic(dataset,{severity:'error',code:'NO_PRIMARY_CONTENT',message:'업무나 현재 문서 객체를 찾지 못했습니다. 올바른 전체 내보내기 파일인지 확인해 주세요.'});

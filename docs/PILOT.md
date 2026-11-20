@@ -130,6 +130,27 @@ npm run pilot:jira:collect -- /absolute/path/jira-config.json /absolute/path/jir
 
 출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Teamspace 분석기로 이 흐름을 검사한다.
 
+## Confluence 공간 XML과 현재 페이지 대조
+
+Confluence Server에서 공간 XML ZIP을 받은 후, 같은 공간의 현재 페이지 목록과 대조할 수 있다. `baseUrl`에는 실제 서비스 경로를 포함한다. 인증 파일은 저장소 밖에 두고 서버에서 허용하는 `Basic ...` 또는 `Bearer ...` 값을 한 줄로 작성한다. `pageIds`를 생략하면 현재 계정으로 목록에 보이는 페이지를 최대 500개까지 확인한다. 페이지를 나눠 확인할 때는 문자열 ID 목록을 추가한다. 선택한 페이지의 상위 페이지도 계층과 상속된 읽기 제한을 확인할 때 조회한다. [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/) · [페이지 제한과 상속](https://confluence.atlassian.com/conf59/page-restrictions-792498763.html)
+
+```json
+{
+  "baseUrl": "https://wiki.example.test/confluence",
+  "authFile": "./confluence-read-auth.txt",
+  "spaceKey": "TEAM",
+  "pageIds": ["12345", "12346"]
+}
+```
+
+```bash
+npm run pilot:confluence:audit -- /absolute/path/confluence-audit.json /absolute/path/confluence-space.zip
+```
+
+ZIP을 생략하면 현재 페이지와 제한 확인 결과만 나온다. ZIP을 지정하면 같은 공간의 현재 페이지 누락, 원본 ZIP에만 있는 페이지, 버전·상위 관계·제한 표시 차이, 본문·첨부 근거와 분석 진단을 대조한다. 명령은 Confluence에 메타데이터 읽기 요청만 보내며 ZIP은 로컬에서 분석한다. 출력은 ZIP 해시·크기·건수·판정으로 구성한다. 결과가 `observed` 또는 `matched`면 종료 코드 `0`, 제한·누락·불일치를 검토해야 하면 `2`, 연결이나 ZIP을 검사할 수 없으면 `1`이다.
+
+`matched`는 조회한 페이지의 확인 항목이 일치했다는 뜻이다. 원본 ZIP에만 있는 페이지는 현재 계정에 보이지 않을 수 있다. 공간 권한은 보고서의 `spacePermissions`에 수동 검토로 표시된다. 이관 대상과 원본의 열람 범위, 과거 버전 및 첨부를 확인한 후 아래 리허설에서 적용을 검토한다. `npm run test:pilot:confluence`는 모의 Confluence와 Teamspace 분석기로 이 절차를 검사한다. [Atlassian의 공간 XML 내보내기 안내](https://confluence.atlassian.com/conf711/export-content-to-word-pdf-html-and-xml-1044781118.html)
+
 ## 오프라인 원본 이관 리허설
 
 리허설 명령은 지정한 내보내기 파일을 전용 워크스페이스에 분석한다. Jira REST 수집 ZIP, Jira 관리자 XML과 첨부파일을 담은 ZIP, Confluence 공간 XML ZIP 등 [지원 형식](API.md#기존-도구-원본-분석)에 해당하는 파일을 매니페스트에 적는다. `file`은 절대 경로나 매니페스트 기준 상대 경로다. 같은 원본 시스템에서 받은 후속 파일에는 같은 `instanceKey`를 사용한다.
