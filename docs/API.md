@@ -436,3 +436,17 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | `space` | `project:<프로젝트 ID>` 또는 `common` | 지정 문서 공간의 새 문서·저장·버전 복구·발행·댓글 |
 
 `targetId`는 URL 경로 한 구간으로 인코딩한다. 공동 편집의 저장 알림은 버전 기록을 만들 때 발송한다. 개별 구독과 프로젝트·공간 구독이 겹치면 같은 변경에 알림 한 건을 저장한다. 자체 백업 형식 29는 범위 구독과 `issue-created`·`document-created`를 보존한다.
+
+## 팀원 시간 배정
+
+시간 배정 경로는 브라우저용 `/api`에서 제공한다. 시작·종료는 `2026-11-20T00:30:00.000Z`처럼 분 단위 UTC 시각이다. 배정 기간은 최대 24시간이다. 시작은 포함하고 종료는 제외한다. 같은 팀원의 다른 프로젝트 배정과 겹치면 `409`로 응답한다.
+
+| 경로 | 요청과 응답 |
+| --- | --- |
+| `GET /api/time-reservations` | 쿼리 `startAt`, `endAt`과 선택 항목 `userId`. 최대 31일에 걸친 확정 배정을 읽는다. 결과가 10,000건을 넘으면 기간이나 팀원을 좁히도록 `422`로 응답한다. |
+| `GET /api/issues/:issueId/time-reservations` | 해당 업무의 확정·재검토 배정 목록을 읽는다. |
+| `POST /api/issues/:issueId/time-reservations` | `userId`, `startAt`, `endAt`, UUID `requestId`를 보낸다. 첫 저장은 `201`, 같은 내용으로 재시도하면 `200`과 기존 배정을 반환한다. |
+| `PATCH /api/issues/:issueId/time-reservations/:id` | `userId`, `startAt`, `endAt`, `expectedVersion`을 보낸다. 시간을 확보하면 배정을 확정한다. |
+| `DELETE /api/issues/:issueId/time-reservations/:id` | 쿼리 `expectedVersion`으로 배정을 취소한다. |
+
+배정 상태는 `reserved` 또는 `needs-review`다. 휴지통 복원 중 이미 다른 업무에 예약된 시간은 `needs-review`로 보존한다. 편집 버전이 오래되면 `409`로 응답한다. 자체 백업 형식 30부터 `timeReservations`가 포함된다.

@@ -314,6 +314,24 @@ export interface WorklogEntry {
   durationSeconds?: number;
 }
 export interface IssueWorklogPage { entries: WorklogEntry[]; totalMinutes: number; totalEntries: number }
+export interface IssueTimeReservation {
+  id: string;
+  issueId: string;
+  userId: string;
+  startAt: string;
+  endAt: string;
+  version: number;
+  state: 'reserved' | 'needs-review';
+  createdById: string;
+  updatedById: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface IssueTimeReservationEntry extends IssueTimeReservation {
+  projectId: string;
+  issueKey: string;
+  issueTitle: string;
+}
 export interface ProjectWorklogReport {
   projectId: string;
   startDate: string;

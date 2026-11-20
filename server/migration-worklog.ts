@@ -1,5 +1,6 @@
 import type { LegacyRecord, LegacyValue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
+import { uniqueWallTimeInstant, utcTime, wallTimeFormatter } from '../shared/wall-time.js';
 
 export interface ParsedJiraWorklog {
   workDate: string;
@@ -103,57 +104,6 @@ function duration(row: LegacyRecord): number | JiraWorklogProblem {
   return textSeconds(row.metadata.timeSpent);
 }
 
-function utcTime(year: number, month: number, day: number, hour: number, minute: number, second: number, millis = 0): number {
-  const date = new Date(0);
-  date.setUTCFullYear(year, month - 1, day);
-  date.setUTCHours(hour, minute, second, millis);
-  return date.getTime();
-}
-
-const formatters = new Map<string, Intl.DateTimeFormat>();
-const offsetCache = new Map<string, number[]>();
-function formatterFor(timeZone: string): Intl.DateTimeFormat | null {
-  if (typeof timeZone !== 'string' || !timeZone || timeZone.trim() !== timeZone || timeZone.length > 100 || /^[+-]/.test(timeZone)) return null;
-  const existing = formatters.get(timeZone);
-  if (existing) return existing;
-  try {
-    const formatter = new Intl.DateTimeFormat('en-GB-u-ca-gregory-nu-latn', {
-      timeZone, era: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-    });
-    formatter.format(0);
-    formatters.set(timeZone, formatter);
-    if (formatters.size > 16) formatters.delete(formatters.keys().next().value!);
-    return formatter;
-  } catch { return null; }
-}
-
-function wallTime(formatter: Intl.DateTimeFormat, at: number): number {
-  const parts = Object.fromEntries(formatter.formatToParts(at).map(part => [part.type, part.value]));
-  const year = parts.era === 'BC' ? 1 - Number(parts.year) : Number(parts.year);
-  return utcTime(year, Number(parts.month), Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
-}
-
-function localInstant(naive: number, date: string, timeZone: string, formatter: Intl.DateTimeFormat): number | null {
-  const cacheKey = `${timeZone}:${date}`;
-  let offsets = offsetCache.get(cacheKey);
-  if (!offsets) {
-    const midnight = Date.parse(`${date}T00:00:00Z`);
-    const observed = new Set<number>();
-    // Both sides of DST/date-line changes are considered. A gap has no match;
-    // a repeated local time has two matches and is never silently disambiguated.
-    for (let sample = midnight - 48 * 3600000; sample <= midnight + 48 * 3600000; sample += 6 * 3600000) {
-      observed.add(wallTime(formatter, sample) - sample);
-    }
-    offsets = [...observed];
-    offsetCache.set(cacheKey, offsets);
-    if (offsetCache.size > 512) offsetCache.delete(offsetCache.keys().next().value!);
-  }
-  const wholeSecond = Math.floor(naive / 1000) * 1000;
-  const matches = offsets.map(offset => naive - offset).filter(at => wallTime(formatter, at) === wholeSecond);
-  return matches.length === 1 ? matches[0] : null;
-}
-
 function start(row: LegacyRecord, timeZone: string): { workDate: string; startedAt: string | null } | JiraWorklogProblem {
   let raw: LegacyValue | undefined;
   for (const name of ['started', 'startDate', 'startdate']) {
@@ -163,7 +113,7 @@ function start(row: LegacyRecord, timeZone: string): { workDate: string; started
     return problem('WORKLOG_START_INVALID', '작업 시작 날짜(started/startDate/startdate)가 없거나 올바르지 않습니다.');
   }
   const value = raw.trim();
-  const formatter = formatterFor(timeZone);
+  const formatter = wallTimeFormatter(timeZone);
   if (!formatter) return problem('WORKLOG_START_INVALID', '작업 시작 시각을 해석할 유효한 IANA 시간대가 필요합니다.');
   // A written date supplies a calendar day, not an invented midnight instant.
   if (isCalendarDate(value)) return { workDate: value, startedAt: null };
@@ -183,7 +133,7 @@ function start(row: LegacyRecord, timeZone: string): { workDate: string; started
       instant = naive - (offset.startsWith('-') ? -1 : 1) * (hours * 60 + minutes) * 60000;
     }
   } else {
-    instant = localInstant(naive, match[1], timeZone, formatter);
+    instant = uniqueWallTimeInstant(naive, match[1], timeZone, formatter);
   }
   if (instant === null) return problem('WORKLOG_START_INVALID', '지정 시간대에서 작업 시작 시각이 없거나 두 번 발생합니다. 명시적인 UTC 오프셋이 필요합니다.');
   return { workDate: match[1], startedAt: new Date(instant).toISOString() };

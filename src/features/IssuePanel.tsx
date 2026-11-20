@@ -14,6 +14,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { IssueWorklogs } from './IssueWorklogs';
+import { TimeReservations } from './TimeReservations';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
@@ -45,21 +46,22 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
-  const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs'>('details');
+  const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
   const [documentId, setDocumentId] = useState('');
   const [linking, setLinking] = useState(false);
   const [loadedVersion, setLoadedVersion] = useState(issue?.version);
   const dirty = Boolean(draft && baseDraft && JSON.stringify(editableIssue(draft, labels)) !== JSON.stringify(editableIssue(baseDraft, baseDraft.labels.join(', '))));
   const dirtyRef = useRef(false);
-  const worklogDraft = useRef<{dirty:boolean;pending:boolean;discard:()=>void} | null>(null);
-  const trackWorklogDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
-    worklogDraft.current = dirty || pending ? {dirty,pending,discard} : null;
+  const childDraft = useRef<{dirty:boolean;pending:boolean;discard:()=>void} | null>(null);
+  const trackChildDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
+    childDraft.current = dirty || pending ? {dirty,pending,discard} : null;
   }, []);
   function switchTab(next: typeof tab) {
     if (next === tab) return;
-    if (worklogDraft.current?.pending) { notify('작업 시간 저장이 끝난 뒤 이동해 주세요.', 'error'); return; }
-    if (worklogDraft.current?.dirty && !window.confirm('작성 중인 작업 시간 기록을 버리고 이동할까요?')) return;
-    worklogDraft.current?.discard();
+    const editingReservations = tab === 'reservations';
+    if (childDraft.current?.pending) { notify(editingReservations ? '시간 배정 저장이 끝난 뒤 이동해 주세요.' : '작업 시간 저장이 끝난 뒤 이동해 주세요.', 'error'); return; }
+    if (childDraft.current?.dirty && !window.confirm(editingReservations ? '작성 중인 시간 배정 입력을 버리고 이동할까요?' : '작성 중인 작업 시간 기록을 버리고 이동할까요?')) return;
+    childDraft.current?.discard();
     setTab(next);
   }
   useEffect(() => { dirtyRef.current = dirty || Boolean(commentBody.trim()); }, [dirty, commentBody]);
@@ -80,16 +82,17 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   useEffect(() => {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
-      const worklog = worklogDraft.current;
-      if (savingRef.current || worklog?.pending) {
+      const activeDraft = childDraft.current;
+      if (savingRef.current || activeDraft?.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
-      } else if (dirtyRef.current || worklog?.dirty) {
-        const message = worklog?.dirty ? '저장하지 않은 업무·댓글·작업 시간 기록을 버리고 이동할까요?'
+      } else if (dirtyRef.current || activeDraft?.dirty) {
+        const childName = tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록';
+        const message = activeDraft?.dirty ? `저장하지 않은 업무·댓글·${childName}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
-          worklog?.discard();
+          activeDraft?.discard();
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
           setCommentBody(''); setError(''); setConflict(false);
@@ -97,12 +100,12 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       }
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !worklogDraft.current) return;
+      if (!dirtyRef.current && !savingRef.current && !childDraft.current) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify]);
+  }, [issue, notify, tab]);
   useEffect(() => {
     let active = true;
     api<Comment[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`).then(value => { if (active) setComments(value); }).catch(err => { if (active) setCommentError(errorMessage(err)); }).finally(() => { if (active) setLoadingComments(false); });
@@ -173,7 +176,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         <button className="issue-icon-button" onClick={closePanel} disabled={saving} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
-    <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button><button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button><button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button></div></div>
+    <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button><button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button><button className={tab === 'reservations' ? 'active' : ''} onClick={() => switchTab('reservations')}>시간 배정</button><button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button></div></div>
     <div className="issue-panel-content">{tab === 'details' ? <>
       {(conflict || issue.version > draft.version) && <div className="issue-conflict-banner" role="alert"><div><strong>다른 변경사항이 있습니다</strong><p>작성 중인 내용은 유지됩니다. 편집 시작 버전은 {draft.version}, 현재 버전은 {issue.version}입니다. 최신 내용을 확인한 뒤 다시 편집하세요.</p></div><button className="btn" onClick={reloadLatest} disabled={saving}>최신 버전 불러오기</button></div>}
       <form className="issue-detail-form" onSubmit={save} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -226,7 +229,8 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       <section className="issue-related-section issue-comments"><h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>{loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => { const user = data.users.find(u => u.id === comment.authorId); return <article key={comment.id} className="issue-comment"><span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span><div><header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time></header><p>{comment.body}</p></div></article>; })}{commentError && <div className="issue-form-error" role="alert">{commentError}</div>}<form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form></section>
       <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentBody.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
-      notify={notify} onChanged={refresh} onDraftChange={trackWorklogDraft}/>
+      notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
+    : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>
   </aside></div>;
 }

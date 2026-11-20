@@ -459,6 +459,12 @@ async function runStandardPilot() {
   const parallel = await (await call(pilot.url,'/issues',{
     method:'POST',status:201,body:{projectId:parallelProjectId,title:'파일럿 병행 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,plannedEffortMinutes:90},
   })).json();
+  const reservationPath = `/issues/${issue.id}/time-reservations`;
+  const reservedTime = {userId:assigneeId,startAt:`${workloadDate}T00:00:00.000Z`,endAt:`${workloadDate}T01:00:00.000Z`};
+  const reservation = await (await call(pilot.url,reservationPath,{
+    method:'POST',status:201,body:{...reservedTime,requestId:randomUUID()},
+  })).json();
+  const calendarPath = `/time-reservations?${new URLSearchParams({startAt:reservedTime.startAt,endAt:reservedTime.endAt,userId:assigneeId})}`;
   const document = await (await call(pilot.url,'/documents',{
     method:'POST',status:201,body:{projectId,title:'파일럿 백업 복원 문서',content:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'고정할 원본 문서'}]}]}},
   })).json();
@@ -505,6 +511,10 @@ async function runStandardPilot() {
   });
   const trashedIssue = await (await call(pilot.url,`/issues/${issue.id}?expectedVersion=${issue.version}`,{method:'DELETE'})).json();
   await call(pilot.url,`/attachments/${attachment.id}/content`,{status:404});
+  assert.deepEqual(await (await call(pilot.url,calendarPath)).json(),[]);
+  const replacementReservation = await (await call(pilot.url,`/issues/${parallel.id}/time-reservations`,{
+    method:'POST',status:201,body:{...reservedTime,requestId:randomUUID()},
+  })).json();
   const locked = cli('backup',source,backup);
   assert.equal(locked.status,75,locked.stderr);
   assert.equal(existsSync(backup),false);
@@ -530,6 +540,11 @@ async function runStandardPilot() {
   await call(copy.url,`/attachments/${attachment.id}/content`,{status:404});
   const undone = await (await call(copy.url,`/trash/${trashedIssue.trashEntryId}/restore`,{method:'POST',body:{}})).json();
   assert.equal(undone.resourceId,issue.id);
+  assert.ok(undone.warnings.some(warning=>warning.includes('시간 배정 1건')));
+  assert.deepEqual(await (await call(copy.url,reservationPath)).json(),[
+    {...reservation,version:reservation.version+1,state:'needs-review'},
+  ]);
+  assert.deepEqual(await (await call(copy.url,calendarPath)).json(),[replacementReservation]);
   const restoredIssue = await (await call(copy.url,`/v1/issues/${issue.id}`,{
     headers:{Authorization:`Bearer ${key.token}`},
   })).json();
@@ -584,7 +599,7 @@ async function runStandardPilot() {
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection and restored data.');
+  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, time reservations and restored data.');
 }
 
 process.on('SIGINT', onInterrupt);

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { AlertCircle, ArrowRight, BarChart3, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
 import type { CustomFieldValue, Dependency, FeatureProps, Issue, PlanningItem, PlanningKind, Project, SchedulePreview, User } from '../../shared/types';
 import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
@@ -25,6 +25,7 @@ import { GanttPlanAssignment } from './GanttPlanAssignment';
 import { PlanScheduleShiftDialog } from './PlanScheduleShiftDialog';
 import { ProjectWorkload, WorkloadPreviewSummary } from './ProjectWorkload';
 import { TeamWorkload } from './TeamWorkload';
+import { TimeReservations } from './TimeReservations';
 import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityEditor';
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill } from './GanttDependencyModal';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
@@ -48,6 +49,7 @@ const HEADER_HEIGHT = 62;
 const BAR_EDGE_INSET = 2;
 const MAX_TIMELINE_DAYS = 180;
 const ANALYSIS_PANEL_ID = 'gantt-schedule-analysis';
+const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
@@ -85,6 +87,7 @@ function ProjectGantt(props: GanttProps) {
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
+  const [reservationsOpen, setReservationsOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
@@ -95,10 +98,19 @@ function ProjectGantt(props: GanttProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
+  const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean }>());
   useEffect(() => { previewRef.current = preview; }, [preview]);
+  useEffect(() => {
+    if (busy || linkEditor || !linkEditorFocusTarget.current) return;
+    const opener = linkEditorFocusTarget.current;
+    linkEditorFocusTarget.current = null;
+    if (opener.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+    else scrollRef.current?.focus({ preventScroll: true });
+  }, [busy, linkEditor]);
   const trackDraft = useCallback((id: string, dirty: boolean, pending = false) => { if (dirty || pending) draftsRef.current.set(id, { dirty, pending }); else draftsRef.current.delete(id); }, []);
+  const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   function markBusy(value: boolean) { busyRef.current = value; setBusy(value); }
   useEffect(() => {
     const guard = (event: Event) => {
@@ -349,9 +361,8 @@ function ProjectGantt(props: GanttProps) {
     showLinkEditor(opener, dependency, { predecessorId, successorId: issueId, type: !dependency || pickedSource.explicit || explicit ? type : undefined });
   }
   function closeLinkEditor() {
-    const opener = linkEditor?.opener;
+    linkEditorFocusTarget.current = linkEditor?.opener ?? null;
     setLinkEditor(null);
-    requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
   }
   async function refreshAfterDependencyChange(message: string) {
     try {
@@ -449,7 +460,14 @@ function ProjectGantt(props: GanttProps) {
     <div className="feature-heading"><div><div className="feature-eyebrow">PLAN WITH CLARITY</div><h1>일정 · 간트</h1><p>업무와 일정이 하나로. 직접 입력하고, 연결하고, 함께 조정하세요.</p></div><div className="gantt-heading-actions">
       <button className="btn" type="button" aria-expanded={workloadView === 'project'} disabled={!hasProject} onClick={() => toggleWorkload('project')}><BarChart3 size={15} />담당자 작업량</button>
       <button className="btn" type="button" aria-expanded={workloadView === 'team'} disabled={!data.projects.length} onClick={() => toggleWorkload('team')}><Layers3 size={15} />프로젝트 간 작업량</button>
+      <button className="btn" type="button" aria-expanded={reservationsOpen} disabled={!hasProject || busy} onClick={() => {
+        if (reservationsOpen && draftsRef.current.has(TIME_RESERVATIONS_DRAFT) && !canLeave()) return;
+        setReservationsOpen(!reservationsOpen);
+      }}><CalendarClock size={15} aria-hidden="true" />시간 배정</button>
       <button className="btn" disabled={busy || !hasProject} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || Boolean(planningScope && !issues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
+    {reservationsOpen && hasProject && <TimeReservations key={draftEpoch} projectId={projectId} issues={projectIssues}
+      initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users}
+      notify={notify} openIssue={openIssue} onDraftChange={trackReservationDraft} onChanged={refresh} />}
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{projectIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{projectIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{projectDependencyCount}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       <button ref={analysisTrigger} className="btn" type="button" aria-expanded={analysisOpen} aria-controls={analysisOpen ? ANALYSIS_PANEL_ID : undefined} disabled={!hasProject} onClick={() => setAnalysisOpen(open => !open)}>

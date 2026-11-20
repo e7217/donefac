@@ -34,6 +34,7 @@ import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
+import { TimeReservationError, TimeReservationService } from './time-reservations.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
@@ -132,6 +133,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   reportLedger.start();
   const reports=new ReportingService(store,reportLedger);
   const worklogs=new WorklogService(store);
+  const timeReservations=new TimeReservationService(store);
   const apiKeys=new ApiKeyService(store);
   const calendars=new CalendarService(store),scheduleArtifacts=new ScheduleArtifactService(store);
   const workload=new ProjectWorkloadService(store);
@@ -397,6 +399,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     },
   });
   worklogs.registerRoutes(app,{actor,activity});
+  timeReservations.registerRoutes(app,{actor,activity});
   registerFieldBreakdownRoutes(app,store,issueSchemas);
   reports.registerRoutes(app,{
     actor,
@@ -776,6 +779,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         const {attached,unavailable}=scheduleArtifacts.restoreIssueLinks(entry.resource,entry.milestoneIds);
         for(const milestone of attached)activity(req,'milestone',milestone.id,'연결 업무 복원',entry.resource.key);
         if(unavailable)warnings.push(`기존 마일스톤 ${unavailable}개를 찾을 수 없어 업무 연결을 복원하지 못했습니다.`);
+        const pendingReservations=timeReservations.restoreIssue(entry.resourceId);
+        if(pendingReservations)warnings.push(`팀원의 다른 일정과 겹친 시간 배정 ${pendingReservations}건을 보관했습니다. 업무 상세의 시간 배정에서 확인해 주세요.`);
       }
       activity(req,entry.resourceType,entry.resourceId,'휴지통에서 복원',entry.title);
       trash.remove(entry.id);
@@ -789,6 +794,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
       subscriptions.removeTarget(entry.resourceType,entry.resourceId);
       atlassianLinks.removeTarget(entry.resourceType,entry.resourceId);
+      if(entry.resourceType==='issue')timeReservations.purgeIssue(entry.resourceId);
       trash.remove(entry.id);
       activity(req,entry.resourceType,entry.resourceId,'휴지통에서 영구 삭제',entry.title);
       return archivedFiles(entry);
@@ -1006,7 +1012,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1063,6 +1069,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     }
     for(const dependency of importedDependencies)validateDependencyVersion(dependency);
     const archivedIssues=importedTrash.flatMap(entry=>entry.resourceType==='issue'?[entry.resource]:[]);
+    if(data.schemaVersion<30&&data.timeReservations!==undefined&&(!Array.isArray(data.timeReservations)||data.timeReservations.length)){
+      fail('시간 배정을 포함한 백업은 schemaVersion 30이 필요합니다.');
+    }
+    const importedReservations=data.schemaVersion>=30?timeReservations.validateRestore(data.timeReservations,{
+      issues:data.issues,archivedIssues,users:data.users,
+    },data.exportedAt):[];
     const effortIssues=[...(data.issues as Issue[]),...archivedIssues];
     if(data.schemaVersion<18){
       const capacities:unknown=data.workloadCapacities;
@@ -1161,6 +1173,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       }
       const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
       const previousWorklogs=worklogs.clearForRestore();
+      timeReservations.clearForRestore();
       documentFollowUp.clearForImport();
       outbound.resetForImport();
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
@@ -1212,6 +1225,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       collaboration.replaceImported(importedCollaboration);
       sourcePreservation.replaceImported(liveSources,previousImports);
       trash.replaceImported(importedTrash);
+      timeReservations.replaceRestored(importedReservations);
       reportLedger.replaceRestored(importedReportLedger,restoreAt);
       reports.replaceRestored(importedReportSnapshots);
       worklogs.replaceRestored(importedWorklogs,previousWorklogs);
@@ -1226,6 +1240,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message});
+    if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

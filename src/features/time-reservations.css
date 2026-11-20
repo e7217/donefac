@@ -1,0 +1,99 @@
+.time-reservations {
+  --reservation-muted: #52675c;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.time-reservations.card { margin: 14px 0; padding: clamp(12px, 2vw, 18px); }
+.time-reservation-header, .time-reservation-filters, .time-reservation-date-picker,
+.time-reservation-actions, .time-reservation-latest {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.time-reservation-header, .time-reservation-latest { justify-content: space-between; }
+.time-reservation-header h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 16px; }
+.time-reservation-header h3 svg { color: var(--accent); }
+.time-reservation-header p { margin: 4px 0 0; color: var(--reservation-muted); font-size: 12px; }
+.time-reservation-filters { margin: 14px 0 8px; align-items: flex-end; }
+.time-reservation-date-picker { align-items: flex-end; gap: 4px; }
+.time-reservation-date-picker > label { min-width: 0; }
+.time-reservation-date-picker > button { min-height: 34px; width: 34px; padding: 5px; justify-content: center; }
+.time-reservation-date-picker input { min-width: 0; width: 142px; }
+.time-reservation-filters > label { min-width: min(100%, 155px); }
+.time-reservation-filters select, .time-reservation-form select { min-width: 0; text-overflow: ellipsis; }
+.time-reservations .field { min-height: 34px; max-width: 100%; }
+
+.time-reservation-form, .time-reservation-delete {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbf8;
+}
+
+.time-reservation-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.time-reservation-form fieldset > label { min-width: 0; }
+.time-reservation-work-field, .time-reservation-edit-title { grid-column: 1 / -1; }
+.time-reservation-edit-title, .time-reservation-delete p { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.time-reservation-form > .time-reservation-actions, .time-reservation-delete .time-reservation-actions { margin-top: 10px; }
+.time-reservation-actions { gap: 6px; justify-content: flex-end; }
+.time-reservation-latest, .time-reservation-empty { color: var(--reservation-muted); font-size: 12px; }
+.time-reservation-latest { margin-top: 10px; }
+.time-reservation-form .issue-form-error { margin: 9px 0 0; }
+.time-reservation-latest .issue-form-error { margin: 0; }
+.time-reservation-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.time-reservation-list > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.time-reservation-row-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 9px; min-width: 0; }
+.time-reservation-row-main > strong { font-size: 13px; font-variant-numeric: tabular-nums; }
+.time-reservation-row-main > span { color: var(--reservation-muted); font-size: 12px; }
+.time-reservation-ticket {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.time-reservation-ticket:hover { text-decoration: underline; }
+.time-reservation-ticket span { color: var(--accent); font-weight: 600; }
+.time-reservation-row-main > .time-reservation-review {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #fff1d8;
+  color: #754a00;
+  font-size: 11px;
+}
+.time-reservation-empty { margin: 12px 0 0; }
+
+@media (max-width: 640px) {
+  .time-reservation-form fieldset { grid-template-columns: minmax(0, 1fr); }
+  .time-reservation-form .field { width: 100%; }
+  .time-reservations :is(button.btn, .field) { min-height: 40px; }
+  .time-reservation-list > li { align-items: flex-start; }
+  .time-reservation-row-main { flex: 1 1 100%; }
+  .time-reservation-list .time-reservation-actions { margin-left: auto; }
+}
