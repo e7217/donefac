@@ -565,6 +565,48 @@ export interface AutomationRun extends AutomationOutcome {
   id: string; eventId: string; ruleId: string; projectId: string; actorId: string; createdAt: string; occurredAt: string | null;
 }
 export interface AutomationPreview { outcomes: AutomationOutcome[]; warnings: string[] }
+export interface IssueAssignmentRuleInput {
+  name: string;
+  enabled: boolean;
+  fromStatuses: string[];
+  toStatusId: string;
+  issueTypes: string[];
+  assigneeId: string;
+  mode: 'unassigned' | 'replace';
+  priority: number;
+}
+export interface IssueAssignmentRule extends IssueAssignmentRuleInput {
+  id: string;
+  projectId: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface IssueAssignmentOutcome {
+  issueId: string;
+  issueKey: string;
+  issueTitle: string;
+  fromStatusId: string;
+  toStatusId: string;
+  previousAssigneeId: string | null;
+  assigneeId: string | null;
+  outcome: 'assigned' | 'unchanged' | 'skipped' | 'blocked';
+  reason: string;
+}
+export interface IssueAssignmentRun extends Omit<IssueAssignmentOutcome, 'outcome'> {
+  id: string;
+  projectId: string;
+  ruleId: string;
+  ruleName: string;
+  actorId: string;
+  source: 'user' | 'gitlab';
+  sourceEventId: string | null;
+  issueVersion: number;
+  outcome: 'assigned' | 'unchanged' | 'skipped';
+  createdAt: string;
+}
+export interface IssueAssignmentRunPage { items: IssueAssignmentRun[]; total: number; offset: number; limit: number }
+export interface IssueAssignmentPreview { outcomes: IssueAssignmentOutcome[] }
 export type OutboundEventType = 'issue.created' | 'issue.updated' | 'issue.deleted' | 'document.created' | 'document.updated' | 'document.deleted' | 'comment.created';
 export type MutationOrigin = 'user' | 'gitlab' | 'automation' | 'system' | 'import' | 'restore';
 export interface WebhookEndpoint {

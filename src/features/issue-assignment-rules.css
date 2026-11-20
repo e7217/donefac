@@ -1,0 +1,47 @@
+.assignment-settings {
+  min-width: 0;
+}
+
+.assignment-settings .automation-policy {
+  max-width: 80ch;
+}
+
+.assignment-settings .automation-rule-card {
+  overflow-wrap: anywhere;
+}
+
+.assignment-settings .automation-editor h3 {
+  overflow-wrap: anywhere;
+}
+
+.assignment-settings .automation-editor-error,
+.assignment-conflict {
+  margin: 1rem 1.2rem 0;
+}
+
+.assignment-conflict p {
+  margin: 0;
+}
+
+.assignment-conflict .btn {
+  margin-top: .5rem;
+}
+
+.assignment-history-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: .5rem;
+  margin-top: .8rem;
+}
+
+.assignment-history-pages span {
+  color: #536f5d;
+  font-size: .875rem;
+}
+
+.assignment-settings .automation-log-scroll:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 2px;
+}

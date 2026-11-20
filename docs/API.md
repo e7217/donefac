@@ -223,6 +223,23 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 `GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
 
+## 상태별 담당자 자동 배정
+
+프로젝트의 **설정 → 상태별 담당자 자동 배정**에서 사용한다. 관리 경로는 브라우저용 `/api`에 있다. 기존 업무의 `/api/v1` 수정 요청으로 상태가 실제로 바뀌면 같은 배정 규칙을 적용한다.
+
+| 요청 | 동작 |
+| --- | --- |
+| `GET /api/projects/:projectId/assignment-rules` | 우선순위 순 규칙 목록 |
+| `POST /api/projects/:projectId/assignment-rules` | 규칙 생성 |
+| `PATCH /api/projects/:projectId/assignment-rules/:id` | 수정 값과 `expectedVersion` 제출 |
+| `DELETE /api/projects/:projectId/assignment-rules/:id?expectedVersion=...` | 현재 버전의 규칙 삭제 |
+| `POST /api/projects/:projectId/assignment-rules/preview` | `{rule,issueIds}`를 받아 `{outcomes}` 반환 |
+| `GET /api/projects/:projectId/assignment-runs?offset=0&limit=20` | 최근 결과부터 `{items,total,offset,limit}` 반환. 최대 100건씩 조회 |
+
+규칙 필드는 `name`, `enabled`, `fromStatuses`, `toStatusId`, `issueTypes`, `assigneeId`, `mode`, `priority`다. 빈 `fromStatuses`와 `issueTypes`는 각각 모든 출발 상태와 업무 유형에 일치한다. 기본값은 `enabled: false`, `mode: 'unassigned'`, `priority: 100`이다. `mode: 'replace'`는 기존 담당자도 바꿀 수 있다. 우선순위는 0~10000으로, 숫자와 ID가 앞서는 일치 규칙 하나를 사용한다. 같은 저장에서 직접 변경하거나 해제한 담당자가 우선한다.
+
+미리보기는 선택한 최대 50개 업무에 입력한 규칙 하나를 적용해 본다. 상태·담당자와 `assigned`, `unchanged`, `skipped`, `blocked` 결과 및 이유를 반환한다. 규칙·업무·실행 기록은 그대로 유지한다.
+
 ## 외부 발신 웹훅
 
 **개발 · GitLab → 외부 웹훅**에서 수신처를 만든다. 처음에는 비활성이며 서명 키는 생성·교체 직후 한 번만 표시한다. 수신 시스템에 저장한 뒤 활성화한다. 최대20개 수신처를 등록할 수 있다.

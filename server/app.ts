@@ -22,6 +22,7 @@ import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artif
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
 import { AutomationService, AutomationError } from './automation.js';
+import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
 import { LegacyImportService } from './legacy-import.js';
@@ -354,10 +355,34 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     for(const c of changes){if(!c||typeof c!=='object'||typeof c.id!=='string')fail('일정 변경 형식을 확인해 주세요.');const issue=get<Issue>('issues',c.id);if(!Object.hasOwn(versions,issue.projectId))fail('변경할 업무의 달력 버전이 필요합니다.');}
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
+  const issueAssignments=new IssueAssignmentRulesService(store);
+  const prepareIssueChange=(before:Issue,proposed:Issue)=>{
+    const decision=issueAssignments.decide(before,proposed);
+    const issue=validateIssue(decision?.outcome==='assigned'?{...proposed,assigneeId:decision.assigneeId}:proposed,before);
+    issue.completedAt=done(issue)?(before.completedAt||issue.updatedAt):null;
+    return {issue,decision};
+  };
+  const commitIssueAssignment=(decision:IssueAssignmentDecision|null,before:Issue,issue:Issue,actorId:string,source:'user'|'gitlab',sourceEventId:string|null=null)=>{
+    if(!decision)return;
+    issueAssignments.record(decision,before,issue,{actorId,source,sourceEventId});
+    if(decision.outcome==='assigned'){
+      const assignee=issue.assigneeId?store.get<User>('users',issue.assigneeId):undefined;
+      store.put('activities',{id:uid(),resourceType:'issue',resourceId:issue.id,actorId,action:'담당자 자동 배정',
+        detail:`${decision.rule.name} · ${assignee?.name??issue.assigneeId}`,createdAt:issue.updatedAt});
+    }
+  };
   const automation=new AutomationService(store,{
     getGitlabSettings:()=>gitlab.settings(),
-    prepareChange:(before,status)=>{const next=validateIssue({...before,status,version:before.version+1,updatedAt:now()},before);next.completedAt=done(next)?(before.completedAt||now()):null;return next;},
-    commitChange:(rule,before,next,event)=>{store.put('issues',next);store.put('activities',{id:uid(),resourceType:'issue',resourceId:next.id,actorId:rule.actorId,action:'GitLab 자동화 상태 변경',detail:`${before.status} → ${next.status} · ${rule.name} · ${event.id}`,createdAt:now()});},
+    prepareChange:(before,status,onStatusChange)=>{
+      const {issue,decision}=prepareIssueChange(before,{...before,status,version:before.version+1,updatedAt:now()});
+      if(decision)onStatusChange((rule,event)=>commitIssueAssignment(decision,before,issue,rule.actorId,'gitlab',event.id));
+      return issue;
+    },
+    commitChange:(rule,before,next,event)=>{
+      store.put('issues',next);
+      store.put('activities',{id:uid(),resourceType:'issue',resourceId:next.id,actorId:rule.actorId,action:'GitLab 자동화 상태 변경',detail:`${before.status} → ${next.status} · ${rule.name} · ${event.id}`,createdAt:now()});
+      if(next.assigneeId&&next.assigneeId!==before.assigneeId)notifyIssue(next,rule.actorId,'issue-assigned',[next.assigneeId],next.updatedAt);
+    },
   });
   const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{
     processEvent:event=>automation.processEvent(event),
@@ -418,6 +443,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     },
   });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
+  issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>validateIssue(proposed,before)});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
   issueSchemas.registerRoutes(app,{actor,activity});
   planning.registerRoutes(app,{actor,activity,validateIssue});apiKeys.registerManagementRoutes(app,{actor,activity});
@@ -588,10 +614,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
     const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
-    const issue=validateIssue({...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()},old);
-    issue.completedAt=done(issue)?(old.completedAt||now()):null;
+    const {issue,decision}=prepareIssueChange(old,{...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()});
+    const actorId=actor(req);
     store.put('issues',issue);activity(req,'issue',issue.id,'티켓 변경',`${issue.key}: ${fields.join(', ')}`);
-    if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actor(req),'issue-assigned',[issue.assigneeId],issue.updatedAt);
+    if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actorId,'issue-assigned',[issue.assigneeId],issue.updatedAt);
+    commitIssueAssignment(decision,old,issue,actorId,'user');
     return issue;
   };
   app.get('/api/projects/:id/issue-order',(req,res)=>{
@@ -1037,7 +1064,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1070,6 +1097,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
+    if(data.schemaVersion<32&&data.issueAssignmentRules!==undefined&&(!Array.isArray(data.issueAssignmentRules)||data.issueAssignmentRules.length)){
+      fail('담당자 자동 배정 규칙을 포함한 백업은 schemaVersion 32가 필요합니다.');
+    }
+    const importedAssignments=issueAssignments.validateImport(data.schemaVersion>=32?data.issueAssignmentRules:[],{
+      projects:data.projects,users:data.users,workflows:importedWorkflows,schemas:importedSchemas,
+    });
     if(data.schemaVersion<9&&['sourceImports','sourceRecords','attachmentVersions','issueRelations'].some(key=>Array.isArray(data[key])&&data[key].length))fail('원본 이관과 첨부 버전이 있는 백업은 schemaVersion 9가 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
@@ -1176,6 +1209,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     let swapped:ReturnType<AttachmentFiles['swapImport']>|undefined;
     try{store.withMutationContext({actorId:null,origin:'import'},()=>store.transaction(()=>{
       const previousAutomation=new Map(automation.all().map(rule=>[rule.id,rule.version]));
+      const previousAssignments=issueAssignments.clearForImport();
       const previousSchemas=new Map(issueSchemas.snapshot().map(schema=>[schema.projectId,schema.version]));
       const previousWorkflows=new Map(workflows.snapshot().map(w=>[w.projectId,w.version]));
       const previousViews=new Map(savedViews.all().map(v=>[v.id,v.version]));
@@ -1216,6 +1250,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       automation.replaceImported(importedAutomation,previousAutomation);
+      issueAssignments.replaceImported(importedAssignments,previousAssignments);
       planning.replaceImported(importedPlanning.items,previousPlanning);
       calendars.replaceImported(importedCalendars,previousCalendars);
       workload.replaceImported(importedCapacity,previousCapacities);
@@ -1271,6 +1306,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueAssignmentRulesError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

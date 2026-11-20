@@ -9,9 +9,11 @@ import type { Store } from './store.js';
 export class AutomationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomationError(status,message,details);}
 type Connection=Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'>;
+type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
+type PreparedChange={outcome:AutomationOutcome;next?:Issue;afterStatusChange?:AfterStatusChange};
 export interface AutomationHooks{
   getGitlabSettings:()=>Connection;
-  prepareChange:(before:Issue,status:string)=>Issue;
+  prepareChange:(before:Issue,status:string,afterStatusChange:(effect:AfterStatusChange)=>void)=>Issue;
   commitChange:(rule:AutomationRule,before:Issue,next:Issue,event:AutomationEvent)=>void;
 }
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
@@ -77,9 +79,13 @@ export class AutomationService{
     return null;
   }
   private outcome(rule:AutomationRule,issue:Issue,outcome:AutomationOutcome['outcome'],reason:string):AutomationOutcome{return{issueId:issue.id,key:issue.key,title:issue.title,fromStatus:issue.status,toStatus:rule.toStatusId,outcome,reason};}
-  private prepare(rule:AutomationRule,issue:Issue):{outcome:AutomationOutcome;next?:Issue}{
+  private prepare(rule:AutomationRule,issue:Issue):PreparedChange{
     if(issue.status===rule.toStatusId)return{outcome:this.outcome(rule,issue,'no_op','이미 도착 상태여서 변경하지 않았습니다.')};
-    try{return{next:this.hooks.prepareChange(structuredClone(issue),rule.toStatusId),outcome:this.outcome(rule,issue,'changed','규칙 조건과 현재 워크플로 검증을 통과했습니다.')}}
+    try{
+      let afterStatusChange:AfterStatusChange|undefined;
+      const next=this.hooks.prepareChange(structuredClone(issue),rule.toStatusId,effect=>{afterStatusChange=effect;});
+      return{next,afterStatusChange,outcome:this.outcome(rule,issue,'changed','규칙 조건과 현재 워크플로 검증을 통과했습니다.')};
+    }
     catch(error){const status=(error as {status?:unknown})?.status;if(typeof status==='number'&&status>=400&&status<500)return{outcome:this.outcome(rule,issue,'blocked',error instanceof Error?error.message:'현재 업무 조건에서 상태를 변경할 수 없습니다.')};throw error;}
   }
   processEvent(event:AutomationEvent):AutomationRun[]{
@@ -99,10 +105,14 @@ export class AutomationService{
         if(last){const applied=JSON.parse(last.json) as AutomationRun,difference=Date.parse(event.occurredAt)-Date.parse(applied.occurredAt!);if(difference<0)ignored='이 업무에 마지막으로 적용한 이벤트보다 오래된 이벤트입니다.';else if(difference===0&&(applied.toStatus!==rule.toStatusId||issue.status!==rule.toStatusId))ignored='같은 발생 시각의 이벤트가 다른 상태 변경을 요구해 적용하지 않았습니다.';}
       }
       ignored??=this.matchReason(rule,issue,event);
-      let prepared:{outcome:AutomationOutcome;next?:Issue};
+      let prepared:PreparedChange;
       if(ignored)prepared={outcome:this.outcome(rule,issue,'ignored',ignored)};
       else prepared=this.store.withMutationContext({actorId:rule.actorId,origin:'automation',sourceEventId:event.id},()=>this.prepare(rule,issue));
-      if(prepared.next)this.store.withMutationContext({actorId:rule.actorId,origin:'automation',sourceEventId:event.id},()=>this.hooks.commitChange(rule,issue,prepared.next!,event));
+      const next=prepared.next;
+      if(next)this.store.withMutationContext({actorId:rule.actorId,origin:'automation',sourceEventId:event.id},()=>{
+        this.hooks.commitChange(rule,issue,next,event);
+        prepared.afterStatusChange?.(rule,event);
+      });
       const run:AutomationRun={...prepared.outcome,id:randomUUID(),eventId:event.id,ruleId:rule.id,projectId:issue.projectId,actorId:rule.actorId,createdAt:new Date().toISOString(),occurredAt:validTime(event.occurredAt)?new Date(event.occurredAt).toISOString():null};
       this.store.db.prepare('INSERT INTO automation_runs(id,event_id,issue_id,project_id,occurred_at,outcome,json) VALUES(?,?,?,?,?,?,?)').run(run.id,event.id,issueId,issue.projectId,run.occurredAt,run.outcome,JSON.stringify(run));result.push(run);
     }

@@ -459,6 +459,24 @@ async function runStandardPilot() {
   const parallel = await (await call(pilot.url,'/issues',{
     method:'POST',status:201,body:{projectId:parallelProjectId,title:'파일럿 병행 업무',assigneeId,startDate:workloadDate,endDate:workloadDate,plannedEffortMinutes:90},
   })).json();
+  const rulesPath = `/projects/${parallelProjectId}/assignment-rules`;
+  const runsPath = `/projects/${parallelProjectId}/assignment-runs`;
+  const routingIssue = await (await call(pilot.url, '/issues', {
+    method: 'POST', status: 201, body: {projectId: parallelProjectId, title: '파일럿 담당자 배정 업무'},
+  })).json();
+  const rule = await (await call(pilot.url, rulesPath, {
+    method: 'POST', status: 201,
+    body: {name: '파일럿 진행 업무 배정', enabled: true, fromStatuses: [routingIssue.status], toStatusId: 'in_progress', assigneeId: workspace.users[1].id},
+  })).json();
+  const routedIssue = await (await call(pilot.url, `/issues/${routingIssue.id}`, {
+    method: 'PATCH', body: {status: rule.toStatusId, expectedVersion: routingIssue.version},
+  })).json();
+  assert.equal(routedIssue.assigneeId, rule.assigneeId);
+  assert.equal(routedIssue.version, routingIssue.version + 1);
+  const assignmentRuns = await (await call(pilot.url, runsPath)).json();
+  assert.equal(assignmentRuns.total, 1);
+  assert.equal(assignmentRuns.items[0].issueId, routedIssue.id);
+  assert.equal(assignmentRuns.items[0].outcome, 'assigned');
   const reservationPath = `/issues/${issue.id}/time-reservations`;
   const reservedTime = {userId:assigneeId,startAt:`${workloadDate}T00:00:00.000Z`,endAt:`${workloadDate}T01:00:00.000Z`};
   const reservation = await (await call(pilot.url,reservationPath,{
@@ -595,6 +613,8 @@ async function runStandardPilot() {
   assert.deepEqual(new Map(restoredTeamRow.days[0].allocations.map(allocation=>[allocation.issueId,allocation.projectId])),new Map([
     [issue.id,projectId],[parallel.id,parallelProjectId],
   ]));
+  assert.deepEqual(await (await call(copy.url, rulesPath)).json(), [rule]);
+  assert.deepEqual(await (await call(copy.url, runsPath)).json(), assignmentRuns);
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();
   assert.equal(restoredCollaboration.enabled,true);
   assert.equal(restoredCollaboration.document.plainText,collaboration.document.plainText);
@@ -627,7 +647,7 @@ async function runStandardPilot() {
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, time reservations and individual trash restore.');
+  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, assignment rules and history, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);
