@@ -170,6 +170,7 @@ async function rejectSocket(url, headers, status) {
 
 async function verifyIntegrations(session, anonymous, origin) {
   const gitlabPath = '/api/integrations/gitlab';
+  const webhookStatusPath = `${gitlabPath}/webhook-status`;
   const settings = await (await call(session, 'GET', gitlabPath, 200)).json();
   await call(session, 'PATCH', gitlabPath, 200, {
     headers: { Origin: origin },
@@ -186,6 +187,13 @@ async function verifyIntegrations(session, anonymous, origin) {
   });
   assert.equal((await incoming.json()).linked, 1);
   await call(anonymous, 'GET', gitlabPath, 401);
+  await call(anonymous, 'GET', webhookStatusPath, 401, { headers: { 'X-Gitlab-Token': gitlabSecret } });
+  const inbound = await call(session, 'GET', webhookStatusPath, 200);
+  assert.equal(inbound.headers()['cache-control'], 'no-store');
+  const [repository] = (await inbound.json()).repositories;
+  assert.equal(repository.repositoryId, 42);
+  assert.equal(repository.lastDelivery.authentication, 'secret-token');
+  assert.equal(repository.lastDelivery.linked, 1);
 
   await call(session, 'GET', '/api/v1/issues/issue-1', 401);
   const key = await (await call(session, 'POST', '/api/api-keys', 201, {
@@ -199,6 +207,8 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'GET', '/api/v1/issues/issue-9', 403, { headers: bearer });
   await call(anonymous, 'PATCH', '/api/v1/issues/issue-1', 403, { headers: bearer, data: { title: '입력이 거부되어야 함' } });
   await call(anonymous, 'GET', '/api/workspace', 401, { headers: bearer });
+  await call(anonymous, 'GET', webhookStatusPath, 401, { headers: bearer });
+  await call(anonymous, 'GET', '/api/v1/integrations/gitlab/webhook-status', 403, { headers: bearer });
 }
 
 async function verifyBrowser(origin) {
@@ -295,7 +305,7 @@ async function verifyBrowser(origin) {
     await rejectSocket(socketUrl, { Cookie: sessionCookie }, 403);
 
     await verifyIntegrations(session.request, anonymous, origin);
-    for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab']) {
+    for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab', '/api/integrations/gitlab/webhook-status']) {
       const response = await call(session.request, 'GET', path, 200);
       checkCredentials(await response.body(), path);
     }

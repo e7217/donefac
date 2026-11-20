@@ -598,11 +598,23 @@ async function runStandardPilot() {
   gitlab.listen(0,'127.0.0.1');
   await once(gitlab,'listening');
   const settings = await (await call(pilot.url,'/integrations/gitlab')).json();
+  const syntheticWebhookSecret = `pilot-webhook-${randomUUID()}`;
   const jiraRoutes = [{repositoryId:42,projectId:sourceAudit.issue.projectId,jiraInstanceKey:'pilot-jira'}];
   const gitlabLinksPath = `/issues/${sourceAudit.issue.id}/gitlab-links?kind=merge_request`;
   await call(pilot.url,'/integrations/gitlab',{
-    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken,jiraRoutes},
+    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken,webhookSecret:syntheticWebhookSecret,jiraRoutes},
   });
+  const gitlabWebhook = {
+    method: 'POST', headers: { 'X-Gitlab-Token': syntheticWebhookSecret, 'Idempotency-Key': randomUUID() },
+    body: { object_kind: 'push', project_id: 42, ref: 'refs/heads/preview-without-ticket', before: '0'.repeat(40), after: 'a'.repeat(40), commits: [] },
+  };
+  const webhookStatusPath = '/integrations/gitlab/webhook-status';
+  const receipt = await (await call(pilot.url, '/integrations/gitlab/webhook', gitlabWebhook)).json();
+  assert.deepEqual(receipt, { ok: true, linked: 0, duplicate: false, runs: [] });
+  const inboundStatus = await call(pilot.url, webhookStatusPath);
+  assert.equal(inboundStatus.headers.get('cache-control'), 'no-store');
+  const gitlabWebhookStatus = await inboundStatus.json();
+  assert.equal(gitlabWebhookStatus.repositories[0].lastDelivery.authentication, 'secret-token');
   const firstSync = await (await call(pilot.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(firstSync.linked,1);
   const gitlabActivity = await (await call(pilot.url,gitlabLinksPath)).json();
@@ -716,6 +728,8 @@ async function runStandardPilot() {
   const restoredGitlab = await (await call(copy.url,'/integrations/gitlab')).json();
   assert.deepEqual(restoredGitlab.jiraRoutes,jiraRoutes);
   assert.deepEqual(await (await call(copy.url,gitlabLinksPath)).json(),gitlabActivity);
+  assert.deepEqual(await (await call(copy.url, webhookStatusPath)).json(), gitlabWebhookStatus);
+  assert.equal((await (await call(copy.url, '/integrations/gitlab/webhook', gitlabWebhook)).json()).duplicate, true);
   const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {
     method: 'PATCH', body: {expectedVersion: restoredAudit.issue.version, status: restoredAudit.nextStatus},
   })).json();

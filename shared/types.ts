@@ -672,6 +672,18 @@ export interface GitlabLink { id: string; issueId: string; projectId: number; ii
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[] }
+export interface GitlabWebhookDelivery {
+  event: 'push' | 'tag_push' | 'merge_request' | 'pipeline' | 'other';
+  authentication: 'secret-token' | 'signing-token';
+  receivedAt: string;
+  duplicate: boolean;
+  linked: number;
+  automationRuns: number;
+}
+export interface GitlabWebhookStatus {
+  settingsVersion: number;
+  repositories: { repositoryId: number; lastDelivery: GitlabWebhookDelivery | null }[];
+}
 export interface GitlabSyncPreviewCounts {
   mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;
   create: number; update: number; unchanged: number;

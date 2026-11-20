@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, Issue, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationRule, GitlabWebhookStatus, Issue, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -27,6 +27,11 @@ test('authenticated automation shares issue, audit, receipt and minimal outbox t
   const f=await fixture();try{
     await configure(f);await endpoint(f);await rule(f);const before=f.observer.get<Issue>('issues','issue-1')!;const body=payload(),id=randomUUID();const result=await hook(f,body,id);assert.equal(result.status,200,JSON.stringify(result.data));
     const snapshot=(await f.call('/workspace')).data,issue=snapshot.issues.find((value:Issue)=>value.id==='issue-1');assert.equal(issue.status,'done');assert.ok(issue.completedAt);assert.equal(issue.version,before.version+1);
+    const webhookStatus = await f.call<GitlabWebhookStatus>('/integrations/gitlab/webhook-status');
+    assert.equal(webhookStatus.status, 200);
+    assert.equal(webhookStatus.data.repositories[0].lastDelivery?.automationRuns, 1);
+    assert.equal(webhookStatus.data.repositories[0].lastDelivery?.linked, 1);
+    assert.equal((await f.call('/integrations/gitlab/webhook-status?repositoryId=42')).status, 400);
     const activity=snapshot.activities.at(-1);assert.equal(activity.actorId,'user-seo');assert.match(activity.action,/자동화/);
     const deliveries=(await f.call<WebhookDelivery[]>('/webhook-deliveries')).data;assert.equal(deliveries.length,1);
     const detail=(await f.call<{delivery:WebhookDelivery;envelope:WebhookEnvelope}>('/webhook-deliveries/'+deliveries[0].id)).data;assert.equal(detail.envelope.origin,'automation');assert.equal(detail.envelope.actorId,'user-seo');assert.ok(detail.envelope.sourceEventId);assert.deepEqual(detail.envelope.changedFields.sort(),['completedAt','status']);assert.equal(detail.envelope.resource.status,'done');assert.ok(!JSON.stringify(detail).includes('integration-secret'));assert.ok(!Object.hasOwn(detail.envelope.resource,'description'));
@@ -47,7 +52,9 @@ test('native8 exports definitions only and restores disabled rules with operatio
   const f=await fixture();try{
     await configure(f);const destination=await endpoint(f);const saved=await rule(f);assert.equal((await hook(f)).status,200);const backup=(await f.call('/export')).data;assert.equal(backup.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);assert.equal(backup.automationRules[0].id,saved.id);
     const serialized=JSON.stringify(backup);for(const privateValue of [destination.secret,destination.endpoint.url,'integration-secret','webhook_endpoints','webhook_deliveries'])assert.ok(!serialized.includes(privateValue));
+    assert.equal(Object.hasOwn(backup, 'gitlabWebhookDeliveries'), false);
     assert.equal((await f.call('/import','POST',{data:backup})).status,200);const restored=(await f.call<AutomationRule[]>('/automation-rules')).data[0];assert.equal(restored.enabled,false);assert.equal(restored.enabledAt,null);assert.ok(restored.version>saved.version);assert.equal((await f.call('/automation-runs')).data.length,0);assert.equal((await f.call('/webhook-endpoints')).data.length,0);assert.equal((await f.call('/webhook-deliveries')).data.length,0);assert.equal(f.observer.db.prepare('SELECT COUNT(*) AS total FROM webhook_events').get()!.total,0);
+    assert.deepEqual((await f.call<GitlabWebhookStatus>('/integrations/gitlab/webhook-status')).data.repositories, [{ repositoryId: 42, lastDelivery: null }]);
     assert.equal((await f.call('/integrations/gitlab')).data.webhookSecretConfigured,true);
     const legacy={...backup,schemaVersion:7};delete legacy.automationRules;assert.equal((await f.call('/import','POST',{data:legacy})).status,200);assert.equal((await f.call('/automation-rules')).data.length,0);
   }finally{await f.close();}

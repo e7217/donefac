@@ -16,10 +16,13 @@
 .gitlab-history-option p,.gitlab-history-result p{margin:4px 0 0}
 .gitlab-history-result{margin-top:10px;color:#375649;font-size:14px}
 .gitlab-history-limits{color:#71542a}
-.gitlab-preview,.gitlab-sync-result{grid-column:1/-1;padding:20px;color:#375649;font-size:14px;line-height:1.6}
+.gitlab-preview,.gitlab-sync-result,.gitlab-webhook-status{grid-column:1/-1;padding:20px;color:#375649;font-size:14px;line-height:1.6}
+.gitlab-webhook-status-heading{flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.gitlab-webhook-status>.gitlab-webhook-repositories{margin-top:12px}
+.gitlab-webhook-waiting{color:#52665c;background:#eff4f0}
 @media(min-width:901px){.development-page>.integration-grid>.integration-guide{grid-column:2;grid-row:1}}
 .gitlab-preview .card-heading h2{display:flex;gap:8px;align-items:center}
-.gitlab-preview p,.gitlab-sync-result p{margin:6px 0;overflow-wrap:anywhere}
+.gitlab-preview p,.gitlab-sync-result p,.gitlab-webhook-status p{margin:6px 0;overflow-wrap:anywhere}
 .gitlab-sync-result-heading{flex-wrap:wrap;gap:8px 12px}
 .gitlab-sync-result>.gitlab-preview-repositories{margin-top:12px}
 .gitlab-preview-summary{display:flex;flex-wrap:wrap;gap:8px 16px;padding:12px 0}
@@ -51,7 +54,7 @@
 .gitlab-preview-ambiguity p{font-weight:650}
 .gitlab-preview-ambiguity ul{display:flex;gap:4px 8px;flex-wrap:wrap;padding:0;list-style:none;overflow-wrap:anywhere}
 @media(max-width:600px){
-  .gitlab-preview,.gitlab-sync-result{padding:14px}
+  .gitlab-preview,.gitlab-sync-result,.gitlab-webhook-status{padding:14px}
   .gitlab-preview-candidates li{align-items:flex-start;flex-direction:column}
   .gitlab-preview-target{justify-content:flex-start}
   .gitlab-jira-route{grid-template-columns:minmax(0,1fr)}

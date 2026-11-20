@@ -36,6 +36,10 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 `npm run test:pilot:access`는 OpenSSL과 Chromium을 사용해 임시 루프백 HTTPS 프록시에서 접속, 공동 편집, 연동 경로를 검증한다.
 
+## GitLab 웹훅 수신 확인
+
+**개발 · GitLab → GitLab 웹훅 수신 확인**에서 저장소별 마지막 인증 수신을 확인한다. 업무 연결이 0건이어도 수신 시각과 이벤트가 표시된다. GitLab에서 이벤트를 보낸 뒤 **수신 상태 새로고침**을 누른다. 수신이 표시되지 않으면 GitLab의 **Settings → Webhooks → Edit → Recent events**에서 전송 결과를 확인할 수 있다. [GitLab 웹훅 전송 이력](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
+
 ## Jira·Confluence 원본 조회
 
 업무 상세 또는 문서 **연결** 탭에서 **기존 도구 연결**을 사용한다. Jira는 `/browse/TEAM-17`, Confluence는 `/pages/viewpage.action?pageId=1234`, `/display/TEAM/Release+Notes`, `/spaces/TEAM/pages/1234/Release-Notes`처럼 브라우저에서 쓰는 주소를 받는다. 기존 서버의 `/jira` 또는 `/wiki` 같은 경로도 주소에 포함한다.

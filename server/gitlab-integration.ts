@@ -1,7 +1,7 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
@@ -12,6 +12,8 @@ export class GitlabIntegrationError extends Error{constructor(public status:numb
 function fail(message:string,status=400,details?:unknown):never{throw new GitlabIntegrationError(status,message,details);}
 type Obj=Record<string,unknown>;
 type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
+type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[] };
+type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery };
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string};
 type BranchCursor={id:string;pipelineId:number};
 type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string};
@@ -256,6 +258,7 @@ export class GitlabIntegrationService{
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gitlab_webhook_deliveries(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS gitlab_links_manual ON gitlab_links(id) WHERE json_extract(json,'$.manualLinkId') IS NOT NULL;`);
     this.manualLinkRows=store.db.prepare(`SELECT json FROM gitlab_links WHERE id>=? AND id<?
       AND json_extract(json,'$.manualLinkId') IS NOT NULL`);
@@ -263,6 +266,14 @@ export class GitlabIntegrationService{
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
   private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{})};}
   settings():GitlabSettings{return this.public(this.raw());}
+  webhookStatus(): GitlabWebhookStatus {
+    const settings = this.raw();
+    const deliveries = new Map(this.store.all<StoredWebhookDelivery>('gitlab_webhook_deliveries').map(({ id, delivery }) => [id, delivery]));
+    return {
+      settingsVersion: settings.version,
+      repositories: settings.projectIds.map(repositoryId => ({ repositoryId, lastDelivery: deliveries.get(String(repositoryId)) ?? null })),
+    };
+  }
   private jiraSources():GitlabJiraSource[]{return this.hooks.jiraSources?.()??[];}
   private submittedJiraRoutes(input:Obj,old:RawSettings,address:string,repositories:number[]):GitlabJiraRoute[]{
     if(Object.hasOwn(input,'jiraRoutes'))return parseJiraRoutes(input.jiraRoutes,repositories,this.jiraSources());
@@ -348,11 +359,40 @@ export class GitlabIntegrationService{
     const jiraRoutes=this.submittedJiraRoutes(input,old,next.baseUrl,next.projectIds);
     if(jiraRoutes.length)next.jiraRoutes=jiraRoutes;
     else delete next.jiraRoutes;
-    for(const field of ['token','webhookSecret','signingToken'] as const)if(field in input){const value=credential(input[field]);if(value&&field==='signingToken')signingKey(value);next[field]=value?this.store.seal(value):null;}
+    let webhookCredentialsChanged = false;
+    for (const field of ['token', 'webhookSecret', 'signingToken'] as const) {
+      if (!Object.hasOwn(input, field)) continue;
+      const submitted = credential(input[field]);
+      if (submitted && field === 'signingToken') signingKey(submitted);
+      if (field !== 'token') {
+        if (this.sameWebhookCredential(old[field], submitted)) continue;
+        webhookCredentialsChanged = true;
+      }
+      next[field] = submitted ? this.store.seal(submitted) : null;
+    }
+    this.invalidateWebhookDeliveries(old, next, webhookCredentialsChanged);
     next.version=old.version+1;this.store.setSetting('gitlab',next);this.hooks.onConnectionChanged(this.public(old),this.public(next));afterSave?.(this.public(next));return this.public(next);
   });}
+  private sameWebhookCredential(stored: string | null | undefined, submitted: string): boolean {
+    if (!stored) return !submitted;
+    if (!submitted) return false;
+    try { return constantEqual(this.store.unseal(stored), submitted); }
+    catch { return false; }
+  }
+  private invalidateWebhookDeliveries(previous: RawSettings, next: RawSettings, credentialsChanged: boolean): void {
+    if (previous.baseUrl !== next.baseUrl || credentialsChanged) {
+      this.store.db.exec('DELETE FROM gitlab_webhook_deliveries');
+      return;
+    }
+    const allowed = new Set(next.projectIds);
+    const previousRoutes = new Map((previous.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
+    const nextRoutes = new Map((next.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
+    for (const id of previous.projectIds) {
+      if (!allowed.has(id) || previousRoutes.get(id) !== nextRoutes.get(id)) this.store.remove('gitlab_webhook_deliveries', String(id));
+    }
+  }
   resetForImport(branchLinks: Iterable<GitlabLink> = []): void {
-    this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;DELETE FROM gitlab_push_cursors;');
+    this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;DELETE FROM gitlab_push_cursors;DELETE FROM gitlab_webhook_deliveries;');
     const observations = new Map<string, PushObservation>();
     for (const link of branchLinks) {
       const observed = pushObservationFromLink(link);
@@ -369,17 +409,18 @@ export class GitlabIntegrationService{
     }
     this.store.setSetting('gitlab', { ...raw, version: raw.version + 1 });
   }
-  private authenticate(req:Request,raw:RawSettings):void{
+  private authenticate(req:Request,raw:RawSettings):GitlabWebhookDelivery['authentication']{
     if(req.headers['webhook-signature']!==undefined){
       if(!raw.signingToken)fail('Webhook 서명 인증에 실패했습니다.',401);
       const id=req.header('webhook-id')||'',timestamp=req.header('webhook-timestamp')||'',signature=req.header('webhook-signature')||'',body=(req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody;
       if(!id||id.length>200||!/^\d{1,16}$/.test(timestamp)||!Number.isSafeInteger(Number(timestamp))||Math.abs(Date.now()/1000-Number(timestamp))>300||!body||signature.length>2048)fail('Webhook 서명 또는 발생 시각을 확인할 수 없습니다.',401);
       const expected=createHmac('sha256',signingKey(this.store.unseal(raw.signingToken))).update(Buffer.concat([Buffer.from(`${id}.${timestamp}.`),body])).digest();let valid=false;
       for(const part of signature.split(/\s+/)){const[version,encoded]=part.split(',');if(version!=='v1'||!encoded)continue;const received=Buffer.from(encoded,'base64');if(received.length===expected.length&&received.toString('base64')===encoded&&timingSafeEqual(received,expected))valid=true;}
-      if(!valid)fail('Webhook 서명 인증에 실패했습니다.',401);return;
+      if(!valid)fail('Webhook 서명 인증에 실패했습니다.',401);return 'signing-token';
     }
     if(!raw.webhookSecret){if(raw.signingToken)fail('Webhook 서명이 필요합니다.',401);fail('Webhook 인증이 설정되지 않았습니다.',503);}
     if(!constantEqual(this.store.unseal(raw.webhookSecret),req.header('X-Gitlab-Token')||''))fail('Webhook 인증에 실패했습니다.',401);
+    return 'secret-token';
   }
   private ticketMatcher(issues:IssueMatch[],route?:GitlabJiraRoute):TicketMatcher{
     return makeTicketMatcher(issues,route,route?this.hooks.jiraOriginalKeys?.(route)??new Map():new Map());
@@ -519,11 +560,12 @@ export class GitlabIntegrationService{
     }
     return linked;
   }
-  webhook(req:Request):{ok:true;duplicate:boolean;linked:number;runs:AutomationRun[]}{
-    const raw=this.raw();this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
+  webhook(req:Request):WebhookResult{
+    const raw=this.raw(),authentication=this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
     const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push'} as Record<string,string>)[header]||'';
     const attributes=record(body.object_attributes),instance=this.instance(raw),externalId=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update((req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody||Buffer.from(JSON.stringify(body))).digest('hex');if(externalId.length>500)fail('Webhook 식별자가 너무 깁니다.');const eventId=`gitlab:${instance}:${projectId}:${kind}:${createHash('sha256').update(externalId).digest('hex')}`;
-    return this.store.transaction(()=>{
+    const receivedAt = now();
+    const processWebhook = (): WebhookResult => {
       if(this.store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
       if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:this.recordPush(raw,instance,projectId,kind,body,project),runs:[]};
@@ -559,6 +601,14 @@ export class GitlabIntegrationService{
       const action=string(attributes.action),trigger=kind==='merge_request'?({open:'merge_request.opened',reopen:'merge_request.opened',merge:'merge_request.merged',close:'merge_request.closed'} as Record<string,AutomationEvent['trigger']>)[action]:({success:'pipeline.succeeded',failed:'pipeline.failed'} as Record<string,AutomationEvent['trigger']>)[state];
       const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
       return{ok:true,duplicate:false,linked,runs};
+    };
+    return this.store.transaction(() => {
+      const result = processWebhook();
+      const event = kind === 'push' || kind === 'tag_push' || kind === 'merge_request' || kind === 'pipeline' ? kind : 'other';
+      const { duplicate, linked, runs } = result;
+      const delivery: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns: runs.length };
+      this.store.put('gitlab_webhook_deliveries', { id: String(projectId), delivery } satisfies StoredWebhookDelivery);
+      return result;
     });
   }
   private visitProjectLinks(
@@ -763,6 +813,11 @@ export class GitlabIntegrationService{
   registerRoutes(app:Express,hooks:RouteHooks):void{
     app.get('/api/integrations/gitlab',(_req,res)=>res.json(this.settings()));
     app.get('/api/integrations/gitlab/jira-sources',(_req,res)=>res.set('Cache-Control','no-store').json(this.jiraSources()));
+    app.get('/api/integrations/gitlab/webhook-status',(req,res)=>{
+      res.set('Cache-Control','no-store');
+      if (Object.keys(req.query).length) fail('웹훅 수신 상태 조회 조건을 확인해 주세요.');
+      res.json(this.webhookStatus());
+    });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;

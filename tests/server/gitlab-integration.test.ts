@@ -10,9 +10,9 @@ import type { Request } from 'express';
 import { Store } from '../../server/store.js';
 import { seed } from '../../server/seed.js';
 import { GitlabIntegrationService,GitlabIntegrationError } from '../../server/gitlab-integration.js';
-import type { AutomationEvent,GitlabLink,GitlabSettings,GitlabSyncFailure } from '../../shared/types.js';
+import type { AutomationEvent,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure } from '../../shared/types.js';
 
-function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-gitlab-')),store=new Store(dir);seed(store);const events:AutomationEvent[]=[],connections:{before:GitlabSettings;after:GitlabSettings}[]=[];let rejectEvent=false;const service=new GitlabIntegrationService(store,{processEvent:event=>{if(rejectEvent)throw new Error('audit rollback');events.push(event);return[];},onConnectionChanged:(before,after)=>{connections.push({before,after});return 0;}});return{store,service,events,connections,rejectEvent:(value:boolean)=>{rejectEvent=value;},configure:(values:Record<string,unknown>={})=>service.configure({expectedVersion:service.settings().version,baseUrl:'https://git.example.test',projectIds:[42],webhookSecret:'legacy-secret',...values}),close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};}
+function fixture(jiraSources: GitlabJiraSource[] = []){const dir=mkdtempSync(join(tmpdir(),'teamspace-gitlab-')),store=new Store(dir);seed(store);const events:AutomationEvent[]=[],connections:{before:GitlabSettings;after:GitlabSettings}[]=[];let rejectEvent=false;const service=new GitlabIntegrationService(store,{processEvent:event=>{if(rejectEvent)throw new Error('audit rollback');events.push(event);return[];},onConnectionChanged:(before,after)=>{connections.push({before,after});return 0;},jiraSources:()=>jiraSources});return{dir,store,service,events,connections,rejectEvent:(value:boolean)=>{rejectEvent=value;},configure:(values:Record<string,unknown>={})=>service.configure({expectedVersion:service.settings().version,baseUrl:'https://git.example.test',projectIds:[42],webhookSecret:'legacy-secret',...values}),close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};}
 function request(body:unknown,headers:Record<string,string>={},raw=Buffer.from(JSON.stringify(body))):Request{const values=Object.fromEntries(Object.entries({'x-gitlab-token':'legacy-secret','x-gitlab-event-uuid':randomUUID(),...headers}).map(([key,value])=>[key.toLowerCase(),value]));return{body,headers:values,gitlabRawBody:raw,header:(name:string)=>values[name.toLowerCase()]} as unknown as Request;}
 function mr(values:Record<string,unknown>={}){return{object_kind:'merge_request',project:{id:42,web_url:'https://git.example.test/team/repo'},object_attributes:{id:101,iid:7,title:'NEO-1 동작 확인',description:'설명',source_branch:'feature/NEO-1',last_commit:{id:'sha-a'},state:'merged',action:'merge',updated_at:new Date(Date.now()-1000).toISOString(),url:'https://git.example.test/team/repo/-/merge_requests/7',...values}};}
 function pipeline(values:Record<string,unknown>={}){return{object_kind:'pipeline',project:{id:42,web_url:'https://git.example.test/team/repo'},object_attributes:{id:200,ref:'feature/NEO-1',sha:'sha-a',status:'success',finished_at:new Date(Date.now()-1000).toISOString(),...values}};}
@@ -68,6 +68,108 @@ function pushPayload(branch: string, before: string, after: string, commits: Rec
     commits, total_commits_count: commits.length,
   };
 }
+
+test('GitLab webhook receipts persist only accepted delivery summaries for each repository', t => {
+  const f = fixture();
+  t.after(f.close);
+  const key = Buffer.alloc(32, 13);
+  const saved = f.configure({ baseUrl: pushBase, projectIds: [42, 77], signingToken: `whsec_${key.toString('base64')}` });
+  const empty = { settingsVersion: saved.version, repositories: [{ repositoryId: 42, lastDelivery: null }, { repositoryId: 77, lastDelivery: null }] };
+  assert.deepEqual(f.service.webhookStatus(), empty);
+
+  const push = pushPayload('feature/synthetic-branch-without-ticket', commitSha('0'), commitSha('a'));
+  rejects(() => f.service.webhook(request(push, { 'x-gitlab-token': 'invalid-token' })), 401);
+  rejects(() => f.service.webhook(request({ ...push, project: { ...push.project, id: 99 } })), 403);
+  assert.deepEqual(f.service.webhookStatus(), empty);
+  const sentAt = Date.now();
+  assert.deepEqual(f.service.webhook(request(push, { 'x-gitlab-event-uuid': 'synthetic-private-delivery-id' })),
+    { ok: true, duplicate: false, linked: 0, runs: [] });
+  const first = f.service.webhookStatus();
+  const delivered = first.repositories[0].lastDelivery;
+  assert.ok(delivered);
+  assert.ok(Date.parse(delivered.receivedAt) >= sentAt && Date.parse(delivered.receivedAt) <= Date.now());
+  assert.deepEqual(delivered, { event: 'push', authentication: 'secret-token', receivedAt: delivered.receivedAt,
+    duplicate: false, linked: 0, automationRuns: 0 });
+  assert.equal(first.repositories[1].lastDelivery, null);
+
+  const body = { ...mr({ title: 'NEO-1 synthetic-private-merge-title' }), project: { id: 77, web_url: `${pushBase}/team/other` } };
+  const raw = Buffer.from(JSON.stringify(body));
+  const signedId = 'synthetic-private-signed-id';
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = createHmac('sha256', key).update(`${signedId}.${timestamp}.`).update(raw).digest('base64');
+  const signed = { 'webhook-id': signedId, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` };
+  f.rejectEvent(true);
+  assert.throws(() => f.service.webhook(request(body, signed, raw)), /audit rollback/);
+  assert.deepEqual(f.service.webhookStatus(), first);
+  f.rejectEvent(false);
+  assert.equal(f.service.webhook(request(body, signed, raw)).linked, 1);
+  const signedStatus = f.service.webhookStatus();
+  const signedDelivery = signedStatus.repositories[1].lastDelivery;
+  assert.ok(signedDelivery);
+  assert.deepEqual(signedDelivery, { event: 'merge_request', authentication: 'signing-token', receivedAt: signedDelivery.receivedAt,
+    duplicate: false, linked: 1, automationRuns: 0 });
+  assert.deepEqual(signedStatus.repositories[0].lastDelivery, delivered);
+  assert.equal(f.service.webhook(request(body, signed, raw)).duplicate, true);
+  const replay = f.service.webhookStatus().repositories[1].lastDelivery;
+  assert.ok(replay);
+  assert.deepEqual(replay, { ...signedDelivery, receivedAt: replay.receivedAt, duplicate: true, linked: 0 });
+  assert.equal(f.events.length, 1);
+
+  const unsupported = 'synthetic-private-custom-event';
+  f.service.webhook(request({ object_kind: unsupported, project_id: 42, payload: 'synthetic-private-inline-content' }));
+  const expected = f.service.webhookStatus();
+  assert.equal(expected.repositories[0].lastDelivery?.event, 'other');
+  assert.equal(expected.repositories[0].lastDelivery?.linked, 0);
+  const reopened = new Store(f.dir);
+  try {
+    const restoredService = new GitlabIntegrationService(reopened, { processEvent: () => [], onConnectionChanged: () => 0 });
+    assert.deepEqual(restoredService.webhookStatus(), expected);
+    const persisted = JSON.stringify(reopened.db.prepare('SELECT json FROM gitlab_webhook_deliveries').all());
+    for (const redacted of ['legacy-secret', signedId, signature, unsupported, 'synthetic-private']) {
+      assert.ok(!persisted.includes(redacted));
+      assert.ok(!JSON.stringify(expected).includes(redacted));
+    }
+  } finally { reopened.db.close(); }
+});
+
+test('matching GitLab settings retain receipts while changed webhook scope prunes them atomically', t => {
+  const jiraSource = { projectId: 'project-neo', jiraInstanceKey: 'synthetic-jira-source' };
+  const f = fixture([jiraSource]);
+  t.after(f.close);
+  f.configure({ projectIds: [42, 77] });
+  const patchSettings = (values: Record<string, unknown>, afterSave?: (settings: GitlabSettings) => void) =>
+    f.service.configure({ expectedVersion: f.service.settings().version, ...values }, afterSave);
+  const deliver = (repositoryId: number, token = 'legacy-secret') => f.service.webhook(request({ object_kind: 'push', project_id: repositoryId }, { 'x-gitlab-token': token }));
+  deliver(42);
+  deliver(77);
+  const original = f.service.webhookStatus();
+  const updated = patchSettings({ token: 'replacement-read-token', webhookSecret: 'legacy-secret' });
+  assert.deepEqual(f.service.webhookStatus(), { ...original, settingsVersion: updated.version });
+
+  assert.throws(() => patchSettings({ webhookSecret: 'rejected-webhook-secret' }, () => { throw new Error('settings rollback'); }), /settings rollback/);
+  assert.deepEqual(f.service.webhookStatus(), { ...original, settingsVersion: updated.version });
+  patchSettings({ jiraRoutes: [{ repositoryId: 42, ...jiraSource }] });
+  assert.deepEqual(f.service.webhookStatus().repositories, [{ repositoryId: 42, lastDelivery: null }, original.repositories[1]]);
+  deliver(42);
+  const updatedMapping = f.service.webhookStatus().repositories[0];
+  patchSettings({ projectIds: [42] });
+  assert.deepEqual(f.service.webhookStatus().repositories, [updatedMapping]);
+  patchSettings({ projectIds: [42, 77] });
+  assert.deepEqual(f.service.webhookStatus().repositories, [updatedMapping, { repositoryId: 77, lastDelivery: null }]);
+
+  const cleared = [{ repositoryId: 42, lastDelivery: null }, { repositoryId: 77, lastDelivery: null }];
+  patchSettings({ webhookSecret: 'rotated-webhook-secret' });
+  assert.deepEqual(f.service.webhookStatus().repositories, cleared);
+  rejects(() => deliver(42), 401);
+  deliver(42, 'rotated-webhook-secret');
+  assert.ok(f.service.webhookStatus().repositories[0].lastDelivery);
+  patchSettings({ baseUrl: 'https://another-git.example.test' });
+  assert.deepEqual(f.service.webhookStatus().repositories, cleared);
+  deliver(42, 'rotated-webhook-secret');
+  assert.ok(f.service.webhookStatus().repositories[0].lastDelivery);
+  f.store.transaction(() => f.service.resetForImport());
+  assert.deepEqual(f.service.webhookStatus().repositories, cleared);
+});
 
 test('an authenticated push links a keyed branch without commits and associates commits before an MR exists', () => {
   const f = fixture();
