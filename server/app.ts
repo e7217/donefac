@@ -18,6 +18,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentLabelListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
+import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent } from './document-templates.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
@@ -153,6 +154,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const documentCreation = new DocumentCreationService(store);
+  const documentTemplates = new DocumentTemplatesService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -1135,22 +1137,48 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       return entry;
     });res.json({ok:true,trashEntryId:archived.id});
   });
+  app.get('/api/document-templates', (req,res) => {
+    const {projectId,includeArchived}=req.query;
+    if(Object.keys(req.query).some(key=>!['projectId','includeArchived'].includes(key)) ||
+      (projectId!==undefined&&(typeof projectId!=='string'||!projectId)) || (includeArchived!==undefined&&includeArchived!=='1')){
+      return fail('템플릿을 조회할 문서 공간과 보관함 조건을 확인해 주세요.');
+    }
+    res.set('Cache-Control','no-store').json(documentTemplates.list(projectId??null,includeArchived==='1'));
+  });
+  app.post('/api/document-templates', (req,res) => {
+    const result=documentTemplates.create(actor(req),req.body);
+    res.status(result.duplicate?200:201).json(result.template);
+  });
+  app.patch('/api/document-templates/:id', (req,res) => {
+    res.json(documentTemplates.patch(req.params.id,actor(req),req.body));
+  });
   app.post('/api/documents',(req,res)=>{
     const authorId = actor(req);
-    const result = documentCreation.create(authorId, req.body, () => {
-      const timestamp=now();
-      const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,
-        ...(Object.hasOwn(req.body,'labels')?{labels:req.body.labels}:{}),
-        content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},
-        plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
-      validateDocument(d);
+    const input=req.body;
+    const usesTemplate=Object.hasOwn(input,'templateId')||Object.hasOwn(input,'expectedTemplateVersion');
+    if(usesTemplate&&(Object.keys(input).some(key=>!['requestId','templateId','expectedTemplateVersion','projectId','parentId','title','actorId'].includes(key))||
+      typeof input.requestId!=='string'||typeof input.templateId!=='string'||!input.templateId||
+      !Number.isSafeInteger(input.expectedTemplateVersion)||input.expectedTemplateVersion<1||
+      (input.projectId!=null&&(typeof input.projectId!=='string'||!input.projectId))||
+      (input.parentId!=null&&(typeof input.parentId!=='string'||!input.parentId)))){
+      return fail('팀 템플릿, 문서 공간과 저장 요청을 확인해 주세요.');
+    }
+    const result = documentCreation.create(authorId, input, () => {
+      const timestamp=now(), id=uid(), projectId=input.projectId??null;
+      if(usesTemplate&&projectId!==null)get<Project>('projects',projectId);
+      const template=usesTemplate?documentTemplates.forDraft(input.templateId,input.expectedTemplateVersion,projectId):null;
+      const content=template?templateDraftContent(template,id):Object.hasOwn(input,'content')?input.content:{type:'doc',content:[{type:'paragraph'}]};
+      const d:DocPage={id,projectId,parentId:input.parentId??null,title:input.title,
+        ...(Object.hasOwn(input,'labels')?{labels:input.labels}:{}),content,
+        plainText:'',icon:template?.icon??(input.icon||'📄'),status:template?'draft':input.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
+      validateDocument(d,undefined,{allowMissing:Boolean(template)});
       bindImportedDocumentSections(d);
       store.put('documents',d);
-      revision(d,authorId,'최초 작성');
+      revision(d,authorId,template?`팀 템플릿 사용 · ${template.name}`:'최초 작성');
       activity(req,'document',d.id,'문서 생성',d.title);
       notifyDocumentCreated(d);
       return d;
-    });
+    },usesTemplate?'document-template-draft':undefined);
     res.status(result.duplicate ? 200 : 201).json(result.document);
   });
   app.post('/api/documents/:id/move-preview',(req,res)=>{
@@ -1605,7 +1633,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1617,6 +1645,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
+    if(data.schemaVersion<63&&data.documentTemplates!==undefined&&(!Array.isArray(data.documentTemplates)||data.documentTemplates.length)){
+      fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
+    }
+    const importedTemplates=data.schemaVersion>=63?documentTemplates.validateRestore(data.documentTemplates,data.projects,data.users,data.exportedAt):[];
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;
     const importedIssueOrders = data.schemaVersion >= 23 ? issueOrders.validateImport(data.issueOrders, data.projects, data.issues) : [];
@@ -1816,7 +1848,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const firstDocument = importedDocuments[0];
     documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
       { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets, revisionOwner });
-    const allImportedContent = [...importedDocuments, ...importedRevisions, ...archivedDocuments.flatMap(entry => [entry.resource, ...entry.revisions])].map(value => value.content);
+    const allImportedContent = [...importedDocuments, ...importedRevisions, ...importedTemplates, ...archivedDocuments.flatMap(entry => [entry.resource, ...entry.revisions])].map(value => value.content);
     validateDocumentLabelListProjects(allImportedContent, issueBlockTargets.hasProject);
     validateDocumentIssueBlocks(allImportedContent, issueBlockTargets, { allowMissing: true });
     validatePinnedDocumentRevisions(allImportedContent, revisionOwner, { allowMissing: true });
@@ -1903,6 +1935,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
+      documentTemplates.restore(importedTemplates);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
@@ -1977,7 +2010,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof DocumentCreationError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -614,7 +614,7 @@ test('deadline postponement uses the effective date and native backup preserves 
   assert.equal(saved[0].readAt, null);
   assert.ok(saved[1].readAt);
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 62);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(
     backup.teamNotifications.filter(item => item.recipientId === reviewer && isRiskNotification(item)),
     [...saved].reverse(),

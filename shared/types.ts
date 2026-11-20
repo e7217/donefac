@@ -699,6 +699,22 @@ export interface DocPage {
   version: number; authorId: string; createdAt: string; updatedAt: string;
   labels?: string[];
 }
+export interface DocumentTemplateSummary {
+  id: string;
+  projectId: string | null;
+  name: string;
+  icon: string;
+  sourceDocumentId: string;
+  sourceTitle: string;
+  sourceVersion: number;
+  version: number;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+}
+export interface DocumentTemplate extends DocumentTemplateSummary { content: RichContent }
 export interface DocumentTreeMovePreview {
   token: string;
   documentId: string;

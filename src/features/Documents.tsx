@@ -7,7 +7,7 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, FileCheck2, FileClock, FilePlus2, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, FileCheck2, FileClock, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
@@ -25,6 +25,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
 import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
+import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
@@ -34,9 +35,9 @@ import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './D
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
 import { DocumentLinkedWork } from './DocumentLinkedWork';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
-import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type FeatureProps, type RichContent } from '../../shared/types';
+import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type DocumentTemplateSummary, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
-import { isDocumentPreservedByNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
@@ -73,6 +74,8 @@ const commentCacheKey = (actorId: string, id: string) => `teamspace:document-com
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
 type MarkdownCreation = { actorId: string; body: string; documentId?: string };
+type TeamTemplateCreation = MarkdownCreation & { projectId: string | null };
+type TemplateManagerContext = { projectId: string | null; source?: Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> };
 const documentMetadata = (page: Pick<DocPage, 'title' | 'status' | 'parentId' | 'labels'>): DocumentMetadata => ({
   title: page.title, status: page.status, parentId: page.parentId, labels: page.labels ?? [],
 });
@@ -143,7 +146,52 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [markdownCreation, setMarkdownCreation] = useState<MarkdownCreation | null>(null);
   const [markdownCreateError, setMarkdownCreateError] = useState('');
   const importingMarkdown = newTemplate === 'markdown';
-  const createLocked = creating || Boolean(markdownCreation);
+  const [teamTemplate, setTeamTemplate] = useState<DocumentTemplateSummary | null>(null);
+  const [teamTemplateConflict, setTeamTemplateConflict] = useState(false);
+  const [teamCreation, setTeamCreation] = useState<TeamTemplateCreation | null>(null);
+  const [teamCreationError, setTeamCreationError] = useState('');
+  const [teamCreationRejected, setTeamCreationRejected] = useState(false);
+  const [templateManager, setTemplateManager] = useState<TemplateManagerContext | null>(null);
+  const templateManagerOpener = useRef<HTMLButtonElement>(null);
+  const templateFormOpen = useRef(false);
+  const templateDraftDirty = useRef(false);
+  const templateCreateAttempt = useRef<TeamTemplateCreation | null>(null);
+  const createOpener = useRef<HTMLElement>(null);
+  const createSubmit = useRef<HTMLButtonElement>(null);
+  const createTitle = useRef<HTMLInputElement>(null);
+  const { catalog: teamCatalog, reload: reloadTeamTemplates } = useDocumentTemplates(newProject || null, newOpen && !importingMarkdown);
+  const currentTeamTemplate = teamCatalog?.state === 'ready' ? teamCatalog.templates.find(item => item.id === teamTemplate?.id) : undefined;
+  const teamTemplateChanged = Boolean(teamTemplate && !teamCreation && (teamTemplateConflict ||
+    teamCatalog?.state === 'ready' && currentTeamTemplate?.version !== teamTemplate.version));
+  const createAttempt = teamCreation ?? markdownCreation;
+  const createLocked = creating || Boolean(createAttempt) || teamCreationRejected;
+  templateFormOpen.current = newOpen && Boolean(teamTemplate);
+  templateDraftDirty.current = templateFormOpen.current && (newTitleCustomized.current || teamTemplateChanged);
+  const recordTeamAttempt = useCallback((value: TeamTemplateCreation | null) => {
+    templateCreateAttempt.current = value;
+    setTeamCreation(value);
+  }, []);
+  const closeCreateDocument = useCallback(() => {
+    templateFormOpen.current = false;
+    templateDraftDirty.current = false;
+    setNewOpen(false);
+    setMarkdownPreview(null);
+    setMarkdownCreation(null);
+    setMarkdownCreateError('');
+    setTeamTemplate(null);
+    setTeamTemplateConflict(false);
+    recordTeamAttempt(null);
+    setTeamCreationError('');
+    setTeamCreationRejected(false);
+  }, [recordTeamAttempt]);
+  const confirmTemplateDraftDiscard = useCallback(() => {
+    if (templateCreateAttempt.current) return window.confirm('문서가 저장됐을 수 있습니다. 목록에서 확인할 수 있습니다. 계속할까요?');
+    return !templateDraftDirty.current || window.confirm('팀 템플릿으로 작성 중인 새 문서의 입력을 버릴까요?');
+  }, []);
+  const closeTemplateManager = useCallback(() => {
+    setTemplateManager(null);
+    requestAnimationFrame(() => templateManagerOpener.current?.focus({ preventScroll: true }));
+  }, []);
   const [exportOpen, setExportOpen] = useState(false);
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
@@ -428,7 +476,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (creatingRequest.current || draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) { rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = ''; }
+      if (creatingRequest.current || templateCreateAttempt.current || templateDraftDirty.current || draftRef.current?.dirty
+        || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
+        rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = '';
+      }
     };
     window.addEventListener('beforeunload', handler);
     return () => { window.removeEventListener('beforeunload', handler); rememberDraft(draftRef.current); rememberComment(); };
@@ -447,14 +498,25 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (savingRef.current || creatingRequest.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
-      } else if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
+        return;
+      }
+      if (templateFormOpen.current && !confirmTemplateDraftDiscard()) {
+        event.preventDefault();
+        return;
+      }
+      if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
         if (!window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 이동할까요?')) event.preventDefault();
         else { rememberDraft(draftRef.current); rememberComment(); }
       }
+      if (templateFormOpen.current) afterAcceptedNavigation(event, closeCreateDocument);
     };
     window.addEventListener('teamspace:navigate', guard);
     return () => window.removeEventListener('teamspace:navigate', guard);
-  }, [annotationDialog, notify, rememberDraft, rememberComment, selectedDocumentId]);
+  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId]);
+
+  useEffect(() => {
+    if (teamCreation && !creating && !teamCreationRejected) createSubmit.current?.focus({ preventScroll: true });
+  }, [creating, teamCreation, teamCreationRejected]);
 
   const saveDraft = useCallback(async (status?: DocPage['status']) => {
     const captured = draftRef.current;
@@ -521,7 +583,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen || newOpen) return;
+      if (issueDrawerOpen || newOpen || templateManager) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen) void saveDraft();
@@ -530,7 +592,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen]);
+  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen, templateManager]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -616,6 +678,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function openNew(parentId = '', template = 'blank') {
     const parent = data.documents.find(page => page.id === parentId);
+    createOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setNewParent(parentId);
     setNewProject(parent ? parent.projectId || '' : projectId === 'all' ? '' : projectId);
     setNewTemplate(template);
@@ -624,24 +687,51 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setMarkdownPreview(null);
     setMarkdownCreation(null);
     setMarkdownCreateError('');
+    setTeamTemplate(null);
+    setTeamTemplateConflict(false);
+    recordTeamAttempt(null);
+    setTeamCreationError('');
+    setTeamCreationRejected(false);
+    reloadTeamTemplates();
     setNewOpen(true);
   }
 
-  function closeCreateDocument() {
-    setNewOpen(false);
-    setMarkdownPreview(null);
-    setMarkdownCreation(null);
-    setMarkdownCreateError('');
+  function discardCreateDocument() {
+    if (creatingRequest.current || !confirmTemplateDraftDiscard()) return;
+    closeCreateDocument();
+    requestAnimationFrame(() => createOpener.current?.focus({ preventScroll: true }));
   }
 
   function chooseDocumentTemplate(template: string) {
-    if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle) || importingMarkdown && !newTitleCustomized.current) {
+    if (!newTitleCustomized.current) {
       setNewTitle(DOCUMENT_TEMPLATES.find(item => item.id === template && item.id !== 'blank')?.name || '');
-      newTitleCustomized.current = false;
     }
     setNewTemplate(template);
+    setTeamTemplate(null);
+    setTeamTemplateConflict(false);
+    setTeamCreationError('');
     setMarkdownPreview(null);
     setMarkdownCreateError('');
+  }
+
+  function chooseTeamTemplate(template: DocumentTemplateSummary | null) {
+    if (!template) {
+      chooseDocumentTemplate('blank');
+      return;
+    }
+    if (!newTitleCustomized.current) setNewTitle(template.name);
+    setNewTemplate('team');
+    setTeamTemplate(template);
+    setTeamTemplateConflict(false);
+    setTeamCreationError('');
+    setMarkdownPreview(null);
+    setMarkdownCreateError('');
+  }
+
+  function changeCreateProject(value: string) {
+    setNewProject(value);
+    setNewParent('');
+    if (teamTemplate?.projectId && teamTemplate.projectId !== value) chooseDocumentTemplate('blank');
   }
 
   function reviewMarkdown(preview: MarkdownImportPreview | null, fileTitle = '') {
@@ -654,8 +744,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function createDocument(event: React.FormEvent) {
     event.preventDefault();
-    if (creatingRequest.current || !newTitle.trim() || importingMarkdown && !markdownPreview) return;
-    if (!markdownCreation && listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
+    if (creatingRequest.current || !newTitle.trim() || importingMarkdown && !markdownPreview || teamTemplateChanged || teamCreationRejected) return;
+    if (!createAttempt && listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
     if (markdownCreation && !markdownCreation.documentId && markdownCreation.actorId !== activeActorRef.current) {
       setMarkdownCreateError('저장을 시작한 작업자로 전환한 뒤 다시 확인해 주세요.');
       return;
@@ -665,6 +755,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setMarkdownCreateError('');
     let documentId = markdownCreation?.documentId;
     try {
+      if (teamTemplate) {
+        await createFromTeamTemplate(teamTemplate);
+        return;
+      }
       const parent = data.documents.find(page => page.id === newParent);
       const payload = {
         title: newTitle.trim(), projectId: parent ? parent.projectId : newProject || null,
@@ -698,6 +792,57 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       creatingRequest.current = false;
       setCreating(false);
     }
+  }
+
+  async function createFromTeamTemplate(template: DocumentTemplateSummary) {
+    if (teamCreation && !teamCreation.documentId && teamCreation.actorId !== activeActorRef.current) {
+      setTeamCreationError('저장을 시작한 작업자로 전환한 뒤 다시 확인해 주세요.');
+      return;
+    }
+    setTeamCreationError('');
+    const parent = data.documents.find(page => page.id === newParent);
+    const destination = parent ? parent.projectId : newProject || null;
+    const request = teamCreation ?? { actorId, projectId: destination, body: JSON.stringify({ requestId: newRequestId(), templateId: template.id,
+      expectedTemplateVersion: template.version, title: newTitle.trim(), projectId: destination, parentId: newParent || null }) };
+    recordTeamAttempt(request);
+    let documentId = request.documentId;
+    try {
+      if (!documentId) {
+        const result = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body });
+        if (!result?.id || result.projectId !== request.projectId || result.authorId !== request.actorId) throw new Error('문서 저장 결과를 확인할 수 없습니다.');
+        documentId = result.id;
+        recordTeamAttempt({ ...request, documentId });
+      }
+      rememberDraft(draftRef.current);
+      rememberComment();
+      await refresh();
+      closeCreateDocument();
+      onSelectDocument(documentId);
+      notify('새 문서를 만들었습니다.', 'success');
+    } catch (cause) {
+      if (documentId) setTeamCreationError('문서가 저장됐습니다. 목록을 다시 불러와 저장한 문서를 열 수 있습니다.');
+      else if (!isDefiniteTemplateFailure(cause)) setTeamCreationError('저장 결과를 확인할 수 없습니다. 같은 요청으로 다시 확인해 주세요.');
+      else {
+        const reason = templateErrorReason(cause);
+        recordTeamAttempt(null);
+        setTeamCreationError(cause.message);
+        if (reason === 'template_version_conflict' || reason === 'template_archived' || reason === 'template_not_found') {
+          setTeamTemplateConflict(true);
+          reloadTeamTemplates();
+        } else if (teamCreation && (reason === 'result_unavailable' || reason === 'request_conflict')) {
+          setTeamCreationRejected(true);
+        }
+      }
+    }
+  }
+
+  function manageTemplates(opener: HTMLButtonElement, capture?: DocPage) {
+    const space = capture ? capture.projectId : currentProject?.id ?? null;
+    const candidate = capture ?? latestPage;
+    templateManagerOpener.current = opener;
+    setTemplateManager({ projectId: space, source: candidate?.projectId === space ? {
+      id: candidate.id, title: candidate.title, version: candidate.version, projectId: candidate.projectId,
+    } : undefined });
   }
 
   async function submitComment(event: React.FormEvent) {
@@ -1039,8 +1184,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onLabelListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
-    <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || documentAction)}>
+    <div className="docs-heading" inert={newOpen || Boolean(templateManager)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
+      <div className="document-template-heading-actions">
+        <button className="btn" type="button" onClick={event => manageTemplates(event.currentTarget)}><FileStack size={15} aria-hidden="true" />팀 템플릿 관리</button>
+        <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button>
+      </div>
+    </div>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || Boolean(issueBlockDialog || documentAction || templateManager)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         {onChangeDocumentLabel && <div className="docs-label-filters">
@@ -1080,6 +1230,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
+              <button type="button" className="btn btn-ghost docs-icon-button" title="팀 템플릿으로 저장" aria-label="팀 템플릿으로 저장"
+                disabled={saving || restoring} onClick={event => manageTemplates(event.currentTarget, latestPage ?? selectedPage)}><FileStack size={16} aria-hidden="true" /></button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
               <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
               <button type="button" className="btn btn-ghost docs-icon-button" title="문서 이동" aria-label="문서 이동" onClick={() => {
@@ -1246,36 +1398,57 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}
+    {templateManager && <DocumentTemplatesManager projectId={templateManager.projectId}
+      scopeLabel={data.projects.find(project => project.id === templateManager.projectId)?.name ?? '팀 공통'}
+      source={templateManager.source} latestSource={templateManager.source && (latestPage?.id === templateManager.source.id ? latestPage
+        : data.documents.find(page => page.id === templateManager.source?.id))}
+      actorId={actorId} refresh={refresh} notify={notify} onClose={closeTemplateManager} />}
     {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => {
-      if (event.target === event.currentTarget && !creatingRequest.current) closeCreateDocument();
+      if (event.target === event.currentTarget) discardCreateDocument();
     }}>
       <form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}
         onKeyDown={event => {
-          if (event.key === 'Escape' && !event.nativeEvent.isComposing && !creatingRequest.current) closeCreateDocument();
+          if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            discardCreateDocument();
+          }
+          if (event.key === 'Tab') {
+            const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled)')]
+              .filter(control => control.getClientRects().length);
+            const first = controls[0], last = controls.at(-1);
+            if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
+            if (!event.shiftKey && document.activeElement === last && first) { event.preventDefault(); first.focus(); }
+          }
         }}>
         <div className="docs-modal-header">
           <div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div>
-          <button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={closeCreateDocument}><X size={19} /></button>
+          <button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={discardCreateDocument}><X size={19} /></button>
         </div>
-        <label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?"
+        <label className="docs-modal-label">문서 제목<input ref={createTitle} autoFocus className="field" placeholder="어떤 이야기를 기록할까요?"
           value={newTitle} onChange={event => { newTitleCustomized.current = true; setNewTitle(event.target.value); }}
           required maxLength={240} disabled={createLocked} /></label>
         {importingMarkdown ? <>
           <div className="docs-markdown-mode"><h3>Markdown 가져오기</h3><button className="btn btn-ghost" type="button" disabled={createLocked}
             onClick={() => chooseDocumentTemplate('blank')}><ChevronLeft size={15} aria-hidden="true" /> 템플릿으로 변경</button></div>
           <DocumentMarkdownImport preview={markdownPreview} onPreview={reviewMarkdown} disabled={createLocked} />
-        </> : <div className="docs-template-grid">
+        </> : <><div className="docs-template-grid">
           {DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id}
-            disabled={creating} onClick={() => chooseDocumentTemplate(template.id)}>
+            disabled={createLocked} onClick={() => chooseDocumentTemplate(template.id)}>
             <span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}
           </button>)}
-          <button type="button" aria-label="Markdown 가져오기" disabled={creating} onClick={() => chooseDocumentTemplate('markdown')}>
+          <button type="button" aria-label="Markdown 가져오기" disabled={createLocked} onClick={() => chooseDocumentTemplate('markdown')}>
             <span aria-hidden="true"><ArrowDownToLine size={18} /></span><strong>Markdown 가져오기</strong><small>파일 또는 붙여넣기</small>
           </button>
-        </div>}
+        </div>
+          <DocumentTemplatePicker catalog={teamCatalog} reload={reloadTeamTemplates} value={teamTemplate?.id ?? ''}
+            projectName={data.projects.find(project => project.id === newProject)?.name} disabled={createLocked}
+            onChoose={chooseTeamTemplate} />
+          {teamTemplate && <p className="document-template-selection">{teamTemplate.projectId === null ? '팀 공통' : data.projects.find(project => project.id === teamTemplate.projectId)?.name}
+            {' · '}템플릿 버전 {teamTemplate.version}</p>}
+        </>}
         <div className="docs-location-fields">
           <label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent) || createLocked}
-            value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}>
+            value={newProject} onChange={event => changeCreateProject(event.target.value)}>
             <option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select></label>
           <label className="docs-modal-label">상위 문서<select className="field" value={newParent} disabled={createLocked} onChange={event => setNewParent(event.target.value)}>
@@ -1283,12 +1456,23 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           </select></label>
         </div>
         {markdownCreateError && <p className="error-text docs-markdown-message" role="alert">{markdownCreateError}</p>}
+        {teamCreationError && <p className="document-template-error" role="alert">{teamCreationError}</p>}
+        {teamTemplateChanged && <div className="document-template-picker-status document-template-review">
+          <span>{currentTeamTemplate ? `현재 템플릿 버전 ${currentTeamTemplate.version}을 확인해 주세요.` : teamCatalog?.state === 'ready'
+            ? '현재 공간에서 이 템플릿을 사용할 수 없습니다. 다른 템플릿을 선택해 주세요.' : '팀 템플릿 목록을 확인하고 있습니다.'}</span>
+          {currentTeamTemplate && <button type="button" className="btn" disabled={createLocked} onClick={() => {
+            setTeamTemplate(currentTeamTemplate);
+            setTeamTemplateConflict(false);
+            setTeamCreationError('');
+            createTitle.current?.focus({ preventScroll: true });
+          }}>최신 템플릿 사용</button>}
+        </div>}
         <div className="docs-modal-footer">
-          <button className="btn btn-ghost" type="button" disabled={creating} onClick={closeCreateDocument}>취소</button>
-          <button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating || importingMarkdown && !markdownPreview}>
+          <button className="btn btn-ghost" type="button" disabled={creating} onClick={discardCreateDocument}>취소</button>
+          <button ref={createSubmit} className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating || importingMarkdown && !markdownPreview || teamTemplateChanged || teamCreationRejected}>
             {creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />}
-            {importingMarkdown && creating ? '저장 중…' : markdownCreation?.documentId ? '저장한 문서 열기'
-              : markdownCreation ? '저장 다시 확인' : importingMarkdown ? 'Markdown 문서 만들기' : '문서 만들기'}
+            {(importingMarkdown || teamTemplate) && creating ? '저장 중…' : createAttempt?.documentId ? '저장한 문서 열기'
+              : createAttempt ? '저장 다시 확인' : importingMarkdown ? 'Markdown 문서 만들기' : '문서 만들기'}
           </button>
         </div>
       </form>
