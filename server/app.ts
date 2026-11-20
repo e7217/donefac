@@ -38,6 +38,9 @@ import { DocumentPublicationError, DocumentPublicationService } from './document
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
 import { NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
+import { AtlassianReadError } from '../shared/atlassian-links.js';
+import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
+import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
@@ -94,7 +97,7 @@ function shiftDate(value: string, days: number, working: boolean): string {
   return d.toISOString().slice(0,10);
 }
 
-export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean} = {}) {
+export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean; atlassianEnv?: NodeJS.ProcessEnv} = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
   const dependencyVersionFloor=()=>{
@@ -113,6 +116,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
+  const atlassianLinks=new AtlassianLinksService(store);
+  const atlassian=new AtlassianReader(options.atlassianEnv);
   const documentPublication=new DocumentPublicationService(store,notifications,documentId=>subscriptions.recipients('document',documentId));
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
   const issueOrders = new IssueOrderService(store);
@@ -416,6 +421,41 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
   app.get('/api/workspace',(_req,res)=>res.json(snapshot()));
+  app.get('/api/atlassian-links',(req,res)=>{
+    if(Object.keys(req.query).some(key=>key!=='targetType'&&key!=='targetId'))return fail('기존 도구 링크 조회 조건을 확인해 주세요.');
+    res.set('Cache-Control','no-store').json(atlassianLinks.list(req.query.targetType,req.query.targetId));
+  });
+  app.post('/api/atlassian-links',(req,res)=>{
+    actor(req);
+    if(Object.keys(req.query).length)return fail('기존 도구 링크 추가 조건을 확인해 주세요.');
+    res.set('Cache-Control','no-store').status(201).json(atlassianLinks.create(req.body));
+  });
+  app.delete('/api/atlassian-links/:id',(req,res)=>{
+    actor(req);
+    if(Object.keys(req.query).length)return fail('기존 도구 링크 삭제 조건을 확인해 주세요.');
+    atlassianLinks.remove(req.params.id);
+    res.status(204).end();
+  });
+  app.get('/api/atlassian-links/:id/preview',async(req,res)=>{
+    actor(req);
+    if(Object.keys(req.query).length)return fail('원본 조회 조건을 확인해 주세요.');
+    const link=atlassianLinks.get(req.params.id);
+    const controller=new AbortController();
+    const disconnect=()=>controller.abort();
+    res.set('Cache-Control','no-store');
+    res.once('close',disconnect);
+    try {
+      const preview=await atlassian.preview(link.product,link.url,controller.signal);
+      if(controller.signal.aborted)return;
+      const current=atlassianLinks.get(link.id);
+      if(current.url!==link.url||current.product!==link.product||current.targetType!==link.targetType||current.targetId!==link.targetId){
+        return fail('원본 링크가 변경되었습니다. 다시 불러와 주세요.',409);
+      }
+      res.json(preview);
+    } catch(error) {
+      if(!controller.signal.aborted)throw error;
+    } finally { res.off('close',disconnect); }
+  });
   const notificationRecipient = (req: Request) => {
     const recipientId = req.header('X-Actor-Id');
     if (!recipientId || !store.get('users',recipientId)) return fail('등록된 작업자를 선택해 주세요.');
@@ -651,6 +691,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const entry=trash.get(String(req.params.id));
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
       subscriptions.removeTarget(entry.resourceType,entry.resourceId);
+      atlassianLinks.removeTarget(entry.resourceType,entry.resourceId);
       trash.remove(entry.id);
       activity(req,entry.resourceType,entry.resourceId,'휴지통에서 영구 삭제',entry.title);
       return archivedFiles(entry);
@@ -865,7 +906,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),worklogs:worklogs.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -970,6 +1011,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       (Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row: {kind?: unknown} | null)=>row?.kind==='issue-status-changed'||row?.kind==='document-updated')))){
       fail('구독 또는 구독 알림을 포함한 백업은 schemaVersion 25가 필요합니다.');
     }
+    if(data.schemaVersion<27&&data.atlassianLinks!==undefined&&(!Array.isArray(data.atlassianLinks)||data.atlassianLinks.length)){
+      fail('Jira·Confluence 링크를 포함한 백업은 schemaVersion 27이 필요합니다.');
+    }
     const subscriptionRefs={
       users:new Set((data.users as User[]).map(user=>user.id)),
       issueIds:new Set((data.issues as Issue[]).map(issue=>issue.id)),
@@ -1017,6 +1061,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs);
+      atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       automation.replaceImported(importedAutomation,previousAutomation);
@@ -1070,6 +1115,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
+    if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

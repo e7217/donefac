@@ -1,0 +1,105 @@
+.atlassian-links {
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.issue-panel-content > .atlassian-links { margin-top: 18px; }
+
+.docs-detail-content > .atlassian-links {
+  margin-bottom: 14px;
+  padding-top: 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.atlassian-links > h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.atlassian-links-form {
+  display: grid;
+  grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
+  gap: 8px;
+  align-items: end;
+}
+
+.atlassian-links-form > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.atlassian-links-form label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.atlassian-links-form .field { min-width: 0; }
+
+.atlassian-links-form > button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.atlassian-links-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.atlassian-link-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.atlassian-link-url {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.atlassian-link-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.atlassian-link-actions .btn { padding-inline: 7px; }
+
+.atlassian-link-preview {
+  min-width: 0;
+  padding: 8px;
+  background: var(--accent-soft);
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+.atlassian-link-preview dl { display: grid; gap: 3px; margin: 6px 0 0; font-size: 11px; }
+.atlassian-link-preview dl div { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 6px; }
+.atlassian-link-preview dt { color: var(--muted); }
+.atlassian-link-preview dd { margin: 0; }
+
+.atlassian-links-note, .atlassian-links-error {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.atlassian-links-note { color: var(--muted); }
+.atlassian-links-error { color: var(--danger); }
+
+@media (max-width: 520px) {
+  .atlassian-links-form { grid-template-columns: 1fr; }
+  .atlassian-links-form .field { font-size: 16px; }
+  .atlassian-links .field, .atlassian-links .btn { min-height: 44px; }
+}

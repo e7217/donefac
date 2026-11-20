@@ -238,7 +238,7 @@ test('subscriptions survive restart, trash and version 25 backup; invalid replac
   const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
   await expectStatus(f.call(issuePath, 'GET', undefined, other), 404);
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 26);
+  assert.equal(backup.schemaVersion, 27);
   assert.deepEqual(backup.notificationSubscriptions, [
     { userId: reviewer, targetType: 'document', targetId: document.id },
     { userId: other, targetType: 'issue', targetId: ticket.id },

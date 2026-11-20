@@ -195,7 +195,7 @@ test('native backup carries exact immutable version bytes and rejects invalid hi
   assert.deepEqual(history.slice(0, 2).map(version => version.localRevision), [3, 2]);
 
   const backup = await read<Backup>(f.json('/export'));
-  assert.equal(backup.schemaVersion, 26);
+  assert.equal(backup.schemaVersion, 27);
   assert.equal(backup.attachments.length, 1);
   assert.equal(backup.attachments[0].id, first.id);
   assert.equal(backup.attachments[0].filename, 'first.txt');
