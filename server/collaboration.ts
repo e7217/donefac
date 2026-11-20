@@ -162,6 +162,7 @@ export class CollaborationService {
   }
   private send(peer:Peer,message:CollaborationServerMessage){if(peer.socket.readyState===WebSocket.OPEN)peer.socket.send(JSON.stringify(message));}
   private ready(documentId:string){return[...this.peers].filter(peer=>peer.ready&&peer.documentId===documentId&&peer.socket.readyState===WebSocket.OPEN);}
+  hasReadyEditors(documentId: string): boolean { return this.ready(documentId).length > 0; }
   private presence(documentId:string):CollaborationPeer[]{return this.ready(documentId).flatMap(peer=>{const user=this.store.get<User>('users',peer.actorId);return user?[{id:peer.id,actorId:peer.actorId,name:user.name,color:user.color}]:[];});}
   private broadcastPresence(documentId:string){const peers=this.presence(documentId);for(const peer of this.ready(documentId))this.send(peer,{type:'presence',peers});}
   private cursorSnapshot(peer: Peer): CollaborationCursor[] {

@@ -6,6 +6,7 @@ import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
 import type { LegacyDataset,LegacyRecord,User } from '../../shared/types.js';
 import { contentReferences } from '../../shared/document-nodes.js';
+import { parseConfluence } from '../../server/legacy-import-confluence.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
 
 const now='2026-11-19T12:00:00.000Z',created='2020-01-01T00:00:00.000Z',actor:User={id:'actor',name:'이관 작업자',email:'actor@example.test',color:'#668899'};
@@ -82,6 +83,75 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
 test('pure planning merges selected containers, preserves typed zero/false and archives every original history/author exactly',()=>{
   const packages=[jira(),confluence()],original=structuredClone(packages),request=input(packages),options=buildMigrationOptions(packages);for(const identity of options.identities)request.configuration.users[identity.id]=actor.id;const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.projects.length,1);assert.equal(plan.issues.length,2);assert.equal(plan.documents.length,1);assert.equal(plan.comments.length,2);assert.equal(plan.revisions.length,2);assert.equal(plan.documents[0].version,3);assert.equal(plan.revisions.find(revision=>revision.title==='과거 문서')!.version,1);assert.equal(plan.sourceImport.id,request.id);assert.equal(plan.preview.id,request.id);assert.deepEqual(packages,original);
   const issue=plan.issues.find(issue=>issue.title==='업무 1')!,schema=plan.issueSchemas[0];assert.equal(issue.customFields![schema.fields.find(field=>field.name==='점수')!.id],0);assert.equal(issue.customFields![schema.fields.find(field=>field.name==='확인')!.id],false);assert.equal(plan.workflows[0].statuses[0].label,'원본 열림');assert.equal(plan.issues.find(issue=>issue.title==='업무 2')!.parentId,issue.id);assert.equal(plan.issueRelations[0].type,'Blocks');assert.ok(notices(plan).has('WORKFLOW_RULES_NOT_REPRODUCED'));assert.equal(plan.sourceRecords.length,packages.reduce((sum,pkg)=>sum+pkg.dataset.records.length,0));const history=plan.sourceRecords.find(row=>row.record.id==='history:jh')!;assert.equal(history.targetId,null);assert.equal(history.ownerType,'issue');assert.equal(history.ownerId,issue.id);assert.deepEqual(history.record,packages[0].dataset.records.find(row=>row.id==='history:jh'));assert.ok(plan.sourceRecords.every(row=>row.id!==row.record.id));
+});
+
+test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting changes and protects mixed document graphs', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const original = pkg('original-wiki', 'confluence', [space, page('10', { authorId: null })]);
+  const baseline = buildMigrationPlan(input([original]));
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const project = baseline.projects[0], canonical = baseline.documents[0];
+  const archive = baseline.sourceRecords.find(row => row.targetId === canonical.id)!;
+  assert.ok(archive.confluencePageFieldHashes?.title);
+  assert.ok(archive.confluencePageFieldHashes.content);
+  const olderArchive = { ...archive };
+  delete olderArchive.confluencePageFieldHashes;
+  const refresh = (rows: LegacyRecord[], document = canonical, previous = archive) => {
+    const delta = pkg('delta-wiki', 'confluence', [{ ...space }, ...rows]);
+    delta.dataset.source.instanceKey = original.dataset.source.instanceKey;
+    const request = input([delta]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = {
+      project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'append-documents',
+      knownPages: [{ sourceId: '10', documentId: canonical.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: canonical.title }],
+      refreshDocuments: [{ document, previous, previousTimezone: 'UTC' }],
+    };
+    return buildMigrationPlan(request);
+  };
+  const next = (options: Partial<LegacyRecord> = {}) => page('10', { authorId: null, metadata: { version: '4' }, ...options });
+  const previousWithoutHashes = refresh([next({ title: '새 원본 제목', text: '<p><strong>현재 본문</strong></p>' })],
+    { ...canonical, version: 14, title: '팀이 바꾼 제목' }, olderArchive);
+  assert.equal(previousWithoutHashes.preview.canApply, true, JSON.stringify(previousWithoutHashes.preview.notices));
+  assert.deepEqual(previousWithoutHashes.preview.documentRefresh?.[0].fields.map(field => [field.field, field.decision, field.formatOnly]),
+    [['title', 'conflict', undefined], ['content', 'apply', true]]);
+  assert.equal(previousWithoutHashes.documentUpdates?.[0].expectedVersion, 14);
+  assert.deepEqual(Object.keys(previousWithoutHashes.documentUpdates![0].changes), ['content']);
+  assert.equal(previousWithoutHashes.revisions.length, 0);
+  const checkpoint = previousWithoutHashes.sourceRecords.find(row => row.targetId === canonical.id)!;
+  assert.equal(checkpoint.confluencePageFieldHashes?.title, archive.confluencePageFieldHashes.title);
+  assert.notEqual(checkpoint.confluencePageFieldHashes?.content, archive.confluencePageFieldHashes.content);
+
+  const parsedPage = (title: string, body: string) => {
+    const xml = `<hibernate-generic><object class="Page"><id name="id">10</id><property name="title">${title}</property><property name="version">4</property><property name="space" class="Space"><id name="id">s</id></property></object>${body}</hibernate-generic>`;
+    return parseConfluence(new Map([['entities.xml', Buffer.from(xml)]]), original.dataset.source.instanceKey).records.find(row => row.kind === 'page')!;
+  };
+  const bodyContent = (body: string) => `<object class="BodyContent"><id name="id">30</id><property name="content" class="Page"><id name="id">10</id></property>${body}</object>`;
+  for (const body of ['', bodyContent('')]) {
+    const omitted = refresh([parsedPage('새 원본 제목', body)]);
+    assert.deepEqual(omitted.documentUpdates?.[0].changes, { title: '새 원본 제목' });
+  }
+  const blank = refresh([parsedPage(canonical.title, bodyContent('<property name="body"></property>'))]);
+  assert.equal(blank.preview.documentRefresh?.[0].fields[0].field, 'content');
+  assert.equal(blank.preview.documentRefresh?.[0].fields[0].incoming, '');
+  assert.ok(blank.documentUpdates?.[0].changes.content);
+
+  const unsafe = refresh([next({ title: '안전한 제목 변경', text: '<ac:image><ri:attachment ri:filename="retained.png"/></ac:image>' })]);
+  assert.equal(unsafe.preview.canApply, true, JSON.stringify(unsafe.preview.notices));
+  assert.deepEqual(unsafe.documentUpdates?.[0].changes, { title: '안전한 제목 변경' });
+  assert.ok(unsafe.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_BODY_UNAVAILABLE'));
+  const stale = refresh([next({ text: '<p>오래된 본문</p>', metadata: { version: '2' }, updatedAt: now })]);
+  assert.equal(stale.preview.canApply, false);
+  assert.ok(notices(stale).has('CONFLUENCE_REFRESH_SOURCE_NOT_NEWER'));
+  const timed = refresh([next({ title: '버전 없이 시간 확인', metadata: {}, updatedAt: now })]);
+  assert.equal(timed.documentUpdates?.[0].changes.title, '버전 없이 시간 확인');
+
+  const include = (id: string) => `<ac:structured-macro ac:name="include"><ac:parameter ac:name=""><ri:page ri:content-id="${id}"/></ac:parameter></ac:structured-macro>`;
+  const mixed = refresh([next({ text: include('20') }), page('20', { authorId: null })]);
+  assert.equal(mixed.preview.canApply, true, JSON.stringify(mixed.preview.notices));
+  assert.deepEqual(contentReferences(mixed.documentUpdates![0].changes.content!).map(reference => reference.id), [mixed.documents[0].id]);
+  const cycle = refresh([next({ text: include('20') }), page('20', { authorId: null, text: include('10') })]);
+  assert.equal(cycle.preview.canApply, false);
+  assert.ok(notices(cycle).has('DOCUMENT_INCLUDE_CYCLE'));
 });
 
 test('all available attachment versions retain distinct files and a missing newest version requires acknowledgement',()=>{

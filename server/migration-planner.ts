@@ -1,6 +1,6 @@
 import { createHash,randomUUID } from 'node:crypto';
-import type { AttachmentVersion,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,SourceRecordArchive,StatusCategory } from '../shared/types.js';
-import { ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
+import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,SourceRecordArchive,StatusCategory } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
 import { defaultIssueSchema, fieldApplies } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -78,6 +78,66 @@ function sourceTimestamp(value: string | null, timezone: string): string | null 
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
   }
   return localDate(value, timezone);
+}
+
+function confluenceSourceVersion(row: LegacyRecord): number | null {
+  const raw = string(row.metadata.version);
+  const version = Number(raw);
+  return /^\d+$/.test(raw) && Number.isSafeInteger(version) && version > 0 ? version : null;
+}
+
+function newerConfluencePage(next: LegacyRecord, previous: LegacyRecord, timezone: string, previousTimezone: string): boolean {
+  const nextVersion = confluenceSourceVersion(next), previousVersion = confluenceSourceVersion(previous);
+  if (nextVersion !== null && previousVersion !== null) return nextVersion > previousVersion;
+  const nextTime = sourceTimestamp(next.updatedAt, timezone), previousTime = sourceTimestamp(previous.updatedAt, previousTimezone);
+  return nextTime !== null && previousTime !== null && nextTime > previousTime;
+}
+
+function confluencePageFieldDigest(field: ConfluenceMigrationDocumentField, value: DocPage[ConfluenceMigrationDocumentField]): string {
+  return hash(field, JSON.stringify(value));
+}
+
+function confluencePageFieldDigests(values: ConfluenceMigrationDocumentValues): ConfluenceMigrationPageFieldHashes {
+  const hashes: ConfluenceMigrationPageFieldHashes = {};
+  for (const field of CONFLUENCE_MIGRATION_DOCUMENT_FIELDS) {
+    const value = values[field];
+    if (value !== undefined) hashes[field] = confluencePageFieldDigest(field, value);
+  }
+  return hashes;
+}
+
+const confluenceRefreshBodyErrors = new Set(['CONFLUENCE_BODY_RELATION_CONFLICT', 'CONFLUENCE_MULTIPLE_BODIES', 'CONFLUENCE_NON_SCALAR_BODY']);
+const lossyConfluenceConversions = new Set([
+  'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
+  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED',
+]);
+
+function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
+  return !converted.diagnostics.some(item => item.severity === 'error' || item.code.startsWith('UNRESOLVED_') ||
+    lossyConfluenceConversions.has(item.code));
+}
+
+function hasConfluenceBody(record: LegacyRecord): boolean {
+  return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
+}
+
+function previousConfluencePageFieldDigests(archive: SourceRecordArchive): ConfluenceMigrationPageFieldHashes {
+  if (archive.confluencePageFieldHashes) return archive.confluencePageFieldHashes;
+  const { record } = archive;
+  const title = record.title.trim();
+  const values: ConfluenceMigrationDocumentValues = {};
+  if (title && title.length <= 300) values.title = title;
+  if (hasConfluenceBody(record)) {
+    // A legacy archive has no canonical checkpoint. Reconstruct only what can be verified
+    // without guessing any of the original page, issue or attachment mappings.
+    const converted = convertLegacyContent(record, { resolveReference: () => null });
+    if (usableConfluenceBody(converted)) values.content = converted.content;
+  }
+  return confluencePageFieldDigests(values);
+}
+
+function confluenceReviewExcerpt(value: string): string {
+  return value.length > 300 ? `${value.slice(0, 297)}…` : value;
 }
 
 function sourceCalendarDate(raw: string, timezone: string): string | null {
@@ -174,6 +234,7 @@ class Planner{
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes: JiraMigrationIssueFieldHashes }>();
+  private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private boundIssues = new Map<string, KnownIssue>();
   private boundPages = new Map<string, KnownPage>();
   private boundPageIdsByTitle = new Map<string, Set<string>>();
@@ -466,6 +527,102 @@ class Planner{
     const page = this.boundPages.get(sourceId);
     return append && page?.projectId === append.project.id && page.sourceSpaceId === append.sourceSpaceId ? page : undefined;
   }
+  private createConfluenceRefreshes(): void {
+    const append = this.input.appendPages;
+    if (!append || this.configuration.appendPagesTo?.refreshExisting !== true) return;
+    const candidates = new Map(append.refreshDocuments?.map(candidate => [candidate.document.id, candidate]));
+    const sourceErrors = new Set<string>(), sourceBodyErrors = new Set<string>();
+    for (const pkg of this.input.packages) for (const item of pkg.dataset.diagnostics) {
+      if (!item.recordId || item.severity !== 'error') continue;
+      const errors = confluenceRefreshBodyErrors.has(item.code) ? sourceBodyErrors : sourceErrors;
+      errors.add(`${pkg.summary.id}/${item.recordId}`);
+    }
+    const review: ConfluenceMigrationDocumentReview[] = [];
+    const updates: NonNullable<PreparedMigration['documentUpdates']> = [];
+    const seen = new Set<string>();
+    let updatedDocumentFields = 0, conflictingDocumentFields = 0, skippedDocumentUpdates = 0;
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (row.kind !== 'page' || !this.retainedEntries.has(entry.key)) continue;
+      const binding = this.originalPage(row.sourceId);
+      const candidate = binding && candidates.get(binding.documentId);
+      if (!candidate || candidate.document.projectId !== append.project.id || candidate.previous.targetId !== binding.documentId ||
+          candidate.previous.source.product !== 'confluence' || candidate.previous.source.instanceKey !== entry.pkg.dataset.source.instanceKey ||
+          candidate.previous.record.sourceId !== row.sourceId || sourceErrors.has(entry.key) ||
+          this.restrictedSourcePages.has(row.sourceId) || this.restricted(entry)) {
+        skippedDocumentUpdates++;
+        this.notice('CONFLUENCE_REFRESH_PAGE_UNAVAILABLE', '현재 문서 연결이나 접근 범위 또는 원본 자료를 확인할 수 없어 원본만 보관합니다.', 'warning', entry);
+        continue;
+      }
+      const { document, previous, previousTimezone } = candidate;
+      if (seen.has(document.id)) {
+        this.notice('CONFLUENCE_REFRESH_OVERLAPPING_PAGE', '같은 기존 문서의 기록이 겹칩니다. 패키지에서 적용할 페이지 기록 하나를 남겨 주세요.', 'error', entry);
+        continue;
+      }
+      seen.add(document.id);
+      if (!newerConfluencePage(row, previous.record, this.configuration.timezone, previousTimezone)) {
+        skippedDocumentUpdates++;
+        this.notice('CONFLUENCE_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 버전 또는 수정 시각을 확인할 수 없어 원본만 보관합니다.', 'info', entry);
+        continue;
+      }
+      const title = row.title.trim();
+      if (!title || title.length > 300) {
+        this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
+      }
+      const bodyChanged = hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
+      const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
+        ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) }) : null;
+      const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
+      if (bodyChanged && !safeBody) {
+        this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
+      }
+      const values: ConfluenceMigrationDocumentValues = {};
+      if (title && title.length <= 300) values.title = title;
+      if (safeBody) {
+        values.content = safeBody.content;
+        for (const diagnostic of safeBody.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
+      }
+      const hashes = { ...previousConfluencePageFieldDigests(previous) };
+      const accepted: ConfluenceMigrationDocumentValues = {};
+      const fields: ConfluenceMigrationDocumentReview['fields'] = [];
+      let checkpoint = false;
+      for (const field of CONFLUENCE_MIGRATION_DOCUMENT_FIELDS) {
+        const incoming = values[field];
+        if (incoming === undefined) continue;
+        const currentHash = confluencePageFieldDigest(field, document[field]);
+        const incomingHash = confluencePageFieldDigest(field, incoming);
+        if (hashes[field] === incomingHash || field === 'title' && title === previous.record.title.trim()) {
+          checkpoint = true;
+          continue;
+        }
+        if (incomingHash === currentHash) {
+          hashes[field] = incomingHash;
+          checkpoint = true;
+          continue;
+        }
+        const decision = currentHash === hashes[field] ? 'apply' : 'conflict';
+        const current = field === 'title' ? document.title : document.plainText;
+        const incomingText = field === 'title' ? title : safeBody!.plainText;
+        fields.push({ field, current: confluenceReviewExcerpt(current), incoming: confluenceReviewExcerpt(incomingText), decision,
+          ...(field === 'content' && current === incomingText ? { formatOnly: true } : {}) });
+        if (decision === 'apply') {
+          Object.assign(accepted, { [field]: incoming });
+          hashes[field] = incomingHash;
+          checkpoint = true;
+          updatedDocumentFields++;
+        } else conflictingDocumentFields++;
+      }
+      if (fields.length) review.push({ documentId: document.id, title: document.title, sourceId: row.sourceId, recordId: entry.key, fields });
+      if (Object.keys(accepted).length) updates.push({ documentId: document.id, expectedVersion: document.version, changes: accepted });
+      if (checkpoint) this.confluenceRefreshCheckpoints.set(entry.key, { document, hashes });
+    }
+    if (conflictingDocumentFields) {
+      this.notice('CONFLUENCE_REFRESH_LOCAL_CONFLICT', `팀에서 수정한 문서 필드 ${conflictingDocumentFields}개를 보존합니다.`, 'warning', undefined, true);
+    }
+    this.result.preview.documentRefresh = review;
+    this.result.documentUpdates = updates;
+    Object.assign(this.result.preview.counts, { updatedDocuments: updates.length, updatedDocumentFields, conflictingDocumentFields, skippedDocumentUpdates });
+  }
   private initializePageAppend(): void {
     const append = this.input.appendPages;
     const mapping = this.configuration.appendPagesTo;
@@ -572,7 +729,7 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   initializeOriginBases(): void {
     const suppliedBases = this.configuration.sourceBaseUrls;
     const packages = this.input.packages;
@@ -1056,11 +1213,13 @@ class Planner{
     const cyclic=(rows:{id:string;parentId:string|null}[], appended:boolean)=>{const incoming=new Map(rows.map(row=>[row.id,0])),children=new Map<string,string[]>();for(const row of rows)if(row.parentId&&(!appended||incoming.has(row.parentId))){incoming.set(row.id,(incoming.get(row.id)||0)+1);const values=children.get(row.parentId)||[];values.push(row.id);children.set(row.parentId,values);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[]){const count=incoming.get(child)!-1;incoming.set(child,count);if(!count)queue.push(child);}return queue.length!==rows.length;};
     if(cyclic(this.result.issues, Boolean(this.input.append)))this.notice('ISSUE_PARENT_CYCLE','이관할 업무 계층에 순환 관계가 있습니다.','error');if(cyclic(this.result.documents, Boolean(this.input.appendPages)))this.notice('DOCUMENT_PARENT_CYCLE','이관할 문서 계층에 순환 관계가 있습니다.','error');
     const issueIds = new Set(this.result.issues.map(issue => issue.id));
-    const incoming = new Map(this.result.documents.map(document => [document.id, 0]));
+    const bodies = new Map(this.result.documents.map(document => [document.id, document.content]));
+    for (const update of this.result.documentUpdates ?? []) if (update.changes.content) bodies.set(update.documentId, update.changes.content);
+    const incoming = new Map([...bodies.keys()].map(id => [id, 0]));
     const edges = new Map<string, string[]>();
-    for (const document of this.result.documents) {
+    for (const [documentId, body] of bodies) {
       const targets: string[] = [];
-      for (const reference of contentReferences(document.content)) {
+      for (const reference of contentReferences(body)) {
         const present = reference.type === 'issue' ? issueIds.has(reference.id) : incoming.has(reference.id) || this.boundPageTargets.has(reference.id);
         if (!present) this.notice('CONTENT_REFERENCE_MISSING', '변환한 본문의 참조 대상이 적용 계획에 없습니다.', 'error');
         if (reference.kind === 'include' && incoming.has(reference.id)) {
@@ -1068,7 +1227,7 @@ class Planner{
           incoming.set(reference.id, incoming.get(reference.id)! + 1);
         }
       }
-      edges.set(document.id, targets);
+      edges.set(documentId, targets);
     }
     const queue = [...incoming].filter(([, count]) => count === 0).map(([id]) => id);
     for (let cursor = 0; cursor < queue.length; cursor++) {
@@ -1124,22 +1283,28 @@ class Planner{
   archive():void{
     for (const entry of this.entries) {
       const excluded = this.excluded.has(entry.key);
-      const checkpoint = this.jiraRefreshCheckpoints.get(entry.key);
-      const binding = checkpoint ? { type: 'issue' as const, id: checkpoint.issue.id, projectId: checkpoint.issue.projectId }
+      const issueCheckpoint = this.jiraRefreshCheckpoints.get(entry.key);
+      const pageCheckpoint = this.confluenceRefreshCheckpoints.get(entry.key);
+      const binding = issueCheckpoint ? { type: 'issue' as const, id: issueCheckpoint.issue.id, projectId: issueCheckpoint.issue.projectId }
+        : pageCheckpoint ? { type: 'document' as const, id: pageCheckpoint.document.id, projectId: pageCheckpoint.document.projectId }
         : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
-      const owner = checkpoint ? binding : ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
+      const owner = issueCheckpoint || pageCheckpoint ? binding : ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
-      const fieldHashes = checkpoint?.hashes ??
+      const issueHashes = issueCheckpoint?.hashes ??
         (createdIssue && entry.pkg.dataset.source.product === 'jira' ? jiraFieldDigests(createdIssue) : undefined);
+      const createdPage = binding?.type === 'document' ? this.documentById.get(binding.id) : undefined;
+      const pageHashes = pageCheckpoint?.hashes ??
+        (createdPage && entry.pkg.dataset.source.product === 'confluence' ? confluencePageFieldDigests(createdPage) : undefined);
       const value: SourceRecordArchive = {
         id: this.archiveIds.get(entry.key) || randomUUID(), sourceImportId: this.input.id,
         packageSha256: entry.pkg.summary.sha256, source: structuredClone(entry.pkg.dataset.source), record: structuredClone(entry.row),
         targetType: binding?.type ?? null, targetId: binding?.id ?? null, targetProjectId: binding?.projectId ?? owner?.projectId ?? null,
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
-        ...(fieldHashes ? { jiraIssueFieldHashes: fieldHashes } : {}),
+        ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
+        ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
       };
       if (entry.row.kind === 'project' || entry.row.kind === 'identity') {
         value.ownerType = null;
@@ -1176,8 +1341,9 @@ class Planner{
       if (this.configuration.appendTo?.refreshExisting) this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
       else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
     }
-    if (this.input.appendPages && !this.result.documents.length && !this.notices.some(notice => notice.severity === 'error')) {
-      this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
+    if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendPagesTo?.refreshExisting) this.notice('CONFLUENCE_REFRESH_NO_CHANGES', '적용할 새 Confluence 문서나 기존 문서 변경분이 없습니다.', 'error');
+      else this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
     }
     this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=projects.map(project=>project.id);this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
   }

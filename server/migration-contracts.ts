@@ -1,4 +1,4 @@
-import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
+import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
@@ -10,6 +10,16 @@ export interface MigrationJiraIssueUpdate {
   issueId: string;
   expectedVersion: number;
   changes: JiraMigrationIssueValues;
+}
+export interface MigrationConfluenceRefreshCandidate {
+  document: DocPage;
+  previous: SourceRecordArchive;
+  previousTimezone: string;
+}
+export interface MigrationConfluenceDocumentUpdate {
+  documentId: string;
+  expectedVersion: number;
+  changes: ConfluenceMigrationDocumentValues;
 }
 export interface MigrationAppendContext {
   project: Project;
@@ -26,6 +36,7 @@ export interface MigrationPageAppendContext {
   sourceSpaceKey?: string;
   token: string;
   knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string }[];
+  refreshDocuments?: MigrationConfluenceRefreshCandidate[];
 }
 export interface MigrationPlanningInput {
   id:string;configuration:MigrationConfiguration;actorId:string;users:User[];existingProjectKeys:string[];
@@ -45,4 +56,5 @@ export interface PreparedMigration {
   append?: { projectId: string; token: string; startIssueNumber: number };
   appendPages?: { projectId: string; token: string };
   issueUpdates?: MigrationJiraIssueUpdate[];
+  documentUpdates?: MigrationConfluenceDocumentUpdate[];
 }

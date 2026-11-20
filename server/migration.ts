@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
+import type { DocPage, Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -21,6 +21,7 @@ const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
 const conversionVersion = 2;
 const MAX_REFRESH_ISSUES = 1000;
+const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
@@ -28,14 +29,16 @@ type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourc
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
-const changedPageAppend = '문서를 추가할 프로젝트 또는 원본 페이지 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedPageAppend = '대상 프로젝트, 문서 버전 또는 원본 페이지 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
 const jiraNumericId = /^\d+$/;
 
 type Hooks = {
   actor: (request: Request) => string;
   validateIssueUpdates?: (prepared: PreparedMigration, request: Request) => void;
+  validateDocumentUpdates?: (prepared: PreparedMigration, request: Request) => void;
   persistCanonical: (prepared: PreparedMigration, request: Request) => void;
+  afterApply?: (prepared: PreparedMigration) => void;
 };
 
 export class MigrationService {
@@ -238,8 +241,8 @@ export class MigrationService {
     }
     const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = destination;
     const selectedPageIds = new Set(packages.flatMap(pkg => pkg.dataset.records.filter(record => record.kind === 'page').map(record => record.sourceId)));
-    // A binding survives trash or permanent deletion. Its original title and space are used for source references,
-    // while only the current document's existence and project affect whether that reference can be reused.
+    // Bindings retain the original space after a move or deletion. A reviewed refresh can supply a newer original
+    // title for that same page; local document titles never participate in source lookups.
     const boundPages = this.store.db.prepare(`WITH page_origins AS (
       SELECT binding.source_alias AS sourceId, binding.target_id AS documentId, document.project_id AS projectId,
         json_extract(archive.json,'$.record.containerId') AS sourceSpaceId,
@@ -250,13 +253,62 @@ export class MigrationService {
         AND archive.source_instance=binding.source_instance AND archive.kind=binding.kind AND archive.source_id=binding.source_alias
         AND archive.target_type=binding.target_type AND archive.target_id=binding.target_id AND json_valid(archive.json)
       WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
-    ) SELECT sourceId, documentId, projectId,
-      CASE WHEN COUNT(DISTINCT sourceSpaceId)=1 THEN MAX(sourceSpaceId) END AS sourceSpaceId,
-      CASE WHEN COUNT(DISTINCT sourceTitle)=1 THEN MAX(sourceTitle) ELSE '' END AS sourceTitle
-    FROM page_origins GROUP BY sourceId, documentId, projectId ORDER BY sourceId`).all(instanceKey) as MigrationPageAppendContext['knownPages'];
+    ), bound_pages AS (
+      SELECT sourceId, documentId, projectId,
+        CASE WHEN COUNT(DISTINCT sourceSpaceId)=1 THEN MAX(sourceSpaceId) END AS sourceSpaceId,
+        CASE WHEN COUNT(DISTINCT sourceTitle)=1 THEN MAX(sourceTitle) ELSE '' END AS sourceTitle
+      FROM page_origins GROUP BY sourceId, documentId, projectId
+    ) SELECT bound.sourceId, bound.documentId, bound.projectId, bound.sourceSpaceId,
+      COALESCE((SELECT json_extract(snapshot.json,'$.record.title')
+      FROM source_records AS snapshot JOIN source_imports AS receipt ON receipt.id=snapshot.import_id
+      WHERE bound.sourceSpaceId=? AND snapshot.target_type='document' AND snapshot.target_id=bound.documentId
+        AND snapshot.product='confluence' AND snapshot.source_instance=? AND snapshot.kind='page' AND snapshot.source_id=bound.sourceId
+        AND json_extract(snapshot.json,'$.record.containerId')=bound.sourceSpaceId AND json_extract(snapshot.json,'$.targetProjectId')=?
+        AND length(trim(json_extract(snapshot.json,'$.record.title'))) BETWEEN 1 AND 300
+        AND json_type(snapshot.json,'$.confluencePageFieldHashes')='object'
+        AND json_type(receipt.json,'$.configuration.appendPagesTo.refreshExisting')='true'
+      ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, snapshot.id DESC LIMIT 1), bound.sourceTitle) AS sourceTitle
+    FROM bound_pages AS bound ORDER BY bound.sourceId`).all(instanceKey, sourceSpaceId, instanceKey, project.id) as MigrationPageAppendContext['knownPages'];
     const knownPages = boundPages.filter(page => page.sourceSpaceId === sourceSpaceId || selectedPageIds.has(page.sourceId));
-    const token = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages])).digest('hex');
-    return { project, sourceSpaceId, sourceSpaceKey, token, knownPages };
+    const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
+    const refreshDocuments = configuration.appendPagesTo.refreshExisting
+      ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
+    return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, ...(refreshDocuments ? { refreshDocuments } : {}) };
+  }
+  private confluenceRefreshDocuments(packages: MigrationPackage[], configuration: MigrationConfiguration, knownPages: MigrationPageAppendContext['knownPages'],
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['refreshDocuments']> {
+    const live = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
+      .map(page => [page.sourceId, page.documentId]));
+    const excluded = new Set(configuration.excludedRecords);
+    const selected = new Set<string>();
+    for (const { summary, dataset } of packages) for (const row of dataset.records) {
+      if (row.kind === 'page' && live.has(row.sourceId) && !excluded.has(`${summary.id}/${row.id}`)) selected.add(row.sourceId);
+    }
+    if (selected.size > MAX_REFRESH_DOCUMENTS) fail(413, '기존 Confluence 문서의 변경은 한 번에 300개까지 검토할 수 있습니다. 패키지를 나누어 주세요.');
+
+    const currentDocument = this.store.db.prepare('SELECT json FROM documents WHERE id=? AND project_id=?');
+    const previousPage = this.store.db.prepare(`SELECT snapshot.json, json_extract(receipt.json,'$.configuration.timezone') AS timezone
+      FROM source_records AS snapshot JOIN source_imports AS receipt ON receipt.id=snapshot.import_id
+      WHERE snapshot.target_type='document' AND snapshot.target_id=? AND snapshot.product='confluence' AND snapshot.source_instance=?
+        AND snapshot.kind='page' AND snapshot.source_id=? AND json_extract(snapshot.json,'$.record.containerId')=?
+        AND json_extract(snapshot.json,'$.targetProjectId')=?
+      ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, snapshot.id DESC LIMIT 1`);
+    const candidates: NonNullable<MigrationPageAppendContext['refreshDocuments']> = [];
+    let bytes = 0;
+    digest.update('\nconfluence-refresh\n');
+    for (const sourceId of [...selected].sort()) {
+      const documentId = live.get(sourceId)!;
+      const current = currentDocument.get(documentId, project.id) as { json: string } | undefined;
+      const previous = previousPage.get(documentId, instanceKey, sourceId, sourceSpaceId, project.id) as { json: string; timezone: string } | undefined;
+      digest.update(JSON.stringify([sourceId, Boolean(current), Boolean(previous)])).update('\n');
+      if (!current || !previous) continue;
+      bytes += Buffer.byteLength(current.json) + Buffer.byteLength(previous.json);
+      if (bytes > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Confluence 원본이 64MiB를 넘습니다. 패키지를 나누어 주세요.');
+      digest.update(current.json).update('\n').update(previous.json).update('\n').update(JSON.stringify(previous.timezone)).update('\n');
+      candidates.push({ document: JSON.parse(current.json) as DocPage, previous: JSON.parse(previous.json) as SourceRecordArchive,
+        previousTimezone: previous.timezone });
+    }
+    return candidates;
   }
   private fileSpec(summary: LegacyPackageSummary): MigrationSourceFile {
     return { id: summary.id, filename: summary.filename, sha256: summary.sha256, path: join(this.dataDir, 'legacy-imports', `${summary.id}.bundle`) };
@@ -348,6 +400,7 @@ export class MigrationService {
       this.verifyPackages(prepared.sourceImport.packages);
       const binding = this.store.db.prepare('SELECT target_type AS type,target_id AS id FROM source_bindings WHERE product=? AND source_instance=? AND kind=? AND source_alias=?');
       const refreshIssueIds = new Set(append?.refreshIssues?.map(candidate => candidate.issue.id));
+      const refreshDocumentIds = new Set(appendPages?.refreshDocuments?.map(candidate => candidate.document.id));
       const duplicate = prepared.sourceRecords.find(row => {
         if (!row.targetId || !['project', 'issue', 'page'].includes(row.record.kind)) return false;
         const { source, record } = row;
@@ -359,6 +412,8 @@ export class MigrationService {
           if (!bound) return false;
           if (source.product === 'jira' && record.kind === 'issue' && row.targetType === 'issue' && row.jiraIssueFieldHashes &&
               bound.type === 'issue' && bound.id === row.targetId && refreshIssueIds.has(bound.id)) return false;
+          if (source.product === 'confluence' && record.kind === 'page' && row.targetType === 'document' && row.confluencePageFieldHashes &&
+              bound.type === 'document' && bound.id === row.targetId && refreshDocumentIds.has(bound.id)) return false;
           return !(existingProject && record.kind === 'project' && row.targetType === 'project' &&
             bound.type === 'project' && bound.id === existingProject.id && row.targetId === existingProject.id);
         });
@@ -374,6 +429,7 @@ export class MigrationService {
         });
       }
       if (prepared.preview.canApply && prepared.issueUpdates?.length) hooks.validateIssueUpdates?.(prepared, request);
+      if (prepared.preview.canApply && prepared.documentUpdates?.length) hooks.validateDocumentUpdates?.(prepared, request);
 
       // Keep the review available even for a blocked plan, without saving arrays that cannot be applied.
       if (!prepared.preview.canApply) {
@@ -488,6 +544,7 @@ export class MigrationService {
         throw error;
       }
       try { staged?.commit(); } catch { console.error('[teamspace migration] 첨부 추가 복구 기록 정리가 필요합니다.'); }
+      try { hooks.afterApply?.(prepared); } catch { console.error('[teamspace migration] 이관한 문서의 공동 편집 알림을 보낼 수 없습니다.'); }
       return { import: receipt, duplicate: false };
     } finally { this.busy = false; }
   }

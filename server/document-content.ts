@@ -114,20 +114,37 @@ export function validatePinnedDocumentRevisions(contents: Iterable<RichContent>,
 }
 
 export interface DocumentValidationOptions{allowMissing?:boolean;documents?:DocPage[];issues?:Issue[];issueBlockTargets?:IssueBlockTargets;revisionOwner?:RevisionOwnerLookup}
+interface DocumentContentEdit { id: string; content: RichContent; previousContent?: RichContent }
 export class DocumentContentService{
   constructor(private readonly store:Store){}
   normalize(value:unknown){return normalizeDocumentContent(value);}
   validate(documentId:string,content:RichContent,previousContent?:RichContent,options:DocumentValidationOptions={}):void{
-    const documents=options.documents??this.store.all<DocPage>('documents'),issues=options.issues??this.store.all<Issue>('issues');
-    const documentIds=new Set([...documents.map(document=>document.id),documentId]),issueIds=new Set(issues.map(issue=>issue.id));
-    const previous=new Set(contentReferences(previousContent||{type:'doc'}).filter(reference=>!reference.revisionId).map(reference=>`${reference.type}:${reference.kind}:${reference.id}`));
-    for(const reference of contentReferences(content))if(!reference.revisionId&&!(reference.type==='issue'?issueIds:documentIds).has(reference.id)&&!options.allowMissing&&!previous.has(`${reference.type}:${reference.kind}:${reference.id}`))invalid(`참조 대상을 찾을 수 없습니다: ${reference.id}`,422,'REFERENCE_NOT_FOUND');
-    validatePinnedDocumentRevisions([content], options.revisionOwner ?? (id => includeRevisionOwner(this.store, id)), { allowMissing: options.allowMissing, previousContent });
-    validateDocumentIssueBlocks([content], options.issueBlockTargets ?? {
+    this.validateBatch([{ id: documentId, content, previousContent }], options);
+  }
+  validateBatch(edits: DocumentContentEdit[], options: DocumentValidationOptions = {}): void {
+    const documents = options.documents ?? this.store.all<DocPage>('documents');
+    const issues = options.issues ?? this.store.all<Issue>('issues');
+    const contents = new Map(documents.map(document => [document.id, document.content]));
+    const issueIds = new Set(issues.map(issue => issue.id));
+    const revisionOwner = options.revisionOwner ?? (id => includeRevisionOwner(this.store, id));
+    const issueBlockTargets = options.issueBlockTargets ?? {
       hasProject: id => Boolean(this.store.get('projects', id)),
       viewProject: id => this.store.get<SavedView>('saved_views', id)?.projectId,
-    }, { allowMissing: options.allowMissing, previousContent });
-    const contents=new Map(documents.map(document=>[document.id,document.content]));contents.set(documentId,content);
+    };
+    for (const { id, content } of edits) contents.set(id, content);
+    for (const { content, previousContent } of edits) {
+      const previous = new Set(contentReferences(previousContent ?? { type: 'doc' })
+        .filter(reference => !reference.revisionId).map(reference => `${reference.type}:${reference.kind}:${reference.id}`));
+      for (const reference of contentReferences(content)) {
+        const targets = reference.type === 'issue' ? issueIds : contents;
+        if (!reference.revisionId && !targets.has(reference.id) && !options.allowMissing && !previous.has(`${reference.type}:${reference.kind}:${reference.id}`)) {
+          invalid(`참조 대상을 찾을 수 없습니다: ${reference.id}`, 422, 'REFERENCE_NOT_FOUND');
+        }
+      }
+      const previousOptions = { allowMissing: options.allowMissing, previousContent };
+      validatePinnedDocumentRevisions([content], revisionOwner, previousOptions);
+      validateDocumentIssueBlocks([content], issueBlockTargets, previousOptions);
+    }
     const incoming=new Map([...contents.keys()].map(id=>[id,0])),edges=new Map<string,string[]>();
     for(const[id,body]of contents){const targets=[...new Set(contentReferences(body).filter(reference=>reference.kind==='include'&&!reference.revisionId&&contents.has(reference.id)).map(reference=>reference.id))];edges.set(id,targets);for(const target of targets)incoming.set(target,incoming.get(target)!+1);}
     const ready=[...incoming].filter(([,degree])=>degree===0).map(([id])=>id);let visited=0;

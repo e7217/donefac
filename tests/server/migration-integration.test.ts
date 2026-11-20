@@ -9,11 +9,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
+import { WebSocket } from 'ws';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
+import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -30,7 +32,7 @@ async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
   }
   async function preview(configuration: MigrationConfiguration) { const result = await call<MigrationPreview>('/migrations/preview', 'POST', { configuration }); assert.equal(result.status, 201, JSON.stringify(result.data)); return result.data; }
   async function apply(plan: MigrationPreview, extra: Record<string, unknown> = {}, actor = 'user-seo') { return call<MigrationApplyResult>(`/migrations/previews/${plan.id}/apply`, 'POST', { expectedVersion: plan.version, acknowledgements: plan.requiredAcknowledgements, ...extra }, actor); }
-  return { dir, base, db, call, upload, configuration, preview, apply, async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); service.close(); db.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return { dir, base, db, call, upload, configuration, preview, apply, attachCollaboration: () => service.attachWebSocket(server), async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); service.close(); db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 const csv = Buffer.from('Issue id,Issue key,Project key,Summary,Description,Reporter,Created,Updated,Status,Issue Type,Comment\r\n100,OLD-1,OLD,Synthetic imported issue one,"h2. 원본 설명",original.author,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task,"2020-01-03T00:00:00Z;original.author;보존한 댓글"\r\n200,OTHER-1,OTHER,Synthetic imported issue two,두번째 설명,original.author,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task,\r\n');
 
@@ -721,6 +723,193 @@ test('incremental Confluence imports reuse live parents and references while pre
   assert.equal(repeated.counts.retainedPages, 2);
   const receipts = (await f.call<SourceImport[]>('/source-imports')).data;
   assert.deepEqual(receipts.find(receipt => receipt.id === applied.data.import.id)?.configuration.appendPagesTo, { projectId });
+});
+
+test('reviewed Confluence deltas preserve local edits, guard collaborative sessions and restore the comparison baseline', async t => {
+  const initial = await fixture(), f = await fixture();
+  const sockets = new Set<WebSocket>();
+  t.after(() => {
+    for (const socket of sockets) socket.terminate();
+    return Promise.all([initial.close(), f.close()]);
+  });
+  f.attachCollaboration();
+  const source = 'synthetic-confluence-refresh';
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
+  const page = (id: string, title: string, version: number, modified: string, storage?: string, parent?: string) => [
+    object('Page', id, prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42') +
+      prop('creationDate', '2020-03-01T00:00:00Z') + prop('lastModificationDate', modified) + (parent ? ref('parent', 'Page', parent) : '')),
+    ...(storage === undefined ? [] : [object('BodyContent', `8${id}`, prop('body', `<![CDATA[${storage}]]>`) + ref('content', 'Page', id))]),
+  ].join('');
+  const upload = (target: MigrationFixture, name: string, rows: string[]) => target.upload(zip([{
+    path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${object('Space', '42', prop('key', 'WIKIREV') + prop('name', '팀 원본 문서'))}${rows.join('')}</hibernate-generic>`),
+  }]), `${name}.zip`, 'confluence', source);
+  const initialPack = await upload(initial, 'initial-pages', [
+    page('100', '이전 원본 제목', 1, '2020-03-02T00:00:00Z', '<p>이전 본문</p>'),
+    page('200', '지원 문서', 1, '2020-03-02T00:00:00Z', '<p>지원하는 기존 본문</p>'),
+  ]);
+  const first = await initial.apply(await initial.preview(await initial.configuration(initialPack, 'WREF')));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & {schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[]; revisions: DocRevision[]};
+  const previous = (await initial.call<Backup>('/export')).data;
+  previous.schemaVersion = 39;
+  for (const receipt of previous.sourceImports) delete receipt.integrity;
+  for (const record of previous.sourceRecords) delete record.confluencePageFieldHashes;
+  assert.equal((await f.call('/import', 'POST', { data: previous })).status, 200);
+  const snapshot = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+  const [document, supporting] = (await snapshot()).documents.filter(doc => doc.projectId === projectId);
+  assert.equal(document.title, '이전 원본 제목');
+  assert.equal(supporting.title, '지원 문서');
+  const path = `/documents/${document.id}`;
+  const edit = await f.call<DocPage>(path, 'PATCH', { expectedVersion: document.version, title: '팀이 수정한 문서 제목' });
+  assert.equal(edit.status, 200);
+  const enabled = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: edit.data.version });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.data));
+  const collaboration = async () => (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+
+  const body = '<p>새 <strong>본문</strong> <ac:link><ri:page ri:content-id="200"/><ac:link-body>지원하는 문서</ac:link-body></ac:link></p>';
+  const delta = await upload(f, 'newer-pages', [
+    page('100', '원본에서 바뀐 제목', 2, '2020-03-03T00:00:00Z', body),
+    page('200', '지원 문서 개정판', 2, '2020-03-03T00:00:00Z'),
+  ]);
+  async function configuration(pkg: LegacyPackageSummary): Promise<MigrationConfiguration> {
+    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    assert.equal(options.appendPagesTarget?.projectId, projectId);
+    return { ...options.defaultConfiguration, appendPagesTo: { projectId, refreshExisting: true } };
+  }
+  const config = await configuration(delta);
+  assert.equal((await f.preview({ ...config, appendPagesTo: { projectId } })).canApply, false);
+  assert.equal((await f.call('/migrations/preview', 'POST', { configuration: { ...config, appendPagesTo: { projectId, refreshExisting: false } } })).status, 400);
+  const reviewed = await f.preview(config);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  assert.equal(reviewed.counts.documents, 0);
+  assert.equal(reviewed.counts.updatedDocuments, 2);
+  assert.equal(reviewed.counts.updatedDocumentFields, 2);
+  assert.equal(reviewed.counts.conflictingDocumentFields, 1);
+  const comparison = reviewed.documentRefresh?.find(row => row.documentId === document.id);
+  assert.ok(comparison);
+  assert.deepEqual(Object.fromEntries(comparison.fields.map(field => [field.field, field.decision])), { title: 'conflict', content: 'apply' });
+
+  async function connect(epoch: string | null, documentId = document.id) {
+    const wsUrl = `${f.base.replace('http:', 'ws:')}/collaboration?${new URLSearchParams({ documentId, actorId: 'user-min' })}`;
+    const socket = new WebSocket(wsUrl);
+    sockets.add(socket);
+    await once(socket, 'open');
+    const incoming = once(socket, 'message');
+    socket.send(JSON.stringify({ type: 'hello', epoch, schemaVersion: COLLABORATION_SCHEMA }));
+    const [bytes] = await incoming;
+    return { socket, message: JSON.parse(String(bytes)) as CollaborationServerMessage };
+  }
+  const live = await connect(enabled.data.epoch);
+  assert.equal(live.message.type, 'welcome');
+  assert.equal((await f.apply(reviewed)).status, 409);
+  const busy = await f.preview(config);
+  assert.equal(busy.canApply, false);
+  assert.ok(busy.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_VALIDATION' && notice.message.includes('공동 편집')));
+  const closed = once(live.socket, 'close');
+  live.socket.close();
+  await closed;
+
+  const beforeEdit = await f.preview(config);
+  const lastEdit = await f.call<DocPage>(path, 'PATCH', { expectedVersion: enabled.data.document.version, title: '검토 후 다시 편집한 문서 제목' });
+  assert.equal(lastEdit.status, 200);
+  assert.equal((await f.apply(beforeEdit)).status, 409);
+  const fresh = await f.preview(config);
+  assert.equal(fresh.canApply, true, JSON.stringify(fresh.notices));
+  f.db.exec(`CREATE TRIGGER fail_confluence_refresh_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Confluence refresh receipt failure'); END`);
+  try { assert.equal((await f.apply(fresh)).status, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_confluence_refresh_receipt'); }
+  assert.equal((await collaboration()).epoch, enabled.data.epoch);
+  assert.deepEqual((await collaboration()).document, lastEdit.data);
+
+  const result = await f.apply(fresh);
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  assert.equal((await f.apply(fresh)).data.duplicate, true);
+  const applied = await collaboration();
+  assert.notEqual(applied.epoch, enabled.data.epoch);
+  assert.equal(applied.document.title, lastEdit.data.title);
+  assert.equal(applied.document.version, lastEdit.data.version + 1);
+  assert.match(applied.document.plainText, /새 본문/);
+  assert.deepEqual(contentReferences(applied.document.content).map(reference => reference.id), [supporting.id]);
+  const renamed = (await snapshot()).documents.find(doc => doc.id === supporting.id);
+  assert.equal(renamed?.title, '지원 문서 개정판');
+  assert.equal(renamed?.plainText, supporting.plainText);
+  const offline = await connect(enabled.data.epoch);
+  assert.equal(offline.message.type, 'reset');
+  if (offline.message.type === 'reset') assert.equal(offline.message.epoch, applied.epoch);
+  offline.socket.terminate();
+
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const revisions = backup.revisions.filter(record => record.documentId === document.id);
+  assert.ok(revisions.some(revision => revision.plainText === '이전 본문'));
+  assert.equal(revisions.filter(revision => revision.version === applied.document.version).length, 1);
+  assert.ok(backup.sourceRecords.find(record => record.sourceImportId === result.data.import.id && record.targetId === document.id)?.confluencePageFieldHashes?.content);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 39 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  assert.equal((await f.preview(config)).canApply, false);
+
+  const outdated = await upload(f, 'older-source-version', [page('100', '이전 원본 제목', 1, '2020-03-07T00:00:00Z', '<p>덮어쓰면 안 되는 본문</p>')]);
+  assert.equal((await f.preview(await configuration(outdated))).canApply, false);
+  const withoutTitle = await upload(f, 'body-without-original-title', [
+    page('200', '', 3, '2020-03-04T00:00:00Z', '<p>제목 없이 제출한 본문 변경</p>'),
+  ]);
+  const bodyOnly = await f.preview(await configuration(withoutTitle));
+  assert.equal(bodyOnly.canApply, true, JSON.stringify(bodyOnly.notices));
+  assert.equal((await f.apply(bodyOnly)).status, 201);
+  const currentSupporting = (await snapshot()).documents.find(doc => doc.id === supporting.id)!;
+  assert.equal(currentSupporting.title, '지원 문서 개정판');
+  assert.equal(currentSupporting.plainText, '제목 없이 제출한 본문 변경');
+  assert.equal((await f.call(`/documents/${supporting.id}`, 'PATCH', {
+    expectedVersion: currentSupporting.version,
+    content: { type: 'doc', content: [{ type: 'documentInclude', attrs: { documentId: document.id, label: '팀 문서' } }] },
+  })).status, 200);
+  const wouldCycle = await upload(f, 'cycle-with-existing-local-document', [
+    page('100', '원본에서 바뀐 제목', 3, '2020-03-04T00:00:00Z',
+      '<ac:structured-macro ac:name="include"><ac:parameter ac:name=""><ri:page ri:content-id="200"/></ac:parameter></ac:structured-macro>'),
+  ]);
+  const cyclic = await f.preview(await configuration(wouldCycle));
+  assert.equal(cyclic.canApply, false);
+  assert.ok(cyclic.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_VALIDATION' && notice.message.includes('순환')));
+  const formatOnly = body.replace('<strong>본문</strong>', '<em>본문</em>');
+  const mixedPack = await upload(f, 'format-and-new-page', [
+    page('100', '원본에서 바뀐 제목', 3, '2020-03-04T00:00:00Z', formatOnly),
+    page('300', '원본 제목 변경 뒤 추가한 하위 문서', 1, '2020-03-04T00:00:00Z',
+      '<p><ac:link><ri:page ri:content-title="지원 문서 개정판"/></ac:link></p>', '100'),
+  ]);
+  const mixed = await f.preview(await configuration(mixedPack));
+  assert.equal(mixed.canApply, true, JSON.stringify(mixed.notices));
+  assert.equal(mixed.counts.documents, 1);
+  assert.equal(mixed.counts.updatedDocuments, 1);
+  assert.equal(mixed.documentRefresh?.[0]?.fields.find(field => field.field === 'content')?.formatOnly, true);
+  assert.equal((await f.apply(mixed)).status, 201);
+  const added = (await snapshot()).documents.find(doc => doc.title === '원본 제목 변경 뒤 추가한 하위 문서');
+  assert.ok(added);
+  assert.equal(added.parentId, document.id);
+  assert.deepEqual(contentReferences(added.content).map(reference => reference.id), [supporting.id]);
+
+  const supportingPath = `/documents/${supporting.id}/collaboration`;
+  const latestSupporting = (await snapshot()).documents.find(doc => doc.id === supporting.id)!;
+  const supportingSession = await f.call<CollaborationSession>(`${supportingPath}/enable`, 'POST', { expectedVersion: latestSupporting.version });
+  assert.equal(supportingSession.status, 200);
+  const metadataPeer = await connect(supportingSession.data.epoch, supporting.id);
+  assert.equal(metadataPeer.message.type, 'welcome');
+  const titlePack = await upload(f, 'collaborating-title-only', [page('200', '지원 문서 새 원본 제목', 4, '2020-03-05T00:00:00Z')]);
+  const titleOnly = await f.preview(await configuration(titlePack));
+  assert.equal(titleOnly.canApply, true, JSON.stringify(titleOnly.notices));
+  const receivedMetadata = once(metadataPeer.socket, 'message', { signal: AbortSignal.timeout(6000) });
+  const [titleApplied, [bytes]] = await Promise.all([f.apply(titleOnly), receivedMetadata]);
+  assert.equal(titleApplied.status, 201);
+  const metadata = JSON.parse(String(bytes)) as CollaborationServerMessage;
+  assert.equal(metadata.type, 'update');
+  if (metadata.type === 'update') {
+    assert.equal(metadata.epoch, supportingSession.data.epoch);
+    assert.equal(metadata.document.title, '지원 문서 새 원본 제목');
+    assert.deepEqual(metadata.document.content, supportingSession.data.document.content);
+  }
 });
 
 function confluence(withAuditFixtures = false) {

@@ -63,7 +63,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -428,6 +428,39 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     }
     return updates.map(update => prepareJiraRefresh(update, projectId));
   };
+  const confluenceRefreshFields = new Set<string>(CONFLUENCE_MIGRATION_DOCUMENT_FIELDS);
+  const prepareConfluenceRefreshes = (value: PreparedMigration) => {
+    const updates = value.documentUpdates ?? [];
+    if (!updates.length) return [];
+    const projectId = value.appendPages?.projectId;
+    if (!projectId || value.preview.configuration.appendPagesTo?.refreshExisting !== true ||
+        new Set(updates.map(update => update.documentId)).size !== updates.length) {
+      return fail('Confluence에서 변경분을 반영할 프로젝트와 문서를 확인해 주세요.', 409);
+    }
+    const prepared = updates.map(update => {
+      const before = store.get<DocPage>('documents', update.documentId);
+      if (!before || before.projectId !== projectId || before.version !== update.expectedVersion) {
+        return fail('이관을 검토하는 동안 문서가 변경되었습니다. 미리보기를 다시 만들어 주세요.', 409);
+      }
+      const fields = Object.keys(update.changes);
+      if (!fields.length || fields.some(field => !confluenceRefreshFields.has(field))) {
+        return fail('Confluence에서 반영할 문서 필드를 확인해 주세요.', 409);
+      }
+      const bodyChanged = Object.hasOwn(update.changes, 'content');
+      if (bodyChanged && collaboration.hasReadyEditors(before.id)) {
+        return fail(`‘${before.title}’에서 공동 편집 중입니다. 참여자가 나간 뒤 문서 변경분을 다시 검토해 주세요.`, 409);
+      }
+      const version = before.version + 1;
+      if (!Number.isSafeInteger(version)) return fail('문서의 버전 범위를 초과했습니다.', 409);
+      const after = validateDocument({ ...before, ...update.changes, version, updatedAt: now() }, before, { skipReferences: true });
+      return { before, after, bodyChanged };
+    });
+    documentContent.validateBatch([
+      ...value.documents.map(({ id, content }) => ({ id, content })),
+      ...prepared.map(({ before, after }) => ({ id: after.id, content: after.content, previousContent: before.content })),
+    ]);
+    return prepared;
+  };
   migrations.registerRoutes(app, {
     actor,
     validateIssueUpdates(value: PreparedMigration) {
@@ -439,13 +472,30 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
           message: error.message, recordId: null, requiresAcknowledgement: false });
       }
     },
+    validateDocumentUpdates(value: PreparedMigration) {
+      try { prepareConfluenceRefreshes(value); }
+      catch (error) {
+        if (!(error instanceof ApiError || error instanceof DocumentContentError)) throw error;
+        value.preview.canApply = false;
+        value.preview.notices.unshift({ severity: 'error', code: 'CONFLUENCE_REFRESH_VALIDATION',
+          message: error.message, recordId: null, requiresAcknowledgement: false });
+      }
+    },
+    afterApply(value: PreparedMigration) {
+      for (const update of value.documentUpdates ?? []) {
+        if (Object.hasOwn(update.changes, 'content')) collaboration.reset(update.documentId, 'Confluence 원본 변경으로 문서 본문을 갱신했습니다.');
+        else collaboration.notifyMetadata(update.documentId);
+      }
+    },
     persistCanonical(value, req) {
       const refreshedIssues = prepareJiraRefreshes(value);
+      const refreshedDocuments = prepareConfluenceRefreshes(value);
       if (value.appendPages) {
         const { projectId } = value.appendPages;
         get<Project>('projects', projectId);
         const newDocumentIds = new Set(value.documents.map(document => document.id));
-        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length || !value.documents.length ||
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length ||
+            (!value.documents.length && !refreshedDocuments.length) ||
             value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
             value.revisions.some(revision => !newDocumentIds.has(revision.documentId)) ||
             [...value.comments, ...value.attachments].some(record => record.resourceType !== 'document' || !newDocumentIds.has(record.resourceId))) {
@@ -475,14 +525,20 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
       for (const document of value.documents) store.put('documents', document);
+      for (const { after } of refreshedDocuments) store.put('documents', after);
       const firstDocument = value.documents[0];
-      if (firstDocument) documentContent.validate(firstDocument.id, firstDocument.content);
+      if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {checkFields:false,allowArchivedSchema:true}));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       for (const { before, after, fields } of refreshedIssues) {
         store.put('issues', after);
         reportLedger.recordImportedIssueUpdate(before, after, actor(req));
         activity(req, 'issue', after.id, 'Jira 원본 변경분 반영', fields.join(', '));
+      }
+      for (const { after, bodyChanged } of refreshedDocuments) {
+        const document = bodyChanged ? collaboration.replaceBody(after) : after;
+        revision(document, actor(req), 'Confluence 원본 변경분 반영');
+        activity(req, 'document', document.id, 'Confluence 원본 변경분 반영', document.title);
       }
       worklogs.persistMigrated(value.worklogs??[],value.sourceRecords);
       for (const comment of value.comments) store.put('comments', comment);
@@ -500,9 +556,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
-      const detail = `${value.issues.length}개 업무 · ${value.documents.length}개 문서`;
-      activity(req, 'source-import', value.sourceImport.id, action, refreshedIssues.length ? `${detail} · 기존 업무 ${refreshedIssues.length}개 변경` : detail);
+      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : refreshedDocuments.length ? 'Confluence 원본 변경분 반영' :
+        value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
+      const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
+      if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
+      if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
+      activity(req, 'source-import', value.sourceImport.id, action, details.join(' · '));
     },
   });
   worklogs.registerRoutes(app,{actor,activity});
@@ -1218,6 +1277,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<37&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo!==undefined))fail('기존 프로젝트에 Jira 업무를 추가한 영수증에는 schemaVersion 37 백업이 필요합니다.');
     if(data.schemaVersion<38&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo!==undefined))fail('기존 프로젝트에 Confluence 문서를 추가한 영수증에는 schemaVersion 38 백업이 필요합니다.');
     if(data.schemaVersion<39&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshExisting!==undefined))fail('기존 Jira 업무의 변경분을 반영한 영수증에는 schemaVersion 39 백업이 필요합니다.');
+    if(data.schemaVersion<40&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshExisting!==undefined))fail('기존 Confluence 문서의 변경분을 반영한 영수증에는 schemaVersion 40 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

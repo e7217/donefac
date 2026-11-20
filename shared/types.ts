@@ -159,6 +159,18 @@ export interface JiraMigrationIssueReview {
 export interface MigrationPageAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceSpaceId: string; sourceSpaceKey?: string;
 }
+export interface MigrationPageAppendConfiguration {
+  projectId: string;
+  refreshExisting?: true;
+}
+export const CONFLUENCE_MIGRATION_DOCUMENT_FIELDS = ['title', 'content'] as const;
+export type ConfluenceMigrationDocumentField = typeof CONFLUENCE_MIGRATION_DOCUMENT_FIELDS[number];
+export type ConfluenceMigrationDocumentValues = Partial<Pick<DocPage, ConfluenceMigrationDocumentField>>;
+export type ConfluenceMigrationPageFieldHashes = Partial<Record<ConfluenceMigrationDocumentField, string>>;
+export interface ConfluenceMigrationDocumentReview {
+  documentId: string; title: string; sourceId: string; recordId: string;
+  fields: { field: ConfluenceMigrationDocumentField; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true }[];
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
@@ -172,7 +184,7 @@ export interface MigrationConfiguration {
   fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
   appendTo?: MigrationAppendConfiguration;
-  appendPagesTo?: { projectId: string };
+  appendPagesTo?: MigrationPageAppendConfiguration;
 }
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
 export interface MigrationPreview {
@@ -181,6 +193,7 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string}[];
   issueRefresh?: JiraMigrationIssueReview[];
+  documentRefresh?: ConfluenceMigrationDocumentReview[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
@@ -204,6 +217,7 @@ export interface SourceRecordArchive {
   ownerType:'issue'|'document'|null;ownerId:string|null;
   excluded?:true;
   jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
+  confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number }
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string }

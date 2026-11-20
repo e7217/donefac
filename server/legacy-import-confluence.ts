@@ -131,7 +131,12 @@ function attachBodies(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     const list=owners.get(key)??[];list.push(body);owners.set(key,list);
   }
   for(const [key,list]of owners){const row=rows.get(key)!;row.textFormat='confluence-storage';row.metadata.bodyContentIds=list.map(body=>body.id);
-    if(list.length===1){row.text=prop(list[0].node,'body');row.metadata.bodyType=prop(list[0].node,'bodyType');}
+    if (list.length === 1) {
+      const body = property(list[0].node, 'body');
+      row.text = scalar(body);
+      row.metadata.bodyType = prop(list[0].node, 'bodyType');
+      if (row.kind === 'page' && body) row.metadata.bodyPresent = true;
+    }
     else{row.metadata.bodyContents=list.map(body=>({id:body.id,bodyType:prop(body.node,'bodyType'),text:prop(body.node,'body')}));for(const body of list)addRecord(data,record('revision',`BodyContent:${body.id}`,{text:prop(body.node,'body'),textFormat:'confluence-storage',metadata:{sourceClass:'BodyContent',originalId:body.id,bodyType:prop(body.node,'bodyType'),bodyVariant:true},references:[{kind:row.kind,sourceId:row.sourceId,relation:'body-owner'}]}));diagnostic(data,{severity:'error',code:'CONFLUENCE_MULTIPLE_BODIES',message:'한 콘텐츠에 여러 본문 객체가 있어 원문들을 별도로 보존했습니다. 적용할 본문을 임의로 선택하지 않았습니다.',recordId:row.id,path});}
     for(const body of list)if(property(body.node,'body')?.children.length)diagnostic(data,{severity:'error',code:'CONFLUENCE_NON_SCALAR_BODY',message:'본문이 CDATA/문자열이 아닌 XML 자식 요소로 저장되어 원문 속성 값을 정확하게 복원할 수 없습니다.',recordId:row.id,path});
   }

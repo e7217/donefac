@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ArchiveRestore, CheckCircle2, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
-import { ISSUE_TYPES, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
+import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -15,11 +15,13 @@ const categoryLabels: Record<StatusCategory, string> = { backlog: '백로그', t
 const fieldLabels: Record<CustomFieldKind | 'archive', string> = { archive: '원본 보관만', text: '텍스트', number: '숫자', date: '날짜', select: '단일 선택', multi_select: '여러 선택', checkbox: '체크박스', user: '사용자', url: 'URL' };
 const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinkedAtlassianRecords: '원본 링크 미생성' };
 const jiraRefreshCountLabels = { updatedIssues: '변경 업무', updatedFields: '반영 필드', conflictingFields: '현재 값을 유지할 필드', skippedIssueUpdates: '변경을 건너뛴 업무' };
+const confluenceRefreshCountLabels = { updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서' };
 const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', labels: '라벨',
   startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량',
 };
-const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraRefreshCountLabels };
+const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문' };
+const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
 const appendLabels = {
   append: {
     item: '업무', counts: ['issues', 'retainedIssues', 'retainedRecords', ...Object.keys(jiraRefreshCountLabels)],
@@ -27,7 +29,7 @@ const appendLabels = {
     success: '새 업무를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
   'append-pages': {
-    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords'],
+    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords', ...Object.keys(confluenceRefreshCountLabels)],
     confirm: '검토한 Confluence 문서를 기존 프로젝트에 추가할까요? 적용 결과는 이관 영수증으로 보관됩니다.',
     success: '새 문서를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
@@ -35,14 +37,19 @@ const appendLabels = {
 type DestinationMode = 'new' | keyof typeof appendLabels;
 const destinationMode = (configuration: MigrationConfiguration | null | undefined): DestinationMode =>
   configuration?.appendTo ? 'append' : configuration?.appendPagesTo ? 'append-pages' : 'new';
+type RefreshProduct = 'Jira' | 'Confluence';
+const refreshProduct = (configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined =>
+  configuration?.appendTo?.refreshExisting ? 'Jira' : configuration?.appendPagesTo?.refreshExisting ? 'Confluence' : undefined;
+const refreshNoChanges: Record<RefreshProduct, string> = { Jira: 'JIRA_REFRESH_NO_CHANGES', Confluence: 'CONFLUENCE_REFRESH_NO_CHANGES' };
 const errorText = (error: unknown) => error instanceof Error ? error.message : '요청을 완료하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 const sameIds = (a: string[], b: string[]) => [...a].sort().join('\n') === [...b].sort().join('\n');
 
-function jiraRefreshSummary(counts: MigrationPreview['counts']) {
+function refreshSummary(product: RefreshProduct, counts: MigrationPreview['counts']) {
+  const [item, added, updated] = product === 'Jira' ? ['업무', counts.issues, counts.updatedIssues] as const : ['문서', counts.documents, counts.updatedDocuments] as const;
   const actions: string[] = [];
-  if (counts.issues) actions.push(`새 업무 ${counts.issues.toLocaleString()}건 추가`);
-  if (counts.updatedIssues) actions.push(`기존 업무 ${counts.updatedIssues.toLocaleString()}건 변경`);
+  if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
+  if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
   return actions.join(' · ');
 }
 
@@ -54,9 +61,9 @@ function ActorMigration(props: FeatureProps) {
   const [preview, setPreview] = useState<MigrationPreview | null>(null), [acknowledgements, setAcknowledgements] = useState<string[]>([]), [selectedImport, setSelectedImport] = useState<string | null>(null);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(''), [error, setError] = useState(''), [listError, setListError] = useState(''), [clock, setClock] = useState(() => Date.now());
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
-  const savedAppendDraft = useRef<AppendMapping | null>(null);
+  const savedAppendDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
-  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setError(''); savedAppendDraft.current = null; dirtyRef.current = false; }, []);
+  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setError(''); savedAppendDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     try { const [nextPackages, nextImports] = await Promise.all([api<LegacyPackageSummary[]>('/legacy-import/packages'), api<SourceImport[]>('/source-imports')]); if (active.current && sequence === loadSequence.current) { setPackages(nextPackages); setImports(nextImports); setListError(''); } }
@@ -76,14 +83,18 @@ function ActorMigration(props: FeatureProps) {
   function chooseDestination(mode: string) {
     if (!configuration || !options) return;
     const next = { ...configuration };
-    if (next.appendTo) savedAppendDraft.current = next.appendTo;
+    if (next.appendTo) savedAppendDraft.current.issues = next.appendTo;
+    if (next.appendPagesTo) savedAppendDraft.current.pages = next.appendPagesTo;
     delete next.appendTo;
     delete next.appendPagesTo;
     if (mode === 'append' && options.appendTarget) {
       const target = options.appendTarget;
-      next.appendTo = savedAppendDraft.current?.projectId === target.projectId ? savedAppendDraft.current : defaultAppendMapping(options, target);
+      const draft = savedAppendDraft.current.issues;
+      next.appendTo = draft?.projectId === target.projectId ? draft : defaultAppendMapping(options, target);
     } else if (mode === 'append-pages' && options.appendPagesTarget) {
-      next.appendPagesTo = { projectId: options.appendPagesTarget.projectId };
+      const { projectId } = options.appendPagesTarget;
+      const draft = savedAppendDraft.current.pages;
+      next.appendPagesTo = draft?.projectId === projectId ? draft : { projectId };
     } else if (mode !== 'new') {
       return;
     }
@@ -91,16 +102,17 @@ function ActorMigration(props: FeatureProps) {
   }
   async function loadOptions() {
     if (configuration && !window.confirm('기존 이관 매핑과 미리보기를 선택한 패키지의 기본값으로 바꿀까요? 요청에 실패하면 현재 입력은 유지됩니다.')) return;
-    await execute('매핑 불러오는 중…', async () => { const params = new URLSearchParams(); selected.forEach(id => params.append('packageId', id)); const result = await api<MigrationOptions>(`/migrations/options?${params}`, { headers: { 'X-Actor-Id': actorId } }); if (active.current) { savedAppendDraft.current = null; setOptions(result); setConfiguration(structuredClone(result.defaultConfiguration)); setPreview(null); setAcknowledgements([]); } });
+    await execute('매핑 불러오는 중…', async () => { const params = new URLSearchParams(); selected.forEach(id => params.append('packageId', id)); const result = await api<MigrationOptions>(`/migrations/options?${params}`, { headers: { 'X-Actor-Id': actorId } }); if (active.current) { savedAppendDraft.current = {}; setOptions(result); setConfiguration(structuredClone(result.defaultConfiguration)); setPreview(null); setAcknowledgements([]); } });
   }
   const mode = destinationMode(configuration), reviewMode = destinationMode(preview?.configuration);
-  const refreshingIssues = preview?.configuration.appendTo?.refreshExisting === true;
+  const reviewProduct = refreshProduct(preview?.configuration);
   const reviewHeading = preview?.canApply ? '검토 후 적용할 수 있습니다'
-    : preview?.notices.some(notice => notice.code === 'JIRA_REFRESH_NO_CHANGES') ? '적용할 Jira 변경이 없습니다'
+    : reviewProduct && preview?.notices.some(notice => notice.code === refreshNoChanges[reviewProduct]) ? `적용할 ${reviewProduct} 변경이 없습니다`
     : '적용을 막는 항목을 해결하세요';
-  const appendTo = configuration?.appendTo, appendTarget = options?.appendTarget, appendPagesTarget = options?.appendPagesTarget;
+  const appendTo = configuration?.appendTo, appendPagesTo = configuration?.appendPagesTo;
+  const appendTarget = options?.appendTarget, appendPagesTarget = options?.appendPagesTarget;
   const issueDestination = appendTo && appendTo.projectId === appendTarget?.projectId ? appendTarget : undefined;
-  const pageDestination = configuration?.appendPagesTo && configuration.appendPagesTo.projectId === appendPagesTarget?.projectId ? appendPagesTarget : undefined;
+  const pageDestination = appendPagesTo && appendPagesTo.projectId === appendPagesTarget?.projectId ? appendPagesTarget : undefined;
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
   const destinationReady = mode === 'new' ? Boolean(configuration?.projects.length) : Boolean(existingDestination);
@@ -124,8 +136,8 @@ function ActorMigration(props: FeatureProps) {
   }
   async function apply() {
     if (!preview || !canApply || busyRef.current) return;
-    const confirmation = refreshingIssues
-      ? `검토한 Jira 이관을 적용할까요? ${jiraRefreshSummary(preview.counts)}`
+    const confirmation = reviewProduct
+      ? `검토한 ${reviewProduct} 이관을 적용할까요? ${refreshSummary(reviewProduct, preview.counts)}`
       : reviewMode === 'new' ? '검토한 미리보기대로 새 프로젝트와 업무·문서를 실제 생성할까요? 적용 결과는 이관 영수증으로 보관됩니다.' : appendLabels[reviewMode].confirm;
     if (!window.confirm(confirmation)) return;
     await execute('실제 이관 적용 중…', async () => {
@@ -134,7 +146,7 @@ function ActorMigration(props: FeatureProps) {
       setImports(previous => [result.import, ...previous.filter(item => item.id !== result.import.id)]);
       setSelectedImport(result.import.id);
       reset();
-      const success = refreshingIssues ? `Jira 이관을 적용했습니다. ${jiraRefreshSummary(result.import.counts)}`
+      const success = reviewProduct ? `${reviewProduct} 이관을 적용했습니다. ${refreshSummary(reviewProduct, result.import.counts)}`
         : reviewMode === 'new' ? '이관을 완료했습니다. 새 프로젝트와 원본 기록을 확인하세요.' : appendLabels[reviewMode].success;
       notify(result.duplicate ? '이미 완료한 이관 영수증을 열었습니다.' : success);
       try { await props.refresh(); } catch { notify('이관은 완료했습니다. 프로젝트 목록 새로고침을 다시 시도하세요.', 'error'); }
@@ -143,7 +155,7 @@ function ActorMigration(props: FeatureProps) {
   }
   const receipt = imports.find(item => item.id === selectedImport);
   const receiptMode = destinationMode(receipt?.configuration);
-  const refreshedIssues = receipt?.configuration.appendTo?.refreshExisting === true;
+  const receiptProduct = refreshProduct(receipt?.configuration);
   const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
   return <section className="card migration-apply" aria-label="실제 데이터 이관">
     <header className="migration-heading"><div><h2><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
@@ -169,8 +181,13 @@ function ActorMigration(props: FeatureProps) {
             {issueDestination && <small>Jira {issueDestination.instanceKey} · 원본 프로젝트 {issueDestination.sourceProjectId}</small>}
             {pageDestination && <small>Confluence {pageDestination.instanceKey} · 원본 공간 {pageDestination.sourceSpaceKey || pageDestination.sourceSpaceId}</small>}
           </p>
-          <p>{pageDestination ? '기존 문서의 편집은 유지하고 새 페이지만 추가합니다.' : '현재 프로젝트의 상태·유형·속성에 새 업무를 연결합니다. 이미 이관한 업무가 겹치면 미리보기에 표시합니다.'}</p>
-          {appendTo && issueDestination && <JiraRefreshOption value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} />}
+          {issueDestination && <p>현재 프로젝트의 상태·유형·속성에 새 업무를 연결합니다. 이미 이관한 업무가 겹치면 미리보기에 표시합니다.</p>}
+          {appendTo && issueDestination && <RefreshOption value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무 변경분 반영">
+            이전 이관 이후 원본에서 바뀐 값만 검토합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 필드는 유지합니다.
+          </RefreshOption>}
+          {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
+            최신 원본의 제목과 본문을 현재 문서와 비교합니다. 팀에서 바꾼 제목이나 본문은 그대로 유지합니다.
+          </RefreshOption>}
         </section>}
         {mode === 'new' && <><h3>새 프로젝트</h3><p>프로젝트 키와 이름을 지정하세요. 여러 원본 컨테이너에 같은 키·이름을 지정하면 하나로 합칩니다.</p>
         <Paged title="프로젝트 매핑" items={options.containers} label={item => `${item.name} ${item.proposedKey}`} render={item => { const project = configuration.projects.find(value => value.containerId === item.id); if (!project) return <p className="migration-error">기본 매핑에 없는 컨테이너입니다: {item.name}</p>; return <div className="migration-project-row"><div><strong>{item.name}</strong><small>업무 {item.issueCount} · 문서 {item.documentCount}</small></div><label>새 프로젝트 키<input className="field" aria-label={`새 프로젝트 키 ${item.name}`} value={project.key} maxLength={12} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, key: event.target.value } : value) })} /></label><label>새 프로젝트 이름<input className="field" aria-label={`새 프로젝트 이름 ${item.name}`} value={project.name} maxLength={100} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, name: event.target.value } : value) })} /></label></div>; }} />
@@ -200,9 +217,8 @@ function ActorMigration(props: FeatureProps) {
     </fieldset>
     {preview && <section className="migration-review" aria-label="이관 적용 미리보기"><header><div><h3>{reviewHeading}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div><button className="btn btn-ghost" disabled={Boolean(pending)} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button></header>
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
-      <Paged title={refreshingIssues ? 'Jira 이관을 적용할 프로젝트' : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {refreshingIssues ? jiraRefreshSummary(preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
-      {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
-      <MigrationPreviewNotices key={preview.id} preview={preview} packages={options?.packages ?? packages} actorId={actorId} />
+      <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
+      <MigrationReviewDetails key={preview.id} preview={preview} packages={options?.packages ?? packages} actorId={actorId} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
         {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
@@ -213,14 +229,14 @@ function ActorMigration(props: FeatureProps) {
     </section>}
     <section className="migration-receipts" aria-label="완료한 이관 영수증"><h3>완료한 이관</h3><Paged title="이관 영수증" items={imports} label={item => `${item.id} ${item.packages.map(value => value.filename).join(' ')}`} render={item => <button className={`migration-receipt ${selectedImport === item.id ? 'is-selected' : ''}`} onClick={() => setSelectedImport(item.id)}><strong>{item.packages.map(value => value.filename).join(' + ')}</strong><span>{timestamp(item.createdAt)} · {item.projectIds.length}개 프로젝트</span><small>{item.id}</small></button>} />{!imports.length && !loading && <p>아직 적용을 완료한 이관이 없습니다.</p>}
       {receipt && <div aria-label="이관 영수증 상세">
-        <h4>{refreshedIssues ? '기존 프로젝트의 Jira 이관 결과' : receiptMode === 'new' ? '원본 기록과 생성 프로젝트' : `원본 기록과 ${appendLabels[receiptMode].item}를 추가한 프로젝트`}</h4>
+        <h4>{receiptProduct ? `기존 프로젝트의 ${receiptProduct} 이관 결과` : receiptMode === 'new' ? '원본 기록과 생성 프로젝트' : `원본 기록과 ${appendLabels[receiptMode].item}를 추가한 프로젝트`}</h4>
         <p>이관 실행자 {data.users.find(user => user.id === receipt.actorId)?.name || receipt.actorId} · 제외한 원본 {receipt.counts.excludedRecords ?? receipt.configuration.excludedRecords.length}개</p>
         {receiptMode !== 'new' && <MigrationCounts entries={Object.entries(receipt.counts).filter(([key]) => appendLabels[receiptMode].counts.includes(key))} mode={receiptMode} />}
         {receiptLinkCounts.length > 0 && <section className="migration-origin-summary" aria-label="이관 당시 원본 링크 집계">
           <MigrationCounts entries={receiptLinkCounts} />
           <small>이관 완료 시점의 집계입니다. 현재 링크는 업무와 문서의 기존 도구 연결에서 확인할 수 있습니다.</small>
         </section>}
-        <Paged title={refreshedIssues ? '기존 프로젝트 열기' : receiptMode === 'new' ? '생성한 프로젝트 열기' : `${appendLabels[receiptMode].item}를 추가한 프로젝트 열기`} items={receipt.projectIds} label={id => data.projects.find(item => item.id === id)?.name || id} render={id => <a className="btn migration-project-link" href={`#/${encodeURIComponent(id)}/overview`} aria-disabled={Boolean(pending)} onClick={event => { if (busyRef.current) event.preventDefault(); }}>{data.projects.find(item => item.id === id)?.name || id} 프로젝트 열기</a>} />
+        <Paged title={receiptProduct ? '기존 프로젝트 열기' : receiptMode === 'new' ? '생성한 프로젝트 열기' : `${appendLabels[receiptMode].item}를 추가한 프로젝트 열기`} items={receipt.projectIds} label={id => data.projects.find(item => item.id === id)?.name || id} render={id => <a className="btn migration-project-link" href={`#/${encodeURIComponent(id)}/overview`} aria-disabled={Boolean(pending)} onClick={event => { if (busyRef.current) event.preventDefault(); }}>{data.projects.find(item => item.id === id)?.name || id} 프로젝트 열기</a>} />
         <MigrationReconciliation key={`${receipt.id}:${receipt.version}`} sourceImportId={receipt.id} {...props} />
         <MappingSection title="검토한 이관 진단">{receipt.notices ? <><p>적용 당시 검토한 진단 {receipt.notices.length}건입니다. 제외·변환하지 않은 항목의 사유도 이 시점의 기록으로 보존합니다.</p><Paged title="영수증 이관 진단" items={receipt.notices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}><strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}</div>} /></> : <p>이전 버전에서 만든 영수증이라 검토 진단이 별도로 저장되지 않았습니다. 원본 기록과 이관 설정을 확인하세요.</p>}</MappingSection>
         <SourceImportRecords sourceImportId={receipt.id} />
@@ -229,32 +245,38 @@ function ActorMigration(props: FeatureProps) {
   </section>;
 }
 
-type DiagnosticOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement };
+type PreviewOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement; documentReview?: true };
 
-function MigrationPreviewNotices({ preview, packages, actorId }: { preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string }) {
-  const [original, setOriginal] = useState<DiagnosticOriginal | null>(null);
+function MigrationReviewDetails({ preview, packages, actorId }: { preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string }) {
+  const [original, setOriginal] = useState<PreviewOriginal | null>(null);
   const sources = new Map(packages.filter(item => preview.configuration.packageIds.includes(item.id)).map(item => [item.id, item]));
+  function originalButton(qualifiedId: string | null, documentReview?: true) {
+    if (!qualifiedId) return null;
+    const separator = qualifiedId.indexOf('/');
+    const source = separator > 0 ? sources.get(qualifiedId.slice(0, separator)) : undefined;
+    const recordId = qualifiedId.slice(separator + 1);
+    return source && recordId ? <button className="btn btn-ghost migration-source-button" type="button"
+      onClick={event => setOriginal({ source, recordId, opener: event.currentTarget, documentReview })}>
+      <FileSearch size={16} aria-hidden="true" />{documentReview ? 'Confluence 원본 보기' : '원본 상세 보기'}
+    </button> : null;
+  }
   return <>
-    <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => {
-      const qualifiedId = item.recordId ?? '';
-      const separator = qualifiedId.indexOf('/');
-      const source = separator > 0 ? sources.get(qualifiedId.slice(0, separator)) : undefined;
-      const recordId = qualifiedId.slice(separator + 1);
-      return <div className={`migration-notice is-${item.severity}`}>
+    {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
+    {preview.documentRefresh && preview.documentRefresh.length > 0 && <ConfluenceRefreshReview rows={preview.documentRefresh} renderOriginal={recordId => originalButton(recordId, true)} />}
+    <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => (
+      <div className={`migration-notice is-${item.severity}`}>
         <strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong>
         <p>{item.message}</p>
         {item.recordId && <small>원본 항목 {item.recordId}</small>}
-        {source && recordId && <button className="btn btn-ghost migration-notice-source-button" type="button"
-          onClick={event => setOriginal({ source, recordId, opener: event.currentTarget })}>
-          <FileSearch size={16} aria-hidden="true" />원본 상세 보기
-        </button>}
-      </div>;
-    }} />
+        {originalButton(item.recordId)}
+      </div>
+    )} />
     {original && <MigrationOriginalDialog {...original} actorId={actorId} onClose={() => setOriginal(null)} />}
   </>;
 }
 
-function MigrationOriginalDialog({ source, recordId, opener, actorId, onClose }: DiagnosticOriginal & { actorId: string; onClose: () => void }) {
+function MigrationOriginalDialog({ source, recordId, opener, documentReview, actorId, onClose }: PreviewOriginal & { actorId: string; onClose: () => void }) {
+  const titleId = useId();
   const element = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const [attempt, setAttempt] = useState(0);
@@ -280,10 +302,10 @@ function MigrationOriginalDialog({ source, recordId, opener, actorId, onClose }:
     return () => request.abort();
   }, [actorId, attempt, recordId, source.id]);
 
-  return <dialog className="migration-original-dialog" ref={element} aria-labelledby="migration-original-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+  return <dialog className="migration-original-dialog" ref={element} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose(); }}>
     <header className="migration-original-heading">
-      <div><h3 id="migration-original-title">이관 진단 원본 기록</h3><p>{source.filename} · {source.source.instanceKey}</p></div>
-      <button ref={closeButton} className="btn btn-ghost" type="button" aria-label="이관 진단 원본 닫기" onClick={onClose}><X size={16} aria-hidden="true" />닫기</button>
+      <div><h3 id={titleId}>{documentReview ? 'Confluence 변경 원본 기록' : '이관 진단 원본 기록'}</h3><p>{source.filename} · {source.source.instanceKey}</p></div>
+      <button ref={closeButton} className="btn btn-ghost" type="button" aria-label={documentReview ? 'Confluence 원본 닫기' : '이관 진단 원본 닫기'} onClick={onClose}><X size={16} aria-hidden="true" />닫기</button>
     </header>
     {!response && <p role="status">원본 객체를 불러오는 중…</p>}
     {response && 'error' in response && <div>
@@ -300,9 +322,12 @@ function MigrationOriginalDialog({ source, recordId, opener, actorId, onClose }:
 
 type AppendTarget = NonNullable<MigrationOptions['appendTarget']>;
 type AppendMapping = NonNullable<MigrationConfiguration['appendTo']>;
+type PageAppendMapping = NonNullable<MigrationConfiguration['appendPagesTo']>;
 type MappingChoice = { id: string; label: string; detail?: string };
 
-function JiraRefreshOption({ value, onChange }: { value: AppendMapping; onChange: (next: AppendMapping) => void }) {
+function RefreshOption<Mapping extends { refreshExisting?: true }>({ value, onChange, label, children }: {
+  value: Mapping; onChange: (next: Mapping) => void; label: string; children: ReactNode;
+}) {
   const labelId = useId();
   const helpId = useId();
   return <label className="migration-refresh-option">
@@ -312,8 +337,8 @@ function JiraRefreshOption({ value, onChange }: { value: AppendMapping; onChange
       else delete next.refreshExisting;
       onChange(next);
     }} />
-    <span id={labelId}>기존 Jira 업무 변경분 반영</span>
-    <small id={helpId}>이전 이관 이후 원본에서 바뀐 값만 검토합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 필드는 유지합니다.</small>
+    <span id={labelId}>{label}</span>
+    <small id={helpId}>{children}</small>
   </label>;
 }
 
@@ -321,19 +346,39 @@ function JiraRefreshReview({ rows }: { rows: JiraMigrationIssueReview[] }) {
   const titleId = useId();
   return <section className="migration-refresh-review" aria-labelledby={titleId}>
     <h4 id={titleId}>기존 Jira 업무 변경 검토</h4>
-    <Paged title="기존 Jira 업무" items={rows} label={row => `${row.key} ${row.sourceKey}`} render={row => <div className="migration-refresh-issue">
+    <Paged title="기존 Jira 업무" items={rows} label={row => `${row.key} ${row.sourceKey}`} render={row => <div className="migration-refresh-entry">
       <h5>{row.key} <small>Jira {row.sourceKey}</small></h5>
-      <ul aria-label={`${row.key} 필드 변경`}>
-        {row.fields.map(change => <li key={change.field} aria-label={jiraRefreshFieldLabels[change.field]}>
-          <div className="migration-refresh-field-heading">
-            <strong>{jiraRefreshFieldLabels[change.field]}</strong>
-            <span className={change.decision === 'apply' ? 'is-apply' : 'is-conflict'}>{change.decision === 'apply' ? 'Jira 값 반영' : '현재 값 유지'}</span>
-          </div>
-          <dl><div><dt>현재 값</dt><dd>{change.current || '비어 있음'}</dd></div><div><dt>Jira 원본 값</dt><dd>{change.incoming || '비어 있음'}</dd></div></dl>
-        </li>)}
-      </ul>
+      <RefreshFields label={`${row.key} 필드 변경`} product="Jira" fields={row.fields} fieldLabels={jiraRefreshFieldLabels} />
     </div>} />
   </section>;
+}
+
+function ConfluenceRefreshReview({ rows, renderOriginal }: { rows: ConfluenceMigrationDocumentReview[]; renderOriginal: (recordId: string) => ReactNode }) {
+  const titleId = useId();
+  return <section className="migration-refresh-review" aria-labelledby={titleId}>
+    <h4 id={titleId}>기존 Confluence 문서 변경 검토</h4>
+    <Paged title="기존 Confluence 문서" items={rows} label={row => `${row.title} ${row.sourceId}`} render={row => <article className="migration-refresh-entry" aria-label={row.title}>
+      <h5>{row.title} <small>원본 페이지 {row.sourceId}</small></h5>
+      <RefreshFields label={`${row.title} 필드 변경`} product="Confluence" fields={row.fields} fieldLabels={confluenceRefreshFieldLabels} />
+      {renderOriginal(row.recordId)}
+    </article>} />
+  </section>;
+}
+
+function RefreshFields<Field extends string>({ label, product, fields, fieldLabels }: {
+  label: string; product: RefreshProduct; fieldLabels: Record<Field, string>;
+  fields: { field: Field; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true }[];
+}) {
+  return <ul aria-label={label}>
+    {fields.map(change => <li key={change.field} aria-label={fieldLabels[change.field]}>
+      <div className="migration-refresh-field-heading">
+        <strong>{fieldLabels[change.field]}</strong>
+        <span className={change.decision === 'apply' ? 'is-apply' : 'is-conflict'}>{change.decision === 'apply' ? `${product} 값 반영` : '현재 값 유지'}</span>
+      </div>
+      {change.formatOnly && <small className="migration-refresh-format">본문 서식 또는 구조가 변경되었습니다.</small>}
+      <dl><div><dt>현재 값</dt><dd>{change.current || '비어 있음'}</dd></div><div><dt>{product} 원본 값</dt><dd>{change.incoming || '비어 있음'}</dd></div></dl>
+    </li>)}
+  </ul>;
 }
 
 function uniqueMapping(option: MigrationValueOption, choices: MappingChoice[]): string | null {
