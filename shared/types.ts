@@ -316,7 +316,11 @@ export interface ScheduleBaseline { id: string; projectId: string; name: string;
 export interface IssueTypeDefinition { id: string; name: string; color: string; archived: boolean }
 export type CustomFieldKind = 'text' | 'number' | 'date' | 'select' | 'multi_select' | 'checkbox' | 'user' | 'url';
 export interface CustomFieldOption { id: string; name: string; archived: boolean }
-export interface CustomFieldDefinition { id: string; name: string; description: string; kind: CustomFieldKind; required: boolean; issueTypes: string[]; options: CustomFieldOption[]; archived: boolean }
+export interface CustomFieldVisibility {
+  statusIds: string[];
+  fieldMatch: { fieldId: string; value: string | boolean } | null;
+}
+export interface CustomFieldDefinition { id: string; name: string; description: string; kind: CustomFieldKind; required: boolean; issueTypes: string[]; options: CustomFieldOption[]; archived: boolean; visibleWhen?: CustomFieldVisibility }
 export type CustomFieldValue = string | number | boolean | string[] | null;
 export interface ProjectIssueSchema { id: string; projectId: string; version: number; issueTypes: IssueTypeDefinition[]; fields: CustomFieldDefinition[]; updatedAt: string }
 export interface Issue {

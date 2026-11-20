@@ -211,7 +211,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               <label className="issue-form-label">시작일<input type="date" name="startDate" className="field" /></label>
               <label className="issue-form-label">종료일<input type="date" name="endDate" className="field" /></label>
             </div>
-            <CustomFields data={data} projectId={selectedProject} issueType={selectedType} values={values} onChange={next => {
+            <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={values} onChange={next => {
               dirtyRef.current = true;
               setValuesByProject(previous => ({ ...previous, [selectedProject]: next }));
             }} disabled={busy || recovering} requiredFields={required} />

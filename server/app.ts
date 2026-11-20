@@ -19,7 +19,7 @@ import { DocumentContentService, DocumentContentError, normalizeDocumentContent,
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { DocumentFollowUpError, DocumentFollowUpService } from './document-follow-up.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
-import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
+import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
 import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
 import { AutomationService, AutomationError } from './automation.js';
@@ -400,6 +400,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     persistCanonical(value, req) {
       const schemas = issueSchemas.validateImport(value.issueSchemas, value.projects, value.issues, {users:store.all<User>('users')});
       const importedWorkflows = workflows.validateImport(value.workflows, value.projects, value.issues, schemas);
+      validateVisibilityStatuses(schemas, importedWorkflows);
       for (const project of value.projects) store.put('projects', validateProject(project));
       for (const schema of schemas) store.put('issue_schemas', schema);
       for (const workflow of importedWorkflows) store.put('workflows', workflow);
@@ -1096,8 +1097,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedRevisions = (data.revisions as DocRevision[]).map(importDocument);
     data.documents=importedDocuments;
     data.revisions=importedRevisions;
+    if(data.schemaVersion<34&&Array.isArray(data.issueSchemas)&&data.issueSchemas.some((schema:{fields?:unknown}|null)=>
+      Array.isArray(schema?.fields)&&schema.fields.some((field:unknown)=>field&&typeof field==='object'&&Object.hasOwn(field,'visibleWhen'))
+    ))fail('필드 표시 조건이 있는 백업은 schemaVersion 34가 필요합니다.');
     const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
+    validateVisibilityStatuses(importedSchemas,importedWorkflows);
     if(data.schemaVersion<13&&Array.isArray(data.savedViews)&&data.savedViews.some((value:unknown)=>
       value&&typeof value==='object'&&'filters' in value&&value.filters&&typeof value.filters==='object'&&
       'fieldFilter' in value.filters&&value.filters.fieldFilter!=null

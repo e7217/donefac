@@ -1,7 +1,8 @@
 import type { Express,Request } from 'express';
-import { ISSUE_TYPES,type CustomFieldDefinition,type CustomFieldKind,type CustomFieldValue,type Issue,type IssueTypeDefinition,type Project,type ProjectIssueSchema,type ProjectWorkflow,type SavedView,type User } from '../shared/types.js';
-import { defaultIssueSchema,fieldApplies,hasCustomValue } from '../shared/issue-schema.js';
+import { ISSUE_TYPES,type CustomFieldDefinition,type CustomFieldKind,type CustomFieldValue,type CustomFieldVisibility,type Issue,type IssueTypeDefinition,type Project,type ProjectIssueSchema,type ProjectWorkflow,type SavedView,type User } from '../shared/types.js';
+import { defaultIssueSchema,fieldApplies,fieldScopeCovers,hasCustomValue,visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { isCalendarDate } from '../shared/calendar.js';
+import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { Store } from './store.js';
 
 export class IssueSchemaError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -14,6 +15,79 @@ function name(value:unknown,label:string,max=120):string{if(typeof value!=='stri
 function id(value:unknown,label:string,type=false):string{if(typeof value!=='string'||reserved.has(value)||(type&&value==='all')||(!/^[a-z][a-z0-9_-]{0,47}$/.test(value)&&!(type&&ISSUE_TYPES.includes(value as typeof ISSUE_TYPES[number]))))fail(`${label} ID는 예약어를 제외한 영문 소문자 시작 48자 이내의 영문·숫자·밑줄·하이픈이어야 합니다.`);return value;}
 function flag(value:unknown,label:string):boolean{if(typeof value!=='boolean')fail(`${label}을(를) 확인해 주세요.`);return value;}
 function unique(values:{id:string;name:string}[],label:string){if(new Set(values.map(v=>v.id)).size!==values.length||new Set(values.map(v=>v.name)).size!==values.length)fail(`${label}의 ID 또는 이름이 중복되었습니다.`);}
+
+function parseVisibility(value: unknown): CustomFieldVisibility | undefined {
+  if (value === undefined) return undefined;
+  const source = object(value, '필드 표시 조건');
+  const { statusIds, fieldMatch } = source;
+  if (Object.keys(source).length !== 2 || !Array.isArray(statusIds) || statusIds.length > 40 || new Set(statusIds).size !== statusIds.length ||
+      statusIds.some(statusId => typeof statusId !== 'string' || !/^[a-z][a-z0-9_-]{0,47}$/.test(statusId))) {
+    fail('필드 표시 조건의 상태 목록을 확인해 주세요.');
+  }
+  if (fieldMatch === null) return { statusIds: [...statusIds], fieldMatch: null };
+  const match = object(fieldMatch, '표시를 제어할 필드와 값');
+  if (Object.keys(match).length !== 2 || (typeof match.value !== 'boolean' && typeof match.value !== 'string')) fail('필드 표시 조건의 비교 값을 확인해 주세요.');
+  return {
+    statusIds: [...statusIds],
+    fieldMatch: { fieldId: id(match.fieldId, '표시를 제어할 필드'), value: typeof match.value === 'boolean' ? match.value : id(match.value, '표시 조건 선택지') },
+  };
+}
+
+function validateSchemaFields(schema: ProjectIssueSchema, previous?: ProjectIssueSchema): void {
+  const active = new Map(schema.fields.filter(field => !field.archived).map(field => [field.id, field]));
+  const previousById = new Map(previous?.fields.map(field => [field.id, field]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  function visit(field: CustomFieldDefinition): void {
+    if (visiting.has(field.id)) fail('필드 표시 조건이 서로 순환 참조합니다.', 400, { fieldId: field.id });
+    if (visited.has(field.id)) return;
+    const match = field.visibleWhen?.fieldMatch;
+    if (match) {
+      const before = previousById.get(field.id);
+      const previousMatch = before?.visibleWhen?.fieldMatch;
+      const retained = before && !before.archived && previousMatch?.fieldId === match.fieldId && previousMatch.value === match.value;
+      const status = retained ? 409 : 400;
+      const controller = active.get(match.fieldId);
+      if (!controller) fail(`${field.name}: 표시를 제어하는 활성 필드를 유지하거나 조건을 변경해 주세요.`, status, { fieldId: field.id, controllerId: match.fieldId });
+      if (controller.kind === 'checkbox') {
+        if (typeof match.value !== 'boolean') fail(`${field.name}: 체크박스 표시 조건에는 예·아니요 값이 필요합니다.`);
+      } else if (controller.kind === 'select') {
+        if (typeof match.value !== 'string') fail(`${field.name}: 단일 선택 필드의 표시 조건에는 선택지 ID가 필요합니다.`);
+        if (!controller.options.some(option => option.id === match.value && !option.archived)) {
+          fail(`${field.name}: 표시 조건에서 참조하는 활성 선택지를 유지하거나 조건을 변경해 주세요.`, status, { fieldId: field.id, controllerId: controller.id, optionId: match.value });
+        }
+      } else fail(`${field.name}: 표시 조건은 체크박스나 단일 선택 필드만 참조할 수 있습니다.`);
+      if (!fieldScopeCovers(controller, field)) fail(`${field.name}: 표시를 제어하는 필드가 같은 모든 업무 유형에 적용되어야 합니다.`, status, { fieldId: field.id, controllerId: controller.id });
+      visiting.add(field.id);
+      visit(controller);
+      visiting.delete(field.id);
+    }
+    visited.add(field.id);
+  }
+
+  for (const field of active.values()) visit(field);
+  for (const field of active.values()) {
+    if ((field.kind === 'select' || field.kind === 'multi_select') && !field.options.some(option => !option.archived)) {
+      fail('활성 선택형 필드에는 최소 한 개의 활성 선택지가 필요합니다.');
+    }
+  }
+}
+
+export function visibilityFieldsWithMissingStatuses(schema: ProjectIssueSchema, statusIds: ReadonlySet<string>): CustomFieldDefinition[] {
+  return schema.fields.filter(field => !field.archived && field.visibleWhen?.statusIds.some(statusId => !statusIds.has(statusId)));
+}
+
+export function validateVisibilityStatuses(schemas: ProjectIssueSchema[], workflows: ProjectWorkflow[]): void {
+  const byProject = new Map(workflows.map(workflow => [workflow.projectId, workflow]));
+  for (const schema of schemas) {
+    const workflow = byProject.get(schema.projectId) ?? defaultWorkflow(schema.projectId);
+    const statusIds = new Set(workflow.statuses.map(status => status.id));
+    const invalid = visibilityFieldsWithMissingStatuses(schema, statusIds);
+    if (invalid.length) fail(`프로젝트 워크플로에 없는 상태를 참조하는 필드 표시 조건입니다: ${invalid.map(field => field.name).join(', ')}`, 400, { fieldIds: invalid.map(field => field.id) });
+  }
+}
+
 function parseSchema(projectId:string,value:unknown,version:number,updatedAt:string):ProjectIssueSchema{
   const source=object(value,'업무 스키마');
   if(!Array.isArray(source.issueTypes)||!source.issueTypes.length||source.issueTypes.length>50)fail('업무 유형은 1~50개여야 합니다.');
@@ -25,8 +99,9 @@ function parseSchema(projectId:string,value:unknown,version:number,updatedAt:str
     if(!Array.isArray(v.issueTypes)||v.issueTypes.some((type:unknown)=>typeof type!=='string'||!typeIds.has(type))||new Set(v.issueTypes).size!==v.issueTypes.length)fail('필드를 적용할 업무 유형을 확인해 주세요.');
     if(!Array.isArray(v.options)||v.options.length>200)fail('필드 선택지는 200개 이하여야 합니다.');
     const options=v.options.map((raw:unknown)=>{const option=object(raw,'선택지');return{id:id(option.id,'선택지'),name:name(option.name,'선택지 이름'),archived:flag(option.archived,'선택지 보관 여부')};});unique(options,'선택지');
-    const archived=flag(v.archived,'필드 보관 여부');if(!['select','multi_select'].includes(kind)&&options.length)fail('선택형 이외의 필드에는 선택지를 지정할 수 없습니다.');if(['select','multi_select'].includes(kind)&&!archived&&!options.some((option:{archived:boolean})=>!option.archived))fail('활성 선택형 필드에는 최소 한 개의 활성 선택지가 필요합니다.');
-    return{id:id(v.id,'필드'),name:name(v.name,'필드 이름'),description:v.description,kind,required:flag(v.required,'필수 입력 여부'),issueTypes:[...v.issueTypes],options,archived};
+    const archived=flag(v.archived,'필드 보관 여부');if(!['select','multi_select'].includes(kind)&&options.length)fail('선택형 이외의 필드에는 선택지를 지정할 수 없습니다.');
+    const visibleWhen = parseVisibility(v.visibleWhen);
+    return{id:id(v.id,'필드'),name:name(v.name,'필드 이름'),description:v.description,kind,required:flag(v.required,'필수 입력 여부'),issueTypes:[...v.issueTypes],options,archived,...(visibleWhen ? { visibleWhen } : {})};
   });unique(fields,'필드');return{id:projectId,projectId,version,issueTypes,fields,updatedAt};
 }
 function ownValue(values:Issue['customFields']|undefined,id:string):CustomFieldValue|undefined{return values&&Object.hasOwn(values,id)?values[id]:undefined;}
@@ -52,7 +127,24 @@ function validateValues(schema:ProjectIssueSchema,next:Issue,previous:Issue|unde
     Object.defineProperty(normalized,fieldId,{value,writable:true,enumerable:true,configurable:true});
   }
   next.customFields=normalized;
-  if(options.checkFields!==false){const missing=schema.fields.filter(field=>field.required&&!field.archived&&fieldApplies(field,next.type)&&!hasCustomValue(ownValue(normalized,field.id)));if(missing.length)fail(`필수 속성을 입력해 주세요: ${missing.map(field=>field.name).join(', ')}`,422,{requiredFields:missing.map(field=>`custom:${field.id}`)});}
+  if (options.checkFields === false && !previous?.customFields) return;
+  let visible = visibleIssueFieldIds(schema, next);
+  const previousVisible = previous?.customFields ? visibleIssueFieldIds(schema, previous) : undefined;
+  let restored = false;
+  for (const field of schema.fields) {
+    if (!field.visibleWhen || field.archived || !fieldApplies(field, next.type) || Object.hasOwn(source, field.id)) continue;
+    const wasHidden = previous && previousVisible && fieldApplies(field, previous.type) && !previousVisible.has(field.id);
+    if (visible.has(field.id) && !wasHidden) continue;
+    const value = ownValue(previous?.customFields, field.id);
+    if (value === undefined) continue;
+    Object.defineProperty(normalized, field.id, { value, writable: true, enumerable: true, configurable: true });
+    restored = true;
+  }
+  if (options.checkFields !== false) {
+    if (restored) visible = visibleIssueFieldIds(schema, next);
+    const missing = schema.fields.filter(field => field.required && visible.has(field.id) && !hasCustomValue(ownValue(normalized, field.id)));
+    if (missing.length) fail(`필수 속성을 입력해 주세요: ${missing.map(field=>field.name).join(', ')}`,422,{requiredFields:missing.map(field=>`custom:${field.id}`)});
+  }
 }
 type Hooks={actor:(request:Request)=>string;activity:(request:Request,type:string,id:string,action:string,detail?:string)=>unknown};
 
@@ -65,6 +157,8 @@ export class IssueSchemaService{
   save(projectId:string,input:unknown,expectedVersion:unknown,afterSave?:(schema:ProjectIssueSchema)=>void):ProjectIssueSchema{
     return this.store.transaction(()=>{const old=this.get(projectId);if(!Number.isSafeInteger(expectedVersion)||Number(expectedVersion)<1)fail('expectedVersion이 필요합니다.');if(expectedVersion!==old.version)fail('업무 유형·필드 설정이 변경되었습니다. 최신 설정을 확인해 주세요.',409,{currentVersion:old.version});const next=parseSchema(projectId,input,old.version+1,new Date().toISOString());
       const issues=this.store.all<Issue>('issues').filter(issue=>issue.projectId===projectId),workflows=this.rows<ProjectWorkflow>('workflows').filter(workflow=>workflow.projectId===projectId),views=this.rows<SavedView>('saved_views').filter(view=>view.projectId===projectId);
+      validateSchemaFields(next, old);
+      validateVisibilityStatuses([next], workflows);
       type RuleReference=Pick<import('../shared/types.js').AutomationRule,'projectId'|'issueTypes'>;
       const automation=[...this.rows<RuleReference>('automation_rules'),...this.rows<RuleReference>('issue_assignment_rules')].filter(rule=>rule.projectId===projectId);
       const typeReferences=new Set([...issues.map(issue=>issue.type),...workflows.flatMap(workflow=>[...workflow.transitions.flatMap(edge=>edge.issueTypes),...workflow.fieldRules.map(rule=>rule.issueType).filter(type=>type!=='*')]),...views.map(view=>view.filters.type).filter(type=>type!=='all'),...automation.flatMap(rule=>rule.issueTypes)]);
@@ -96,6 +190,7 @@ export class IssueSchemaService{
     if(!Array.isArray(value))fail('업무 유형·필드 스키마 목록이 필요합니다.');let schemas:ProjectIssueSchema[];
     if(options.legacy)schemas=projects.map(project=>defaultIssueSchema(project.id,project.createdAt));
     else{if(value.length!==projects.length)fail('프로젝트별 업무 유형·필드 스키마가 하나씩 필요합니다.');const seen=new Set<string>();schemas=value.map(raw=>{const v=object(raw,'업무 스키마');if(typeof v.projectId!=='string'||v.id!==v.projectId||seen.has(v.projectId)||!projects.some(project=>project.id===v.projectId)||!Number.isSafeInteger(v.version)||Number(v.version)<1||typeof v.updatedAt!=='string'||!Number.isFinite(Date.parse(v.updatedAt)))fail('업무 스키마의 ID·프로젝트·버전·수정 시간을 확인해 주세요.');seen.add(v.projectId);return parseSchema(v.projectId,v,Number(v.version),v.updatedAt);});}
+    for (const schema of schemas) validateSchemaFields(schema);
     for(const issue of issues){const schema=schemas.find(schema=>schema.projectId===issue.projectId);if(!schema)fail('업무 스키마의 프로젝트를 찾을 수 없습니다.');validateValues(schema,{...issue},undefined,{checkFields:false,allowArchived:true,users:options.users});}return schemas;
   }
   replaceImported(schemas:ProjectIssueSchema[],previousVersions=new Map(this.snapshot().map(schema=>[schema.projectId,schema.version]))):void{this.store.db.exec('DELETE FROM issue_schemas');for(const schema of schemas){const previous=previousVersions.get(schema.projectId);this.store.put('issue_schemas',{...schema,version:previous===undefined?schema.version:Math.max(previous,schema.version)+1});}}

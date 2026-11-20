@@ -1,7 +1,7 @@
 'use client';
 
 import type { CustomFieldDefinition, CustomFieldValue, Issue, IssueRequiredField, WorkspaceSnapshot } from '../../shared/types';
-import { fieldApplies, fieldValueLabel, hasCustomValue, issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
+import { fieldApplies, fieldValueLabel, hasCustomValue, issueTypeMeta, projectIssueSchema, projectIssueTypes, visibleIssueFieldIds } from '../../shared/issue-schema';
 import './custom-fields.css';
 
 type FieldValues = Record<string, CustomFieldValue>;
@@ -13,9 +13,13 @@ export function IssueTypeSelect({ data, projectId, value, existingType, onChange
 }
 export function IssueTypeName({ data, issue }: { data: SchemaData; issue: Pick<Issue, 'projectId' | 'type'> }) { const meta = issueTypeMeta(data, issue.projectId, issue.type); return <span className="custom-type-name" style={{ color: meta.color }}>{meta.name}{meta.archived ? ' · 보관됨' : ''}</span>; }
 
-export function CustomFields({ data, projectId, issueType, values, existingValues = {}, onChange, disabled = false, requiredFields = [], labelPrefix = '' }: { data: SchemaData; projectId: string; issueType: string; values: FieldValues; existingValues?: FieldValues; onChange: (values: FieldValues) => void; disabled?: boolean; requiredFields?: IssueRequiredField[]; labelPrefix?: string }) {
+export function CustomFields({ data, projectId, issueType, status, values, existingValues = {}, onChange, disabled = false, requiredFields = [], labelPrefix = '' }: { data: SchemaData; projectId: string; issueType: string; status: string; values: FieldValues; existingValues?: FieldValues; onChange: (values: FieldValues) => void; disabled?: boolean; requiredFields?: IssueRequiredField[]; labelPrefix?: string }) {
   const schema = projectIssueSchema(data, projectId);
-  const fields = schema.fields.filter(field => !field.archived && fieldApplies(field, issueType) || hasCustomValue(values[field.id]));
+  const visible = visibleIssueFieldIds(schema, { type: issueType, status, customFields: values });
+  const fields = schema.fields.filter(field => {
+    if (field.archived || !fieldApplies(field, issueType)) return hasCustomValue(values[field.id]);
+    return visible.has(field.id) || requiredFields.includes(`custom:${field.id}`);
+  });
   const unknown = Object.keys(values).filter(id => !schema.fields.some(field => field.id === id) && hasCustomValue(values[id]));
   if (!fields.length && !unknown.length) return null;
   const update = (id: string, value: CustomFieldValue) => onChange({ ...values, [id]: value });

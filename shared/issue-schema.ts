@@ -8,6 +8,34 @@ export function projectIssueSchema(data:SchemaData,projectId:string):ProjectIssu
 export function projectIssueTypes(data:SchemaData,projectId:string,options:{includeArchived?:boolean}={}):IssueTypeDefinition[]{return projectIssueSchema(data,projectId).issueTypes.filter(type=>options.includeArchived||!type.archived);}
 export function issueTypeMeta(data:SchemaData,projectId:string,typeId:string):IssueTypeDefinition{return projectIssueSchema(data,projectId).issueTypes.find(type=>type.id===typeId)||{id:typeId,name:typeId||'알 수 없는 유형',color:'#8b93a5',archived:true};}
 export function fieldApplies(field:CustomFieldDefinition,typeId:string){return field.issueTypes.length===0||field.issueTypes.includes(typeId);}
+export function fieldScopeCovers(source: CustomFieldDefinition, dependent: CustomFieldDefinition): boolean {
+  return source.issueTypes.length === 0 || (dependent.issueTypes.length > 0 && dependent.issueTypes.every(type => fieldApplies(source, type)));
+}
+
+export function visibleIssueFieldIds(schema: ProjectIssueSchema, issue: Pick<Issue, 'type' | 'status' | 'customFields'>): Set<string> {
+  const applicable = schema.fields.filter(field => !field.archived && fieldApplies(field, issue.type));
+  const byId = new Map(applicable.map(field => [field.id, field]));
+  const checked = new Map<string, boolean>();
+  const values = issue.customFields ?? {};
+
+  function matches(field: CustomFieldDefinition): boolean {
+    if (checked.has(field.id)) return checked.get(field.id)!;
+    // Set the result before visiting dependencies so invalid cycles cannot reveal fields.
+    checked.set(field.id, false);
+    const condition = field.visibleWhen;
+    if (condition?.statusIds.length && !condition.statusIds.includes(issue.status)) return false;
+    const match = condition?.fieldMatch;
+    if (match) {
+      const source = byId.get(match.fieldId);
+      if (!source || !Object.hasOwn(values, source.id) || values[source.id] !== match.value || !matches(source)) return false;
+    }
+    checked.set(field.id, true);
+    return true;
+  }
+
+  return new Set(applicable.filter(matches).map(field => field.id));
+}
+
 export function hasCustomValue(value:CustomFieldValue|undefined){return value!==null&&value!==undefined&&!(typeof value==='string'&&!value.trim())&&!(Array.isArray(value)&&value.length===0);}
 export function fieldValueLabel(field:CustomFieldDefinition,value:CustomFieldValue|undefined,users:User[]=[]):string{
   if(!hasCustomValue(value))return'';

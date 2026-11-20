@@ -2,7 +2,7 @@ import type { Express, Request } from 'express';
 import { type Issue, type IssueRequiredField, type Project, type ProjectIssueSchema, type ProjectWorkflow, type WorkflowFieldRule, type WorkflowStatus, type WorkflowTransition } from '../shared/types.js';
 import { defaultWorkflow, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
 import { BASE_REQUIRED_FIELD_LABELS, defaultIssueSchema, fieldApplies, hasCustomValue, requiredFieldLabels } from '../shared/issue-schema.js';
-import type { IssueSchemaService } from './issue-schema.js';
+import { visibilityFieldsWithMissingStatuses, type IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
 
 export class WorkflowError extends Error {
@@ -83,8 +83,11 @@ export class WorkflowService {
       const previous = this.get(projectId);
       if (!Number.isInteger(expectedVersion)) invalid('expectedVersion이 필요합니다.');
       if (expectedVersion !== previous.version) invalid('다른 작업자가 워크플로를 변경했습니다. 최신 설정을 불러온 뒤 다시 편집해 주세요.', 409, { currentVersion: previous.version });
-      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId));
+      const schema = this.issueSchemas?.get(projectId) ?? defaultIssueSchema(projectId);
+      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), schema);
       const statusIds = new Set(next.statuses.map(status => status.id));
+      const visibilityFields = visibilityFieldsWithMissingStatuses(schema, statusIds);
+      if (visibilityFields.length) invalid('필드 표시 조건에서 참조하는 상태입니다. 표시 조건을 변경한 뒤 상태를 삭제해 주세요.', 409, { fieldIds: visibilityFields.map(field => field.id) });
       const issues = this.store.all<Issue>('issues').filter(issue => issue.projectId === projectId);
       const referenced = issues.filter(issue => !statusIds.has(issue.status));
       if (referenced.length) invalid(`사용 중인 상태는 삭제할 수 없습니다: ${[...new Set(referenced.map(issue => previous.statuses.find(status => status.id === issue.status)?.label || issue.status))].join(', ')}`, 409, { issueIds: referenced.map(issue => issue.id) });

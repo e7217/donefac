@@ -499,15 +499,33 @@ async function runStandardPilot() {
   })).json();
   const rulesPath = `/projects/${parallelProjectId}/assignment-rules`;
   const runsPath = `/projects/${parallelProjectId}/assignment-runs`;
+  const schemaPath = `/projects/${parallelProjectId}/issue-schema`;
+  const parallelSchema = await (await call(pilot.url, schemaPath)).json();
+  const commonField = {description: '', issueTypes: [], options: [], archived: false};
+  const savedSchema = await (await call(pilot.url, schemaPath, {
+    method: 'PATCH', body: { ...parallelSchema, expectedVersion: parallelSchema.version, fields: [...parallelSchema.fields,
+      {...commonField, id: 'pilot_gate', name: '파일럿 추가 확인', kind: 'checkbox', required: false},
+      {...commonField, id: 'pilot_proof', name: '파일럿 확인 내용', kind: 'text', required: true,
+        visibleWhen: {statusIds: ['in_progress'], fieldMatch: {fieldId: 'pilot_gate', value: true}}},
+    ] },
+  })).json();
+  assert.deepEqual(savedSchema.fields.find(field => field.id === 'pilot_proof').visibleWhen, {
+    statusIds: ['in_progress'], fieldMatch: {fieldId: 'pilot_gate', value: true},
+  });
   const routingIssue = await (await call(pilot.url, '/issues', {
-    method: 'POST', status: 201, body: {projectId: parallelProjectId, title: '파일럿 담당자 배정 업무'},
+    method: 'POST', status: 201, body: {projectId: parallelProjectId, title: '파일럿 담당자 배정 업무', customFields: {pilot_gate: true}},
   })).json();
   const rule = await (await call(pilot.url, rulesPath, {
     method: 'POST', status: 201,
     body: {name: '파일럿 진행 업무 배정', enabled: true, fromStatuses: [routingIssue.status], toStatusId: 'in_progress', assigneeId: workspace.users[1].id},
   })).json();
+  const blockedTransition = await (await call(pilot.url, `/issues/${routingIssue.id}`, {
+    method: 'PATCH', status: 422, body: {status: rule.toStatusId, expectedVersion: routingIssue.version},
+  })).json();
+  assert.deepEqual(blockedTransition.details.requiredFields, ['custom:pilot_proof']);
   const routedIssue = await (await call(pilot.url, `/issues/${routingIssue.id}`, {
-    method: 'PATCH', body: {status: rule.toStatusId, expectedVersion: routingIssue.version},
+    method: 'PATCH', body: {status: rule.toStatusId, expectedVersion: routingIssue.version,
+      customFields: {pilot_gate: true, pilot_proof: '착수 조건 확인'}},
   })).json();
   assert.equal(routedIssue.assigneeId, rule.assigneeId);
   assert.equal(routedIssue.version, routingIssue.version + 1);
@@ -653,6 +671,11 @@ async function runStandardPilot() {
   ]));
   assert.deepEqual(await (await call(copy.url, rulesPath)).json(), [rule]);
   assert.deepEqual(await (await call(copy.url, runsPath)).json(), assignmentRuns);
+  assert.deepEqual(await (await call(copy.url, schemaPath)).json(), savedSchema);
+  const restoredRouting = (await (await call(copy.url, '/workspace')).json()).issues.find(item => item.id === routedIssue.id);
+  assert.deepEqual(restoredRouting.customFields, routedIssue.customFields);
+  await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
+    body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();
   assert.equal(restoredCollaboration.enabled,true);
   assert.equal(restoredCollaboration.document.plainText,collaboration.document.plainText);
@@ -685,7 +708,7 @@ async function runStandardPilot() {
   await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
   assert.equal(authenticatedReads,2);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, assignment rules and history, time reservations and individual trash restore.');
+  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, conditional ticket fields, assignment rules and history, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);
