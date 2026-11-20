@@ -14,7 +14,7 @@ const fail = (status: number, message: string): never => { throw new ApiKeyError
 const unauthorized = (): never => fail(401, '유효한 Bearer API 키가 필요합니다.');
 const metadata = (row: { json: string } | undefined) => row ? JSON.parse(row.json) as ApiKeyRecord : undefined;
 type Hooks = { actor: (request: Request) => string; activity: (request: Request, type: string, id: string, action: string, detail?: string) => unknown };
-type Context = { id: string; version: number; actorId: string; path: string };
+type Context = { id: string; version: number; actorId: string; path: string; projectIds: readonly string[] | null };
 
 /** The existing /api browser surface remains local/trusted. Only /api/v1 is a
  * strict Bearer gateway; it reuses the application's normal mutation routes. */
@@ -92,12 +92,18 @@ export class ApiKeyService {
         if (count !== 1 || !match) return unauthorized();
         const record = this.authenticate(match[1]);
         const rewritten = `/api${request.url.slice('/api/v1'.length)}`;
-        this.contexts.set(request, { id: record.id, actorId: record.actorId, version: record.version, path: rewritten.split('?')[0] });
+        this.contexts.set(request, {
+          id: record.id, actorId: record.actorId, version: record.version, path: rewritten.split('?')[0], projectIds: record.projectIds,
+        });
         request.headers['x-actor-id'] = record.actorId;
         request.url = rewritten;
         next();
       } catch (error) { next(error); }
     });
+  }
+
+  projectScope(request: Request): readonly string[] | null {
+    return this.contexts.get(request)?.projectIds ?? null;
   }
 
   private allowedProject(key: ApiKeyRecord, projectId: unknown) {
@@ -221,6 +227,13 @@ export class ApiKeyService {
     if (request.method === 'POST' && fieldBreakdown) {
       this.query(request, []);
       this.allowedProject(key, this.decode(fieldBreakdown[1]));
+      this.used(key);
+      return next();
+    }
+    const deliveryBlockers = /^\/api\/projects\/([^/]+)\/delivery-blockers$/.exec(path);
+    if (request.method === 'GET' && deliveryBlockers) {
+      this.query(request, ['savedViewId', 'reason', 'offset', 'revision']);
+      this.allowedProject(key, this.decode(deliveryBlockers[1]));
       this.used(key);
       return next();
     }

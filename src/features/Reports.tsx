@@ -15,9 +15,10 @@ import type {
 import { projectIssueTypes } from '../../shared/issue-schema';
 import { isCalendarDate } from '../../shared/calendar';
 import { api } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { WorklogReport } from './WorklogReport';
 import { FieldBreakdownReport } from './FieldBreakdownReport';
+import { DeliveryBlockersReport } from './DeliveryBlockersReport';
 import { reportDuration, StatusDurationReport } from './ReportStatusDuration';
 import './reports.css';
 
@@ -104,7 +105,7 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields'>(props.snapshotId ? 'saved' : 'live'),
+  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
   const [creating, setCreating] = useState(false),
@@ -135,7 +136,7 @@ function ProjectReports(props: Props) {
       if (busyRef.current) {
         event.preventDefault();
         notify('공유 초안 저장 결과를 확인한 뒤 이동해 주세요.', 'error');
-      } else if (dirtyRef.current) {
+      } else if (dirtyRef.current && !isReportPreservedByNavigation(event)) {
         if (!window.confirm('입력 중인 보고서 조건과 공유 초안 제목을 버리고 이동할까요?'))
           event.preventDefault();
         else afterAcceptedNavigation(event, resetDraft);
@@ -379,6 +380,16 @@ function ProjectReports(props: Props) {
         >
           필드 집계
         </button>
+        <button
+          role="tab"
+          id="report-blockers-tab"
+          aria-controls="report-blockers-panel"
+          aria-selected={view === 'blockers'}
+          disabled={creating}
+          onClick={() => showView('blockers')}
+        >
+          진행 차단
+        </button>
       </div>
       {view === 'live' ? (
         <section role="tabpanel" id="report-live-panel" aria-labelledby="report-live-tab">
@@ -537,6 +548,10 @@ function ProjectReports(props: Props) {
       ) : view === 'fields' ? (
         <section role="tabpanel" id="report-fields-panel" aria-labelledby="report-fields-tab">
           <FieldBreakdownReport {...props} />
+        </section>
+      ) : view === 'blockers' ? (
+        <section role="tabpanel" id="report-blockers-panel" aria-labelledby="report-blockers-tab">
+          <DeliveryBlockersReport {...props} />
         </section>
       ) : (
         <section role="tabpanel" id="report-saved-panel" aria-labelledby="report-saved-tab">

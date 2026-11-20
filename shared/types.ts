@@ -78,6 +78,50 @@ export interface ReportOpenStatusIssue {
   enteredAt: string | null;
   elapsedHours: number | null;
 }
+export const DELIVERY_BLOCKER_REASONS = ['issue_block', 'schedule_conflict', 'gitlab'] as const;
+export type DeliveryBlockerReason = typeof DELIVERY_BLOCKER_REASONS[number];
+
+export interface DeliveryBlockerIssue extends Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'status' | 'assigneeId' | 'version'> {
+  statusLabel: string;
+  assigneeName: string | null;
+}
+
+export interface DeliveryScheduleConflict {
+  predecessor: DeliveryBlockerIssue;
+  type: DependencyType;
+  lagDays: number;
+  endpoint: 'startDate' | 'endDate';
+  scheduledDate: string;
+  requiredDate: string;
+}
+
+export interface DeliveryBlockerRow {
+  issue: DeliveryBlockerIssue;
+  priority: Priority;
+  deadline: { value: string; source: 'dueDate' | 'endDate' } | null;
+  blockers: { total: number; items: DeliveryBlockerIssue[] };
+  scheduleConflicts: { total: number; items: DeliveryScheduleConflict[] };
+  gitlab: { blockedMergeRequests: number; failedPipelines: number };
+}
+
+export interface DeliveryBlockerCounts {
+  open: number;
+  affected: number;
+  reasons: Record<DeliveryBlockerReason, number>;
+}
+
+export interface DeliveryBlockerReport {
+  projectId: string;
+  generatedAt: string;
+  savedView: Pick<SavedView, 'id' | 'name' | 'version'> | null;
+  reason: DeliveryBlockerReason | null;
+  counts: DeliveryBlockerCounts;
+  revision: string;
+  total: number;
+  offset: number;
+  limit: number;
+  items: DeliveryBlockerRow[];
+}
 export interface ReportStatusDuration {
   completedVisits: ReportStatusVisitMetric[];
   openIssues: ReportOpenStatusIssue[];

@@ -1,0 +1,182 @@
+.delivery-blockers-report {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.delivery-blockers-query,
+.delivery-blockers-card,
+.delivery-blockers-empty {
+  min-width: 0;
+  padding: 1.15rem 1.25rem;
+}
+
+.delivery-blockers-query > p {
+  margin: 0.35rem 0 1rem;
+  color: #526c65;
+  font-size: 0.875rem;
+}
+
+.delivery-blockers-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 1fr)) auto;
+  align-items: end;
+  gap: 0.8rem;
+}
+
+.delivery-blockers-controls label {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.delivery-blockers-controls .field {
+  max-width: 100%;
+  min-width: 0;
+  min-height: 36px;
+}
+
+.delivery-blockers-controls .btn { justify-content: center; }
+
+.delivery-blockers-report > .reports-error,
+.delivery-blockers-notice {
+  margin: 0;
+}
+
+.delivery-blockers-notice {
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: #ecf5f1;
+  color: #31574c;
+  font-size: 0.875rem;
+}
+
+.delivery-blockers-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.delivery-blockers-summary > div {
+  padding: 0.8rem 1rem;
+}
+
+.delivery-blockers-summary > div:first-child {
+  border-color: #acd1c6;
+  background: #f1f8f5;
+}
+
+.delivery-blockers-summary dt,
+.delivery-blockers-properties dt {
+  color: #526c65;
+  font-size: 0.8125rem;
+}
+
+.delivery-blockers-summary dd {
+  margin: 0.2rem 0 0;
+  color: #203f35;
+  font-size: 1.25rem;
+  font-weight: 650;
+}
+
+.delivery-blockers-scope {
+  margin: 0.65rem 0 1.15rem;
+  color: #526c65;
+  font-size: 0.8125rem;
+}
+
+.delivery-blockers-scope strong { color: #325248; }
+
+.delivery-blockers-results > header,
+.delivery-blockers-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+}
+
+.delivery-blockers-results > header { margin-bottom: 0.6rem; }
+.delivery-blockers-results h3 { margin: 0; font-size: 1rem; }
+.delivery-blockers-results > header > span,
+.delivery-blockers-pagination > span { color: #526c65; font-size: 0.8125rem; }
+
+.delivery-blockers-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.delivery-blockers-list > li { min-width: 0; }
+.delivery-blockers-card h4 { margin: 0 0 0.6rem; font-size: 1rem; }
+
+.delivery-blockers-issue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #156c5e;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.delivery-blockers-issue:hover strong { text-decoration: underline; }
+.delivery-blockers-issue[aria-disabled='true'] { opacity: 0.65; cursor: wait; }
+.delivery-blockers-issue .issue-key { flex: none; color: inherit; }
+.delivery-blockers-issue strong { min-width: 0; overflow-wrap: anywhere; }
+
+.delivery-blockers-properties {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.4rem 0.75rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+}
+
+.delivery-blockers-properties dd { margin: 0; }
+.delivery-blockers-causes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 225px), 1fr)); gap: 0.65rem; }
+
+.delivery-blockers-causes > section {
+  min-width: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #e3ede7;
+  border-radius: 7px;
+  background: #f8faf9;
+  font-size: 0.8125rem;
+}
+
+.delivery-blockers-causes h5 {
+  margin: 0 0 0.35rem;
+  font-size: 0.8125rem;
+}
+
+.delivery-blockers-causes h5 > span { margin-inline-start: 0.2rem; color: #526c65; font-weight: 500; }
+.delivery-blockers-causes ul { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
+.delivery-blockers-causes p { margin: 0.2rem 0 0; color: #526c65; }
+.delivery-blockers-empty { margin: 0; color: #526c65; }
+
+.delivery-blockers-pagination {
+  justify-content: flex-end;
+  margin-top: 0.75rem;
+}
+
+.delivery-blockers-pagination > span { margin-inline-end: auto; }
+
+@media (max-width: 620px) {
+  .delivery-blockers-controls { grid-template-columns: minmax(0, 1fr); }
+  .delivery-blockers-controls .btn { justify-self: start; }
+  .delivery-blockers-summary,
+  .delivery-blockers-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .delivery-blockers-query,
+  .delivery-blockers-card,
+  .delivery-blockers-empty { padding: 0.85rem; }
+}

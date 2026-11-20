@@ -95,6 +95,16 @@ function hasSameDocumentContext(previous: WorkspaceRoute, next: WorkspaceRoute):
 function hasDocumentIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'documents' && route.documentId && route.issueId);
 }
+function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
+  return previous.view === 'reports' && next.view === 'reports' && previous.projectId === next.projectId &&
+    (previous.reportId ?? null) === (next.reportId ?? null);
+}
+function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
+  return hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next);
+}
+function hasReportIssueOverlay(route: WorkspaceRoute | null): boolean {
+  return Boolean(route?.view === 'reports' && route.issueId);
+}
 function canPreviewIssueDocument(snapshot: WorkspaceSnapshot, issueId: string, documentId: string): boolean {
   const document = snapshot.documents.find(value => value.id === documentId);
   return Boolean(document && (snapshot.resourceLinks.some(link => link.issueId === issueId && link.documentId === documentId) ||
@@ -107,6 +117,9 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
     if (previous.issueId === next.issueId && previous.sectionId !== next.sectionId &&
         previous.documentPreviewId === next.documentPreviewId) return true;
     return dispatchWorkspaceNavigation(previous.documentId);
+  }
+  if (previous && hasSameReportContext(previous, next) && previous.issueId !== next.issueId) {
+    return dispatchWorkspaceNavigation(null, true);
   }
   return dispatchWorkspaceNavigation();
 }
@@ -127,7 +140,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
     issueId = issue.id;
-    if (view !== 'teamoverview' && !documentId) projectId = issue.projectId;
+    if (view !== 'teamoverview' && view !== 'reports' && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
   const requestedDocumentPreview = parameters.get('documentPreview');
@@ -193,7 +206,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const notificationOpenRequest = useRef(0);
   const routeIndexRef = useRef(0);
   const rollbackHashRef = useRef<string | null>(null);
-  const documentIssueOpener = useRef<HTMLElement | null>(null);
+  const overlayIssueOpener = useRef<HTMLElement | null>(null);
   const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null } | null>(null);
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
@@ -221,7 +234,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const handler = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (!hasDocumentIssueOverlay(acceptedRouteRef.current) && !acceptedRouteRef.current?.documentPreviewId && !boardIssueOpener.current) {
+        if (!hasDocumentIssueOverlay(acceptedRouteRef.current) && !hasReportIssueOverlay(acceptedRouteRef.current) &&
+            !acceptedRouteRef.current?.documentPreviewId && !boardIssueOpener.current) {
           setSearchOpen(value => !value);
         }
       }
@@ -249,21 +263,21 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         });
       }
     }
-    if (!previous || !hasSameDocumentContext(previous, route)) documentIssueOpener.current = null;
+    if (!previous || !hasSameIssueOverlayContext(previous, route)) overlayIssueOpener.current = null;
     else if (!previous.issueId && route.issueId) {
       const active = document.activeElement;
-      documentIssueOpener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+      overlayIssueOpener.current = active instanceof HTMLElement && active !== document.body ? active : null;
     } else if (previous.issueId && !route.issueId) {
-      const opener = documentIssueOpener.current;
-      documentIssueOpener.current = null;
+      const opener = overlayIssueOpener.current;
+      overlayIssueOpener.current = null;
       if (opener) requestAnimationFrame(() => {
         const current = acceptedRouteRef.current;
-        if (current && !current.issueId && hasSameDocumentContext(route, current) && opener.isConnected && !opener.closest('[inert]')) {
+        if (current && !current.issueId && hasSameIssueOverlayContext(route, current) && opener.isConnected && !opener.closest('[inert]')) {
           opener.focus({ preventScroll: true });
         }
       });
     }
-    if (hasDocumentIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
+    if (hasDocumentIssueOverlay(route) || hasReportIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
     if (mode === 'push') history.pushState(state, '', hash);
@@ -342,9 +356,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     const sameProject = issue.projectId === projectId;
     if (requestRoute({
-      projectId:view === 'teamoverview' ? projectId : issue.projectId,
+      projectId:view === 'teamoverview' || view === 'reports' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
-      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
+      reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
       ganttFocusDate:sameProject ? ganttFocusDate : null,
       publicationTab, issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
@@ -461,10 +475,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const projectIssues = data.issues.filter(i => i.projectId === projectId);
   const openedIssue = data.issues.find(issue => issue.id === issueId);
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
+  const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
   const boardIssueFocus = Boolean(openedIssue && openedIssue.id === boardDialogIssueId);
-  const workspaceObscured = documentIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
+  const workspaceObscured = documentIssueOpen || reportIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
 
   return <div className="workspace">
     {sidebarOpen && !workspaceObscured && <button className="sidebar-scrim" aria-label="메뉴 닫기" onClick={() => setSidebarOpen(false)}/>}
@@ -530,7 +545,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {!project && view !== 'trash' && view !== 'teamoverview' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus}
+    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || reportIssueOpen}
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onClose={() => closeIssuePanel(openedIssue.id)}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}

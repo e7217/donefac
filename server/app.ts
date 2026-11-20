@@ -49,6 +49,7 @@ import { TimeReservationError, TimeReservationService } from './time-reservation
 import { registerTeamOverviewRoutes } from './team-overview.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
+import { registerDeliveryBlockerRoutes } from './delivery-blocker-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
@@ -709,6 +710,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   worklogs.registerRoutes(app,{actor,activity});
   timeReservations.registerRoutes(app,{actor,activity});
   registerFieldBreakdownRoutes(app,store,issueSchemas);
+  registerDeliveryBlockerRoutes(app, { store, schemas: issueSchemas, calendars, projectScope: req => apiKeys.projectScope(req) });
   reports.registerRoutes(app,{
     actor,
     createDocument(req,snapshot,content,issueIds) {
