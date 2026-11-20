@@ -134,6 +134,53 @@ test('all dependency types use their calendar anchors and keep working duration 
   } finally { await f.close(); f.remove(); }
 });
 
+test('reversing a dependency validates the remaining graph and preserves issue dates and identity', async () => {
+  const f = await fixture();
+  try {
+    const predecessor = await makeIssue(f, '첫 선행 업무', '2026-11-16', '2026-11-17');
+    const successor = await makeIssue(f, '첫 후행 업무', '2026-11-18', '2026-11-19');
+    const intermediate = await makeIssue(f, '간접 선후행 업무', '2026-11-17', '2026-11-18');
+    const link = await dep(f, predecessor, successor);
+    await dep(f, predecessor, intermediate);
+    const finalIndirectLink = await dep(f, intermediate, successor);
+    const path = `/dependencies/${link.id}`;
+    const expectedVersion = link.version ?? 1;
+    const reversal = { expectedVersion, reverse: true, type: 'SS', lagDays: -1 };
+    const before = (await f.request('/workspace')).data;
+
+    const invalidFlag = await f.request(path, 'PATCH', { ...reversal, reverse: 'true' });
+    assert.equal(invalidFlag.status, 400);
+    const cycle = await f.request(path, 'PATCH', reversal);
+    assert.equal(cycle.status, 400);
+    assert.match(cycle.data.error, /순환/);
+    const unchanged = (await f.request('/workspace')).data;
+    assert.deepEqual(unchanged.dependencies, before.dependencies);
+    assert.deepEqual(unchanged.activities, before.activities);
+
+    const remove = await f.request(`/dependencies/${finalIndirectLink.id}?expectedVersion=${finalIndirectLink.version}`, 'DELETE');
+    assert.equal(remove.status, 200);
+    const previousProposal = await preview(f, [predecessor.id]);
+    const reverse = await f.request(path, 'PATCH', reversal);
+    assert.equal(reverse.status, 200, JSON.stringify(reverse.data));
+    assert.deepEqual(reverse.data, { ...link, predecessorId: successor.id, successorId: predecessor.id,
+      version: expectedVersion + 1, type: 'SS', lagDays: -1 });
+    assert.equal((await f.request(path, 'PATCH', reversal)).status, 409);
+    assert.equal((await f.request(`${path}?expectedVersion=${expectedVersion}`, 'DELETE')).status, 409);
+    assert.equal((await f.request('/schedule/auto-apply', 'POST', { previewId: previousProposal.previewId })).status, 409);
+
+    const saved = (await f.request('/workspace')).data;
+    assert.deepEqual(saved.dependencies.find((value: Dependency) => value.id === link.id), reverse.data);
+    assert.deepEqual(saved.issues, before.issues);
+    const audited = saved.activities.filter((value: { action: string }) => value.action === '선후행 방향 변경');
+    assert.deepEqual(new Set(audited.map((value: { resourceId: string }) => value.resourceId)), new Set([predecessor.id, successor.id]));
+    assert.equal(audited.length, 2);
+    assert.equal((await f.request(`${path}?expectedVersion=${reverse.data.version}`, 'DELETE')).status, 200);
+  } finally {
+    await f.close();
+    f.remove();
+  }
+});
+
 test('schema21 backs up non-FS links and rejects older headers even when a link is only in trash', async () => {
   const f = await fixture();
   try {

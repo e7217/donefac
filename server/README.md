@@ -31,7 +31,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `GET|POST /api/attachments?resourceType=issue|document&resourceId=...` (POST also needs `filename` query; raw `application/octet-stream`)
 - `GET /api/attachments/:id/content`, `DELETE /api/attachments/:id`
 - `POST /api/resource-links`, `DELETE /api/resource-links/:id`
-- `POST /api/dependencies`, `DELETE /api/dependencies/:id`
+- `POST /api/dependencies`, `PATCH /api/dependencies/:id`, `DELETE /api/dependencies/:id`. PATCH accepts `expectedVersion`, `type`, `lagDays`, and `reverse`. Reversals keep the relationship ID and are checked for cycles.
 - `POST /api/schedule/preview`, `POST /api/schedule/apply`, `POST /api/schedule/undo`
 - `POST /api/schedule/paste-preview`, `POST /api/schedule/paste-apply`
 - `GET|PATCH /api/projects/:id/calendar`, `POST /api/schedule/auto-preview`, `POST /api/schedule/auto-apply`

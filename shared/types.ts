@@ -659,17 +659,27 @@ export interface GitlabSyncPreviewCandidate {
   issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged'; originalJiraKey?: string;
 }
 export interface GitlabHistoryLimits { branches: boolean; commits: boolean }
+interface GitlabSyncRepositoryCounts {
+  projectId: number; counts: GitlabSyncPreviewCounts; historyLimits?: GitlabHistoryLimits; ambiguousKeys?: string[];
+}
+export interface GitlabSyncRepositoryFailure extends GitlabSyncRepositoryCounts {
+  status: 'error';
+  error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits'; httpStatus: number | null; message: string };
+}
+export type GitlabSyncRepositoryResult = GitlabSyncRepositoryFailure | (GitlabSyncRepositoryCounts & {
+  status: 'ok'; error: null;
+});
+export interface GitlabSyncFailure {
+  settingsVersion: number; reason: string; repositories: GitlabSyncRepositoryFailure[];
+}
 export interface GitlabSyncResult {
   ok: true; scanned: number; linked: number; settings: GitlabSettings; notice: string;
+  partial: boolean; repositories: GitlabSyncRepositoryResult[];
   historyCounts?: { branches: number; commits: number }; historyLimits?: GitlabHistoryLimits;
 }
 export interface GitlabSyncPreview {
   settingsVersion: number; baseUrl: string; projectIds: number[];
-  repositories: {
-    projectId: number; status: 'ok' | 'error'; counts: GitlabSyncPreviewCounts;
-    error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits'; httpStatus: number | null; message: string } | null;
-    historyLimits?: GitlabHistoryLimits; ambiguousKeys?: string[];
-  }[];
+  repositories: GitlabSyncRepositoryResult[];
   counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
 }
 export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';

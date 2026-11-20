@@ -10,7 +10,7 @@ import type { Request } from 'express';
 import { Store } from '../../server/store.js';
 import { seed } from '../../server/seed.js';
 import { GitlabIntegrationService,GitlabIntegrationError } from '../../server/gitlab-integration.js';
-import type { AutomationEvent,GitlabLink,GitlabSettings } from '../../shared/types.js';
+import type { AutomationEvent,GitlabLink,GitlabSettings,GitlabSyncFailure } from '../../shared/types.js';
 
 function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-gitlab-')),store=new Store(dir);seed(store);const events:AutomationEvent[]=[],connections:{before:GitlabSettings;after:GitlabSettings}[]=[];let rejectEvent=false;const service=new GitlabIntegrationService(store,{processEvent:event=>{if(rejectEvent)throw new Error('audit rollback');events.push(event);return[];},onConnectionChanged:(before,after)=>{connections.push({before,after});return 0;}});return{store,service,events,connections,rejectEvent:(value:boolean)=>{rejectEvent=value;},configure:(values:Record<string,unknown>={})=>service.configure({expectedVersion:service.settings().version,baseUrl:'https://git.example.test',projectIds:[42],webhookSecret:'legacy-secret',...values}),close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};}
 function request(body:unknown,headers:Record<string,string>={},raw=Buffer.from(JSON.stringify(body))):Request{const values=Object.fromEntries(Object.entries({'x-gitlab-token':'legacy-secret','x-gitlab-event-uuid':randomUUID(),...headers}).map(([key,value])=>[key.toLowerCase(),value]));return{body,headers:values,gitlabRawBody:raw,header:(name:string)=>values[name.toLowerCase()]} as unknown as Request;}
@@ -264,6 +264,82 @@ test('draft sync preview is read-only and predicts actual MR and exact branch/he
     assert.equal(refresh.candidates.find(link => link.objectId === '101')?.state, 'merged');
     assert.equal(links(f).find(link => link.id.includes(':101:'))?.state, 'opened');
     assert.deepEqual(f.service.settings(), actual.settings);
+  } finally { await mock.close(); f.close(); }
+});
+
+test('sync commits complete healthy repositories, rolls back audit failures, and retries only saved repositories', async () => {
+  const f = fixture();
+  const token = `synthetic-retry-${randomUUID()}`;
+  const calls: { projectId: number; method: string | undefined; token: string | string[] | undefined }[] = [];
+  const audit: [number, number, number][] = [];
+  const at = new Date(Date.now() - 30_000).toISOString();
+  let unavailable = true;
+  const mock = await mockServer((path, res, req) => {
+    const projectId = Number(path.split('/')[4]);
+    calls.push({ projectId, method: req.method, token: req.headers['private-token'] });
+    res.setHeader('Content-Type', 'application/json');
+    if (path.includes('/merge_requests?')) {
+      res.end(JSON.stringify([{ id: projectId * 10, iid: 1, title: 'NEO-1 MR', state: 'opened', updated_at: at,
+        web_url: `https://git.example.test/project-${projectId}/-/merge_requests/1` }]));
+    } else if (projectId === 40 && unavailable) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ message: `untrusted diagnostic ${token}` }));
+    } else res.end('[]');
+  });
+  try {
+    const saved = f.configure({ baseUrl: mock.url, projectIds: [40, 42], token });
+    const snapshot = f.store.all('issues');
+    await assert.rejects(f.service.sync(() => { throw new Error('mixed audit rollback'); }), (error: unknown) =>
+      error instanceof GitlabIntegrationError && error.status === 502);
+    assert.equal(f.service.settings().lastSyncAt, null);
+    assert.deepEqual(links(f), []);
+
+    calls.length = 0;
+    const actual = await f.service.sync((...summary) => audit.push(summary));
+    assert.equal(actual.partial, true);
+    assert.deepEqual(actual.repositories.map(repo => [repo.projectId, repo.status, repo.counts.create]), [[40, 'error', 0], [42, 'ok', 1]]);
+    assert.deepEqual(actual.repositories[0].error, { stage: 'pipelines', httpStatus: 403, message: '파이프라인 조회 중 GitLab HTTP 403 응답' });
+    assert.deepEqual(audit, [[1, 1, 1]]);
+    assert.deepEqual(calls.map(call => call.projectId), [40, 40, 42, 42]);
+    assert.ok(calls.every(call => call.method === 'GET' && call.token === token));
+    assert.equal(JSON.stringify(actual).includes(token), false);
+    assert.deepEqual(links(f).map(link => link.projectId), [42]);
+    assert.ok(actual.settings.lastSyncAt);
+    assert.ok(actual.settings.lastError);
+
+    calls.length = 0;
+    const reject = (status: number) => (error: unknown) => error instanceof GitlabIntegrationError && error.status === status;
+    await assert.rejects(f.service.sync(undefined, { repositoryIds: [40] }), reject(400));
+    await assert.rejects(f.service.sync(undefined, { expectedVersion: saved.version, repositoryIds: [99] }), reject(400));
+    await assert.rejects(f.service.sync(undefined, { expectedVersion: saved.version - 1, repositoryIds: [40] }), reject(409));
+    assert.equal(calls.length, 0);
+
+    const retry = { expectedVersion: saved.version, repositoryIds: [40] };
+    await assert.rejects(f.service.sync((...summary) => audit.push(summary), retry), (error: unknown) => {
+      if (!(error instanceof GitlabIntegrationError)) return false;
+      const details = error.details as GitlabSyncFailure;
+      assert.equal(error.status, 502);
+      assert.equal(details.settingsVersion, saved.version);
+      assert.deepEqual(details.repositories, [actual.repositories[0]]);
+      assert.equal(JSON.stringify(details).includes(token), false);
+      return true;
+    });
+    assert.equal(f.service.settings().lastSyncAt, actual.settings.lastSyncAt);
+    assert.deepEqual(links(f).map(link => link.projectId), [42]);
+    assert.deepEqual(calls.map(call => call.projectId), [40, 40]);
+    assert.deepEqual(audit, [[1, 1, 1]]);
+
+    calls.length = 0;
+    unavailable = false;
+    const recovered = await f.service.sync((...summary) => audit.push(summary), retry);
+    assert.equal(recovered.partial, false);
+    assert.deepEqual(recovered.repositories.map(repo => [repo.projectId, repo.status, repo.counts.create]), [[40, 'ok', 1]]);
+    assert.deepEqual(calls.map(call => call.projectId), [40, 40]);
+    assert.deepEqual(links(f).map(link => link.projectId).sort(), [40, 42]);
+    assert.equal(recovered.settings.lastError, null);
+    assert.equal((await f.service.sync(undefined, retry)).linked, 0);
+    assert.deepEqual(f.store.all('issues'), snapshot);
+    assert.deepEqual(f.events, []);
   } finally { await mock.close(); f.close(); }
 });
 

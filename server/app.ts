@@ -1278,20 +1278,29 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   app.patch('/api/dependencies/:id',(req,res)=>{
     const input=req.body;
-    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['expectedVersion','type','lagDays','actorId'].includes(key)))fail('업무 연결 유형과 간격을 확인해 주세요.');
+    if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['expectedVersion','type','lagDays','reverse','actorId'].includes(key)))fail('업무 연결 변경 내용을 확인해 주세요.');
+    if(Object.hasOwn(input,'reverse')&&typeof input.reverse!=='boolean')fail('업무 연결 방향을 확인해 주세요.');
     const result=store.transaction(()=>{
       const prior=get<Dependency>('dependencies',req.params.id);
       checkVersion({version:prior.version??1},input.expectedVersion);
       const type=Object.hasOwn(input,'type')?input.type:prior.type;
       const lagDays=Object.hasOwn(input,'lagDays')?input.lagDays:prior.lagDays;
       if(!isDependencyType(type)||!isDependencyLag(lagDays))fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
-      if(type===prior.type&&lagDays===prior.lagDays)return {...prior,version:prior.version??1};
-      // Editing relationship details leaves the existing endpoints and graph intact.
+      const reverse=input.reverse===true;
+      if(!reverse&&type===prior.type&&lagDays===prior.lagDays)return {...prior,version:prior.version??1};
       const version=nextDependencyVersion(prior);
-      const next:Dependency={...prior,type,lagDays,version};
+      const next:Dependency={...prior,
+        predecessorId:reverse?prior.successorId:prior.predecessorId,
+        successorId:reverse?prior.predecessorId:prior.successorId,type,lagDays,version};
+      if(reverse)validateDependency(next);
       store.put('dependencies',next);
       trackDependencyVersion(version);
-      activity(req,'issue',next.successorId,'선후행 일정 변경',`${prior.type} ${prior.lagDays}근무일 → ${next.type} ${next.lagDays}근무일`);
+      if(reverse){
+        const predecessor=get<Issue>('issues',prior.predecessorId),successor=get<Issue>('issues',prior.successorId);
+        const detail=`${predecessor.key} → ${successor.key}에서 ${successor.key} → ${predecessor.key}로 변경`;
+        activity(req,'issue',predecessor.id,'선후행 방향 변경',detail);
+        activity(req,'issue',successor.id,'선후행 방향 변경',detail);
+      }else activity(req,'issue',next.successorId,'선후행 일정 변경',`${prior.type} ${prior.lagDays}근무일 → ${next.type} ${next.lagDays}근무일`);
       return next;
     });
     res.json(result);

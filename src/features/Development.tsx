@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
-import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Project } from '../../shared/types';
-import { api, patch, post } from '../lib/api';
+import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncRepositoryResult, GitlabSyncResult, Project } from '../../shared/types';
+import { api, ApiError, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
@@ -15,6 +15,7 @@ const empty:Draft={baseUrl:'',ids:'',token:'',secret:'',signingToken:'',jiraRout
 const sortedRoutes = (routes: GitlabJiraRoute[]) => [...routes].sort((a, b) => a.repositoryId - b.repositoryId);
 const draftOf=(settings:GitlabSettings):Draft=>({...empty,baseUrl:settings.baseUrl,ids:settings.projectIds.join(', '),jiraRoutes:sortedRoutes(settings.jiraRoutes ?? [])});
 type PreviewState = { state: 'loading' } | { state: 'failed'; error: string } | { state: 'ready'; result: GitlabSyncPreview; jiraRoutes: GitlabJiraRoute[] };
+type SyncRun = { settingsVersion: number; includeHistory: boolean; repositories: GitlabSyncRepositoryResult[] };
 type JiraSources = { items: GitlabJiraSource[]; loading: boolean; error: string };
 function HistoryLimitNote({ limits }: { limits?: GitlabHistoryLimits }) {
   const capped = [limits?.branches && '브랜치 500개', limits?.commits && '커밋 100개'].filter(Boolean);
@@ -39,13 +40,21 @@ function normalizedAddress(input: string): string | null {
   catch { return null; }
 }
 
+function syncFailure(cause: unknown, version: number): GitlabSyncFailure | null {
+  if (!(cause instanceof ApiError) || cause.status !== 502 || !cause.details || typeof cause.details !== 'object') return null;
+  const details = cause.details as Partial<GitlabSyncFailure>;
+  return details.settingsVersion === version && typeof details.reason === 'string' && Array.isArray(details.repositories) &&
+    details.repositories.length && details.repositories.every(repository => repository?.status === 'error' && repository.error)
+    ? details as GitlabSyncFailure : null;
+}
+
 export function Development(props:FeatureProps){
   const {notify}=props;
   const [settings,setSettings]=useState<GitlabSettings|null>(null),[draft,setDraft]=useState< Draft>(empty),[baseline,setBaseline]=useState< Draft>(empty);
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [includeHistory, setIncludeHistory] = useState(false);
-  const [historyResult, setHistoryResult] = useState<Pick<GitlabSyncResult, 'historyCounts' | 'historyLimits'> | null>(null);
+  const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [jiraSources, setJiraSources] = useState<JiraSources>({ items: [], loading: true, error: '' });
   const previewRequest = useRef<AbortController | null>(null);
   const jiraSourcesRequest = useRef<AbortController | null>(null);
@@ -61,7 +70,7 @@ export function Development(props:FeatureProps){
     previewRequest.current = null;
     setPreview(null);
   }, []);
-  const accept=useCallback((value:GitlabSettings)=>{clearPreview();setHistoryResult(null);setSettings(value);const next=draftOf(value);setDraft(next);setBaseline(next);dirtyRef.current=false;setError('');},[clearPreview]);
+  const accept=useCallback((value:GitlabSettings)=>{clearPreview();setSyncRun(null);setSettings(value);const next=draftOf(value);setDraft(next);setBaseline(next);dirtyRef.current=false;setError('');},[clearPreview]);
   useEffect(()=>{alive.current=true;let cancelled=false;void api<GitlabSettings>('/integrations/gitlab').then(value=>{if(!cancelled)accept(value);}).catch(e=>{if(!cancelled)setError((e as Error).message);});return()=>{cancelled=true;alive.current=false;previewRequest.current?.abort();previewRequest.current=null;};},[accept]);
   const loadJiraSources = useCallback(async () => {
     jiraSourcesRequest.current?.abort();
@@ -117,14 +126,44 @@ export function Development(props:FeatureProps){
     const saved=await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,baseUrl:draft.baseUrl,projectIds,...(jiraRoutes.length||settings.jiraRoutes?.length?{jiraRoutes}:{}),...(draft.token?{token:draft.token}:{}),...(draft.secret?{webhookSecret:draft.secret}:{}),...(draft.signingToken?{signingToken:draft.signingToken}:{})});accept(saved);window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 연결 설정을 저장했습니다.');
   });}
   async function disconnect(){if(!settings||!window.confirm('GitLab 자격 증명을 삭제하고 상태 자동화를 비활성화할까요? 입력 중인 연결 설정도 초기화합니다. 기존 개발 활동 기록은 유지됩니다.'))return;await execute(async()=>{accept(await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,token:'',webhookSecret:'',signingToken:''}));window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 자격 증명을 삭제했습니다.');});}
-  async function sync(){await execute(async()=>{
-    setHistoryResult(null);
-    const result = await post<GitlabSyncResult>('/integrations/gitlab/sync', includeHistory ? { includeHistory: true } : {});
-    setSettings(result.settings);
-    if (result.historyCounts) setHistoryResult({ historyCounts: result.historyCounts, historyLimits: result.historyLimits });
-    await props.refresh();
-    props.notify(`GitLab 동기화를 완료했습니다. ${result.linked}개 연결`);
-  });}
+  async function sync(repositoryIds?: number[]) {
+    if (!settings) return;
+    const expectedVersion = settings.version;
+    const scanHistory = repositoryIds ? syncRun?.includeHistory === true : includeHistory;
+    await execute(async () => {
+      function recordRun(repositories: GitlabSyncRepositoryResult[]) {
+        setSyncRun(current => {
+          if (!repositoryIds || current?.settingsVersion !== expectedVersion) {
+            return { settingsVersion: expectedVersion, includeHistory: scanHistory, repositories };
+          }
+          const replacements = new Map(repositories.map(repository => [repository.projectId, repository]));
+          return { ...current, repositories: current.repositories.map(repository => replacements.get(repository.projectId) ?? repository) };
+        });
+      }
+      let result: GitlabSyncResult;
+      try {
+        result = await post<GitlabSyncResult>('/integrations/gitlab/sync', {
+          expectedVersion, ...(scanHistory ? { includeHistory: true } : {}), ...(repositoryIds ? { repositoryIds } : {}),
+        });
+      } catch (cause) {
+        const failure = syncFailure(cause, expectedVersion);
+        if (!failure) throw cause;
+        if (alive.current) {
+          recordRun(failure.repositories);
+          props.notify('요청한 저장소를 조회하지 못했습니다. 동기화 결과를 확인하세요.', 'error');
+        }
+        return;
+      }
+      if (!alive.current) return;
+      recordRun(result.repositories);
+      setSettings(result.settings);
+      await props.refresh();
+      if (alive.current) {
+        if (result.partial) props.notify(`조회한 저장소에서 ${result.linked}개 연결을 저장했습니다. 실패한 저장소는 동기화 결과에서 확인하세요.`);
+        else props.notify(`GitLab 동기화를 완료했습니다. ${result.linked}개 연결`);
+      }
+    });
+  }
   async function requestPreview() {
     if (!settings || pending.current || previewRequest.current) return;
     const controller = new AbortController();
@@ -148,7 +187,7 @@ export function Development(props:FeatureProps){
   const issueKeys = new Map(props.data.issues.filter(issue => issue.projectId === props.projectId).map(issue => [issue.id, issue.key]));
   const links = props.data.gitlabLinks.filter(link => issueKeys.has(link.issueId));
   const repositoryIds = editableRepoIds(draft.ids);
-  return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div><button className="btn btn-primary" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={sync}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button></div>
+  return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div><button className="btn btn-primary" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={() => void sync()}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button></div>
     {error&&<div className="inline-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}
     <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
       <label className="form-label">GitLab 주소<input type="url" className="field" placeholder="https://gitlab.example.com" value={draft.baseUrl} onChange={e=>edit('baseUrl',e.target.value)}/></label>
@@ -165,13 +204,10 @@ export function Development(props:FeatureProps){
         <p className="help-text" id="gitlab-history-help">미리보기와 지금 동기화에 적용합니다. 저장소별로 브랜치 최대 500개와 최근 커밋 최대 100개를 읽습니다.</p>
       </div>
       <div className="data-actions"><button className="btn btn-primary" disabled={!dirty}>연결 설정 저장</button><button type="button" className="btn" disabled={!draft.baseUrl.trim() || !draft.ids.trim() || preview?.state === 'loading'} onClick={() => void requestPreview()}><Search size={15} aria-hidden="true"/>연결 미리보기</button>{(settings?.tokenConfigured||settings?.webhookSecretConfigured||settings?.signingTokenConfigured)&&<button className="btn btn-ghost" type="button" onClick={disconnect}>연결 해제</button>}</div>
-    </fieldset>{settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{settings?.lastError&&<p className="error-text">{settings.lastError}</p>}
-      {historyResult?.historyCounts && <div className="gitlab-history-result" role="status" aria-label="기존 개발 이력 동기화 결과">
-        <p>브랜치 {historyResult.historyCounts.branches}개 · 커밋 {historyResult.historyCounts.commits}개 조회</p>
-        <HistoryLimitNote limits={historyResult.historyLimits} />
-      </div>}
+    </fieldset>{settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{settings?.lastError&&!syncRun&&<p className="error-text">{settings.lastError}</p>}
     </form>
     {preview && <GitlabPreview preview={preview} projects={props.data.projects} openIssue={props.openIssue}/>}
+    {syncRun && <GitlabSyncReport run={syncRun} busy={busy} onRetry={ids => void sync(ids)} />}
     <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 새 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>지금 동기화는 저장한 연결 설정을 사용합니다. 기존 브랜치·커밋을 포함하면 웹훅 설정 전의 활동도 찾을 수 있습니다.</li></ul><p className="help-text">GitLab에서 접근 가능한 배포 주소에 웹훅 경로 <code>/api/integrations/gitlab/webhook</code>를 설정하세요.</p></section></div>
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
     <section className="card linked-development" aria-label="연결된 개발 활동">
@@ -243,6 +279,61 @@ function JiraRouteSettings({ repositoryIds, routes, sources, projects, onRetry, 
 const candidateAction = { create: '신규 연결', update: '갱신', unchanged: '유지' } as const;
 const candidateKind = { merge_request: 'MR', pipeline: '파이프라인', branch: '브랜치', commit: '커밋' } as const;
 const readStage = { project: '저장소 정보', 'merge-requests': 'MR', pipelines: '파이프라인', branches: '브랜치', commits: '커밋' } as const;
+const repositoryReadHints: Partial<Record<number, string>> = {
+  401: '저장한 읽기 API 토큰이 유효한지 확인하세요.',
+  403: '읽기 API 토큰에 이 저장소를 조회할 권한이 있는지 확인하세요.',
+  404: '저장소 ID와 읽기 API 토큰의 접근 권한을 확인하세요.',
+  429: 'GitLab 요청 제한이 풀린 뒤 다시 시도하세요.',
+};
+
+function RepositoryReadError({ error }: Pick<GitlabSyncRepositoryFailure, 'error'>) {
+  const hint = error.httpStatus === null ? undefined : repositoryReadHints[error.httpStatus];
+  return <>
+    <p className="error-text">{error.message}</p>
+    {hint && <p className="help-text">{hint}</p>}
+  </>;
+}
+
+function RepositoryCounts({ counts }: { counts: GitlabSyncPreviewCounts }) {
+  return <>
+    <p>MR {counts.mergeRequests}개 · 파이프라인 {counts.pipelines}개
+      {counts.branches !== undefined && ` · 브랜치 ${counts.branches}개`}
+      {counts.commits !== undefined && ` · 커밋 ${counts.commits}개`}</p>
+    <p>신규 연결 {counts.create}개 · 갱신 {counts.update}개 · 유지 {counts.unchanged}개</p>
+  </>;
+}
+
+function GitlabSyncReport({ run, busy, onRetry }: { run: SyncRun; busy: boolean; onRetry: (repositoryIds: number[]) => void }) {
+  const failed = run.repositories.flatMap(repository => repository.status === 'error' ? [repository.projectId] : []);
+  const completed = run.repositories.length - failed.length;
+  const branches = run.repositories.reduce((total, repository) => total + (repository.counts.branches ?? 0), 0);
+  const commits = run.repositories.reduce((total, repository) => total + (repository.counts.commits ?? 0), 0);
+  return <section className="card gitlab-sync-result" aria-labelledby="gitlab-sync-result-title">
+    <div className="card-heading gitlab-sync-result-heading">
+      <h2 id="gitlab-sync-result-title">GitLab 동기화 결과</h2>
+      {failed.length > 0 && <button className="btn" type="button" disabled={busy} onClick={() => onRetry(failed)}>
+        <RefreshCw size={15} aria-hidden="true" />실패한 저장소 다시 시도
+      </button>}
+    </div>
+    <p role="status">저장소 {completed}곳 동기화 완료 · {failed.length}곳 조회 실패</p>
+    {run.includeHistory && completed > 0 && <div className="gitlab-history-result" role="status" aria-label="기존 개발 이력 동기화 결과">
+      <p>브랜치 {branches}개 · 커밋 {commits}개 조회</p>
+    </div>}
+    <ul className="gitlab-preview-repositories" aria-label="저장소별 동기화 결과">
+      {run.repositories.map(repository => <li key={repository.projectId}>
+        <section aria-label={`저장소 ${repository.projectId}`}>
+          <h3>저장소 {repository.projectId} <span className={`badge gitlab-preview-${repository.status}`}>
+            {repository.status === 'error' ? `${readStage[repository.error.stage]} 조회 실패` : '동기화 완료'}
+          </span></h3>
+          {repository.status === 'error' ? <RepositoryReadError error={repository.error} /> : <>
+            <RepositoryCounts counts={repository.counts} />
+            <HistoryLimitNote limits={repository.historyLimits} />
+          </>}
+        </section>
+      </li>)}
+    </ul>
+  </section>;
+}
 
 function GitlabPreview({ preview, projects, openIssue }: { preview: PreviewState; projects: Project[]; openIssue: FeatureProps['openIssue'] }) {
   return <section className="card gitlab-preview" aria-labelledby="gitlab-preview-title">
@@ -250,7 +341,7 @@ function GitlabPreview({ preview, projects, openIssue }: { preview: PreviewState
     {preview.state === 'loading' && <p role="status">입력한 설정으로 GitLab 저장소를 조회하는 중입니다.</p>}
     {preview.state === 'failed' && <p className="inline-error" role="alert">{preview.error} 작성 내용은 유지됩니다.</p>}
     {preview.state === 'ready' && <>
-      <p>현재 입력값으로 조회한 결과입니다. 지금 동기화는 저장한 설정의 모든 저장소를 조회한 뒤 연결을 저장합니다.</p>
+      <p>현재 입력값으로 조회한 결과입니다. 지금 동기화는 저장한 설정을 사용해 조회를 마친 저장소의 연결을 저장합니다.</p>
       <div className="gitlab-preview-summary" aria-label="미리보기 집계">
         <span>조회 MR <strong>{preview.result.counts.mergeRequests}</strong></span>
         <span>조회 파이프라인 <strong>{preview.result.counts.pipelines}</strong></span>
@@ -263,16 +354,13 @@ function GitlabPreview({ preview, projects, openIssue }: { preview: PreviewState
       <ul className="gitlab-preview-repositories" aria-label="저장소별 조회 결과">
         {preview.result.repositories.map(repository => {
           const route = preview.jiraRoutes.find(item => item.repositoryId === repository.projectId);
-          const ambiguousKeys = repository.ambiguousKeys ?? [];
+          const ambiguousKeys = repository.status === 'ok' ? repository.ambiguousKeys ?? [] : [];
           return <li key={repository.projectId}>
             <section aria-label={`저장소 ${repository.projectId}`}>
               <h3>저장소 {repository.projectId} <span className={`badge gitlab-preview-${repository.status}`}>{repository.error ? `${readStage[repository.error.stage]} 조회 실패` : '조회 가능'}</span></h3>
               {route && <p className="help-text">연결 범위 {projects.find(project => project.id === route.projectId)?.name ?? route.projectId} · Jira 원본 {route.jiraInstanceKey}</p>}
-              {repository.error ? <p className="error-text">{repository.error.message}</p> : <>
-                  <p>MR {repository.counts.mergeRequests}개 · 파이프라인 {repository.counts.pipelines}개
-                    {repository.counts.branches !== undefined && ` · 브랜치 ${repository.counts.branches}개`}
-                    {repository.counts.commits !== undefined && ` · 커밋 ${repository.counts.commits}개`}</p>
-                  <p>신규 연결 {repository.counts.create}개 · 갱신 {repository.counts.update}개 · 유지 {repository.counts.unchanged}개</p>
+              {repository.error ? <RepositoryReadError error={repository.error} /> : <>
+                  <RepositoryCounts counts={repository.counts} />
                   {ambiguousKeys.length > 0 && <div className="gitlab-preview-ambiguity">
                     <p>여러 티켓과 일치한 키</p>
                     <ul aria-label="연결이 보류된 키">{ambiguousKeys.map(key => <li key={key}><code>{key}</code></li>)}</ul>

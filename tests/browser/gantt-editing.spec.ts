@@ -71,7 +71,9 @@ test('간트 막대 종료일 드래그와 시작일 방향키는 미리보기 �
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     await expect.poll(async () => (await snapshot(request)).issues.find(value => value.id === issue.id)?.endDate).toBe(dateAt(4));
 
-    await page.getByRole('button', { name: `${issue.key} 시작일 조정`, exact: true }).press('ArrowRight');
+    const startHandle = page.getByRole('button', { name: `${issue.key} 시작일 조정`, exact: true });
+    await expect(startHandle).toBeEnabled();
+    await startHandle.press('ArrowRight');
     await expect(preview.locator('.gantt-new-dates')).toContainText(dateAt(1));
     expect((await snapshot(request)).issues.find(value => value.id === issue.id)?.startDate).toBe(dateAt(0));
     await preview.getByRole('button', { name: '변경 적용', exact: true }).click();

@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import type { AutomationRule,GitlabSettings,GitlabSyncPreview,Issue,WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule,GitlabSettings,GitlabSyncPreview,GitlabSyncResult,Issue,WorkspaceSnapshot } from '../../shared/types';
 
 test('자동화 미리보기는 업무를 유지하고 명시적으로 활성화한 규칙은 인증된 새 MR 이벤트를 적용한다',async({page,request})=>{
   const initial=await(await request.get('/api/workspace')).json() as WorkspaceSnapshot,project=initial.projects[0];
@@ -32,7 +32,7 @@ test('자동화 미리보기는 업무를 유지하고 명시적으로 활성화
   }
 });
 
-test('저장 전 GitLab 연결에서 저장소별 결과와 티켓 후보를 확인하고 저장 후 같은 링크를 동기화한다',async({page,request})=>{
+test('저장 전 GitLab 연결을 확인하고 접근 가능한 저장소를 동기화한 뒤 실패한 저장소만 다시 조회한다',async({page,request})=>{
   const workspace = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
   const before = await workspace();
   const project = before.projects[0];
@@ -43,12 +43,13 @@ test('저장 전 GitLab 연결에서 저장소별 결과와 티켓 후보를 확
   const original = await settings();
   expect(original.baseUrl).toBe('');
   const token = `synthetic-browser-read-${randomUUID()}`;
-  const received: { method:string|undefined; token:string|string[]|undefined }[] = [];
+  const received: { method:string|undefined; token:string|string[]|undefined; path:string }[] = [];
   const at = new Date(Date.now()-5_000).toISOString();
+  let denied = true;
   const mock = createServer((req,res) => {
-    received.push({method:req.method,token:req.headers['private-token']});
+    received.push({method:req.method,token:req.headers['private-token'],path:req.url ?? ''});
     res.setHeader('Content-Type','application/json');
-    if (req.url?.includes('/projects/99/')) {
+    if (denied && req.url?.includes('/projects/99/')) {
       res.statusCode = 404;
       res.end(JSON.stringify({message:'synthetic access denial'}));
     } else if (req.url?.includes('/merge_requests?')) {
@@ -98,20 +99,49 @@ test('저장 전 GitLab 연결에서 저장소별 결과와 티켓 후보를 확
     await expect(result).toBeVisible();
     await expect(address).toHaveValue(url);
     await expect(privateToken).toHaveValue(token);
-    await ids.fill('42');
+    await ids.fill('42, 99 ');
     await expect(result).toHaveCount(0);
     const saved = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab' && value.request().method()==='PATCH');
     await page.getByRole('button',{name:'연결 설정 저장',exact:true}).click();
-    expect((await saved).ok()).toBeTruthy();
+    const savedResponse = await saved;
+    expect(savedResponse.ok()).toBeTruthy();
+    const stored = await savedResponse.json() as GitlabSettings;
+    expect(stored.projectIds).toEqual([42, 99]);
     const synced = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab/sync');
     await page.getByRole('button',{name:'지금 동기화',exact:true}).click();
     const applied = await synced;
     expect(applied.ok(),await applied.text()).toBeTruthy();
-    expect(await applied.json()).toMatchObject({scanned:3,linked:2});
+    expect(await applied.json() as GitlabSyncResult).toMatchObject({scanned:3,linked:2,partial:true});
     const snapshot = await workspace();
     expect(snapshot.gitlabLinks.filter(link=>link.issueId===issue.id).map(link=>link.kind).sort()).toEqual(['merge_request','pipeline']);
     expect(snapshot.gitlabLinks.some(link=>link.issueId===issue.id && link.iid===802)).toBe(false);
     expect(snapshot.issues.find(item=>item.id===issue.id)).toMatchObject({status:issue.status,version:issue.version});
+
+    const report = page.getByRole('region',{name:'GitLab 동기화 결과',exact:true});
+    await expect(report.getByRole('region',{name:'저장소 42',exact:true})).toContainText('신규 연결 2개');
+    await expect(report.getByRole('region',{name:'저장소 99',exact:true})).toContainText('GitLab HTTP 404 응답');
+    await expect(report.getByRole('region',{name:'저장소 99',exact:true})).toContainText('저장소 ID와 읽기 API 토큰의 접근 권한을 확인하세요.');
+    const retryButton = report.getByRole('button',{name:'실패한 저장소 다시 시도'});
+    const nextSync = () => page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab/sync');
+    received.length = 0;
+    const rejected = nextSync();
+    await retryButton.click();
+    expect((await rejected).status()).toBe(502);
+    expect(received.map(value=>value.path)).toEqual([expect.stringContaining('/projects/99/')]);
+    await expect(report.getByRole('region',{name:'저장소 42',exact:true})).toContainText('신규 연결 2개');
+
+    denied = false;
+    received.length = 0;
+    const retried = nextSync();
+    await retryButton.click();
+    const recovered = await retried;
+    expect(recovered.ok()).toBeTruthy();
+    expect(recovered.request().postDataJSON()).toEqual({expectedVersion:stored.version,repositoryIds:[99]});
+    expect(received.map(value=>value.path)).toEqual([expect.stringContaining('/projects/99/'),expect.stringContaining('/projects/99/')]);
+    await expect(report.getByRole('status')).toContainText('저장소 2곳 동기화 완료');
+    await expect(retryButton).toHaveCount(0);
+    const combined = (await workspace()).gitlabLinks.filter(link=>link.issueId===issue.id);
+    expect(combined.map(link=>link.projectId).sort()).toEqual([42,42,99,99]);
   } finally {
     try {
       const current = await settings();
@@ -295,7 +325,7 @@ test('360px에서 기존 GitLab 이력을 선택해 브랜치와 커밋을 미�
     await page.getByRole('button', { name: '지금 동기화', exact: true }).click();
     const sync = await syncResponse;
     expect(sync.ok(), await sync.text()).toBeTruthy();
-    expect(sync.request().postDataJSON()).toEqual({ includeHistory: true });
+    expect(sync.request().postDataJSON()).toEqual({ expectedVersion: (await saved.json() as GitlabSettings).version, includeHistory: true });
     await expect(page.getByRole('status', { name: '기존 개발 이력 동기화 결과', exact: true })).toContainText('브랜치 1개 · 커밋 1개 조회');
     const activity = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
     await expect(activity.getByRole('region', { name: '브랜치', exact: true }).getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', branchUrl);

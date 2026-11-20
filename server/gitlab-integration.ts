@@ -1,6 +1,6 @@
 import { createHash,createHmac,timingSafeEqual } from 'node:crypto';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncResult,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
@@ -24,6 +24,7 @@ type Hooks={
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
 type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number};
 type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
+type SyncOptions=Pick<ReadOptions,'includeHistory'> & { expectedVersion?: unknown; repositoryIds?: unknown };
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
 type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'>;
 type JiraKeyBinding={issueId:string;originalJiraKey:string};
@@ -94,6 +95,7 @@ type ProjectReadPlan={
   projectId:number;mergeRequests:LinkDraft[];pipelines:LinkDraft[];
   history?:{branches:LinkDraft[];commits:LinkDraft[];limits:GitlabHistoryLimits};
 };
+type ProjectReadOutcome={projectId:number;plan:ProjectReadPlan}|{projectId:number;failure:GitlabSyncRepositoryFailure};
 function linkForIssue(instance:string,projectId:number,kind:GitlabLink['kind'],match:TicketMatch,draft:LinkDraft):GitlabLink{
   const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha }=draft;
   const {issue:{id:issueId},originalJiraKey}=match;
@@ -500,6 +502,22 @@ export class GitlabIntegrationService{
     return current;
   }
 
+  private async readRepositories(connection: SyncConnection, options: ReadOptions): Promise<ProjectReadOutcome[]> {
+    const reads: ProjectReadOutcome[] = [];
+    for (const projectId of connection.projectIds) {
+      options.signal?.throwIfAborted();
+      try { reads.push({ projectId, plan: await readProjectPlan(connection, projectId, options) }); }
+      catch (error) {
+        if (!(error instanceof GitlabReadError)) throw error;
+        const { stage, httpStatus, message } = error;
+        reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
+      }
+      options.signal?.throwIfAborted();
+      this.currentForSync(connection.version);
+    }
+    return reads;
+  }
+
   async previewSync(value:unknown, signal?:AbortSignal):Promise<GitlabSyncPreview>{
     const input=record(value),saved=this.raw(),startedAt=Date.now();
     if(Object.keys(input).some(key=>!['expectedVersion','baseUrl','projectIds','token','includeHistory','jiraRoutes'].includes(key)))fail('지원하지 않는 GitLab 미리보기 요청입니다.');
@@ -511,18 +529,11 @@ export class GitlabIntegrationService{
     const jiraRoutes=this.submittedJiraRoutes(input,saved,address,repositories);
     const token='token'in input?credential(input.token):address===saved.baseUrl&&saved.token?this.store.unseal(saved.token):null;
     const connection={baseUrl:address,projectIds:repositories,jiraRoutes,token,version:saved.version};
-    const reads:({projectId:number;plan:ProjectReadPlan}|{projectId:number;error:GitlabReadError})[]=[];
-    for(const projectId of repositories){
-      signal?.throwIfAborted();
-      try{reads.push({projectId,plan:await readProjectPlan(connection,projectId,{signal,includeHistory})});}
-      catch(error){if(!(error instanceof GitlabReadError))throw error;reads.push({projectId,error});}
-      signal?.throwIfAborted();
-      this.currentForSync(saved.version);
-    }
+    const reads=await this.readRepositories(connection,{signal,includeHistory});
     const candidates:GitlabSyncPreviewCandidate[]=[],counts=emptyCounts(includeHistory),issues=this.syncIssues(),instance=this.instance(connection);
     const outcomes:GitlabSyncPreview['repositories']=reads.map(read=>{
       const {projectId}=read;
-      if('error'in read){const {stage,httpStatus,message}=read.error;return {projectId,status:'error',counts:emptyCounts(includeHistory),error:{stage,httpStatus,message}};}
+      if('failure'in read)return read.failure;
       const matcher=this.ticketMatcher(issues,jiraRoutes.find(route=>route.repositoryId===projectId));
       const projectCounts=this.visitProjectLinks(instance,read.plan,startedAt,matcher,(link,{issue,originalJiraKey},action,kind,objectId)=>{
         if(candidates.length<PREVIEW_CANDIDATE_LIMIT)candidates.push({
@@ -537,25 +548,40 @@ export class GitlabIntegrationService{
       candidatesTruncated:counts.create+counts.update+counts.unchanged>candidates.length};
   }
 
-  async sync(afterSync?:(scanned:number,linked:number)=>void,{includeHistory=false}:Pick<ReadOptions,'includeHistory'> = {}):Promise<GitlabSyncResult>{
+  async sync(afterSync?:(scanned:number,linked:number,failedRepositories:number)=>void,{includeHistory=false,expectedVersion,repositoryIds}:SyncOptions = {}):Promise<GitlabSyncResult>{
     const captured=this.raw(),startedAt=Date.now();
+    if(expectedVersion!==undefined||repositoryIds!==undefined)assertSettingsVersion(expectedVersion,captured.version);
     if(!captured.baseUrl||!captured.projectIds.length)fail('GitLab 주소와 저장소 ID를 먼저 설정해 주세요.');
+    const selected=repositoryIds===undefined?captured.projectIds:projectIds(repositoryIds);
+    if(!selected.length||selected.some(id=>!captured.projectIds.includes(id)))fail('저장한 GitLab 연결의 저장소를 선택해 주세요.');
     if(includeHistory&&this.historySyncActive)fail('기존 브랜치·커밋 동기화가 진행 중입니다.',409);
     if(includeHistory)this.historySyncActive=true;
     try{
-      const connection={...captured,token:captured.token?this.store.unseal(captured.token):null};
-      const plans:ProjectReadPlan[]=[];
-      for(const projectId of connection.projectIds){
-        plans.push(await readProjectPlan(connection,projectId,{includeHistory}));
-        this.currentForSync(captured.version);
+      const connection={...captured,projectIds:selected,token:captured.token?this.store.unseal(captured.token):null};
+      const reads=await this.readRepositories(connection,{includeHistory});
+      const failures=reads.flatMap(read=>'failure'in read?[read.failure]:[]);
+      const partial=failures.length>0;
+      const failureSummary=`저장소 ${failures.length}곳을 조회하지 못했습니다.`;
+      if(failures.length===reads.length){
+        const reason=failures.length===1?failures[0].error.message:failureSummary;
+        const details:GitlabSyncFailure={settingsVersion:captured.version,reason,repositories:failures};
+        this.store.transaction(()=>{
+          const current=this.currentForSync(captured.version);
+          this.store.setSetting('gitlab',{...current,lastError:reason});
+        });
+        fail('GitLab 동기화에 실패했습니다.',502,details);
       }
       let scanned=0,linked=0;
+      const repositories:GitlabSyncRepositoryResult[]=[];
       const historyCounts={branches:0,commits:0},historyLimits={branches:false,commits:false};
       this.store.transaction(()=>{
         const current=this.currentForSync(captured.version),instance=this.instance(current),issues=this.syncIssues();
-        for(const plan of plans){
+        for(const read of reads){
+          if('failure'in read){repositories.push(read.failure);continue;}
+          const {plan}=read;
           const matcher=this.ticketMatcher(issues,current.jiraRoutes?.find(route=>route.repositoryId===plan.projectId));
           const counts=this.visitProjectLinks(instance,plan,startedAt,matcher,(link,_match,action)=>{if(action!=='unchanged')this.store.put('gitlab_links',link);});
+          repositories.push({projectId:read.projectId,status:'ok',counts,error:null,...(plan.history?{historyLimits:plan.history.limits}:{})});
           scanned+=counts.mergeRequests+counts.pipelines+(counts.branches??0)+(counts.commits??0);
           linked+=counts.create+counts.update;
           if(plan.history){
@@ -565,16 +591,16 @@ export class GitlabIntegrationService{
             historyLimits.commits||=plan.history.limits.commits;
           }
         }
-        this.store.setSetting('gitlab',{...current,lastSyncAt:now(),lastError:null});
-        afterSync?.(scanned,linked);
+        this.store.setSetting('gitlab',{...current,lastSyncAt:now(),lastError:partial?failureSummary:null});
+        afterSync?.(scanned,linked,failures.length);
       });
       const notice=includeHistory ? '저장소당 브랜치 최대 500개와 최근 커밋 100개를 함께 확인했습니다. 업무 상태는 자동 변경하지 않습니다.'
         : 'MR은 저장소당 최근 최대 1000개, 파이프라인은 최근 50개를 조회합니다. 업무 상태는 자동 변경하지 않습니다.';
-      return{ok:true,scanned,linked,settings:this.settings(),notice,...(includeHistory?{historyCounts,historyLimits}:{})};
+      return{ok:true,scanned,linked,settings:this.settings(),notice,partial,repositories,...(includeHistory?{historyCounts,historyLimits}:{})};
     }catch(error){
       this.currentForSync(captured.version);
       if(error instanceof GitlabIntegrationError)throw error;
-      const message=error instanceof GitlabReadError?error.message:'GitLab 동기화 결과를 저장하지 못했습니다.';
+      const message='GitLab 동기화 결과를 저장하지 못했습니다.';
       this.store.transaction(()=>{const current=this.currentForSync(captured.version);this.store.setSetting('gitlab',{...current,lastError:message});});
       return fail('GitLab 동기화에 실패했습니다.',502,{reason:message});
     }finally{if(includeHistory)this.historySyncActive=false;}
@@ -597,8 +623,10 @@ export class GitlabIntegrationService{
     });
     app.post('/api/integrations/gitlab/sync',(req:Request,res:Response,next:NextFunction)=>{
       hooks.actor(req);
-      const includeHistory=historyRequested(record(req.body));
-      void this.sync((scanned,linked)=>hooks.activity(req,'integration','gitlab','GitLab 재동기화',`${scanned}개 항목 확인, ${linked}개 업무 연결`),{includeHistory}).then(result=>res.json(result),next);
+      const input=record(req.body),includeHistory=historyRequested(input);
+      void this.sync((scanned,linked,failed)=>hooks.activity(req,'integration','gitlab','GitLab 재동기화',
+        `${scanned}개 항목 확인, ${linked}개 업무 연결${failed?`, 저장소 ${failed}곳 조회 실패`:''}`),
+      {includeHistory,expectedVersion:input.expectedVersion,repositoryIds:input.repositoryIds}).then(result=>res.json(result),next);
     });
   }
 }

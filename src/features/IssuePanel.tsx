@@ -1,8 +1,8 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, FileText, GitMerge, Link2, MessageSquare, Plus, Save, Trash2, X } from 'lucide-react';
-import { PRIORITY, type Comment, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { ArrowRight, Check, ChevronRight, Clock3, FileText, GitMerge, Link2, MessageSquare, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -22,10 +22,12 @@ import { NotificationSubscriptionButton } from './NotificationSubscriptionButton
 import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
+import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
 import './issues.css';
 import './issue-decision-source.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
+type IssueDependencyEditor = { otherRole: RelatedIssueDirection; dependency?: Dependency };
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
@@ -56,6 +58,18 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const closeChildCreation = useCallback(() => {
     setChildCreation(null);
     requestAnimationFrame(() => childCreationTrigger.current?.focus({ preventScroll: true }));
+  }, []);
+  const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
+  const [dependencyBusy, setDependencyBusy] = useState(false);
+  const dependencyBusyRef = useRef(false);
+  const dependencyDraftRef = useRef(false);
+  const dependencyOpener = useRef<HTMLButtonElement | null>(null);
+  const addPredecessorButton = useRef<HTMLButtonElement>(null);
+  const trackDependencyDraft = useCallback((_id: string, dirty: boolean) => { dependencyDraftRef.current = dirty; }, []);
+  const closeDependencyEditor = useCallback(() => {
+    const opener = dependencyOpener.current;
+    setDependencyEditor(null);
+    requestAnimationFrame(() => (opener?.isConnected ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
   }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
   const [documentId, setDocumentId] = useState('');
@@ -94,16 +108,17 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       const activeDraft = childDraft.current;
-      if (savingRef.current || activeDraft?.pending) {
+      if (savingRef.current || activeDraft?.pending || dependencyBusyRef.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
-      } else if (dirtyRef.current || activeDraft?.dirty) {
-        const childName = tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록';
-        const message = activeDraft?.dirty ? `저장하지 않은 업무·댓글·${childName}을 버리고 이동할까요?`
+      } else if (dirtyRef.current || activeDraft?.dirty || dependencyDraftRef.current) {
+        const childName = dependencyDraftRef.current ? '업무 연결 입력' : tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록';
+        const message = activeDraft?.dirty || dependencyDraftRef.current ? `저장하지 않은 업무·댓글·${childName}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
           activeDraft?.discard();
+          setDependencyEditor(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
           setCommentBody(''); setError(''); setConflict(false);
@@ -111,7 +126,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       }
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !childDraft.current) return;
+      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
@@ -142,11 +157,11 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   }, [issueId, props.actorId]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !saving && !childCreation) closePanel();
+      if (event.key === 'Escape' && !event.defaultPrevented && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation]);
+  }, [closePanel, saving, childCreation, dependencyEditor]);
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
   const availableDocuments = data.documents.filter(d => !linkedDocuments.some(l => l.documentId === d.id));
@@ -159,10 +174,17 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const nextStatuses = allowedNextStatuses(data, {projectId:draft.projectId,status:baseDraft?.status || draft.status,type:draft.type});
   const requiredFields = requiredFieldsFor(data,draft.projectId,draft.type,draft.status,baseDraft?.status);
   const dependencies = data.dependencies.filter(d => d.predecessorId === issueId || d.successorId === issueId);
+  const hasOtherIssueInProject = data.issues.some(value => value.projectId === issue.projectId && value.id !== issueId);
+  const editingDependency = dependencyEditor?.dependency;
+  const latestDependency = editingDependency && dependencies.find(value => value.id === editingDependency.id);
+  const staleDependencyMessage = editingDependency && (!latestDependency
+    ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
+    : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
+      ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
   function update<K extends keyof Issue>(key: K, value: Issue[K]) { setDraft(previous => previous ? { ...previous, [key]: value } : previous); }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
-    event.preventDefault(); if (!draft || !issue || savingRef.current) return; savingRef.current = true; setSaving(true); setError('');
+    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current) return; savingRef.current = true; setSaving(true); setError('');
     try {
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...editableIssue(draft, labels) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
@@ -177,7 +199,7 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
-    if (!issue || savingRef.current || commenting) return;
+    if (!issue || savingRef.current || commenting || dependencyBusyRef.current) return;
     savingRef.current = true; setSaving(true); setError('');
     try {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
@@ -211,16 +233,60 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     catch (err) { notify(errorMessage(err), 'error'); } finally { setLinking(false); }
   }
   async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
+  function openDependencyEditor(opener: HTMLButtonElement, otherRole: RelatedIssueDirection, dependency?: Dependency) {
+    if (savingRef.current || dependencyBusyRef.current) return;
+    dependencyOpener.current = opener;
+    setDependencyEditor({ otherRole, dependency });
+  }
+  async function changeDependency(change: () => Promise<unknown>, message: string) {
+    if (dependencyBusyRef.current || savingRef.current) return false;
+    dependencyBusyRef.current = true;
+    setDependencyBusy(true);
+    try {
+      await change();
+      try {
+        await refresh();
+        notify(message);
+      } catch (err) {
+        notify(`${message} 최신 목록을 불러오지 못했습니다. ${errorMessage(err)}`, 'error');
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => undefined);
+      throw err;
+    } finally {
+      dependencyBusyRef.current = false;
+      setDependencyBusy(false);
+    }
+  }
+  async function saveDependency(input: DependencyInput) {
+    const changed = await changeDependency(() => {
+      if (!editingDependency) return post('/dependencies', input);
+      const { type, lagDays } = input;
+      const reverse = input.predecessorId !== editingDependency.predecessorId;
+      return patch(`/dependencies/${encodeURIComponent(editingDependency.id)}`, {
+        expectedVersion: editingDependency.version ?? 1, type, lagDays, ...(reverse ? { reverse: true } : {}),
+      });
+    }, editingDependency ? '업무 연결을 수정했습니다.' : '선행·후행 업무를 연결했습니다.');
+    if (changed) closeDependencyEditor();
+  }
+  async function unlinkDependency(dependency: Dependency, opener: HTMLButtonElement) {
+    try {
+      await changeDependency(() => remove(`/dependencies/${encodeURIComponent(dependency.id)}?expectedVersion=${dependency.version ?? 1}`),
+        '선행·후행 연결을 해제했습니다.');
+    } catch (err) { notify(errorMessage(err), 'error'); }
+    requestAnimationFrame(() => (opener.isConnected ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
+  }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <>
-    <div className="issue-panel-backdrop" inert={Boolean(childCreation)} onMouseDown={event => {
-      if (event.target === event.currentTarget && !saving && !childCreation) closePanel();
+    <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor)} onMouseDown={event => {
+      if (event.target === event.currentTarget && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
     }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading">
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
-        <button className="issue-icon-button" onClick={closePanel} disabled={saving} aria-label="업무 상세 닫기"><X size={20} /></button>
+        <button className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
     <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button><button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button><button className={tab === 'reservations' ? 'active' : ''} onClick={() => switchTab('reservations')}>시간 배정</button><button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button></div></div>
@@ -249,8 +315,39 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         <CustomFields data={data} projectId={draft.projectId} issueType={draft.type} status={draft.status} values={draft.customFields || {}} existingValues={baseDraft?.customFields || {}} onChange={value => update('customFields', value)} disabled={saving} requiredFields={requiredFields} />
         {requiredFields.length > 0 && <p className="issue-section-empty">이 유형·상태의 필수 속성: {requiredFieldLabels(data, draft.projectId, requiredFields).join(', ')}</p>}
         {error && <div className="issue-form-error" role="alert">{error}</div>}
-        <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
+        <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || dependencyBusy || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
+      <section className="issue-related-section" aria-label="업무 의존성">
+        <div className="issue-schedule-heading">
+          <h3><Link2 size={16} aria-hidden="true" />업무 의존성 <span>{dependencies.length}</span></h3>
+          <div className="issue-schedule-actions">
+            <button ref={addPredecessorButton} className="btn" type="button" disabled={!hasOtherIssueInProject || saving || dependencyBusy}
+              onClick={event => openDependencyEditor(event.currentTarget, 'predecessor')}><Plus size={14} aria-hidden="true" />선행 업무 추가</button>
+            <button className="btn" type="button" disabled={!hasOtherIssueInProject || saving || dependencyBusy}
+              onClick={event => openDependencyEditor(event.currentTarget, 'successor')}><Plus size={14} aria-hidden="true" />후행 업무 추가</button>
+          </div>
+        </div>
+        {!dependencies.length && <p className="issue-section-empty">{hasOtherIssueInProject ? '연결된 선행·후행 업무가 없습니다.' : '같은 프로젝트에 업무를 추가하면 연결할 수 있습니다.'}</p>}
+        {dependencies.map(dependency => {
+          const otherIsSuccessor = dependency.predecessorId === issueId;
+          const related = data.issues.find(value => value.id === (otherIsSuccessor ? dependency.successorId : dependency.predecessorId));
+          if (!related) return null;
+          return <div className="issue-schedule-relation" key={dependency.id}>
+            <button type="button" className="issue-related-row" onClick={() => navigateIssue(related.id)}>
+              <span className="muted">{otherIsSuccessor ? '후행' : '선행'}</span>
+              <span className="issue-key">{related.key}</span>
+              <span className="issue-dependency-description"><span>{related.title}</span><small>{dependencyLabel(dependency)}</small></span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+            <div className="issue-schedule-row-actions">
+              <button type="button" className="issue-icon-button" aria-label={`${related.key} 연결 수정`} title="연결 수정" disabled={saving || dependencyBusy}
+                onClick={event => openDependencyEditor(event.currentTarget, otherIsSuccessor ? 'successor' : 'predecessor', dependency)}><Pencil size={15} aria-hidden="true" /></button>
+              <button type="button" className="issue-icon-button" aria-label={`${related.key} 연결 해제`} title="연결 해제" disabled={saving || dependencyBusy}
+                onClick={event => void unlinkDependency(dependency, event.currentTarget)}><X size={15} aria-hidden="true" /></button>
+            </div>
+          </div>;
+        })}
+      </section>
       <section className="issue-related-section" aria-label="하위 업무">
         <div className="issue-children-heading">
           <h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>
@@ -293,19 +390,6 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{gitlabLinks.length}</span></h3><GitlabActivityRefresh refresh={refresh} notify={notify} /></div>
         {gitlabLinks.length ? <GitlabActivityList links={gitlabLinks} /> : <p className="issue-section-empty">연결된 개발 기록이 없습니다. GitLab을 연결한 뒤 브랜치 이름이나 커밋 메시지에 {issue.key}를 넣어 푸시하세요.</p>}
       </section>
-      {dependencies.length > 0 && <section className="issue-related-section">
-        <h3><Link2 size={16} /> 업무 의존성 <span>{dependencies.length}</span></h3>
-        {dependencies.map(dependency => {
-          const isPredecessor = dependency.predecessorId === issueId;
-          const related = data.issues.find(issue => issue.id === (isPredecessor ? dependency.successorId : dependency.predecessorId));
-          return related && <button key={dependency.id} className="issue-related-row" onClick={() => navigateIssue(related.id)}>
-            <span className="muted">{isPredecessor ? '후행' : '선행'}</span>
-            <span className="issue-key">{related.key}</span>
-            <span className="issue-dependency-description"><span>{related.title}</span><small>{dependencyLabel(dependency)}</small></span>
-            <ChevronRight size={14} />
-          </button>;
-        })}
-      </section>}
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments">
         <h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>
@@ -332,6 +416,9 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>
     </aside></div>
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
+    {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
+      anchor={{ issueId, otherRole: dependencyEditor.otherRole }} staleMessage={staleDependencyMessage} busy={dependencyBusy}
+      onClose={closeDependencyEditor} onSubmit={saveDependency} onDraftChange={trackDependencyDraft} />}
   </>;
 }
 

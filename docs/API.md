@@ -52,7 +52,7 @@ curl --fail-with-body \
 
 브라우저의 `POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
 
-`PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?}`를 보내 연결 유형과 간격을 바꾼다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
+`PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?,reverse?}`를 보내 연결 유형과 간격을 바꾼다. `reverse: true`는 같은 연결 ID에서 선행 업무와 후행 업무를 서로 바꾼다. 반대 방향이 순환을 만들면 변경을 거절한다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
 
 ## 일정 여유 분석
 
@@ -241,6 +241,8 @@ curl --fail-with-body \
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
 
 **연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`, `jiraRoutes`를 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
+
+수동 동기화는 조회를 완료한 저장소를 반영하고 `repositories`에 저장소별 결과를 돌려준다. 성공과 실패가 섞이면 `partial: true`가 표시된다. 요청한 저장소가 모두 실패하면 새 링크를 저장하지 않고 502 응답에 저장소별 실패 사유를 전달한다. `{repositoryIds,expectedVersion,includeHistory?}`로 현재 설정에 있는 저장소만 골라 다시 시도할 수 있다. 그 사이 연결 설정이 변경되면 선택 재시도를 거절한다.
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 
