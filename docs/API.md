@@ -534,6 +534,12 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 자체 백업 schema10 이상은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
 
 
+## 기준 업무와 후행 일정 함께 적용
+
+브라우저의 `POST /api/schedule/auto-preview`에 `{projectId, anchorChange: {id, expectedVersion, startDate, endDate}}`를 보낸다. 양쪽 날짜는 `YYYY-MM-DD` 또는 `null`이다. 기준 날짜를 그대로 사용해 프로젝트 안의 직접·간접 후행 업무를 계산한다. 이 모드에는 일반 자동 일정의 `issueIds`, `anchorDate`, `defaultDuration`, `seedChanges`를 함께 보내지 않는다. 반환값의 `changes`는 검토할 날짜이고 `blocking`은 함께 적용하기 전에 해결할 항목이다.
+
+`POST /api/schedule/auto-apply`에 `{previewId}`를 보낸다. 작업자와 미리보기의 업무·연결·달력·워크플로·양식 버전을 확인한다. 정상 적용은 같은 트랜잭션에서 업무 날짜와 되돌리기 기록을 저장하고, 동일 미리보기의 재요청은 저장한 결과를 반환한다. `GET /api/schedule/auto-result/:previewId`에서 같은 작업자가 `{applied:false}` 또는 기존 `{undoId,updated,warnings}`를 읽을 수 있다. 미사용 미리보기의 유효 시간은 30분이며 적용 결과는 7일간 보관된다.
+
 ## 스프레드시트 일정 붙여넣기
 
 브라우저의 `POST /api/schedule/paste-preview`에 `{projectId, text}`를 보낸다. `text`는 헤더가 있는 TSV 또는 CSV다. `key`(`업무 키`)와 `startDate`(`시작일`), `endDate`(`종료일`), `predecessor`(`선행 업무`) 중 한 열 이상이 필요하다. 빈 날짜 값은 유지하고 `-`는 지운다. 선행 업무 키가 있으면 `dependency type`(`연결 유형`)과 `lag days`(`근무일 간격`)도 사용할 수 있다. 유형 `-`는 지정한 관계를 해제한다. 빈 유형과 간격은 기존 값을 사용하며 새 연결의 기본값은 `FS`·`0`이다. 업무 키는 같은 프로젝트에서 조회하며 후행 업무마다 한 행을 사용할 수 있다. 다른 헤더가 명시된 열은 무시한다. 최대 500행, UTF-8 128KiB를 처리한다.

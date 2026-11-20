@@ -9,7 +9,7 @@ import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
 import { CalendarError,defaultCalendar,validateWorkCalendar,isWorkingDate,shiftWorkingDate,countWorkingDays,createCalendarMath } from '../../shared/calendar.js';
-import type { Dependency, DependencyType, Issue, ScheduleChange } from '../../shared/types.js';
+import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, ScheduleChange } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
   const service=createApp({dataDir:dir}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
@@ -70,6 +70,79 @@ test('automatic scheduling treats missing/partial dates and negative lags explic
     const negative=await makeIssue(f,'음수 연결','2026-11-16','2026-11-17');await dep(f,fixed,negative,-1);
     const overlap=await preview(f,[negative.id]);assert.deepEqual(overlap.blocking,[]);assert.equal(overlap.changes[0].toStart,'2026-11-20');assert.equal(overlap.changes[0].toEnd,'2026-11-23');
   }finally{await f.close();f.remove();}
+});
+
+test('a fixed anchor keeps the entered dates and commits all reachable schedules in one recoverable undo', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const anchor = await makeIssue(f, '기준 업무', '2026-11-16', '2026-11-17');
+  const first = await makeIssue(f, '직접 후행', '2026-11-18', '2026-11-19');
+  const second = await makeIssue(f, '간접 후행', '2026-11-20', '2026-11-20');
+  const unrelated = await makeIssue(f, '독립 업무', null, null);
+  await dep(f, anchor, first);
+  await dep(f, first, second, 1, 'SS');
+
+  const request = { projectId: f.projectId, anchorChange: {
+    id: anchor.id, expectedVersion: anchor.version, startDate: null, endDate: '2026-11-21',
+  } };
+  const preview = await f.request('/schedule/auto-preview', 'POST', request);
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  const proposal = preview.data as AutomaticSchedulePreview;
+  assert.deepEqual(proposal.blocking, []);
+  const dates = (issue: Issue) => [issue.startDate, issue.endDate];
+  const expected = [[null, '2026-11-21'], ['2026-11-23', '2026-11-24'], ['2026-11-24', '2026-11-24']];
+  assert.deepEqual(proposal.changes.map(change => [change.id, change.toStart, change.toEnd]),
+    [anchor, first, second].map((issue, index) => [issue.id, ...expected[index]]));
+  assert.deepEqual(await Promise.all([anchor, first, second, unrelated].map(issue => getIssue(f, issue.id))), [anchor, first, second, unrelated]);
+
+  const resultPath = `/schedule/auto-result/${proposal.previewId}`;
+  assert.deepEqual(await f.request(resultPath), { status: 200, data: { applied: false } });
+  assert.equal((await f.request(resultPath, 'GET', undefined, { 'X-Actor-Id': 'user-seo' })).status, 409);
+  const applied = await f.request('/schedule/auto-apply', 'POST', { previewId: proposal.previewId });
+  assert.equal(applied.status, 200);
+  assert.deepEqual(await f.request(resultPath), applied);
+  assert.deepEqual(await f.request('/schedule/auto-apply', 'POST', { previewId: proposal.previewId }), applied);
+  const saved = await Promise.all([anchor, first, second].map(issue => getIssue(f, issue.id)));
+  assert.deepEqual(saved.map(dates), expected);
+  assert.deepEqual(saved.map(issue => issue.version), [anchor, first, second].map(item => item.version + 1));
+  assert.deepEqual(await getIssue(f, unrelated.id), unrelated);
+
+  const undo = await f.request('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+  assert.equal(undo.status, 200);
+  assert.equal(undo.data.updated.length, 3);
+  assert.deepEqual((await Promise.all([anchor, first, second].map(issue => getIssue(f, issue.id)))).map(dates), [anchor, first, second].map(dates));
+});
+
+test('pinned anchor conflicts and edits to a hidden successor cannot partially apply schedules', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const predecessor = await makeIssue(f, '보존할 선행', '2026-11-16', '2026-11-17');
+  const anchor = await makeIssue(f, '고정 입력', '2026-11-18', '2026-11-18');
+  const successor = await makeIssue(f, '연결된 후행', '2026-11-19', '2026-11-20');
+  await dep(f, predecessor, anchor);
+  await dep(f, anchor, successor);
+  const anchored = { projectId: f.projectId, anchorChange: {
+    id: anchor.id, expectedVersion: anchor.version, startDate: '2026-11-17', endDate: '2026-11-20',
+  } };
+  const conflict = await f.request('/schedule/auto-preview', 'POST', anchored);
+  assert.equal(conflict.status, 200);
+  const blocked = conflict.data as AutomaticSchedulePreview;
+  assert.ok(blocked.blocking.some(message => message.includes('입력한 시작일 2026-11-17')));
+  assert.ok(blocked.blocking.some(message => message.startsWith(successor.key)));
+  assert.deepEqual(blocked.changes, []);
+  assert.equal((await f.request('/schedule/auto-apply', 'POST', { previewId: blocked.previewId })).status, 422);
+  assert.equal((await f.request('/schedule/auto-preview', 'POST', { ...anchored, issueIds: [anchor.id] })).status, 400);
+
+  anchored.anchorChange.startDate = '2026-11-18';
+  const ready = await f.request('/schedule/auto-preview', 'POST', anchored);
+  assert.equal(ready.status, 200);
+  assert.equal(ready.data.changes.length, 2);
+  const edited = await f.request(`/issues/${successor.id}`, 'PATCH', { expectedVersion: successor.version, description: '다른 편집' });
+  assert.equal(edited.status, 200);
+  assert.equal((await f.request('/schedule/auto-apply', 'POST', { previewId: ready.data.previewId })).status, 409);
+  assert.deepEqual(await f.request(`/schedule/auto-result/${ready.data.previewId}`), { status: 200, data: { applied: false } });
+  assert.deepEqual(await getIssue(f, anchor.id), anchor);
+  assert.deepEqual(await getIssue(f, successor.id), edited.data);
 });
 
 test('all dependency types use their calendar anchors and keep working duration through mixed constraints and undo', async () => {

@@ -131,6 +131,21 @@
   font-size: 11px;
 }
 
+.gantt-inline-end-cell { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.gantt-inline-cascade {
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid #bad2c7;
+  border-radius: 4px;
+  color: #205e51;
+  background: #f1f7f4;
+  font-size: 11px;
+  cursor: pointer;
+}
+.gantt-inline-cascade:hover:not(:disabled) { background: #e1f0ea; }
+.gantt-inline-cascade:focus-visible { outline: 2px solid #2e7a68; outline-offset: 1px; }
+.gantt-inline-cascade:disabled { opacity: .55; cursor: default; }
+
 .gantt-date-range-actions {
   position: absolute;
   inset: 12px auto auto 12px;
