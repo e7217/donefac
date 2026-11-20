@@ -1,5 +1,5 @@
 import type { Express, Request } from 'express';
-import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacyRecordKind, LegacySource, MigrationConfiguration, MigrationNotice, Project, SourceImport, SourceImportIntegrity, SourceImportIntegrityPackage, SourceRecordArchive, SourceRecordPage, SourceRecordSummary, User } from '../shared/types.js';
+import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacyRecordKind, LegacySource, MigrationAppendConfiguration, MigrationConfiguration, MigrationNotice, Project, SourceImport, SourceImportIntegrity, SourceImportIntegrityPackage, SourceRecordArchive, SourceRecordPage, SourceRecordSummary, User } from '../shared/types.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
@@ -29,22 +29,42 @@ function legacySource(raw: unknown): LegacySource {
   if (product !== 'jira' && product !== 'confluence' || typeof format !== 'string' || !(product === 'jira' ? ['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json'] : ['confluence-xml']).includes(format)) fail(400, '원본 도구·내보내기 형식이 일치하지 않습니다.');
   return { product, format: format as LegacySource['format'], instanceKey: string(value.instanceKey, '원본 인스턴스', 200), declaredVersion: nullable(value.declaredVersion, '원본 버전', 100), timezone: nullable(value.timezone, '원본 시간대', 100) };
 }
+function mapping<T>(raw: unknown, convert: (value: unknown) => T): Record<string, T> {
+  const entries = Object.entries(object(raw, '이관 매핑'));
+  if (entries.length > 100000) fail(400, '이관 매핑 개수가 너무 많습니다.');
+  return Object.fromEntries(entries.map(([key, value]) => {
+    string(key, '매핑 ID', 1200);
+    if (['__proto__', 'constructor', 'prototype'].includes(key)) fail(400, '이관 매핑 키를 확인해 주세요.');
+    return [key, convert(value)];
+  }));
+}
+export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppendConfiguration {
+  const append = object(raw, '기존 프로젝트 추가 설정');
+  if (Object.keys(append).length !== 4) fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
+  return {
+    projectId: string(append.projectId, '추가 대상 프로젝트', 200),
+    statuses: mapping(append.statuses, value => string(value, '추가 대상 상태', 200)),
+    issueTypes: mapping(append.issueTypes, value => string(value, '추가 대상 업무 유형', 200)),
+    fields: mapping(append.fields, value => nullable(value, '추가 대상 필드', 200)),
+  };
+}
 function configuration(raw: unknown, users: Set<string>): MigrationConfiguration {
   const value = object(raw, '이관 설정');
   const packageIds = list(value.packageIds, '설정 패키지', 20).map(id => string(id, '패키지 ID', 200)); if (new Set(packageIds).size !== packageIds.length) fail(400, '설정 패키지가 중복되었습니다.');
   const projects = list(value.projects, '설정 프로젝트', 100).map(raw => { const item = object(raw, '설정 프로젝트'); const key = string(item.key, '프로젝트 키', 12); if (!/^[A-Z][A-Z0-9]{1,11}$/.test(key)) fail(400, '원본 이관 프로젝트 키를 확인해 주세요.'); return { containerId: string(item.containerId, '원본 컨테이너', 500), key, name: string(item.name, '프로젝트 이름', 300) }; });
   if (new Set(projects.map(value => value.containerId)).size !== projects.length) fail(400, '이관 설정 원본 컨테이너가 중복되었습니다.');
   const projectNames = new Map<string, string>(); for (const project of projects) { if (projectNames.has(project.key) && projectNames.get(project.key) !== project.name) fail(400, '같은 신규 프로젝트 키는 같은 이름으로 매핑해야 합니다.'); projectNames.set(project.key, project.name); }
-  const map = <T>(raw: unknown, convert: (value: unknown) => T): Record<string, T> => { const input = object(raw, '이관 매핑'), result: Record<string, T> = {}; if (Object.keys(input).length > 100000) fail(400, '이관 매핑 개수가 너무 많습니다.'); for (const [key, value] of Object.entries(input)) { string(key, '매핑 ID', 1200); if (['__proto__', 'constructor', 'prototype'].includes(key)) fail(400, '이관 매핑 키를 확인해 주세요.'); Object.defineProperty(result, key, { value: convert(value), enumerable: true, writable: true, configurable: true }); } return result; };
-  const mappedUsers = map(value.users, value => { const id = nullable(value, '매핑 사용자', 200); if (id && !users.has(id)) fail(400, '이관 설정의 현재 사용자를 찾을 수 없습니다.'); return id; });
-  const statuses = map(value.statuses, value => { if (typeof value !== 'string' || !['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'].includes(value)) fail(400, '원본 상태 매핑을 확인해 주세요.'); return value as MigrationConfiguration['statuses'][string]; });
-  const issueTypes = map(value.issueTypes, value => nullable(value, '업무 유형', 200));
-  const fields = map(value.fields, value => { if (typeof value !== 'string' || !['text', 'number', 'date', 'select', 'multi_select', 'checkbox', 'user', 'url', 'archive'].includes(value)) fail(400, '원본 필드 매핑을 확인해 주세요.'); return value as MigrationConfiguration['fields'][string]; });
-  const sourceBaseUrls = map(value.sourceBaseUrls, value => { if (value === null) return null; const text = string(value, '원본 기준 주소', 4000); try { const url = new URL(text); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(); } catch { fail(400, '원본 기준 주소에는 http(s) 주소만 사용할 수 있습니다.'); } return text; });
+  const mappedUsers = mapping(value.users, value => { const id = nullable(value, '매핑 사용자', 200); if (id && !users.has(id)) fail(400, '이관 설정의 현재 사용자를 찾을 수 없습니다.'); return id; });
+  const statuses = mapping(value.statuses, value => { if (typeof value !== 'string' || !['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'].includes(value)) fail(400, '원본 상태 매핑을 확인해 주세요.'); return value as MigrationConfiguration['statuses'][string]; });
+  const issueTypes = mapping(value.issueTypes, value => nullable(value, '업무 유형', 200));
+  const fields = mapping(value.fields, value => { if (typeof value !== 'string' || !['text', 'number', 'date', 'select', 'multi_select', 'checkbox', 'user', 'url', 'archive'].includes(value)) fail(400, '원본 필드 매핑을 확인해 주세요.'); return value as MigrationConfiguration['fields'][string]; });
+  const sourceBaseUrls = mapping(value.sourceBaseUrls, value => { if (value === null) return null; const text = string(value, '원본 기준 주소', 4000); try { const url = new URL(text); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(); } catch { fail(400, '원본 기준 주소에는 http(s) 주소만 사용할 수 있습니다.'); } return text; });
   const timezone = string(value.timezone, '해석 시간대', 100); try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(0); } catch { fail(400, '이관 해석 시간대를 확인해 주세요.'); }
   if (value.datePolicy !== 'block' && value.datePolicy !== 'import-time') fail(400, '날짜 해석 정책을 확인해 주세요.');
   const excludedRecords = list(value.excludedRecords, '제외 원본', 100000).map(value => string(value, '제외 원본', 1200)); if (new Set(excludedRecords).size !== excludedRecords.length) fail(400, '제외 원본이 중복되었습니다.');
-  return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy, excludedRecords };
+  const appendTo = Object.hasOwn(value, 'appendTo') ? parseMigrationAppendConfiguration(value.appendTo) : undefined;
+  return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy,
+    excludedRecords, ...(appendTo ? { appendTo } : {}) };
 }
 
 function parseIntegrity(raw: unknown, packages: SourceImport['packages']): SourceImportIntegrity | undefined {
@@ -102,6 +122,10 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const packages = list(value.packages, '원본 패키지', 20).map(raw => { const item = object(raw, '원본 패키지'); let filename: string; try { filename = safeFilename(item.filename); } catch { return fail(400, '원본 패키지 파일명을 확인해 주세요.'); } return { stagingId: string(item.stagingId, '분석 패키지 ID', 200), filename, sha256: sha(item.sha256), source: legacySource(item.source) }; });
   if (!packages.length || new Set(packages.map(value => value.stagingId)).size !== packages.length || new Set(packages.map(value => stable([value.source.product, value.source.instanceKey, value.sha256]))).size !== packages.length) fail(400, '원본 패키지 출처가 중복되거나 비었습니다.');
   const config = configuration(value.configuration, users); if (config.packageIds.length !== packages.length || packages.some(value => !config.packageIds.includes(value.stagingId))) fail(400, '이관 설정과 원본 패키지 목록이 다릅니다.');
+  if (config.appendTo && (projectIds.length !== 1 || projectIds[0] !== config.appendTo.projectId ||
+      packages.some(pkg => pkg.source.product !== 'jira' || pkg.source.instanceKey !== packages[0].source.instanceKey))) {
+    fail(400, '추가 이관 영수증의 대상 프로젝트와 Jira 원본 인스턴스를 확인해 주세요.');
+  }
   const rawCounts = object(value.counts, '이관 수량'), counts: Record<string, number> = {}; if (Object.keys(rawCounts).length > 100) fail(400, '이관 수량 종류가 너무 많습니다.');
   for (const [key, count] of Object.entries(rawCounts)) { string(key, '수량 종류', 100); if (['__proto__', 'prototype', 'constructor'].includes(key) || !Number.isSafeInteger(count) || Number(count) < 0) fail(400, '이관 수량을 확인해 주세요.'); counts[key] = Number(count); }
   const notices = value.notices === undefined ? undefined : list(value.notices, '검토한 이관 안내', 10000).map(raw => {

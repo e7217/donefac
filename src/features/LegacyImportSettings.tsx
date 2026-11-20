@@ -120,7 +120,7 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
   const selectedDetail = detail?.summary.id === selectedId ? detail : null;
   return <section className="card legacy-import-settings" aria-label="기존 도구 원본 분석">
     <header className="legacy-card-heading"><div><h2><Archive size={20} />기존 도구 원본 분석</h2><p>Jira·Confluence 내보내기 파일을 읽고 이관할 원본과 누락 항목을 확인합니다.</p></div><button className="btn btn-ghost" aria-label="원본 분석 새로고침" disabled={loading || pending} onClick={() => setRefreshKey(value => value + 1)}><RefreshCw size={16} />새로고침</button></header>
-    <p className="legacy-analysis-notice"><strong>원본을 분석하고 누락 항목을 확인하세요.</strong> 분석을 마치면 아래 실제 데이터 이관에서 매핑하고 새 프로젝트에 적용할 수 있습니다.</p>
+    <p className="legacy-analysis-notice"><strong>원본을 분석하고 누락 항목을 확인하세요.</strong> 분석을 마치면 아래 실제 데이터 이관에서 적용 대상과 매핑을 검토할 수 있습니다.</p>
     <form className="legacy-upload-form" aria-label="원본 파일 분석" onSubmit={event => void upload(event)}><fieldset disabled={pending}>
       <label>원본 파일<input ref={fileInput} className="field" type="file" accept=".zip,.xml,.csv,.json" aria-label="Jira·Confluence 원본 파일" onChange={event => { setFile(event.target.files?.[0] || null); setActionError(''); }} /></label>
       <label>원본 인스턴스 식별값<input className="field" aria-label="원본 인스턴스 식별값" value={instanceKey} onChange={event => setInstanceKey(event.target.value)} maxLength={500} placeholder="예: jira-team-original" required /></label>

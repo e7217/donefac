@@ -2,10 +2,19 @@ import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,Iss
 import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
+export interface MigrationAppendContext {
+  project: Project;
+  workflow: ProjectWorkflow;
+  schema: ProjectIssueSchema;
+  nextIssueNumber: number;
+  token: string;
+  knownIssues: { alias: string; issueId: string; projectId: string | null }[];
+}
 export interface MigrationPlanningInput {
   id:string;configuration:MigrationConfiguration;actorId:string;users:User[];existingProjectKeys:string[];
   packages:MigrationPackage[];now:string;
   fileInfo?:Record<string,Record<string,{size:number;sha256:string;mimeType:string}>>;
+  append?: MigrationAppendContext;
 }
 export interface MigrationFileCopy { fileId:string;packageId:string;path:string;size:number;sha256:string }
 export interface PreparedMigration {
@@ -15,4 +24,5 @@ export interface PreparedMigration {
   attachments:Attachment[];attachmentVersions:AttachmentVersion[];fileCopies:MigrationFileCopy[];
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
+  append?: { projectId: string; token: string; startIssueNumber: number };
 }

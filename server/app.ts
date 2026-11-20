@@ -62,7 +62,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink } from '../shared/types.js';
+import { PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -402,12 +402,26 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   migrations.registerRoutes(app, {
     actor,
     persistCanonical(value, req) {
-      const schemas = issueSchemas.validateImport(value.issueSchemas, value.projects, value.issues, {users:store.all<User>('users')});
-      const importedWorkflows = workflows.validateImport(value.workflows, value.projects, value.issues, schemas);
-      validateVisibilityStatuses(schemas, importedWorkflows);
-      for (const project of value.projects) store.put('projects', validateProject(project));
-      for (const schema of schemas) store.put('issue_schemas', schema);
-      for (const workflow of importedWorkflows) store.put('workflows', workflow);
+      if (value.append) {
+        const { projectId, startIssueNumber } = value.append;
+        const project = get<Project>('projects', projectId);
+        const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
+        if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || !value.issues.length ||
+            !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
+              issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id))) {
+          fail('기존 프로젝트에 추가할 업무의 범위나 번호가 올바르지 않습니다.',409);
+        }
+        store.db.prepare(`INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id)
+          DO UPDATE SET next_number=excluded.next_number`).run(projectId,startIssueNumber + value.issues.length);
+      } else {
+        const schemas = issueSchemas.validateImport(value.issueSchemas, value.projects, value.issues, {users:store.all<User>('users')});
+        const importedWorkflows = workflows.validateImport(value.workflows, value.projects, value.issues, schemas);
+        validateVisibilityStatuses(schemas, importedWorkflows);
+        for (const project of value.projects) store.put('projects', validateProject(project));
+        for (const schema of schemas) store.put('issue_schemas', schema);
+        for (const workflow of importedWorkflows) store.put('workflows', workflow);
+      }
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
       for (const document of value.documents) store.put('documents', document);
@@ -421,15 +435,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);
       for (const link of value.atlassianLinks??[]) atlassianLinks.create(link);
-      const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
-      for (const issue of value.issues) {
-        const number = Number(issue.key.split('-').at(-1));
-        nextNumbers.set(issue.projectId, Math.max(nextNumbers.get(issue.projectId)!, number + 1));
+      if (!value.append) {
+        const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
+        for (const issue of value.issues) {
+          const number = Number(issue.key.split('-').at(-1));
+          nextNumbers.set(issue.projectId, Math.max(nextNumbers.get(issue.projectId)!, number + 1));
+        }
+        const insertSequence = store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)');
+        for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
-      const insertSequence = store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)');
-      for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       reportLedger.baselineImportedIssues(value.issues);
-      activity(req, 'source-import', value.sourceImport.id, '원본 이관 적용', `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
+      activity(req, 'source-import', value.sourceImport.id, value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용', `${value.issues.length}개 업무 · ${value.documents.length}개 문서`);
     },
   });
   worklogs.registerRoutes(app,{actor,activity});
@@ -1142,6 +1158,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       projects:data.projects,users:data.users,workflows:importedWorkflows,schemas:importedSchemas,
     });
     if(data.schemaVersion<9&&['sourceImports','sourceRecords','attachmentVersions','issueRelations'].some(key=>Array.isArray(data[key])&&data[key].length))fail('원본 이관과 첨부 버전이 있는 백업은 schemaVersion 9가 필요합니다.');
+    if(data.schemaVersion<37&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo!==undefined))fail('기존 프로젝트에 Jira 업무를 추가한 영수증에는 schemaVersion 37 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

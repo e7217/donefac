@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -18,6 +18,108 @@ async function openReconciliation(settings: Locator) {
 async function preview(page: Page, settings: Locator) { const response = page.waitForResponse(value => value.url().endsWith('/api/migrations/preview') && value.request().method() === 'POST'); await settings.getByRole('button', { name: '적용 전 미리보기 만들기', exact: true }).click(); const result = await response; expect(result.ok(), await result.text()).toBe(true); return await result.json() as MigrationPreview; }
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
+
+test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트에 추가하고 편집한 업무를 보존한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `SRC${id}`, targetKey = `TGT${id}`, instance = `append-source-${id}`;
+  const targetName = `기존 이관 프로젝트 ${id}`, oldTitle = `처음 받은 업무 ${id}`, newTitle = `새로 받은 업무 ${id}`;
+  const staged: LegacyPackageSummary[] = [];
+  const read = async <T,>(path: string): Promise<T> => {
+    const response = await request.get(path);
+    expect(response.ok(), await response.text()).toBe(true);
+    return await response.json() as T;
+  };
+  try {
+    const original = await upload(request, `original-${id}.csv`, jira(sourceKey, oldTitle), instance);
+    staged.push(original);
+    const originalOptions = await read<MigrationOptions>(`/api/migrations/options?${new URLSearchParams({ packageId: original.id })}`);
+    const configuration = { ...originalOptions.defaultConfiguration, projects: originalOptions.defaultConfiguration.projects.map(project => ({ ...project, key: targetKey, name: targetName })) };
+    const proposedResponse = await request.post('/api/migrations/preview', { data: { configuration } });
+    expect(proposedResponse.status(), await proposedResponse.text()).toBe(201);
+    const proposed = await proposedResponse.json() as MigrationPreview;
+    const initialResponse = await request.post(`/api/migrations/previews/${proposed.id}/apply`, { data: {
+      expectedVersion: proposed.version, acknowledgements: proposed.requiredAcknowledgements,
+    } });
+    expect(initialResponse.status(), await initialResponse.text()).toBe(201);
+    const initial = await initialResponse.json() as MigrationApplyResult;
+    const [projectId] = initial.import.projectIds;
+    const initialWorkspace = await read<WorkspaceSnapshot>('/api/workspace');
+    const prior = initialWorkspace.issues.find(issue => issue.projectId === projectId && issue.title === oldTitle)!;
+    expect(prior).toBeTruthy();
+    const savedResponse = await request.patch(`/api/issues/${prior.id}`, { data: { expectedVersion: prior.version, title: `Teamspace에서 편집한 내용 ${id}` } });
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const saved = await savedResponse.json() as Issue;
+
+    const workflowPath = `/api/projects/${projectId}/workflow`;
+    const workflow = await read<ProjectWorkflow>(workflowPath);
+    const targetStatusId = 'local_review_queue';
+    const updatedWorkflow = await request.patch(workflowPath, { data: {
+      ...workflow, expectedVersion: workflow.version,
+      statuses: [...workflow.statuses, { id: targetStatusId, label: '팀 확인 대기', category: 'todo', color: '#596d84' }],
+    } });
+    expect(updatedWorkflow.ok(), await updatedWorkflow.text()).toBe(true);
+
+    const header = ['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated'];
+    const data = (number: number, sourceId: string, title: string, status: string) => [
+      `${sourceKey}-${number}`, sourceId, sourceKey, `원본 프로젝트 ${sourceKey}`, title, '', status, 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z',
+    ];
+    const next = await upload(request, `append-${id}.csv`, csv([header, data(1, '100', `Jira에서 변경한 제목 ${id}`, 'Ready'), data(2, '101', newTitle, 'New from Jira')]), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByRole('combobox', { name: '이관 방식', exact: true });
+    await expect(mode).toHaveValue('new');
+    const newProjectKey = settings.getByLabel(`새 프로젝트 키 원본 프로젝트 ${sourceKey}`, { exact: true });
+    await newProjectKey.fill(`TMP${id}`);
+    await mode.selectOption('append');
+    const target = settings.getByRole('region', { name: '추가할 기존 프로젝트', exact: true });
+    await expect(target).toContainText(`${targetKey} · ${targetName}`);
+    await expect(target).toContainText(instance);
+    await expect(newProjectKey).toHaveCount(0);
+    const bounds = await target.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await settings.getByText('상태 매핑', { exact: true }).click();
+    const mapping = settings.getByLabel('상태 매핑 New from Jira', { exact: true });
+    await expect(mapping).toHaveValue('');
+    await mapping.selectOption(targetStatusId);
+    const beforeSwitch = await preview(page, settings);
+    expect(beforeSwitch.canApply, JSON.stringify(beforeSwitch.notices)).toBe(true);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await mode.selectOption('new');
+    await expect(review).toHaveCount(0);
+    await expect(newProjectKey).toHaveValue(`TMP${id}`);
+    await mode.selectOption('append');
+    await settings.getByText('상태 매핑', { exact: true }).click();
+    await expect(mapping).toHaveValue(targetStatusId);
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendTo?.projectId).toBe(projectId);
+    expect(plan.counts).toMatchObject({ projects: 0, issues: 1, retainedIssues: 1 });
+    await expect(review.getByText('새로 추가할 업무 1', { exact: true })).toBeVisible();
+    await expect(review.getByText('이미 이관한 업무 1', { exact: true })).toBeVisible();
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const response = await applyResponse;
+    expect(response.status(), await response.text()).toBe(201);
+    const appended = await response.json() as MigrationApplyResult;
+    expect(appended.import.projectIds).toEqual([projectId]);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByText('원본 기록과 업무를 추가한 프로젝트', { exact: true })).toBeVisible();
+
+    const after = await read<WorkspaceSnapshot>('/api/workspace');
+    expect(after.projects).toEqual(initialWorkspace.projects);
+    expect(after.issues.find(issue => issue.id === prior.id)).toEqual(saved);
+    expect(after.issues.find(issue => issue.projectId === projectId && issue.title === newTitle)).toMatchObject({ status: targetStatusId, key: `${targetKey}-2` });
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
 
 test('360px 이관 진단에서 해당 패키지의 원본을 확인하고 같은 미리보기로 돌아간다', async ({ page, request }) => {
   test.setTimeout(90_000);

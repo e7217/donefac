@@ -137,16 +137,28 @@ export interface MigrationContainerOption { id:string;packageId:string;sourcePro
 export interface MigrationValueOption { id:string;packageId:string;sourceValue:string;label:string }
 export interface MigrationIdentityOption extends MigrationValueOption { email:string|null }
 export interface MigrationFieldOption extends MigrationValueOption { suggestedKind:CustomFieldKind|'archive' }
+export interface MigrationAppendTarget {
+  projectId: string; key: string; name: string; instanceKey: string; sourceProjectId: string;
+  statuses: WorkflowStatus[]; issueTypes: IssueTypeDefinition[]; fields: CustomFieldDefinition[];
+}
+export interface MigrationAppendConfiguration {
+  projectId: string;
+  statuses: Record<string, string>;
+  issueTypes: Record<string, string>;
+  fields: Record<string, string | null>;
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
   defaultConfiguration:MigrationConfiguration;
+  appendTarget?: MigrationAppendTarget;
 }
 export interface MigrationConfiguration {
   packageIds:string[];projects:{containerId:string;key:string;name:string}[];
   users:Record<string,string|null>;statuses:Record<string,StatusCategory>;issueTypes:Record<string,string|null>;
   fields:Record<string,CustomFieldKind|'archive'>;sourceBaseUrls:Record<string,string|null>;
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
+  appendTo?: MigrationAppendConfiguration;
 }
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
 export interface MigrationPreview {

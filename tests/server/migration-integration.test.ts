@@ -21,7 +21,7 @@ async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string'); const base = `http://127.0.0.1:${address.port}/api`, db = new DatabaseSync(join(dir, 'teamspace.sqlite')); db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
   async function call<T = unknown>(path: string, method = 'GET', body?: unknown, actor = 'user-seo') { const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; }
-  async function upload(bytes: Buffer, filename: string, product = 'auto') { const params = new URLSearchParams({ filename, product, instanceKey: `synthetic-${randomUUID()}` }); const response = await fetch(`${base}/legacy-import/packages?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(bytes) }); const data = await response.json() as LegacyPackageSummary; assert.equal(response.status, 201, JSON.stringify(data)); return data; }
+  async function upload(bytes: Buffer, filename: string, product = 'auto', instanceKey = `synthetic-${randomUUID()}`) { const params = new URLSearchParams({ filename, product, instanceKey }); const response = await fetch(`${base}/legacy-import/packages?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(bytes) }); const data = await response.json() as LegacyPackageSummary; assert.equal(response.status, 201, JSON.stringify(data)); return data; }
   async function configuration(packages: LegacyPackageSummary | LegacyPackageSummary[], key = `MIG${randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase()}`) {
     const params = new URLSearchParams((Array.isArray(packages) ? packages : [packages]).map(pkg => ['packageId', pkg.id]));
     const result = await call<MigrationOptions>(`/migrations/options?${params}`); assert.equal(result.status, 200);
@@ -40,6 +40,101 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('incremental Jira imports append only new issues to the bound project and reuse active source parents', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-continuing-jira';
+  function original(id: string, key: string, summary: string, extra: Record<string, unknown> = {}) {
+    return { id, key, fields: {
+      project: { id: '10104', key: 'OLD', name: '팀 Jira 원본' }, summary,
+      description: '원본 설명', created: '2020-01-01T00:00:00Z', updated: '2020-01-02T01:00:00Z',
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' }, ...extra,
+    } };
+  }
+  const upload = (name: string, issues: ReturnType<typeof original>[], source = instance) =>
+    f.upload(Buffer.from(JSON.stringify({ issues })),name,'jira',source);
+
+  const initial = await upload('initial-jira.json', [original('100','OLD-1','기존 부모'), original('200','OLD-2','기존 보관 업무')]);
+  const initialPlan = await f.preview(await f.configuration(initial,'CONT'));
+  assert.equal(initialPlan.canApply,true,JSON.stringify(initialPlan.notices));
+  const initialApply = await f.apply(initialPlan);
+  assert.equal(initialApply.status,201,JSON.stringify(initialApply.data));
+  const [projectId] = initialApply.data.import.projectIds;
+  const initialData = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const first = initialData.issues.find(issue=>issue.key==='CONT-1')!;
+  const second = initialData.issues.find(issue=>issue.key==='CONT-2')!;
+  assert.ok(first && second);
+  const updated = await f.call<typeof first>(`/issues/${first.id}`,'PATCH',{expectedVersion:first.version,title:'Teamspace에서 수정한 부모'});
+  assert.equal(updated.status,200,JSON.stringify(updated.data));
+  assert.equal((await f.call(`/issues/${second.id}`,'DELETE',{expectedVersion:second.version})).status,200);
+
+  const rows = [original('200','OLD-2','최신 원본의 보관 업무',{
+    comment:{comments:[{id:'301',body:'기존 업무의 새 원본 댓글',created:'2020-01-04T00:00:00Z'}]},
+  }), original('300','OLD-3','처음 가져오는 하위 업무',{
+    parent:{id:'100',key:'OLD-1'},
+    comment:{comments:[{id:'302',body:'새 티켓의 원본 댓글',created:'2020-01-04T00:00:00Z'}]},
+    issuelinks:[{id:'303',type:{id:'1',name:'Blocks'},outwardIssue:{id:'100',key:'OLD-1'}}],
+  })];
+  const delta = await upload('continuing-jira.json',rows);
+  const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${delta.id}`)).data;
+  const target = options.appendTarget;
+  assert.equal(target?.projectId,projectId);
+  assert.equal(target?.instanceKey,instance);
+  assert.ok(target);
+  const unrelated = await upload('unrelated-origin.json',rows,'synthetic-different-jira');
+  assert.equal((await f.call<MigrationOptions>(`/migrations/options?packageId=${unrelated.id}`)).data.appendTarget,undefined);
+  const config: MigrationConfiguration = {
+    ...options.defaultConfiguration,
+    appendTo: {
+      projectId,
+      statuses:Object.fromEntries(options.statuses.map(row=>[row.id,target.statuses.find(status=>status.label===row.label)!.id])),
+      issueTypes:Object.fromEntries(options.issueTypes.map(row=>[row.id,target.issueTypes.find(type=>type.name===row.label)!.id])),
+      fields:Object.fromEntries(options.fields.map(row=>[row.id,null])),
+    },
+  };
+  const invalid = await f.call('/migrations/preview','POST',{configuration:{...config,appendTo:{...config.appendTo,projectId:'project-neo'}}});
+  assert.ok([400,409].includes(invalid.status),JSON.stringify(invalid.data));
+  const firstReview = await f.preview(config);
+  assert.equal(firstReview.canApply,true,JSON.stringify(firstReview.notices));
+  assert.equal(firstReview.counts.retainedIssues,1);
+  assert.equal(firstReview.counts.issues,1);
+  assert.equal(firstReview.projects[0]?.id,projectId);
+  const local = await f.call<typeof first>('/issues','POST',{projectId,title:'미리보기 뒤 추가한 팀 업무'});
+  assert.equal(local.status,201,JSON.stringify(local.data));
+  assert.equal(local.data.key,'CONT-3');
+  assert.equal((await f.apply(firstReview)).status,409);
+  assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.filter(issue=>issue.projectId===projectId).length,2);
+
+  const review = await f.preview(config);
+  assert.equal(review.canApply,true,JSON.stringify(review.notices));
+  const applied = await f.apply(review);
+  assert.equal(applied.status,201,JSON.stringify(applied.data));
+  assert.deepEqual(applied.data.import.projectIds,[projectId]);
+  assert.deepEqual(applied.data.import.configuration.appendTo,config.appendTo);
+  assert.equal((await f.apply(review)).data.duplicate,true);
+  const current = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const child = current.issues.find(issue=>issue.projectId===projectId&&issue.key==='CONT-4');
+  assert.ok(child);
+  assert.equal(child.parentId,first.id);
+  assert.deepEqual(current.issues.find(issue=>issue.id===first.id),updated.data);
+  assert.equal(current.issues.some(issue=>issue.id===second.id),false);
+  assert.deepEqual(current.workflows?.find(value=>value.projectId===projectId),initialData.workflows?.find(value=>value.projectId===projectId));
+  assert.deepEqual(current.issueSchemas?.find(value=>value.projectId===projectId),initialData.issueSchemas?.find(value=>value.projectId===projectId));
+  const backup = await f.call<WorkspaceSnapshot & {schemaVersion:number;sourceImports:SourceImport[];comments:Comment[];issueRelations:{sourceIssueId:string;targetIssueId:string}[]}>('/export');
+  assert.deepEqual(backup.data.comments.filter(comment=>comment.resourceId===child.id).map(comment=>comment.body),['새 티켓의 원본 댓글']);
+  assert.equal(backup.data.comments.some(comment=>comment.body==='기존 업무의 새 원본 댓글'),false);
+  assert.equal(backup.data.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.ok(backup.data.issueRelations.some(relation=>relation.sourceIssueId===child.id&&relation.targetIssueId===first.id));
+  assert.equal((await f.call('/import','POST',{data:{...backup.data,schemaVersion:36}})).status,400);
+  assert.equal((await f.call('/import','POST',{data:backup.data})).status,200);
+  const receipts = (await f.call<SourceImport[]>('/source-imports')).data;
+  assert.deepEqual(receipts.find(value=>value.id===applied.data.import.id)?.configuration.appendTo,config.appendTo);
+  const noChanges = await f.preview(config);
+  assert.equal(noChanges.canApply,false,JSON.stringify(noChanges.notices));
+  assert.equal(noChanges.counts.retainedIssues,2);
+});
+
 const gitlabPath = '/integrations/gitlab';
 const historicAt = '2020-01-02T00:00:00.000Z';
 const syntheticSecret = 'migration-gitlab-synthetic-secret';

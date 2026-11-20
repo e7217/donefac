@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, DocPage, DocRevision, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -203,7 +204,7 @@ test('the selected decision is bound to its exact stored source through edits, r
   assert.deepEqual(await call<DocRevision>(revisionPath), original);
 
   const activeBackup = await call<Backup>('/export');
-  assert.equal(activeBackup.schemaVersion, 36);
+  assert.equal(activeBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const storedLink = activeBackup.resourceLinks.find(link => link.id === created.link.id);
   assert.ok(storedLink?.documentSource);
   assert.deepEqual(storedLink.documentSource, storedContext);

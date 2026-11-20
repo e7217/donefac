@@ -6,6 +6,11 @@
 .migration-origin-summary { margin: .75rem 0; }
 .migration-origin-summary small { margin-top: .35rem; }
 
+.migration-destination-mode { display: block; max-width: 26rem; margin-top: 1rem; }
+.migration-append-project { margin-top: .75rem; padding: .8rem 1rem; border: 1px solid #d4e2de; border-radius: .5rem; }
+.migration-append-project h3 { margin: 0; }
+.migration-append-project p { margin: .45rem 0 0; overflow-wrap: anywhere; }
+
 .migration-notice-source-button { margin-top: .4rem; }
 .migration-original-dialog {
   --border: #d5e3df;

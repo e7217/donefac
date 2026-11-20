@@ -324,8 +324,8 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 | 요청 | 동작 |
 | --- | --- |
-| `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑 후보와 기본값 |
-| `POST /api/migrations/preview` | `configuration`으로 새 프로젝트 생성 계획, 변환 예시, 보존·누락 진단 검토 |
+| `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑과 확인한 Jira 추가 대상 |
+| `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 Jira 업무 추가 계획과 보존·누락 진단 검토 |
 | `GET /api/migrations/previews/:id` | 선택한 작업자의 검사 결과 다시 읽기 |
 | `POST /api/migrations/previews/:id/apply` | `expectedVersion`·`acknowledgements`로 검토한 계획 적용 |
 | `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
@@ -343,6 +343,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 원본의 시간대가 없는 시각에는 설정한 IANA 시간대를 사용한다. Jira CSV의 영문 월 형식도 처리하며, 두 자리 연도는 2000년대로 해석한다는 확인을 요청한다. [Atlassian Jira 날짜 형식 안내](https://confluence.atlassian.com/jirakb/date-format-changes-after-exporting-to-excel-119799961.html) 해석 불가 시 기본값은 적용 차단이다. 이관 시각을 사용하는 정책을 선택하면 그 사실을 검토 결과와 영수증에 남긴다. 원본 작성자는 원래 신원으로 보존한다. 현재 팀원으로 매핑하지 않은 작성자는 현재 문서·댓글·첨부에 이관 실행자를 기록한다. 제외한 원본은 적용 대상 없이 관리용 영수증에 보관한다. 원본 권한 정책은 별도로 검토해야 한다.
 
 자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.
+
+### 기존 프로젝트에 새 Jira 업무 추가
+
+선택한 패키지의 업무가 같은 Jira 인스턴스와 하나의 원본 프로젝트에 속하고, 원본이 기존 Teamspace 프로젝트에 연결되어 있으면 옵션에 `appendTarget`과 현재 상태·유형·필드가 포함된다. `configuration.appendTo`에 `{projectId,statuses,issueTypes,fields}`를 설정한다. 각 매핑의 키는 옵션 ID이며 값은 대상 프로젝트의 상태·업무 유형·필드 ID다. 필드 값을 `null`로 지정하면 해당 값은 원본에 보관한다. 기존 프로젝트의 설정과 기존 티켓 데이터를 보존한다.
+
+`counts.issues`는 새 업무 수, `retainedIssues`와 `retainedRecords`는 이전 이관으로 이미 처리해 원본으로 보관하는 업무와 관련 기록 수다. 휴지통이나 영구 삭제한 업무의 원본 ID도 중복 생성 방지에 사용한다. 새 업무는 현재 연결 가능한 부모나 관계를 참조할 수 있다. 적용은 대상의 설정 버전, 다음 업무 번호와 원본 연결을 다시 확인한다. 형식 37 자체 백업은 추가 이관의 대상과 매핑을 보존한다.
 
 ### 적용 후 대조
 
