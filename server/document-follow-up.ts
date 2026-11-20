@@ -35,7 +35,7 @@ function validSelection(value: Record<string, unknown>): value is Record<string,
     && typeof text === 'string' && text.length <= DOCUMENT_SELECTION_TEXT_LIMIT && Boolean(text.trim()) && text.isWellFormed();
 }
 
-function parseSelection(input: unknown): DocumentSourceSelection | undefined {
+export function parseDocumentSourceSelection(input: unknown): DocumentSourceSelection | undefined {
   if (!record(input) || Object.keys(input).length !== 3 || !validSelection(input)) return;
   const { from, to, text } = input;
   return { from, to, text };
@@ -55,7 +55,7 @@ function parse(body: unknown) {
   if (!record(issue)) throw new DocumentFollowUpError(400, '생성할 업무 정보를 확인해 주세요.');
   let selection: DocumentSourceSelection | undefined;
   if (Object.hasOwn(body, 'sourceSelection')) {
-    selection = parseSelection(body.sourceSelection);
+    selection = parseDocumentSourceSelection(body.sourceSelection);
     if (!selection) {
       throw new DocumentFollowUpError(400, '후속 업무에 남길 문서의 선택 범위를 확인해 주세요.');
     }
@@ -75,7 +75,7 @@ function parseDecisionLink(body: unknown) {
     throw new DocumentFollowUpError(400, '연결할 문서의 버전을 확인해 주세요.');
   }
   if (typeof issueId !== 'string' || !issueId.length) throw new DocumentFollowUpError(400, '연결할 업무를 확인해 주세요.');
-  const selection = parseSelection(body.sourceSelection);
+  const selection = parseDocumentSourceSelection(body.sourceSelection);
   if (!selection) throw new DocumentFollowUpError(400, '결정 근거로 남길 문서의 선택 범위를 확인해 주세요.');
   return { requestId: requestId.toLowerCase(), expectedDocumentVersion, issueId, selection };
 }
@@ -97,7 +97,8 @@ function requestFingerprint(version: number, issue: IssueInput, selection?: Docu
   return createHash('sha256').update(payload).digest('hex');
 }
 
-export function resolveDocumentDecisionSource(store: Store, document: DocPage, actorId: string, selection: DocumentSourceSelection, summary = '후속 업무 원문 저장'): DocumentDecisionSource {
+export function resolveDocumentDecisionSource(store: Store, document: DocPage, actorId: string, selection: DocumentSourceSelection,
+  summary = '후속 업무 원문 저장', acceptExisting: (revision: DocRevision) => boolean = () => true): DocumentDecisionSource {
   if (!store.db.isTransaction) throw new DocumentFollowUpError(500, '문서 발췌 저장에는 트랜잭션이 필요합니다.');
   const { from, to } = selection;
   const text = readDocumentSelection(document.content, from, to);
@@ -109,7 +110,7 @@ export function resolveDocumentDecisionSource(store: Store, document: DocPage, a
     WHERE document_id=? AND json_extract(json,'$.version')=? AND json_type(json,'$.confluenceSourceVersion') IS NULL
     ORDER BY rowid DESC`).all(document.id, document.version) as { json: string }[];
   const existing = rows.map(row => JSON.parse(row.json) as DocRevision)
-    .find(revision => revision.title === document.title && JSON.stringify(revision.content) === content);
+    .find(revision => revision.title === document.title && JSON.stringify(revision.content) === content && acceptExisting(revision));
   if (existing) return { revisionId: existing.id, from, to, text };
 
   const revision: DocRevision = {
@@ -120,8 +121,9 @@ export function resolveDocumentDecisionSource(store: Store, document: DocPage, a
   return { revisionId: revision.id, from, to, text };
 }
 
-export function validateDocumentDecisionSource(value: unknown, documentId: string, revisions: ReadonlyMap<string, DocRevision>, knownDocument: boolean): void {
-  const invalidSource = () => new DocumentFollowUpError(400, '업무에 연결된 문서 발췌와 원문 저장본을 확인해 주세요.');
+export function validateDocumentDecisionSource(value: unknown, documentId: string, revisions: ReadonlyMap<string, DocRevision>, knownDocument: boolean,
+  errorMessage = '업무에 연결된 문서 발췌와 원문 저장본을 확인해 주세요.'): void {
+  const invalidSource = () => new DocumentFollowUpError(400, errorMessage);
   if (!record(value) || Object.keys(value).length !== 4 || !validSelection(value)) throw invalidSource();
   const { revisionId, from, to, text } = value;
   if (typeof revisionId !== 'string' || !revisionId.trim() || revisionId.length > 200

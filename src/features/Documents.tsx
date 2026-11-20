@@ -15,7 +15,7 @@ import {
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
-import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
+import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
@@ -24,6 +24,7 @@ import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
+import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
 import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type FeatureProps, type RichContent } from '../../shared/types';
@@ -44,7 +45,8 @@ type Props = FeatureProps & {
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
 };
-type DocumentIssueAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource };
+type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
+  | { kind: 'comment'; source: SelectionCommentSource; initialBody: string };
 type Draft = {
   id: string; title: string; content: RichContent; plainText: string;
   status: DocPage['status']; parentId: string | null; expectedVersion: number;
@@ -55,6 +57,7 @@ type Draft = {
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
+const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
 const draftFromPage = (page: DocPage): Draft => ({
   id: page.id, title: page.title, content: page.content, plainText: page.plainText,
@@ -90,6 +93,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [commentBody, setCommentBody] = useState('');
   const commentBodyRef = useRef('');
   const commentContextRef = useRef<CommentContext | null>(null);
+  const reselectedCommentDraft = useRef<(CommentContext & { body: string }) | null>(null);
+  const focusCommentId = useRef<string | null>(null);
   const [commentBusy, setCommentBusy] = useState(false);
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [commentError, setCommentError] = useState('');
@@ -116,13 +121,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const editorWrap = useRef<HTMLDivElement>(null);
   const [issueSearch, setIssueSearch] = useState('');
   const [linkBusy, setLinkBusy] = useState(false);
-  const [issueAction, setIssueAction] = useState<DocumentIssueAction | null>(null);
-  const issueActionOpener = useRef<HTMLButtonElement>(null);
-  const closeIssueAction = useCallback(() => {
-    const opener = issueActionOpener.current;
-    setIssueAction(null);
-    issueActionOpener.current = null;
-    requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
+  const [documentAction, setDocumentAction] = useState<DocumentAction | null>(null);
+  const documentActionOpener = useRef<HTMLButtonElement>(null);
+  const closeDocumentAction = useCallback((restoreFocus = true) => {
+    const opener = documentActionOpener.current;
+    setDocumentAction(null);
+    documentActionOpener.current = null;
+    if (restoreFocus) requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
   }, []);
   const [referencesRefreshing, setReferencesRefreshing] = useState(false);
   const [, forceToolbar] = useState(0);
@@ -467,6 +472,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [documentId, actorId, rememberComment]);
 
   useEffect(() => {
+    if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments') return;
+    const article = document.getElementById(`document-comment-${focusCommentId.current}`);
+    if (!article) return;
+    focusCommentId.current = null;
+    article.scrollIntoView({ block: 'nearest' });
+    article.focus({ preventScroll: true });
+  }, [comments, sidebarOpen, sideTab]);
+
+  useEffect(() => {
     if (!documentId || sideTab !== 'history' || publicationOpen) return;
     let active = true;
     setHistoryLoading(true); setHistoryError('');
@@ -479,7 +493,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function selectDocument(id: string) {
     if (id === selectedDocumentId) return;
-    if (issueAction) {
+    if (documentAction) {
       if (window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) onSelectDocument(id);
       return;
     }
@@ -543,6 +557,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     finally { setCommentBusy(false); }
   }
 
+  function showSavedSelectionComment(comment: Comment) {
+    closeDocumentAction(false);
+    const current = commentContextRef.current;
+    if (current?.documentId === comment.resourceId && current.actorId === comment.authorId && activeActorRef.current === comment.authorId) {
+      focusCommentId.current = comment.id;
+      setComments(items => [...items.filter(item => item.id !== comment.id), comment]);
+      setSidebarOpen(true);
+      setSideTab('comments');
+    }
+    window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
+    void refresh().catch(() => undefined);
+    notify('발췌 댓글을 등록했습니다.', 'success');
+  }
+
   async function restoreRevision(revision: DocRevision) {
     const captured = draftRef.current;
     if (!captured || savingRef.current) return;
@@ -602,6 +630,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
       rememberComment('', { actorId: capturedActor, documentId: captured.id });
+      if (reselectedCommentDraft.current?.actorId === capturedActor && reselectedCommentDraft.current.documentId === captured.id) reselectedCommentDraft.current = null;
+      try { localStorage.removeItem(selectionCommentCacheKey(capturedActor, captured.id)); } catch { setStorageProblem(true); }
       const sameContext = draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
       if (sameContext) { draftRef.current = null; setDraft(null); commentBodyRef.current = ''; setCommentBody(''); }
       try { await refresh(); }
@@ -623,7 +653,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function discardLocal() {
     if (!selectedPage || !window.confirm('저장하지 않은 편집을 버리고 서버에 저장된 내용을 열까요?')) return;
-    const latest = liveStateRef.current?.document || sessionRef.current?.document || selectedPage;
+    const candidate = liveStateRef.current?.document || sessionRef.current?.document;
+    const latest = candidate?.id === selectedPage.id && candidate.version >= selectedPage.version ? candidate : selectedPage;
     const current = draftRef.current;
     const next = { ...draftFromPage(latest), ...(sessionRef.current?.enabled && !manualRecoveryRef.current && current ? { content: current.content, plainText: current.plainText } : {}) };
     draftRef.current = next; setDraft(next); rememberDraft(next);
@@ -767,27 +798,68 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
   const selectionDocument = liveMode ? liveState?.document : selectedPage;
   let selectionUnavailable: string | null = null;
-  if (draft?.bodyDirty) selectionUnavailable = '문서 본문을 저장한 뒤 선택한 내용을 연결할 수 있습니다.';
+  if (draft?.bodyDirty) selectionUnavailable = '선택한 내용을 사용하려면 변경한 본문을 먼저 저장해 주세요.';
   else if (liveMode && (liveState?.phase !== 'connected' || liveState.pending)) {
-    selectionUnavailable = '본문 동기화가 끝난 뒤 선택한 내용을 연결할 수 있습니다.';
-  } else if (saving || bodyReadOnly || conflict || !draft || !data.projects.length || !selectionDocument
+    selectionUnavailable = '본문 동기화가 끝나면 선택한 내용을 사용할 수 있습니다.';
+  } else if (saving || bodyReadOnly || conflict || !draft || !selectionDocument
     || draft.id !== selectedPage?.id || selectionDocument.id !== draft.id || selectionDocument.version !== draft.expectedVersion) {
-    selectionUnavailable = '최신 저장본을 확인한 뒤 선택한 내용을 연결할 수 있습니다.';
+    selectionUnavailable = '최신 저장본을 확인한 뒤 본문을 선택해 주세요.';
   }
+  const selectionIssueUnavailable = data.projects.length ? null : '업무를 연결할 프로젝트가 없습니다.';
   function openFollowUp(page: DocPage, opener: HTMLButtonElement, sourceSelection?: DocumentSourceSelection) {
-    issueActionOpener.current = opener;
-    setIssueAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
+    documentActionOpener.current = opener;
+    setDocumentAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
   }
   function openDecisionLink(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
-    issueActionOpener.current = opener;
-    setIssueAction({ kind: 'link', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
+    documentActionOpener.current = opener;
+    setDocumentAction({ kind: 'link', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
+  }
+  function openSelectionComment(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
+    documentActionOpener.current = opener;
+    const preserved = reselectedCommentDraft.current;
+    let initialBody = '';
+    if (preserved?.documentId === page.id && preserved.actorId === actorId) {
+      initialBody = preserved.body;
+      reselectedCommentDraft.current = null;
+    }
+    try {
+      const key = selectionCommentCacheKey(actorId, page.id);
+      const cached = localStorage.getItem(key);
+      if (cached !== null) {
+        initialBody ||= cached;
+        localStorage.removeItem(key);
+      }
+    } catch { setStorageProblem(true); }
+    setDocumentAction({ kind: 'comment', initialBody, source: { id: page.id, title: page.title, version: page.version, sourceSelection } });
+  }
+  function reselectCommentSource(body: string) {
+    if (documentAction?.kind !== 'comment') return;
+    const documentId = documentAction.source.id;
+    reselectedCommentDraft.current = { actorId, documentId, body };
+    try { localStorage.setItem(selectionCommentCacheKey(actorId, documentId), body); } catch { setStorageProblem(true); }
+
+    const current = draftRef.current;
+    if (!liveMode && !manualRecovery && current?.id === documentId && selectedPage?.id === documentId
+      && current.dirty && !current.bodyDirty && current.expectedVersion < selectedPage.version) {
+      const base = current.baseMetadata;
+      if (base?.title === selectedPage.title && base.status === selectedPage.status && base.parentId === selectedPage.parentId) {
+        const next = { ...current, content: selectedPage.content, plainText: selectedPage.plainText, expectedVersion: selectedPage.version };
+        draftRef.current = next;
+        setDraft(next);
+        rememberDraft(next);
+        manualEditor?.commands.setContent(next.content, { emitUpdate: false });
+        setConflict(false);
+      } else setConflict(true);
+    }
+    closeDocumentAction(false);
+    requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueBlock={bodyReadOnly ? undefined : openIssueBlock}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || issueAction)}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || documentAction)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         <div className="docs-tree-content">
@@ -865,9 +937,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('접기 블록 모두 펼치기', <ChevronRight size={15} />, () => unfoldDetails(editor))}
                 {editor?.isActive('details') && button('접기 블록 해제', <Unlink size={15} />, () => unwrapDetails(editor))}
                 {button('파일 첨부', <Paperclip size={15} />, () => { setSidebarOpen(true); setSideTab('attachments'); })}
-                <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable}
+                <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable} issueUnavailable={selectionIssueUnavailable}
                   onCreate={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }}
-                  onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }} />
+                  onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}
+                  onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }} />
               </div>
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
@@ -916,7 +989,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}
               {comments.map(comment => {
                 const user = data.users.find(item => item.id === comment.authorId);
-                return <article className="docs-comment" key={comment.id}>
+                return <article className="docs-comment" id={`document-comment-${comment.id}`} tabIndex={-1} key={comment.id}>
                   <div className="docs-comment-head">
                     <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
                     <strong>{user?.name || '팀원'}</strong>
@@ -930,6 +1003,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                         }
                       }} />
                   </div>
+                  {comment.documentSource && <section className="docs-comment-source" aria-label="댓글이 달린 본문">
+                    <blockquote>{comment.documentSource.text}</blockquote>
+                    <DocumentDecisionRevision data={data} documentId={comment.resourceId} revisionId={comment.documentSource.revisionId}
+                      label={selectedPage.title} sourceLabel="댓글 원문 저장본" />
+                  </section>}
                   <p>{comment.body}</p>
                 </article>;
               })}
@@ -944,10 +1022,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </> : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
-    {issueAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
-      sourceDocument={issueAction.source} onClose={closeIssueAction} />}
-    {issueAction?.kind === 'link' && <DocumentDecisionLinkDialog source={issueAction.source} data={data} actorId={actorId}
-      refresh={refresh} notify={notify} onClose={closeIssueAction} />}
+    {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
+      sourceDocument={documentAction.source} onClose={closeDocumentAction} />}
+    {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
+      refresh={refresh} notify={notify} onClose={closeDocumentAction} />}
+    {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialBody={documentAction.initialBody}
+      actorId={actorId} refresh={refresh} notify={notify} onClose={closeDocumentAction} onSaved={showSavedSelectionComment} onReselect={reselectCommentSource} />}
     {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} projectId={selectedPage.projectId ?? projectId} sectionId={publicationLink ? sectionId : null}

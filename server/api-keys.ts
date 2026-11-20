@@ -295,7 +295,20 @@ export class ApiKeyService {
         const query = this.query(request, ['resourceType', 'resourceId']);
         if (!['issue', 'document'].includes(query.resourceType) || !query.resourceId) fail(400, '댓글 대상을 확인해 주세요.');
         this.resource(key, query.resourceType === 'issue' ? 'issues' : 'documents', query.resourceId);
-        this.used(key); response.json(this.store.commentsForResource(query.resourceType as Comment['resourceType'], query.resourceId)); return;
+        const comments = this.store.commentsForResource(query.resourceType as Comment['resourceType'], query.resourceId);
+        const readableRevisions = new Map<string, boolean>();
+        this.used(key);
+        response.set('Cache-Control', 'no-store').json(comments.map(comment => {
+          const { documentSource, ...plainComment } = comment;
+          if (!documentSource) return comment;
+          const revisionId = documentSource.revisionId;
+          if (!readableRevisions.has(revisionId)) {
+            const revision = this.store.get<DocRevision>('revisions', revisionId);
+            readableRevisions.set(revisionId, Boolean(revision && revision.documentId === query.resourceId && this.canReadDocumentBody(key, revision.content)));
+          }
+          return readableRevisions.get(revisionId) ? comment : plainComment;
+        }));
+        return;
       }
       return fail(403, '공개 API에서 지원하지 않는 경로입니다.');
     }

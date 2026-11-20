@@ -18,6 +18,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
+import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
@@ -126,6 +127,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
   const documentContent=new DocumentContentService(store);
   const documentFollowUp=new DocumentFollowUpService(store);
+  const documentSelectionComments=new DocumentSelectionCommentService(store);
   const issueChildren = new IssueChildService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
@@ -183,6 +185,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     notifyDocument(document,document.authorId,'document-created',spaceSubscribers(document),document.createdAt);
   const notifyDocumentUpdate = (document: DocPage, actorId: string, createdAt: string) =>
     notifyDocument(document,actorId,'document-updated',documentSubscribers(document),createdAt);
+  const notifyDocumentComment = (document: DocPage, comment: Comment) =>
+    notifyDocument(document,comment.authorId,'document-comment',[document.authorId,...documentSubscribers(document)],comment.createdAt);
   const stopIssueWatch = store.onChange(({before,after,context})=>{
     const old=before as Issue | undefined, issue=after as Issue | undefined;
     if(!old || !issue || old.status===issue.status || !context.actorId ||
@@ -1183,10 +1187,20 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         notifyIssue(issue,c.authorId,'issue-comment',[issue.assigneeId,...issue.collaboratorIds,...issueSubscribers(issue)],c.createdAt);
       }else{
         const doc=get<DocPage>('documents',resourceId);
-        notifyDocument(doc,c.authorId,'document-comment',[doc.authorId,...documentSubscribers(doc)],c.createdAt);
+        notifyDocumentComment(doc,c);
       }
       store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));
     });res.status(201).json(c);
+  });
+  app.post('/api/documents/:id/selection-comments',(req,res)=>{
+    const result=documentSelectionComments.create({documentId:String(req.params.id),actorId:actor(req),body:req.body},{
+      validateBody:body=>text(body,'댓글',20000),
+      onCreated(document,comment){
+        notifyDocumentComment(document,comment);
+        activity(req,'document',document.id,'댓글 작성',comment.body.slice(0,100));
+      },
+    });
+    res.status(result.duplicate?200:201).json(result);
   });
   app.delete('/api/comments/:id',(req,res)=>{
     const trashItemId=store.transaction(()=>{
@@ -1488,6 +1502,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];
     const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
+    const allImportedComments=[...(data.comments as Comment[]),...archiveComments];
     const allImportedRevisions=[...importedRevisions,...importedTrash.flatMap(entry=>entry.revisions)];
     if(data.schemaVersion<42&&allImportedRevisions.some(revision=>revision.confluenceSourceVersion!==undefined))fail('Confluence 원본 버전을 구분하는 문서 이력에는 schemaVersion 42 백업이 필요합니다.');
     if(data.schemaVersion<33&&(
@@ -1497,7 +1512,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
-    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:[...data.comments,...archiveComments],revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
+    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     for(const entry of importedTrash){
@@ -1519,6 +1534,16 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     };
     for (const link of data.resourceLinks as ResourceLink[]) validateDecisionLink(link, true);
     for (const entry of importedTrash) for (const link of entry.resourceLinks) validateDecisionLink(link, false);
+    const legacyConfluenceRevisionIds = new Set(importedSources.records.filter(record =>
+      record.source.product === 'confluence' && record.targetType === 'revision').map(record => record.targetId));
+    for (const comment of allImportedComments) {
+      if (!Object.hasOwn(comment, 'documentSource')) continue;
+      if (data.schemaVersion < 50) fail('문장 댓글을 포함한 백업은 schemaVersion 50이 필요합니다.');
+      const invalidSource = '문장 댓글의 선택 범위와 원문 저장본을 확인해 주세요.';
+      if (comment.resourceType !== 'document' || !importedDocumentIds.has(comment.resourceId)
+          || (comment.documentSource && legacyConfluenceRevisionIds.has(comment.documentSource.revisionId))) fail(invalidSource);
+      validateDocumentDecisionSource(comment.documentSource, comment.resourceId, revisionsById, true, invalidSource);
+    }
     const firstDocument = importedDocuments[0];
     documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
       { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets, revisionOwner });
@@ -1592,6 +1617,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousWorklogs=worklogs.clearForRestore();
       timeReservations.clearForRestore();
       documentFollowUp.clearForImport();
+      documentSelectionComments.clearForImport();
       issueChildren.clearForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
@@ -1660,7 +1686,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
-    if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChildCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});

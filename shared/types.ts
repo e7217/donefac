@@ -570,7 +570,16 @@ export interface DocumentDecisionSource extends DocumentSourceSelection { revisi
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
 export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; duplicate: boolean }
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
-export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
+export interface Comment {
+  id: string;
+  resourceType: 'issue' | 'document';
+  resourceId: string;
+  authorId: string;
+  body: string;
+  createdAt: string;
+  documentSource?: DocumentDecisionSource;
+}
+export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface AttachmentHead extends Attachment { currentVersionId: string; versionCount: number; hasVersionHistory: boolean }
 export type TrashResourceType = 'issue' | 'document';

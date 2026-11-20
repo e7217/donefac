@@ -147,6 +147,14 @@ curl --fail-with-body \
 
 발췌를 처음 저장하면 `201`과 `{issue,link,duplicate:false}`를 반환한다. 작업자와 요청 내용이 같은 재시도, 또는 같은 저장본의 동일한 발췌는 `200`과 `duplicate:true`를 반환한다. 저장된 버전이나 선택한 텍스트가 다른 경우, 또는 문서와 티켓 사이에 다른 결정 근거가 이미 있는 경우 `409`를 반환한다. 연결을 해제한 뒤 이전 요청을 보내면 `409`를 반환한다. 자체 백업 형식 48은 기존 업무에 저장된 발췌와 원문 저장본을 보존하고, 복원할 때 재시도 기록을 초기화한다.
 
+## 문장 댓글
+
+브라우저의 `POST /api/documents/:id/selection-comments`에 `{requestId,expectedDocumentVersion,sourceSelection,body}`를 보낸다. `requestId`는 UUID v4다. `sourceSelection`은 저장된 본문의 ProseMirror 위치 `{from,to,text}`이며 최대 2,000 UTF-16 단위를 선택한다. 댓글은 공백을 정리한 뒤 20,000자까지 받는다. 서버는 버전과 발췌를 대조하고, 필요하면 원문 저장본을 댓글·활동·알림과 함께 기록한다.
+
+신규 응답은 `201`과 `{comment,duplicate:false}`다. 같은 작업자·문서·입력의 재시도는 `200`과 `duplicate:true`를 반환한다. 버전이나 발췌가 달라지면 `409`의 `details.reason`은 `source_version_changed` 또는 `source_selection_changed`다. 휴지통으로 옮긴 댓글의 원래 요청을 보내면 `409`를 반환한다.
+
+일반 댓글 조회는 문장 댓글의 `documentSource: {revisionId,from,to,text}`를 포함한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`로 읽는다. 범위 제한 `/api/v1/comments` 조회에서는 키로 읽을 수 있는 원문 저장본의 발췌를 반환한다. 자체 백업 형식 50은 활성 댓글과 휴지통 댓글의 발췌를 보존한다.
+
 ## 문서 참조·포함·접기
 
 문서 본문에는 다음 블록을 넣을 수 있다. `issueReference`는 `issueId`, `documentReference`와 `documentInclude`는 `documentId`를 사용하며, `label`은 대상이 없어졌을 때 표시할 이름이다. 모든 대상은 키의 프로젝트 범위 안에 있어야 한다. 포함 원문의 내용을 현재 문서에 복사하지 않으며, 조회 응답도 참조 ID를 유지한다.

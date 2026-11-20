@@ -1,0 +1,41 @@
+.document-selection-comment-input {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: .875rem;
+  font-weight: 600;
+}
+
+.document-selection-comment-input textarea {
+  width: 100%;
+  min-height: 85px;
+  font-size: 1rem;
+  font-weight: 400;
+  resize: vertical;
+}
+
+.docs-comment-source {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  margin: 9px 0 0 28px;
+}
+
+.docs-comment-source blockquote {
+  margin: 0;
+  padding: 7px 9px;
+  border-inline-start: 3px solid #93bfad;
+  border-radius: 0 5px 5px 0;
+  background: #f1f7f4;
+  color: #355247;
+  font-size: .8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.docs-comment[tabindex="-1"]:focus-visible {
+  outline: 2px solid #167563;
+  outline-offset: 1px;
+  border-radius: 3px;
+}

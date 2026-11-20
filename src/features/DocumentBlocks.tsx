@@ -84,12 +84,12 @@ function subscribeToRevision(documentId: string, revisionId: string) {
 }
 
 type RevisionLoad = { revision: DocRevision } | { error: string; missing: boolean };
-function PinnedRevision({ documentId, revisionId, label, nodeBudget, decisionSource = false }: {
+function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel }: {
   documentId: string;
   revisionId: string;
   label: string;
   nodeBudget: number;
-  decisionSource?: boolean;
+  sourceLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -120,8 +120,8 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, decisionSou
   const revision = loaded && 'revision' in loaded ? loaded.revision : undefined;
   const revisionLabel = revision?.confluenceSourceVersion != null ? documentRevisionLabel(revision) : revision ? `고정 버전 ${revision.version}` : '고정 버전';
   const title = revision?.title || label || '제목 없는 문서';
-  const toggleLabel = decisionSource ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
-  return <section className="doc-included-content doc-pinned-include" aria-label={`${decisionSource ? '결정 근거 원문' : '고정 포함 문서'} ${title}`}>
+  const toggleLabel = sourceLabel ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
+  return <section className="doc-included-content doc-pinned-include" aria-label={`${sourceLabel ?? '고정 포함 문서'} ${title}`}>
     <button type="button" className="doc-reference-card document" aria-expanded={open}
       aria-label={toggleLabel} onClick={() => { setLoaded(null); setOpen(!open); }}>
       <span className="doc-reference-icon"><FileClock size={15} aria-hidden="true" /></span>
@@ -132,20 +132,21 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, decisionSou
     {open && loaded && 'error' in loaded && <div className="doc-pinned-message"><p role="alert">{loaded.error}</p>
       {!loaded.missing && <button className="btn btn-ghost" type="button" onClick={() => { setLoaded(null); setAttempt(previous => previous + 1); }}>고정 버전 다시 불러오기</button>}
     </div>}
-    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned" pinnedSource={{ documentId, revisionId }} showOutline={decisionSource} />}
+    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned" pinnedSource={{ documentId, revisionId }} showOutline={Boolean(sourceLabel)} />}
   </section>;
 }
 
 const keepReading = () => {};
 
-export function DocumentDecisionRevision({ data, documentId, revisionId, label }: {
+export function DocumentDecisionRevision({ data, documentId, revisionId, label, sourceLabel = '결정 근거 원문' }: {
   data: WorkspaceSnapshot;
   documentId: string;
   revisionId: string;
   label: string;
+  sourceLabel?: string;
 }) {
   return <DocumentBlocksProvider data={data} documentId={documentId} openIssue={keepReading} openDocument={keepReading}>
-    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} decisionSource />
+    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} sourceLabel={sourceLabel} />
   </DocumentBlocksProvider>;
 }
 
