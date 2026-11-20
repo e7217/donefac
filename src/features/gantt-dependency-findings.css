@@ -1,0 +1,221 @@
+.gantt-findings {
+  min-width: 0;
+  margin: 16px 0;
+  padding: 16px;
+  color: #365046;
+}
+
+.gantt-findings-count {
+  display: inline-grid;
+  min-width: 18px;
+  min-height: 18px;
+  padding-inline: 4px;
+  place-items: center;
+  border-radius: 10px;
+  background: #fff1d9;
+  color: #824b19;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.gantt-findings-header,
+.gantt-findings-item-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 8px;
+}
+
+.gantt-findings-header h2,
+.gantt-findings-item-heading h3 {
+  margin: 0;
+}
+
+.gantt-findings-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 16px;
+}
+
+.gantt-findings-header h2 svg {
+  color: #8a521d;
+}
+
+.gantt-findings-header p,
+.gantt-findings-empty {
+  margin: 4px 0 0;
+  color: #53685e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gantt-findings-header .issue-icon-button {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.gantt-findings-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.gantt-findings-summary > div {
+  padding: 7px 10px;
+  background: #f6f8f7;
+  border: 1px solid #e2ebe5;
+  border-radius: 6px;
+}
+
+.gantt-findings-summary > .has-conflicts {
+  background: #fff7ea;
+  border-color: #eedbbd;
+}
+
+.gantt-findings-summary dt,
+.gantt-findings-dates dt {
+  color: #53685e;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-findings-summary dd,
+.gantt-findings-dates dd {
+  margin: 2px 0 0;
+  font-weight: 650;
+}
+
+.gantt-findings-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-findings-list > li {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e4eae5;
+  border-radius: 6px;
+}
+
+.gantt-findings-item-heading h3 {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-findings-kind {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #edf3ef;
+  color: #41594a;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.gantt-findings-kind[data-kind='conflict'] {
+  background: #fff1d9;
+  color: #824b19;
+}
+
+.gantt-findings-item-titles,
+.gantt-findings-relation,
+.gantt-findings-reason {
+  margin: 4px 0 0;
+  color: #53685e;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.gantt-findings-relation {
+  font-size: 11px;
+}
+
+.gantt-findings-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin: 8px 0;
+}
+
+.gantt-findings-dates dd {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.gantt-findings-bound dd,
+.gantt-findings-reason {
+  color: #824b19;
+}
+
+.gantt-findings-actions,
+.gantt-findings-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.gantt-findings-actions {
+  margin-top: auto;
+}
+
+.gantt-findings-actions .btn {
+  min-width: 0;
+  min-height: 36px;
+  padding-inline: 7px;
+  color: #2d6251;
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.gantt-findings-actions .btn svg {
+  flex: none;
+}
+
+.gantt-findings-pagination {
+  justify-content: end;
+  margin-top: 6px;
+  color: #53685e;
+  font-size: 11px;
+}
+
+.gantt-findings button:focus-visible {
+  outline: 2px solid #386e5b;
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .gantt-findings-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .gantt-findings {
+    padding: 11px;
+  }
+
+  .gantt-findings-summary {
+    gap: 4px;
+  }
+
+  .gantt-findings-summary > div {
+    padding-inline: 6px;
+  }
+
+  .gantt-findings-dates {
+    column-gap: 8px;
+  }
+}

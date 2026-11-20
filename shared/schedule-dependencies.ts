@@ -4,18 +4,37 @@ import type { Dependency, DependencyType } from './types.js';
 export const DEPENDENCY_TYPES = ['FS', 'SS', 'FF', 'SF'] as const;
 export const MAX_DEPENDENCY_LAG_DAYS = 3650;
 
-type ScheduleDate = 'startDate' | 'endDate';
-type ScheduleDates = Record<ScheduleDate, string | null>;
+export type ScheduleDependencyEndpoint = 'startDate' | 'endDate';
+type ScheduleDates = Record<ScheduleDependencyEndpoint, string | null>;
 type KeyedScheduleDates = ScheduleDates & { key: string };
 type DependencyRule = Pick<Dependency, 'type' | 'lagDays'>;
 type CalendarMath = ReturnType<typeof createCalendarMath>;
+
+export type DependencyScheduleCheck =
+  | { kind: 'valid' }
+  | {
+      kind: 'missing';
+      predecessorEndpoint: ScheduleDependencyEndpoint;
+      successorEndpoint: ScheduleDependencyEndpoint;
+      predecessorDate: string | null;
+      successorDate: string | null;
+    }
+  | {
+      kind: 'conflict';
+      predecessorEndpoint: ScheduleDependencyEndpoint;
+      successorEndpoint: ScheduleDependencyEndpoint;
+      predecessorDate: string;
+      successorDate: string;
+      requiredDate: string;
+    }
+  | { kind: 'invalid'; reason: string };
 
 export const DEPENDENCY_ENDPOINTS = {
   FS: { predecessor: 'endDate', successor: 'startDate' },
   SS: { predecessor: 'startDate', successor: 'startDate' },
   FF: { predecessor: 'endDate', successor: 'endDate' },
   SF: { predecessor: 'startDate', successor: 'endDate' },
-} as const satisfies Record<DependencyType, { predecessor: ScheduleDate; successor: ScheduleDate }>;
+} as const satisfies Record<DependencyType, { predecessor: ScheduleDependencyEndpoint; successor: ScheduleDependencyEndpoint }>;
 
 export const DEPENDENCY_LABELS = {
   FS: '완료 후 시작',
@@ -42,26 +61,39 @@ export function dependencyBound(dependency: DependencyRule, predecessor: Schedul
   return { endpoint: endpoints.successor, date: math.shift(anchor, dependency.lagDays + Number(dependency.type === 'FS')) };
 }
 
+export function checkDependencySchedule(
+  dependency: DependencyRule, predecessor: ScheduleDates, successor: ScheduleDates, math: CalendarMath,
+): DependencyScheduleCheck {
+  if (!isDependencyType(dependency.type) || !isDependencyLag(dependency.lagDays)) {
+    return { kind: 'invalid', reason: '업무 연결 종류와 간격을 확인해 주세요.' };
+  }
+  const { predecessor: predecessorEndpoint, successor: successorEndpoint } = DEPENDENCY_ENDPOINTS[dependency.type];
+  const predecessorDate = predecessor[predecessorEndpoint] || null;
+  const successorDate = successor[successorEndpoint] || null;
+  if (!predecessorDate || !successorDate) {
+    return { kind: 'missing', predecessorEndpoint, successorEndpoint, predecessorDate, successorDate };
+  }
+  try {
+    const bound = dependencyBound(dependency, predecessor, math);
+    if (!bound || successorDate >= bound.date) return { kind: 'valid' };
+    return { kind: 'conflict', predecessorEndpoint, successorEndpoint, predecessorDate, successorDate, requiredDate: bound.date };
+  } catch (error) {
+    if (!(error instanceof CalendarError)) throw error;
+    return { kind: 'invalid', reason: error.message };
+  }
+}
+
 /** Manual schedules retain their dates and show a warning only when both dates are known. */
 export function dependencyScheduleWarning(
   dependency: DependencyRule, predecessor: KeyedScheduleDates, successor: KeyedScheduleDates, math: CalendarMath,
 ): string | null {
+  const check = checkDependencySchedule(dependency, predecessor, successor, math);
+  if (check.kind === 'valid' || check.kind === 'missing') return null;
   const keyPair = `${predecessor.key} → ${successor.key}`;
-  if (!isDependencyType(dependency.type) || !isDependencyLag(dependency.lagDays)) {
-    return `${keyPair} · 업무 연결 종류와 간격을 확인해 주세요.`;
-  }
-  const actual = successor[DEPENDENCY_ENDPOINTS[dependency.type].successor];
-  if (!actual) return null;
-  try {
-    const bound = dependencyBound(dependency, predecessor, math);
-    if (!bound || actual >= bound.date) return null;
-    const label = dependency.type === 'FS' ? '선행 업무 종료 후 시작' : DEPENDENCY_LABELS[dependency.type];
-    const lag = dependency.lagDays > 0 ? `+${dependency.lagDays}` : String(dependency.lagDays);
-    return `${keyPair} · ${label} (${dependency.type}, ${lag}근무일) 조건에 따라 후행 업무 ${SCHEDULE_DATE_LABELS[bound.endpoint]}은 ${bound.date} 이후여야 합니다.`;
-  } catch (error) {
-    if (!(error instanceof CalendarError)) throw error;
-    return `${keyPair} · ${error.message}`;
-  }
+  if (check.kind === 'invalid') return `${keyPair} · ${check.reason}`;
+  const label = dependency.type === 'FS' ? '선행 업무 종료 후 시작' : DEPENDENCY_LABELS[dependency.type];
+  const lag = dependency.lagDays > 0 ? `+${dependency.lagDays}` : String(dependency.lagDays);
+  return `${keyPair} · ${label} (${dependency.type}, ${lag}근무일) 조건에 따라 후행 업무 ${SCHEDULE_DATE_LABELS[check.successorEndpoint]}은 ${check.requiredDate} 이후여야 합니다.`;
 }
 
 export function dependencyGuardFields(dependency: Dependency) {

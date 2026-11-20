@@ -164,6 +164,13 @@
   overflow-wrap: anywhere;
 }
 
+.gantt-feature {
+  --gantt-dependency-conflict: #ad5c28;
+}
+.gantt-legend-conflict {
+  width: 20px;
+  border-top: 2px dashed var(--gantt-dependency-conflict);
+}
 .gantt-feature .gantt-row[data-focused-issue] > .gantt-left,
 .gantt-feature .gantt-row[data-focused-issue] > .gantt-row-timeline {
   background-color: #e7f4ef;

@@ -9,6 +9,7 @@ import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflo
 import { issueSearchText } from '../shared/issue-schema';
 import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
+import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import { Issues } from './features/Issues';
@@ -45,7 +46,7 @@ const navigation = [
 
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
-  savedViewId?: string | null; ganttFocusIssueId?: string | null;
+  savedViewId?: string | null; ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
@@ -58,7 +59,10 @@ function routeHash(route: WorkspaceRoute) {
   const query = new URLSearchParams();
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt') && route.savedViewId) query.set('savedView', route.savedViewId);
-  if (route.view === 'gantt' && route.ganttFocusIssueId) query.set('focusIssue', route.ganttFocusIssueId);
+  if (route.view === 'gantt' && route.ganttFocusIssueId) {
+    query.set('focusIssue', route.ganttFocusIssueId);
+    if (route.ganttFocusDate) query.set('focusDate', route.ganttFocusDate);
+  }
   if (route.view === 'documents' && route.documentId && route.publication) {
     query.set('publication', route.publication.kind);
     query.set('revision', route.publication.revisionId);
@@ -111,6 +115,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
+  const requestedFocusDate = parameters.get('focusDate');
+  const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
   const planningId = (view === 'planning' || view === 'gantt' && !ganttFocusIssueId) && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
   const savedViewId = view === 'issues' || (view === 'gantt' && !ganttFocusIssueId) ? parameters.get('savedView') || null : null;
@@ -126,7 +132,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
   } : undefined;
-  return { projectId, view, documentId, issueId, reportId, planningId, savedViewId, ganttFocusIssueId, publicationTab, publication, sectionId, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, reportId, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -142,6 +148,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
+  const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
@@ -216,6 +223,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
     setSavedViewId(route.savedViewId ?? null);
     setGanttFocusIssueId(route.ganttFocusIssueId ?? null);
+    setGanttFocusDate(route.ganttFocusDate ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
     setSectionId(route.sectionId ?? null);
@@ -262,6 +270,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const sameView = nextView === view && nextProject === projectId;
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
+      ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
   };
   const openIssue = (id: string) => {
@@ -278,6 +287,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
+      ganttFocusDate:sameProject ? ganttFocusDate : null,
       publicationTab, issueId:id, teamOverviewFilters,
     })) setSearchOpen(false);
   };
@@ -285,9 +295,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     if (current?.issueId === id) requestRoute({ ...current, issueId: null });
   };
-  const openIssueSchedule = (id: string) => {
+  const openIssueSchedule = (id: string, endpoint?: ScheduleDependencyEndpoint) => {
     const issue = dataRef.current?.issues.find(value => value.id === id);
-    if (!issue || !requestRoute({projectId:issue.projectId, view:'gantt', documentId:null, issueId:null, ganttFocusIssueId:id})) return false;
+    if (!issue) return false;
+    const target: WorkspaceRoute = {
+      projectId:issue.projectId, view:'gantt', documentId:null, issueId:null, ganttFocusIssueId:id, ganttFocusDate:endpoint,
+    };
+    const current = acceptedRouteRef.current;
+    if (endpoint && current && routeHash(current) === routeHash(target) && !confirmRouteNavigation(current, target)) return false;
+    if (!requestRoute(target)) return false;
     setIssueFocusActivation(value => value + 1);
     return true;
   };
@@ -412,7 +428,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeSavedView={id => requestRoute({projectId,view:'issues',documentId:null,issueId,savedViewId:id})}
           onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
-          focusIssueId={ganttFocusIssueId} issueOverlayOpen={Boolean(openedIssue)} issueFocusActivation={issueFocusActivation}
+          focusIssueId={ganttFocusIssueId} focusDateEndpoint={ganttFocusDate} issueOverlayOpen={Boolean(openedIssue)} issueFocusActivation={issueFocusActivation}
+          onLocateIssueDate={openIssueSchedule}
           onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId})}
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}

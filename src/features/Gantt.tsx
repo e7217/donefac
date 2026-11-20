@@ -6,7 +6,7 @@ import type { CustomFieldValue, Dependency, FeatureProps, Issue, PlanningItem, P
 import { isTerminalStatus, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
-import { DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, dependencyScheduleWarning, SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
+import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, dependencyScheduleWarning, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { ApiError, patch, post, remove } from '../lib/api';
@@ -31,6 +31,7 @@ import { TeamWorkload } from './TeamWorkload';
 import { TimeReservations } from './TimeReservations';
 import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityEditor';
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill } from './GanttDependencyModal';
+import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDependencyFindings';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import './issues.css';
 import './gantt.css';
@@ -46,9 +47,11 @@ type GanttProps = FeatureProps & {
   onChangeGanttView?: (id: string | null) => boolean;
   onOpenSavedIssueView?: (id: string) => boolean;
   focusIssueId?: string | null;
+  focusDateEndpoint?: ScheduleDependencyEndpoint | null;
   issueFocusActivation?: number;
   issueOverlayOpen?: boolean;
   onClearIssueFocus?: () => boolean;
+  onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type DependencyEditor = { dependency?: Dependency; prefill?: DependencyPrefill; opener: HTMLButtonElement };
@@ -62,6 +65,7 @@ const HEADER_HEIGHT = 62;
 const BAR_EDGE_INSET = 2;
 const MAX_TIMELINE_DAYS = 180;
 const ANALYSIS_PANEL_ID = 'gantt-schedule-analysis';
+const FINDINGS_PANEL_ID = 'gantt-dependency-findings';
 const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
@@ -92,10 +96,10 @@ export function Gantt(props: GanttProps) {
 
 function ProjectGantt(props: GanttProps) {
   const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView, onOpenSavedIssueView,
-    focusIssueId, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus } = props;
+    focusIssueId, focusDateEndpoint, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus, onLocateIssueDate } = props;
   const focusedIssue = focusIssueId ? data.issues.find(issue => issue.id === focusIssueId && issue.projectId === projectId) : undefined;
-  const focusedDate = focusedIssue?.startDate || focusedIssue?.endDate;
-  const focusRequest = focusIssueId ? JSON.stringify([focusIssueId, issueFocusActivation]) : null;
+  const focusedDate = (focusDateEndpoint && focusedIssue?.[focusDateEndpoint]) || focusedIssue?.startDate || focusedIssue?.endDate;
+  const focusRequest = focusIssueId ? JSON.stringify([focusIssueId, focusDateEndpoint ?? null, issueFocusActivation]) : null;
   const projectPlans = useMemo(() => (data.planningItems ?? []).filter(item => item.projectId === projectId), [data.planningItems, projectId]);
   const initialPlan = projectPlans.find(item => item.id === initialPlanningId);
   const [planningExpanded, setPlanningExpanded] = useState(Boolean(initialPlan));
@@ -125,6 +129,7 @@ function ProjectGantt(props: GanttProps) {
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
   const [reservationsOpen, setReservationsOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [findingsOpen, setFindingsOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
   const [previousFocusRequest, setPreviousFocusRequest] = useState(focusRequest);
@@ -135,9 +140,11 @@ function ProjectGantt(props: GanttProps) {
   if (previousFocusRequest !== focusRequest) {
     setPreviousFocusRequest(focusRequest);
     if (focusedIssue) {
-      setQuery('');
-      setHideDone(false);
-      setLinkedOnly(false);
+      if (!focusDateEndpoint) {
+        setQuery('');
+        setHideDone(false);
+        setLinkedOnly(false);
+      }
       setLinkPicker(null);
       setDrag(null);
       setWindowStart(focusedDate ? windowForDate(focusedDate) : null);
@@ -152,6 +159,7 @@ function ProjectGantt(props: GanttProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const handledFocusRequest = useRef<string | null>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
+  const findingsTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
@@ -210,11 +218,6 @@ function ProjectGantt(props: GanttProps) {
   }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
-  const projectDependencyCount = useMemo(() => {
-    const issueIds = new Set(projectIssues.map(issue => issue.id));
-    return data.dependencies.reduce((count, dependency) =>
-      count + Number(issueIds.has(dependency.predecessorId) && issueIds.has(dependency.successorId)), 0);
-  }, [data.dependencies, projectIssues]);
   const hasProject = data.projects.some(project => project.id === projectId);
   const sharedViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [data.savedViews, projectId]);
@@ -240,13 +243,36 @@ function ProjectGantt(props: GanttProps) {
     if (sharedViewUnavailable) return [];
     return matchSharedView ? rows.filter(matchSharedView) : rows;
   }
-  const issues = sharedViewRows(locallyVisibleIssues(query, hideDone, planningScope));
+  function chartRows(text: string, hideTerminal: boolean, scope?: PlanningItem) {
+    const rows = sharedViewRows(locallyVisibleIssues(text, hideTerminal, scope));
+    return focusedIssue && focusDateEndpoint && !rows.some(issue => issue.id === focusedIssue.id)
+      ? [focusedIssue, ...rows] : rows;
+  }
+  const issues = chartRows(query, hideDone, planningScope);
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
   const milestones = useMemo(() => (data.milestones || []).filter(value => value.projectId === projectId), [data.milestones, projectId]);
   const historicalIssues = planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
   const historicalMilestones = baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
   const calendar = useMemo(() => data.calendars?.find(value => value.projectId === projectId) ?? defaultWorkCalendar(projectId), [data.calendars, projectId]);
   const calendarMath = useMemo(() => createCalendarMath(calendar), [calendar]);
+  const { projectDependencyCount, findings, conflictingIds } = useMemo(() => {
+    const issuesById = new Map(projectIssues.map(issue => [issue.id, issue]));
+    const findings: GanttDependencyFinding[] = [];
+    const conflictingIds = new Set<string>();
+    let projectDependencyCount = 0;
+    for (const dependency of data.dependencies) {
+      const predecessor = issuesById.get(dependency.predecessorId);
+      const successor = issuesById.get(dependency.successorId);
+      if (!predecessor || !successor) continue;
+      projectDependencyCount++;
+      if (!hasProject) continue;
+      const check = checkDependencySchedule(dependency, predecessor, successor, calendarMath);
+      if (check.kind === 'valid') continue;
+      findings.push({ dependency, predecessor, successor, check });
+      if (check.kind === 'conflict') conflictingIds.add(dependency.id);
+    }
+    return { projectDependencyCount, findings, conflictingIds };
+  }, [projectIssues, data.dependencies, calendarMath, hasProject]);
   const analysisResult = useMemo(() => {
     if (!analysisOpen || !hasProject) return null;
     try {
@@ -289,7 +315,9 @@ function ProjectGantt(props: GanttProps) {
       const { id, startDate, endDate } = focusedIssue;
       if (!issueOverlayOpen) scroll.scrollIntoView({ block: 'start', inline: 'nearest' });
       scroll.scrollTop = row.offsetTop - HEADER_HEIGHT;
-      if (startDate && endDate) {
+      if (focusDateEndpoint && !issueOverlayOpen) {
+        focusGanttDate(scroll, id, focusDateEndpoint === 'startDate' ? 'start' : 'end', 'nearest');
+      } else if (startDate && endDate) {
         scrollTimelineDate(scroll, (dayNumber(startDate) - range.start) * dayWidth);
         if (!issueOverlayOpen) row.querySelector<HTMLButtonElement>('.gantt-bar')?.focus({ preventScroll: true });
       } else if (!issueOverlayOpen) {
@@ -297,7 +325,7 @@ function ProjectGantt(props: GanttProps) {
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [dayWidth, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
+  }, [dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
   const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope ? issues : [];
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
@@ -330,11 +358,11 @@ function ProjectGantt(props: GanttProps) {
     return ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6))) || canLeave();
   }
   function changeVisibility(nextQuery: string, nextHideDone: boolean) {
-    if (!canHideRows(sharedViewRows(locallyVisibleIssues(nextQuery, nextHideDone, planningScope)))) return;
+    if (!canHideRows(chartRows(nextQuery, nextHideDone, planningScope))) return;
     setQuery(nextQuery); setHideDone(nextHideDone);
   }
   function setPlanningFilter(only: boolean) {
-    if (canHideRows(sharedViewRows(locallyVisibleIssues(query, hideDone, only ? selectedPlan : undefined)))) setLinkedOnly(only);
+    if (canHideRows(chartRows(query, hideDone, only ? selectedPlan : undefined))) setLinkedOnly(only);
   }
   function scrollToDate(date: number, start: number, behavior: ScrollBehavior = 'auto') {
     const offset = (date - start) * dayWidth;
@@ -587,6 +615,14 @@ function ProjectGantt(props: GanttProps) {
       }}>업무 위치 해제</button>}
     </div>}
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
+      <button ref={findingsTrigger} className="btn gantt-findings-trigger" type="button" aria-label="일정 충돌" aria-expanded={findingsOpen}
+        aria-controls={findingsOpen ? FINDINGS_PANEL_ID : undefined}
+        aria-describedby="gantt-dependency-summary"
+        disabled={!hasProject} onClick={() => setFindingsOpen(open => !open)}>
+        <AlertCircle size={15} aria-hidden="true" />일정 충돌
+        {findings.length > 0 && <span className="gantt-findings-count" aria-hidden="true">{findings.length}</span>}
+      </button>
+      <span id="gantt-dependency-summary" hidden>충돌 {conflictingIds.size}건, 전체 점검 항목 {findings.length}건</span>
       <button ref={analysisTrigger} className="btn" type="button" aria-expanded={analysisOpen} aria-controls={analysisOpen ? ANALYSIS_PANEL_ID : undefined} disabled={!hasProject} onClick={() => setAnalysisOpen(open => !open)}>
         <ChartNoAxesCombined size={15} aria-hidden="true" />일정 여유 분석
       </button>
@@ -600,6 +636,10 @@ function ProjectGantt(props: GanttProps) {
         setLinkPicker({ source: null });
         linkPickerTrigger.current?.focus({ preventScroll: true });
       }} onCancel={cancelLinkPicking} />}
+    {findingsOpen && hasProject && <GanttDependencyFindings id={FINDINGS_PANEL_ID} findings={findings}
+      disabled={busy || Boolean(issueOverlayOpen)} onLocateDate={onLocateIssueDate}
+      onEditLink={(dependency, opener) => showLinkEditor(opener, dependency)}
+      onClose={() => { setFindingsOpen(false); findingsTrigger.current?.focus({ preventScroll: true }); }} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateAnalysisDate} />}
@@ -664,9 +704,11 @@ function ProjectGantt(props: GanttProps) {
       <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true">
         <defs>
           <marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#8a9b9b" /></marker>
+          {conflictingIds.size > 0 && <marker id="gantt-arrow-conflict" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-dependency-conflict)" /></marker>}
           {analysisResult?.analysis && <marker id="gantt-arrow-analysis" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-analysis-accent)" /></marker>}
         </defs>
         {dependencies.map(link => <GanttConnector key={link.dependency.id} {...link} range={range} dayWidth={dayWidth} drag={drag}
+          conflict={conflictingIds.has(link.dependency.id)}
           critical={analysisResult?.criticalDependencyIds?.has(link.dependency.id) ?? false} />)}
       </svg>
       {planningRows.map(item => <PlanningTimelineRow key={item.id} item={item} selected={item.id === selectedPlanningId}
@@ -732,7 +774,7 @@ function ProjectGantt(props: GanttProps) {
     </div></div>
     {baseline && <details className="gantt-baseline-records"><summary>기준선 업무 기록 {baseline.issues.length}개 · 캡처된 이름과 날짜 확인</summary><div><table><thead><tr><th>기준선 업무</th><th>시작일</th><th>종료일</th><th>현재 상태</th></tr></thead><tbody>{baseline.issues.map(captured => <tr key={captured.issueId}><td><small>{captured.key}</small><strong>{captured.title}</strong></td><td><button disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button></td><td><button disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></td><td>{projectIssues.some(issue => issue.id === captured.issueId) ? '현재 업무 있음' : '삭제된 업무 기록'}</td></tr>)}</tbody></table></div></details>}
     {scheduleWarnings.length > 0 && <div className="gantt-current-warnings" role="status"><AlertCircle size={16} /><div><strong>일정 의존성 확인</strong>{scheduleWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="issue-icon-button" onClick={() => setScheduleWarnings([])} aria-label="경고 닫기"><X size={14} /></button></div>}
-    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span><span><span className="gantt-legend-line" />선행 → 후행</span><span><span className="gantt-legend-today" />오늘</span><span><Diamond size={12} />마일스톤</span><span><span className="gantt-nonworking-key" />비근무일</span>{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
+    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span><span><span className="gantt-legend-line" />선행 → 후행</span>{conflictingIds.size > 0 && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span><span><Diamond size={12} />마일스톤</span><span><span className="gantt-nonworking-key" />비근무일</span>{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row">
       <button type="button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
@@ -799,11 +841,12 @@ function ProjectGantt(props: GanttProps) {
   </div>;
 }
 
-function GanttConnector({ dependency, predecessor, successor, range, dayWidth, drag, critical }: {
+function GanttConnector({ dependency, predecessor, successor, range, dayWidth, drag, critical, conflict }: {
   dependency: Dependency; predecessor: IssueRow; successor: IssueRow;
-  range: TimelineRange; dayWidth: number; drag: DragState | null; critical: boolean;
+  range: TimelineRange; dayWidth: number; drag: DragState | null; critical: boolean; conflict: boolean;
 }) {
   const type = dependency.type ?? 'FS';
+  if (!isDependencyType(type)) return null;
   const endpoints = DEPENDENCY_ENDPOINTS[type];
   function anchor({ issue, index }: IssueRow, dateField: keyof typeof SCHEDULE_DATE_LABELS) {
     if (!issue.startDate || !issue.endDate) return null;
@@ -821,15 +864,20 @@ function GanttConnector({ dependency, predecessor, successor, range, dayWidth, d
   const to = anchor(successor, endpoints.successor);
   if (!from || !to) return null;
   const middleY = (from.y + to.y) / 2;
+  const connector = conflict
+    ? { color: 'var(--gantt-dependency-conflict)', width: 2, dash: '5 3', marker: 'gantt-arrow-conflict' }
+    : critical ? { color: 'var(--gantt-analysis-accent)', width: 2, marker: 'gantt-arrow-analysis' }
+      : { color: '#8a9b9b', width: 1.3, dash: '3 3', marker: 'gantt-arrow' };
   return <path
     data-dependency-id={dependency.id}
     data-analysis-critical={critical || undefined}
+    data-dependency-conflict={conflict || undefined}
     data-dependency-type={type}
     data-predecessor-anchor={endpoints.predecessor}
     data-successor-anchor={endpoints.successor}
     d={`M${from.x},${from.y} H${from.bend} V${middleY} H${to.bend} V${to.y} H${to.x}`}
-    fill="none" stroke={critical ? 'var(--gantt-analysis-accent)' : '#8a9b9b'} strokeWidth={critical ? '2' : '1.3'}
-    strokeDasharray={critical ? undefined : '3 3'} markerEnd={critical ? 'url(#gantt-arrow-analysis)' : 'url(#gantt-arrow)'}
+    fill="none" stroke={connector.color} strokeWidth={connector.width}
+    strokeDasharray={connector.dash} markerEnd={`url(#${connector.marker})`}
   />;
 }
 
