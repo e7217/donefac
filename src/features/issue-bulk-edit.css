@@ -75,6 +75,39 @@
 
 .issue-bulk-fields .field { width: 100%; min-width: 0; }
 
+.issue-bulk-date-fields { display: grid; gap: 8px; min-width: 0; }
+
+.issue-bulk-label-removal {
+  align-self: start;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid #d5e7dd;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.issue-bulk-label-removal summary {
+  padding: 5px 0;
+  color: #284c42;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.issue-bulk-label-removal summary:focus-visible { outline: 2px solid #286c5d; outline-offset: 2px; }
+.issue-bulk-removal-options { max-height: 150px; overflow: auto; }
+
+.issue-bulk-fields .issue-bulk-removal-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 1px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.issue-bulk-removal-option input { flex-shrink: 0; accent-color: #286c5d; }
+
 .issue-bulk-editor .issue-bulk-error {
   margin-top: 10px;
   padding: 7px 9px;
@@ -151,5 +184,5 @@
 @media (max-width: 520px) {
   .issue-bulk-editor { padding: 12px; }
   .issue-bulk-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .issue-bulk-fields label:last-child { grid-column: 1 / -1; }
+  .issue-bulk-label-removal { grid-column: 1 / -1; }
 }

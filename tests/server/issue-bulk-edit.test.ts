@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import {
-  ISSUE_BULK_EDIT_LIMIT, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
   type IssueBulkEditPreview, type IssueBulkEditResult, type ProjectWorkflow, type TeamNotificationPage,
   type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -178,6 +178,90 @@ test('bulk review shows blocked and unchanged rows, assigns automatically, and r
   assert.ok(!JSON.stringify(backup).includes(valid.previewId));
   await f.expectStatus(200, '/import', 'POST', { data: backup });
   assert.equal((await f.apply(valid.previewId)).status, 404);
+});
+
+test('bulk due dates and label edits preserve unrelated labels and replay the same applied receipt', async t => {
+  const f = await fixture(t);
+  const dueDate = '2026-12-18';
+  const first = await f.createIssue('첫 라벨 구성', { labels: ['alpha', '독립', 'old', 'legacy,tag', ' old '], dueDate: '2026-11-27' });
+  const second = await f.createIssue('두 번째 라벨 구성', { labels: ['beta', 'Alpha', 'old'] });
+  const unchanged = await f.createIssue('이미 같은 변경', { labels: ['유지', 'new', 'Alpha'], dueDate });
+  const outside = await f.createIssue('선택하지 않은 업무', { labels: ['old'], dueDate: '2026-11-30' });
+  const chosen = [first, second, unchanged];
+  const changes = { dueDate, removeLabels: ['old', 'legacy,tag', ' old '], addLabels: ['new', 'Alpha'] };
+  const expectedLabels = [['alpha', '독립', 'new', 'Alpha'], ['beta', 'Alpha', 'new'], unchanged.labels];
+  await f.enableEndpoint();
+  const before = await f.snapshot();
+  const reviewed = await f.preview(chosen, changes);
+  assert.ok(reviewed.previewId);
+  assert.equal(reviewed.changed, 2);
+  assert.equal(reviewed.unchanged, 1);
+  assert.equal(reviewed.blocked, 0);
+  assert.deepEqual(reviewed.rows.map(({ before }) => [before.dueDate, before.labels]), chosen.map(issue => [issue.dueDate, issue.labels]));
+  assert.deepEqual(reviewed.rows.map(({ after }) => [after?.dueDate, after?.labels]), expectedLabels.map(labels => [dueDate, labels]));
+  assert.deepEqual(await f.snapshot(), before);
+  assert.deepEqual(await f.deliveries(), []);
+
+  const receipt = await f.apply(reviewed.previewId);
+  assert.equal(receipt.status, 200);
+  assert.deepEqual(receipt.data.updated.map(({ id, version }) => [id, version]), [first, second].map(issue => [issue.id, issue.version + 1]));
+  assert.equal(receipt.data.unchanged, 1);
+  const updated = await f.snapshot();
+  const issues = new Map(updated.issues.map(issue => [issue.id, issue]));
+  assert.deepEqual(chosen.map(issue => [issues.get(issue.id)?.dueDate, issues.get(issue.id)?.labels]), expectedLabels.map(labels => [dueDate, labels]));
+  assert.deepEqual(issues.get(unchanged.id), unchanged);
+  assert.deepEqual(issues.get(outside.id), outside);
+  const deliveries = await f.deliveries();
+  assert.equal(deliveries.length, 2);
+  for (const delivery of deliveries) {
+    const { envelope } = await f.expectStatus<{ envelope: WebhookEnvelope }>(200, `/webhook-deliveries/${delivery.id}`);
+    assert.deepEqual(envelope.changedFields.sort(), ['dueDate', 'labels']);
+  }
+  await f.restart();
+  assert.deepEqual(await f.apply(reviewed.previewId), receipt);
+  assert.deepEqual(await f.snapshot(), updated);
+  assert.deepEqual(await f.deliveries(), deliveries);
+
+  const updatedFirst = issues.get(first.id)!;
+  const clear = await f.preview([updatedFirst], { dueDate: null });
+  assert.ok(clear.previewId);
+  assert.deepEqual(clear.rows[0].after, { ...issueFields(updatedFirst), dueDate: null });
+  assert.equal((await f.apply(clear.previewId)).status, 200);
+  const cleared = await f.snapshot();
+  assert.equal(cleared.issues.find(issue => issue.id === first.id)?.dueDate, null);
+  assert.deepEqual(cleared.issues.find(issue => issue.id === first.id)?.labels, expectedLabels[0]);
+  assert.deepEqual(cleared.issues.find(issue => issue.id === second.id), issues.get(second.id));
+});
+
+test('bulk due dates and label removals honor workflow requirements and reject ambiguous operations', async t => {
+  const f = await fixture(t);
+  const date = '2026-11-30';
+  const first = await f.createIssue('라벨을 일부 제거', { dueDate: date, labels: ['old', 'keep'] });
+  const second = await f.createIssue('라벨이 필요한 업무', { dueDate: date, labels: ['old'] });
+  await f.requireForReview(['dueDate', 'labels']);
+  const before = await f.snapshot();
+  const remove = await f.preview([first, second], { status: 'review', removeLabels: ['old'] });
+  assert.equal(remove.previewId, null);
+  assert.equal(remove.changed, 1);
+  assert.equal(remove.blocked, 1);
+  assert.deepEqual(remove.rows[0].after?.labels, ['keep']);
+  assert.equal(remove.rows[1].after, null);
+  const clear = await f.preview([first, second], { status: 'review', dueDate: null });
+  assert.equal(clear.previewId, null);
+  assert.equal(clear.blocked, 2);
+  assert.ok(clear.rows.every(({ after, reason }) => after === null && /마감일|dueDate/u.test(reason ?? '')));
+
+  const previewPath = `${bulkPath()}-preview`;
+  for (const changes of [{ dueDate: '2026-02-29' }, { dueDate: '' }, { addLabels: [] }, { removeLabels: 'old' },
+    { addLabels: ['dup', 'dup'] }, { addLabels: ['old'], removeLabels: ['old'] }, { labels: [] },
+    { addLabels: ['a'.repeat(ISSUE_BULK_LABEL_MAX_LENGTH + 1)] },
+    { removeLabels: Array.from({ length: ISSUE_BULK_LABEL_LIMIT + 1 }, (_, index) => `label-${index}`) }]) {
+    await f.expectStatus(400, previewPath, 'POST', { issues: issueVersions([first]), changes });
+  }
+  const noChange = await f.preview([first], { dueDate: date, addLabels: ['keep'], removeLabels: ['missing'] });
+  assert.equal(noChange.previewId, null);
+  assert.equal(noChange.unchanged, 1);
+  assert.deepEqual(await f.snapshot(), before);
 });
 
 test('issue and rule changes invalidate reviewed batches and project-scoped validation rejects foreign and duplicate targets', async t => {

@@ -489,14 +489,19 @@ export interface Issue {
 }
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export const ISSUE_BULK_EDIT_LIMIT = 100;
+export const ISSUE_BULK_LABEL_LIMIT = 100;
+export const ISSUE_BULK_LABEL_MAX_LENGTH = 60;
 export const WORKFLOW_STATUS_MIGRATION_LIMIT = 1_000;
 export interface WorkflowStatusMigrationPreviewInput {
   fromStatusId: string;
   toStatusId: string;
   expectedWorkflowVersion: number;
 }
-export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'>;
-export type IssueBulkEditChanges = Partial<IssueBulkEditValues>;
+export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'labels'>>;
+export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate'>> & {
+  addLabels?: string[];
+  removeLabels?: string[];
+};
 export interface IssueBulkEditPreviewInput {
   issues: { id: string; expectedVersion: number }[];
   changes: IssueBulkEditChanges;

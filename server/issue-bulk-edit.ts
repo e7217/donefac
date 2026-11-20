@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
+import { isCalendarDate } from '../shared/calendar.js';
 import {
-  ISSUE_BULK_EDIT_LIMIT, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT,
+  type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditValues,
   type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
 } from '../shared/types.js';
@@ -13,10 +15,11 @@ export class IssueBulkEditError extends Error {
 }
 
 type IssueSelection = IssueBulkEditPreviewInput['issues'][number];
+type IssueUpdate = Partial<IssueBulkEditValues>;
 interface BulkEditHooks<T extends { issue: Issue }> {
   actor(request: Request): string;
   configurationToken(projectId: string): string;
-  prepare(before: Issue, changes: IssueBulkEditChanges): T;
+  prepare(before: Issue, update: IssueUpdate): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
 interface StatusMigrationHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
@@ -38,7 +41,7 @@ interface BulkEditCandidate<T> { before: Issue; row: IssueBulkEditRow; prepared?
 
 const TABLE = 'issue_bulk_edit_previews';
 const STALE_MESSAGE = '업무 또는 프로젝트 설정이 변경되었습니다. 다시 미리 확인해 주세요.';
-const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId']);
+const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels']);
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 
 function fail(status: number, message: string, details?: unknown): never {
@@ -52,6 +55,21 @@ function object(value: unknown): Record<string, unknown> {
 
 function isId(value: unknown): value is string {
   return typeof value === 'string' && !!value.trim() && value.length <= 200;
+}
+
+function parseLabels(value: unknown, operation: 'add' | 'remove'): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > ISSUE_BULK_LABEL_LIMIT) {
+    fail(400, `추가하거나 제거할 라벨을 항목별로 1~${ISSUE_BULK_LABEL_LIMIT}개 선택해 주세요.`);
+  }
+  const labels = value.map((label: unknown) => {
+    if (typeof label !== 'string' || label.length > ISSUE_BULK_LABEL_MAX_LENGTH
+      || (operation === 'add' && (!label.trim() || /[\x00-\x1f\x7f-\x9f]/u.test(label)))) {
+      fail(400, '변경할 라벨의 형식과 길이를 확인해 주세요.');
+    }
+    return label;
+  });
+  if (new Set(labels).size !== labels.length) fail(400, '같은 라벨을 중복으로 지정할 수 없습니다.');
+  return labels;
 }
 
 function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
@@ -74,7 +92,7 @@ function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
 
   const change = object(input.changes);
   const fields = Object.keys(change);
-  if (!fields.length || fields.some(field => !CHANGE_FIELDS.has(field))) fail(400, '상태, 우선순위 또는 담당자 변경을 한 가지 이상 선택해 주세요.');
+  if (!fields.length || fields.some(field => !CHANGE_FIELDS.has(field))) fail(400, '지원하는 변경 항목을 한 가지 이상 선택해 주세요.');
   const changes: IssueBulkEditChanges = {};
   if (Object.hasOwn(change, 'status')) {
     if (!isId(change.status)) fail(400, '변경할 업무 상태를 확인해 주세요.');
@@ -88,6 +106,13 @@ function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
     if (change.assigneeId !== null && !isId(change.assigneeId)) fail(400, '변경할 담당자를 확인해 주세요.');
     changes.assigneeId = change.assigneeId;
   }
+  if (Object.hasOwn(change, 'dueDate')) {
+    if (change.dueDate !== null && !isCalendarDate(change.dueDate)) fail(400, '마감일을 YYYY-MM-DD 형식으로 입력해 주세요.');
+    changes.dueDate = change.dueDate;
+  }
+  if (Object.hasOwn(change, 'addLabels')) changes.addLabels = parseLabels(change.addLabels, 'add');
+  if (Object.hasOwn(change, 'removeLabels')) changes.removeLabels = parseLabels(change.removeLabels, 'remove');
+  if (changes.addLabels?.some(label => changes.removeLabels?.includes(label))) fail(400, '같은 라벨을 함께 추가하고 제거할 수 없습니다.');
   return { issues, changes };
 }
 
@@ -107,28 +132,50 @@ function parseStatusMigration(raw: unknown): WorkflowStatusMigrationPreviewInput
   return { fromStatusId, toStatusId, expectedWorkflowVersion };
 }
 
-function values({ status, priority, assigneeId }: Issue): IssueBulkEditValues {
-  return { status, priority, assigneeId };
+function issueUpdate(before: Issue, { addLabels, removeLabels, ...fields }: IssueBulkEditChanges): IssueUpdate {
+  if (!addLabels && !removeLabels) return fields;
+  const removed = new Set(removeLabels);
+  const labels = before.labels.filter(label => !removed.has(label));
+  const retained = new Set(labels);
+  for (const label of addLabels ?? []) if (!retained.has(label)) {
+    retained.add(label);
+    labels.push(label);
+  }
+  return { ...fields, labels };
+}
+
+function values({ status, priority, assigneeId, dueDate, labels }: Issue, update: IssueUpdate): IssueBulkEditValues {
+  // Include these fields when requested so reviews saved before their introduction still match on replay.
+  return { status, priority, assigneeId,
+    ...(Object.hasOwn(update, 'dueDate') ? { dueDate } : {}),
+    ...(Object.hasOwn(update, 'labels') ? { labels } : {}),
+  };
+}
+
+function sameLabels(left: string[] | undefined, right: string[] | undefined): boolean {
+  return left === right || (left !== undefined && right !== undefined && left.length === right.length && left.every((label, index) => label === right[index]));
 }
 
 function sameValues(left: IssueBulkEditValues | null, right: IssueBulkEditValues | null): boolean {
   return left === null || right === null ? left === right
-    : left.status === right.status && left.priority === right.priority && left.assigneeId === right.assigneeId;
+    : left.status === right.status && left.priority === right.priority && left.assigneeId === right.assigneeId
+      && left.dueDate === right.dueDate && sameLabels(left.labels, right.labels);
 }
 
 function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare']): BulkEditCandidate<T> {
   const { id, key, title } = before;
-  const row = { id, key, title, before: values(before) };
-  if (sameValues(row.before, { ...row.before, ...changes })) {
+  const update = issueUpdate(before, changes);
+  const row = { id, key, title, before: values(before, update) };
+  if (sameValues(row.before, { ...row.before, ...update })) {
     return { before, row: { ...row, after: row.before, outcome: 'unchanged', reason: null } };
   }
   try {
-    const prepared = prepare(before, changes);
+    const prepared = prepare(before, update);
     const next = prepared.issue;
     if (next.id !== before.id || next.projectId !== before.projectId || next.version !== before.version + 1) {
       fail(500, '일괄 변경할 업무의 식별자 또는 버전이 일치하지 않습니다.');
     }
-    const nextValues = values(next);
+    const nextValues = values(next, update);
     if (sameValues(row.before, nextValues)) return { before, row: { ...row, after: nextValues, outcome: 'unchanged', reason: null } };
     return { before, prepared, row: { ...row, after: nextValues, outcome: 'changed', reason: null } };
   } catch (error) {

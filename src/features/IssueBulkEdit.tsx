@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ListChecks, X } from 'lucide-react';
+import { isCalendarDate } from '../../shared/calendar';
 import {
-  ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type FeatureProps, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditValues, type Priority, type WorkflowStatus,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
@@ -11,18 +12,30 @@ import { afterAcceptedNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './issue-bulk-edit.css';
 
-interface EditSession {
+type BasicChanges = Pick<IssueBulkEditChanges, 'status' | 'priority' | 'assigneeId'>;
+type DueDateMode = 'keep' | 'set' | 'clear';
+
+interface EditFields {
+  changes: BasicChanges;
+  dueDateMode: DueDateMode;
+  dueDate: string;
+  addLabelsText: string;
+  removeLabels: string[];
+}
+
+interface EditSession extends EditFields {
   scope: string;
   ids: Set<string>;
-  changes: IssueBulkEditChanges;
   preview: { result: IssueBulkEditPreview; input: string } | null;
   error: string;
   refreshRequired: boolean;
   applyUncertain: boolean;
 }
 
+const emptyFields: EditFields = { changes: {}, dueDateMode: 'keep', dueDate: '', addLabelsText: '', removeLabels: [] };
+
 function initialSession(scope: string): EditSession {
-  return { scope, ids: new Set(), changes: {}, preview: null, error: '', refreshRequired: false, applyUncertain: false };
+  return { ...emptyFields, scope, ids: new Set(), preview: null, error: '', refreshRequired: false, applyUncertain: false };
 }
 
 function discardPrompt(uncertain: boolean) {
@@ -36,10 +49,27 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
   const pending = useRef<AbortController | null>(null);
   const active = session?.scope === scope;
   const selected = active ? visible.filter(issue => session.ids.has(issue.id)) : [];
-  const changes = active ? session.changes : {};
+  const fields = active ? session : emptyFields;
+  const { dueDateMode, dueDate, addLabelsText, removeLabels } = fields;
+  const addLabels = [...new Set(addLabelsText.split(',').map(label => label.trim()).filter(Boolean))];
+  const validDueDate = dueDateMode !== 'set' || isCalendarDate(dueDate);
+  const changes: IssueBulkEditChanges = {
+    ...fields.changes,
+    ...(dueDateMode === 'clear' ? { dueDate: null } : dueDateMode === 'set' && validDueDate ? { dueDate } : {}),
+    ...(addLabels.length ? { addLabels } : {}),
+    ...(removeLabels.length ? { removeLabels } : {}),
+  };
+  const removalOptions = [...new Set([...removeLabels, ...selected.flatMap(issue => issue.labels)])]
+    .sort((first, second) => first.localeCompare(second, 'ko'));
+  let labelsError = '';
+  if (addLabels.length > ISSUE_BULK_LABEL_LIMIT || addLabels.some(label => label.length > ISSUE_BULK_LABEL_MAX_LENGTH || /\p{Cc}/u.test(label))) {
+    labelsError = `추가할 라벨은 각 ${ISSUE_BULK_LABEL_MAX_LENGTH}자 이하로 최대 ${ISSUE_BULK_LABEL_LIMIT}개 입력해 주세요.`;
+  } else if (addLabels.some(label => removeLabels.includes(label))) {
+    labelsError = '같은 라벨은 추가와 제거 중 한 곳에서만 선택해 주세요.';
+  }
   const changeCount = Object.keys(changes).length;
   const applyUncertain = active && session.applyUncertain;
-  const dirty = active && (selected.length > 0 || changeCount > 0 || applyUncertain);
+  const dirty = active && (selected.length > 0 || changeCount > 0 || dueDateMode !== 'keep' || Boolean(addLabelsText) || applyUncertain);
   const input = JSON.stringify({
     issues: selected.map(({ id, version }) => ({ id, expectedVersion: version })), changes,
   } satisfies IssueBulkEditPreviewInput);
@@ -118,13 +148,25 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     setSession(current => current && { ...current, ids, preview: null });
   }
 
-  function setChange<N extends keyof IssueBulkEditChanges>(name: N, value: IssueBulkEditChanges[N]) {
+  function updateFields(update: (current: EditSession) => Partial<EditFields>) {
     setSession(current => {
       if (!current || pending.current || current.applyUncertain) return current;
+      return { ...current, ...update(current), preview: null, error: current.refreshRequired ? current.error : '' };
+    });
+  }
+
+  function setChange<N extends keyof BasicChanges>(name: N, value: BasicChanges[N]) {
+    updateFields(current => {
       const patch = { ...current.changes, [name]: value };
       if (value === undefined) delete patch[name];
-      return { ...current, changes: patch, preview: null, error: current.refreshRequired ? current.error : '' };
+      return { changes: patch };
     });
+  }
+
+  function toggleLabelRemoval(label: string) {
+    updateFields(current => ({ removeLabels: current.removeLabels.includes(label)
+      ? current.removeLabels.filter(value => value !== label)
+      : current.removeLabels.length < ISSUE_BULK_LABEL_LIMIT ? [...current.removeLabels, label] : current.removeLabels }));
   }
 
   async function request(task: (signal: AbortSignal) => Promise<void>) {
@@ -146,7 +188,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     return api<T>(`${path}/${action}`, { method: 'POST', body, signal, headers: { 'X-Actor-Id': actorId } });
   }
 
-  const canPreview = active && selected.length > 0 && changeCount > 0 && !session.refreshRequired && !applyUncertain;
+  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && !labelsError && !session.refreshRequired && !applyUncertain;
   async function review() {
     if (!canPreview) return;
     await request(async signal => {
@@ -208,6 +250,10 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     active, busy, locked: busy || applyUncertain, selectedIds: active ? session.ids : new Set<string>(), changes,
     preview, stalePreview, canPreview, applyUncertain, error: active ? session.error : '', refreshRequired: active && session.refreshRequired,
     selectedCount: selected.length, visibleCount: visible.length,
+    dueDateMode, dueDate, addLabelsText, removalOptions, removeLabels, labelsError, toggleLabelRemoval,
+    setDueDateMode: (value: DueDateMode) => updateFields(() => ({ dueDateMode: value })),
+    setDueDate: (value: string) => updateFields(() => ({ dueDate: value })),
+    setAddLabelsText: (value: string) => updateFields(() => ({ addLabelsText: value })),
     open: () => setSession(initialSession(scope)), close, toggle, toggleVisible, setChange, review, apply, reload,
   };
 }
@@ -227,9 +273,10 @@ export function IssueBulkSelectVisible({ editor }: { editor: BulkEditor }) {
   </label>;
 }
 
-const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자' } satisfies Record<keyof IssueBulkEditValues, string>;
+const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자', dueDate: '마감일', labels: '라벨' } satisfies Record<keyof IssueBulkEditValues, string>;
 const outcomes = { changed: '변경 예정', unchanged: '변경 없음', blocked: '변경 불가' };
 const memberPrefix = 'team-member:';
+const displayLabel = (label: string) => !label || label.trim() !== label || /[",\p{Cc}]/u.test(label) ? JSON.stringify(label) : label;
 
 export function IssueBulkEdit({ editor, statuses, users, onClose }: {
   editor: BulkEditor;
@@ -241,6 +288,8 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
   function valueLabel(field: keyof IssueBulkEditValues, values: IssueBulkEditValues) {
     if (field === 'status') return statuses.find(status => status.id === values.status)?.label ?? values.status;
     if (field === 'priority') return PRIORITY[values.priority];
+    if (field === 'dueDate') return values.dueDate ?? '미지정';
+    if (field === 'labels') return values.labels?.length ? values.labels.map(displayLabel).join(', ') : '없음';
     return values.assigneeId ? users.find(user => user.id === values.assigneeId)?.name ?? values.assigneeId : '미지정';
   }
 
@@ -274,7 +323,33 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
           <option value="">직접 지정하지 않음</option><option value="none">담당자 해제</option>
           {users.map(user => <option value={`${memberPrefix}${user.id}`} key={user.id}>{user.name}</option>)}
         </select></label>
+        <div className="issue-bulk-date-fields">
+          <label>마감일<select className="field" aria-label="일괄 변경 마감일" value={editor.dueDateMode}
+            onChange={event => editor.setDueDateMode(event.currentTarget.value as DueDateMode)}>
+            <option value="keep">현재 마감일 유지</option><option value="set">날짜 지정</option><option value="clear">마감일 지우기</option>
+          </select></label>
+          {editor.dueDateMode === 'set' && <label>지정할 마감일<input type="date" className="field" required
+            value={editor.dueDate} onChange={event => editor.setDueDate(event.currentTarget.value)} /></label>}
+        </div>
+        <label>추가할 라벨<input className="field" placeholder="쉼표로 구분" value={editor.addLabelsText}
+          aria-invalid={Boolean(editor.labelsError) || undefined}
+          onChange={event => editor.setAddLabelsText(event.currentTarget.value)} /></label>
+        <details className="issue-bulk-label-removal">
+          <summary>제거할 라벨 선택</summary>
+          <div className="issue-bulk-removal-options">
+            {editor.removalOptions.length ? editor.removalOptions.map(label => {
+              const checked = editor.removeLabels.includes(label);
+              return <label key={label} className="issue-bulk-removal-option">
+                <input type="checkbox" aria-label={`${displayLabel(label)} 라벨 제거`} checked={checked}
+                  disabled={!checked && editor.removeLabels.length >= ISSUE_BULK_LABEL_LIMIT} onChange={() => editor.toggleLabelRemoval(label)} />
+                <span>{displayLabel(label)}</span>
+              </label>;
+            }) : <p>선택한 업무에 제거할 라벨이 없습니다.</p>}
+          </div>
+          {editor.removeLabels.length > 0 && <p role="status">{editor.removeLabels.length}개 선택 · 최대 {ISSUE_BULK_LABEL_LIMIT}개</p>}
+        </details>
       </fieldset>
+      {editor.labelsError && <p className="issue-bulk-error" role="alert">{editor.labelsError}</p>}
       <p className="issue-bulk-note">현재 목록의 업무만 선택할 수 있습니다. 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
       {editor.visibleCount > ISSUE_BULK_EDIT_LIMIT && <p className="issue-bulk-note">전체 선택은 검색 결과가 {ISSUE_BULK_EDIT_LIMIT}개 이하일 때 가능합니다.</p>}
       <button type="submit" className="btn" disabled={editor.busy || !editor.canPreview}>변경 미리보기</button>
@@ -301,7 +376,11 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
 
 function transitionLabels(before: IssueBulkEditValues, after: IssueBulkEditValues,
   label: (field: keyof IssueBulkEditValues, values: IssueBulkEditValues) => string) {
-  const fields = (Object.keys(fieldLabels) as (keyof IssueBulkEditValues)[]).filter(field => before[field] !== after[field]);
+  const fields = (Object.keys(fieldLabels) as (keyof IssueBulkEditValues)[]).filter(field => {
+    if (field !== 'labels') return before[field] !== after[field];
+    const previous = before.labels ?? [], next = after.labels ?? [];
+    return previous.length !== next.length || previous.some((value, index) => value !== next[index]);
+  });
   if (!fields.length) return null;
   return <dl className="issue-bulk-changes">{fields.map(field => <div key={field}>
     <dt>{fieldLabels[field]}</dt><dd>{label(field, before)} → {label(field, after)}</dd>

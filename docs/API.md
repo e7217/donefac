@@ -139,9 +139,11 @@ curl --fail-with-body \
 
 ## 업무 일괄 편집
 
-브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다.
+브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
 
-응답의 `rows`는 업무별 `before`, `after`, `outcome`, `reason`을 반환하며 `changed`, `unchanged`, `blocked`에 건수를 담는다. 변경할 업무가 있고 모든 업무가 검증을 통과하면 30분간 유효한 `previewId`를 반환한다. 적용 전까지 업무와 변경 이력은 유지된다.
+`addLabels`와 `removeLabels`는 각각 중복 없는 1~100개 문자열 배열이며, 라벨 하나는 최대 60자다. 양쪽에 같은 이름을 넣으면 요청을 거절한다. 대소문자와 공백을 포함한 이름을 그대로 비교한다. 해당 티켓에 있는 제거 대상만 지우고, 없는 추가 대상을 기존 목록 뒤에 붙인다.
+
+응답의 `rows`는 업무별 `before`, `after`, `outcome`, `reason`을 반환하며 `changed`, `unchanged`, `blocked`에 건수를 담는다. 마감일이나 라벨 편집을 요청하면 해당 필드의 전후 값도 반환한다. 변경할 업무가 있고 모든 업무가 검증을 통과하면 30분간 유효한 `previewId`를 반환한다. 적용 전까지 업무와 변경 이력은 유지된다.
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
