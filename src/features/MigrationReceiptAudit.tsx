@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
-import type { SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationStatus } from '../../shared/types';
+import type { SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationStatus } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
@@ -17,6 +17,12 @@ const fileLabels: Record<SourceReconciliationAuditStatus, string> = {
   unreadable: '읽기 실패',
 };
 const findingStatuses = new Set<SourceReconciliationAuditStatus>(['missing', 'corrupt', 'unbound', 'unreadable']);
+const integrityLabels: Record<SourceReconciliationIntegrity['status'], string> = {
+  verified: '보존 원본 검증값 일치',
+  mismatch: '확인 필요',
+  'counts-only': '건수만 비교',
+  unavailable: '비교 기준 없음',
+};
 
 type Filter = 'all' | 'findings' | SourceReconciliationAuditStatus;
 type AuditState = { kind: 'idle' | 'pending' | 'cancelled' } | { kind: 'complete'; result: SourceReconciliationAudit } | { kind: 'error'; message: string };
@@ -112,6 +118,7 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       {state.kind === 'error' && <p className="migration-error" role="alert">{state.message}</p>}
       {report && <>
         <p className="migration-audit-completed" role="status">원본 연결과 첨부 검증을 마쳤습니다.</p>
+        <ReceiptIntegrity integrity={report.integrity} />
         <h5>원본 객체 상태</h5>
         <AuditCounts label="원본 검증 건수" labels={recordLabels} counts={report.recordCounts} />
         <h5>첨부 검증 결과</h5>
@@ -159,11 +166,65 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
             </div>
           </> : <p>선택한 상태의 첨부가 없습니다.</p>}
         </>}
-        {report.attachments.length === 0 && <p>영수증에 첨부 원본이 없습니다.</p>}
+        {report.attachments.length === 0 && <p>현재 검사할 첨부 원본이 없습니다.</p>}
       </>}
     </section>}
   </div>;
 }
+
+function ReceiptIntegrity({ integrity }: { integrity: SourceReconciliationIntegrity }) {
+  const { status, packages, unmatchedRecords, columnMismatches } = integrity;
+  const mismatches = packages.filter(item => item.status === 'mismatch');
+  const remaining = packages.filter(item => item.status !== 'mismatch');
+  const hasFingerprints = packages.some(item => item.recordsSha256.expected !== null);
+  return <section className="migration-audit-integrity" aria-label="이관 당시 기록과 현재 비교">
+    <div className="migration-audit-integrity-heading">
+      <h5>이관 당시 기록과 현재 비교</h5>
+      <span className={`migration-audit-status is-${status}`}>{integrityLabels[status]}</span>
+    </div>
+    {!hasFingerprints && <p>이 영수증에는 패키지별 검증값이 없습니다.</p>}
+    <IntegrityCounts counts={integrity} label="영수증 전체 건수 비교" />
+    {(unmatchedRecords > 0 || columnMismatches > 0) && <ul className="migration-audit-integrity-findings" aria-label="보존 원본 식별 정보 확인">
+      {unmatchedRecords > 0 && <li>영수증의 패키지를 확인할 수 없는 원본 {count(unmatchedRecords)}</li>}
+      {columnMismatches > 0 && <li>저장 식별 정보가 일치하지 않는 원본 {count(columnMismatches)}</li>}
+    </ul>}
+    {mismatches.length > 0 && <IntegrityPackages packages={mismatches} label="확인이 필요한 이관 패키지" />}
+    {remaining.length > 0 && <details>
+      <summary>패키지별 비교 {count(remaining.length)}</summary>
+      <IntegrityPackages packages={remaining} label="이관 패키지별 비교" />
+    </details>}
+  </section>;
+}
+
+function IntegrityPackages({ packages, label }: { packages: SourceReconciliationIntegrityPackage[]; label: string }) {
+  return <ul className="migration-audit-integrity-packages" aria-label={label}>
+    {packages.map(item => {
+      const { expected, observed } = item.recordsSha256;
+      const comparison = expected === null ? '이관 당시 검증값 없음' : expected === observed ? '원본 목록 검증값 일치' : '원본 목록 검증값 불일치';
+      return <li key={item.stagingId}>
+        <div className="migration-audit-integrity-heading">
+          <strong>{item.filename}</strong>
+          {item.status === 'mismatch' && <span className="migration-audit-status is-mismatch">확인 필요</span>}
+        </div>
+        <IntegrityCounts counts={item} />
+        <p>{comparison}</p>
+      </li>;
+    })}
+  </ul>;
+}
+
+function IntegrityCounts({ counts, label }: { counts: Pick<SourceReconciliationIntegrity, 'records' | 'boundAttachments'>; label?: string }) {
+  return <dl className="migration-audit-integrity-counts" aria-label={label}>
+    <div><dt>보존 원본</dt><dd>{comparedCount(counts.records)}</dd></div>
+    <div><dt>원본에 연결된 첨부 버전</dt><dd>{comparedCount(counts.boundAttachments)}</dd></div>
+  </dl>;
+}
+
+function comparedCount({ expected, observed }: SourceReconciliationIntegrity['records']) {
+  return `${expected === null ? '이관 당시 기준 없음' : `이관 당시 ${count(expected)}`} · 현재 ${count(observed)}`;
+}
+
+function count(value: number) { return `${value.toLocaleString('ko-KR')}개`; }
 
 function AuditCounts<Status extends string>({ label, labels, counts }: { label: string; labels: Record<Status, string>; counts: Record<Status, number> }) {
   return <dl className="migration-reconciliation-counts" aria-label={label}>

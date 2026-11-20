@@ -465,7 +465,25 @@ class Planner{
     }
   }
   archive():void{
-    for(const entry of this.entries){const binding=this.excluded.has(entry.key)?undefined:this.bindings.get(entry.key),ownerEntry=this.excluded.has(entry.key)?null:this.ownerEntry(entry),owner=ownerEntry?this.bindings.get(ownerEntry.key):undefined;const value:SourceRecordArchive={id:this.archiveIds.get(entry.key)||randomUUID(),sourceImportId:this.input.id,packageSha256:entry.pkg.summary.sha256,source:structuredClone(entry.pkg.dataset.source),record:structuredClone(entry.row),targetType:binding?.type||null,targetId:binding?.id||null,targetProjectId:binding?.projectId||owner?.projectId||null,ownerType:owner&&['issue','document'].includes(owner.type)?owner.type as 'issue'|'document':null,ownerId:owner&&['issue','document'].includes(owner.type)?owner.id:null};if(entry.row.kind==='project'||entry.row.kind==='identity'){value.ownerType=null;value.ownerId=null;}this.result.sourceRecords.push(value);}
+    for (const entry of this.entries) {
+      const excluded = this.excluded.has(entry.key);
+      const binding = excluded ? undefined : this.bindings.get(entry.key);
+      const ownerEntry = excluded ? null : this.ownerEntry(entry);
+      const owner = ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
+      const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
+      const value: SourceRecordArchive = {
+        id: this.archiveIds.get(entry.key) || randomUUID(), sourceImportId: this.input.id,
+        packageSha256: entry.pkg.summary.sha256, source: structuredClone(entry.pkg.dataset.source), record: structuredClone(entry.row),
+        targetType: binding?.type ?? null, targetId: binding?.id ?? null, targetProjectId: binding?.projectId ?? owner?.projectId ?? null,
+        ownerType, ownerId: ownerType ? owner!.id : null,
+        ...(excluded ? { excluded: true } : {}),
+      };
+      if (entry.row.kind === 'project' || entry.row.kind === 'identity') {
+        value.ownerType = null;
+        value.ownerId = null;
+      }
+      this.result.sourceRecords.push(value);
+    }
   }
   finish():PreparedMigration{
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};

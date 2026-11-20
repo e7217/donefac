@@ -159,11 +159,23 @@ export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
   packages:{stagingId:string;filename:string;sha256:string;source:LegacySource}[];counts:Record<string,number>;
   notices?:MigrationNotice[];
+  integrity?:SourceImportIntegrity;
+}
+export interface SourceImportIntegrityPackage {
+  stagingId: string;
+  recordCount: number;
+  boundAttachmentCount: number;
+  recordsSha256: string;
+}
+export interface SourceImportIntegrity {
+  version: 1;
+  packages: SourceImportIntegrityPackage[];
 }
 export interface SourceRecordArchive {
   id:string;sourceImportId:string;packageSha256:string;source:LegacySource;record:LegacyRecord;
   targetType:'project'|'issue'|'document'|'comment'|'revision'|'attachment'|null;targetId:string|null;targetProjectId:string|null;
   ownerType:'issue'|'document'|null;ownerId:string|null;
+  excluded?:true;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number }
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string }
@@ -201,11 +213,32 @@ export interface SourceReconciliationAuditAttachment extends Omit<SourceReconcil
   recordStatus: SourceReconciliationStatus;
   status: SourceReconciliationAuditStatus;
 }
+export interface SourceReconciliationIntegrityCount {
+  expected: number | null;
+  observed: number;
+}
+export interface SourceReconciliationIntegrityPackage {
+  stagingId: string;
+  filename: string;
+  status: 'verified' | 'mismatch' | 'unavailable';
+  records: SourceReconciliationIntegrityCount;
+  boundAttachments: SourceReconciliationIntegrityCount;
+  recordsSha256: { expected: string | null; observed: string };
+}
+export interface SourceReconciliationIntegrity {
+  status: 'verified' | 'mismatch' | 'counts-only' | 'unavailable';
+  records: SourceReconciliationIntegrityCount;
+  boundAttachments: SourceReconciliationIntegrityCount;
+  unmatchedRecords: number;
+  columnMismatches: number;
+  packages: SourceReconciliationIntegrityPackage[];
+}
 export interface SourceReconciliationAudit {
   importId: string;
   receiptVersion: number;
   startedAt: string;
   completedAt: string;
+  integrity: SourceReconciliationIntegrity;
   recordCounts: SourceReconciliationPage['counts'];
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];

@@ -1161,6 +1161,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];
     const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
+    if(data.schemaVersion<33&&(
+      (Array.isArray(data.sourceImports)&&data.sourceImports.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'integrity')))||
+      (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'excluded')))
+    ))fail('원본 무결성 기준 또는 하위 제외 기록을 포함한 백업은 schemaVersion 33이 필요합니다.');
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],

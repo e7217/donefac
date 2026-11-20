@@ -17,7 +17,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 1;
+const conversionVersion = 2;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 
 type Hooks = {
@@ -251,8 +251,9 @@ export class MigrationService {
       if (expectedFiles.size) fail(409, '검토한 첨부 내용 일부가 없습니다.');
       const staged = files.length ? this.append.stage(id, files) : null;
       prepared.sourceImport.notices = preview.notices;
+      let receipt: SourceImport;
       try {
-        this.store.withMutationContext({ actorId, origin: 'import' }, () => this.store.transaction(() => {
+        receipt = this.store.withMutationContext({ actorId, origin: 'import' }, () => this.store.transaction(() => {
           if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
           if (Date.parse(preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
           this.verifyPackages(prepared.sourceImport.packages);
@@ -260,16 +261,17 @@ export class MigrationService {
           if (prepared.projects.some(project => keys.has(project.key))) fail(409, '이관할 프로젝트 키가 이미 사용 중입니다.');
           if (!this.store.get('users', actorId)) fail(409, '이관 작업자가 변경되었습니다. 다시 검토해 주세요.');
           hooks.persistCanonical(prepared, request);
-          this.sources.persistPrepared(prepared);
+          const recorded = this.sources.persistPrepared(prepared);
           staged?.install();
           this.store.db.prepare('DELETE FROM migration_previews WHERE id=?').run(id);
+          return recorded;
         }));
       } catch (error) {
         staged?.rollback();
         throw error;
       }
       try { staged?.commit(); } catch { console.error('[teamspace migration] 첨부 추가 복구 기록 정리가 필요합니다.'); }
-      return { import: prepared.sourceImport, duplicate: false };
+      return { import: receipt, duplicate: false };
     } finally { this.busy = false; }
   }
   registerRoutes(app: Express, hooks: Hooks) {

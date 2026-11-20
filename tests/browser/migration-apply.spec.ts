@@ -313,6 +313,7 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     await expect(reconciliation.getByRole('list', { name: '이관 결과 대조 목록' }).getByRole('listitem')).toHaveCount(1);
     const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
     const audit = reconciliation.getByRole('region', { name: '전체 이관 검증', exact: true });
+    const comparison = audit.getByRole('region', { name: '이관 당시 기록과 현재 비교', exact: true });
     const output = audit.getByRole('button', { name: '검증 결과 JSON 내보내기', exact: true });
     const filter = audit.getByLabel('첨부 검증 상태', { exact: true });
     const rows = audit.getByRole('list', { name: '첨부 검증 목록', exact: true }).getByRole('listitem');
@@ -329,6 +330,9 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     const good = await checkAll();
     expect(good.attachmentCounts).toEqual({ verified: 3, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 });
     expect(new Set(good.attachments.map(row => row.sha256))).toEqual(new Set([first, latest, removed].map(bytes => createHash('sha256').update(bytes).digest('hex'))));
+    expect(good.integrity.status).toBe('verified');
+    await expect(comparison.getByText('보존 원본 검증값 일치', { exact: true })).toBeVisible();
+    await expect(comparison.getByLabel('영수증 전체 건수 비교', { exact: true }).getByText('이관 당시 3개 · 현재 3개', { exact: true })).toBeVisible();
     await expect(filter).toHaveValue('all');
     await expect(rows).toHaveCount(3);
     const box = await audit.boundingBox();
@@ -363,6 +367,44 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     expect(path).not.toBeNull();
     const json = await readFile(path!, 'utf8');
     expect(JSON.parse(json)).toEqual(mixed);
+
+    const auditPath = `/api/source-imports/${receipt.id}/reconciliation/audit`;
+    const packageResult = good.integrity.packages.find(item => item.filename === filename)!;
+    const records = { ...packageResult.records, observed: packageResult.records.observed - 1 };
+    const boundAttachments = { ...packageResult.boundAttachments, observed: packageResult.boundAttachments.observed - 1 };
+    // Exercise the result presentation for a missing source row while the surviving files all verify.
+    const missingSource: SourceReconciliationAudit = {
+      ...good,
+      attachmentCounts: { ...good.attachmentCounts, verified: 2 },
+      attachments: good.attachments.filter(row => row.sourceId !== '702'),
+      integrity: { ...good.integrity, status: 'mismatch', records, boundAttachments, packages: [{
+        ...packageResult, status: 'mismatch', records, boundAttachments,
+        recordsSha256: { ...packageResult.recordsSha256, observed: '0'.repeat(64) },
+      }] },
+    };
+    await page.route(url => url.pathname === auditPath, route => route.fulfill({ json: missingSource }), { times: 1 });
+    await checkAll();
+    const mismatch = comparison.getByRole('list', { name: '확인이 필요한 이관 패키지', exact: true });
+    await expect(mismatch.getByText(filename, { exact: true })).toBeVisible();
+    await expect(mismatch.getByText('원본 목록 검증값 불일치', { exact: true })).toBeVisible();
+    await expect(mismatch.getByText('이관 당시 3개 · 현재 2개', { exact: true })).toBeVisible();
+    await filter.selectOption('findings');
+    await expect(rows).toHaveCount(0);
+    await expect(mismatch.getByText(filename, { exact: true })).toBeVisible();
+
+    const legacy: SourceReconciliationAudit = {
+      ...good,
+      integrity: { ...good.integrity, status: 'counts-only', packages: [{
+        ...packageResult, status: 'unavailable', records: { ...packageResult.records, expected: null },
+        boundAttachments: { ...packageResult.boundAttachments, expected: null },
+        recordsSha256: { ...packageResult.recordsSha256, expected: null },
+      }] },
+    };
+    await page.route(url => url.pathname === auditPath, route => route.fulfill({ json: legacy }), { times: 1 });
+    await checkAll();
+    await expect(comparison.getByText('건수만 비교', { exact: true })).toBeVisible();
+    await expect(comparison.getByText('이 영수증에는 패키지별 검증값이 없습니다.', { exact: true })).toBeVisible();
+    await expect(comparison.getByText('보존 원본 검증값 일치', { exact: true })).toHaveCount(0);
     expect(json).not.toContain('검증 보고서에 복사하지 않을 원문');
     await filter.selectOption('all');
     await expect(rows).toHaveCount(3);

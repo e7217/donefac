@@ -120,8 +120,21 @@ test('a migrated document can move to another project or common documents and na
 test('native replacement increments receipt versions, rebuilds bindings, refuses UUID mutation and rolls back completely on late failure', () => {
   const f = fixture(); try {
     persist(f); const original = data(f), previous = new Map([[f.prepared.sourceImport.id, 7]]);
-    const invalid = structuredClone(original); invalid.records[2].record.sourceId = 'changed-original'; invalid.records[2].record.id = 'issue:changed-original'; const parsed = f.service.validateImport(invalid, f.context());
-    assert.throws(() => f.store.transaction(() => f.service.replaceImported(parsed, previous)), isError(409)); assert.deepEqual(data(f), original);
+    const invalid = structuredClone(original);
+    invalid.records[2].record.sourceId = 'changed-original';
+    invalid.records[2].record.id = 'issue:changed-original';
+    assert.throws(() => f.service.validateImport(invalid, f.context()), isError(400));
+    assert.deepEqual(data(f), original);
+
+    const legacyReceipt = structuredClone(original.imports[0]);
+    delete legacyReceipt.integrity;
+    f.store.put('source_imports', legacyReceipt);
+    delete invalid.imports[0].integrity;
+    const legacy = f.service.validateImport(invalid, f.context());
+    assert.throws(() => f.store.transaction(() => f.service.replaceImported(legacy, previous)), isError(409));
+    assert.deepEqual(f.service.allRecords(), original.records);
+    f.store.put('source_imports', original.imports[0]);
+
     assert.throws(() => f.store.transaction(() => { f.service.replaceImported(original, previous); throw new Error('late audit failure'); }), /late audit/); assert.deepEqual(data(f), original);
     f.store.transaction(() => f.service.replaceImported(original, previous)); assert.equal(f.service.allImports()[0].version, 8); assert.equal((f.store.db.prepare('SELECT COUNT(*) n FROM source_bindings WHERE kind=?').get('issue') as { n: number }).n, 2);
   } finally { f.close(); }

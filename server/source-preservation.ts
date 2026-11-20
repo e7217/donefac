@@ -1,8 +1,9 @@
 import type { Express, Request } from 'express';
-import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacyRecordKind, LegacySource, MigrationConfiguration, MigrationNotice, Project, SourceImport, SourceRecordArchive, SourceRecordPage, SourceRecordSummary, User } from '../shared/types.js';
-import { addRecord, emptyDataset } from './legacy-import-model.js';
+import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacyRecordKind, LegacySource, MigrationConfiguration, MigrationNotice, Project, SourceImport, SourceImportIntegrity, SourceImportIntegrityPackage, SourceRecordArchive, SourceRecordPage, SourceRecordSummary, User } from '../shared/types.js';
+import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
+import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import type { Store } from './store.js';
 
 export class SourcePreservationError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
@@ -45,6 +46,56 @@ function configuration(raw: unknown, users: Set<string>): MigrationConfiguration
   const excludedRecords = list(value.excludedRecords, '제외 원본', 100000).map(value => string(value, '제외 원본', 1200)); if (new Set(excludedRecords).size !== excludedRecords.length) fail(400, '제외 원본이 중복되었습니다.');
   return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy, excludedRecords };
 }
+
+function parseIntegrity(raw: unknown, packages: SourceImport['packages']): SourceImportIntegrity | undefined {
+  if (raw === undefined) return;
+  const value = object(raw, '보존 원본 무결성 기준');
+  if (value.version !== 1 || Object.keys(value).length !== 2) fail(400, '보존 원본 무결성 기준 형식을 확인해 주세요.');
+  const entries = list(value.packages, '보존 원본 무결성 패키지', 20);
+  const stagingIds = new Set(packages.map(item => item.stagingId));
+  const byStagingId = new Map<string, SourceImportIntegrityPackage>();
+  for (const raw of entries) {
+    const item = object(raw, '보존 원본 무결성 패키지');
+    const { stagingId, recordCount, boundAttachmentCount } = item;
+    if (Object.keys(item).length !== 4 || typeof stagingId !== 'string' || !stagingIds.has(stagingId) || byStagingId.has(stagingId) ||
+        typeof recordCount !== 'number' || !Number.isSafeInteger(recordCount) || recordCount < 0 || recordCount > LEGACY_MAX_RECORDS ||
+        typeof boundAttachmentCount !== 'number' || !Number.isSafeInteger(boundAttachmentCount) || boundAttachmentCount < 0 || boundAttachmentCount > recordCount) {
+      fail(400, '보존 원본 무결성 패키지 ID와 수량을 확인해 주세요.');
+    }
+    byStagingId.set(stagingId, { stagingId, recordCount, boundAttachmentCount, recordsSha256: sha(item.recordsSha256) });
+  }
+  if (byStagingId.size !== packages.length) fail(400, '보존 원본 무결성 패키지가 영수증과 일치하지 않습니다.');
+  return { version: 1, packages: packages.map(item => byStagingId.get(item.stagingId)!) };
+}
+
+function archiveTotals(packages: SourceImportIntegrityPackage[]) {
+  return packages.reduce((totals, item) => ({
+    sourceRecords: totals.sourceRecords + item.recordCount,
+    attachmentVersions: totals.attachmentVersions + item.boundAttachmentCount,
+  }), { sourceRecords: 0, attachmentVersions: 0 });
+}
+
+function validateArchiveManifests(imports: SourceImport[], records: SourceRecordArchive[], status = 400): void {
+  const byImport = new Map(imports.filter(receipt => receipt.integrity).map(receipt => [receipt.id, [] as SourceRecordArchive[]]));
+  if (!byImport.size) return;
+  for (const record of records) byImport.get(record.sourceImportId)?.push(record);
+  for (const receipt of imports) {
+    if (!receipt.integrity) continue;
+    const measured = measureIncomingArchive(receipt, byImport.get(receipt.id)!);
+    const totals = archiveTotals(measured.packages);
+    const expected = receipt.integrity.packages;
+    if (measured.unmatchedRecords || expected.length !== measured.packages.length ||
+        measured.packages.some((item, index) => {
+          const previous = expected[index];
+          return item.stagingId !== previous.stagingId || item.recordCount !== previous.recordCount ||
+            item.boundAttachmentCount !== previous.boundAttachmentCount || item.recordsSha256 !== previous.recordsSha256;
+        }) ||
+        receipt.counts.sourceRecords !== totals.sourceRecords || receipt.counts.attachmentVersions !== totals.attachmentVersions) {
+      fail(status, '보존 원본이 이관 영수증의 무결성 기준과 일치하지 않습니다.');
+    }
+  }
+}
+
 function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const value = object(raw, '이관 영수증'), actorId = string(value.actorId, '이관 작업자', 200); if (!users.has(actorId)) fail(400, '이관 작업자가 현재 사용자 목록에 없습니다.');
   const projectIds = list(value.projectIds, '이관 프로젝트', 100).map(value => string(value, '이관 프로젝트', 200)); if (new Set(projectIds).size !== projectIds.length) fail(400, '이관 프로젝트가 중복되었습니다.');
@@ -58,16 +109,44 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
     if (typeof item.message !== 'string' || !item.message.trim() || item.message.length > 2000) fail(400, '이관 안내 메시지를 확인해 주세요.');
     return { severity: item.severity, code: string(item.code, '이관 안내 코드', 100), message: item.message, recordId: nullable(item.recordId, '이관 안내 원본', 1200), requiresAcknowledgement: item.requiresAcknowledgement } as MigrationNotice;
   });
-  return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}) };
+  const integrity = parseIntegrity(value.integrity, packages);
+  return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}), ...(integrity ? { integrity } : {}) };
 }
 const baseAttachment = (value: Attachment): Attachment => ({ id: value.id, resourceType: value.resourceType, resourceId: value.resourceId, filename: value.filename, mimeType: value.mimeType, size: value.size, sha256: value.sha256, authorId: value.authorId, createdAt: value.createdAt });
 type Binding = { product: string; instance: string; kind: string; alias: string; type: string; id: string; importId: string };
+interface ArchiveSqlRow {
+  id: string;
+  importId: string;
+  ownerType: string | null;
+  ownerId: string | null;
+  targetType: string | null;
+  targetId: string | null;
+  kind: string;
+  instanceKey: string;
+  product: string;
+  sourceId: string;
+  json: string;
+}
+
+function archiveMatchesColumns(record: SourceRecordArchive, row: ArchiveSqlRow): boolean {
+  return record.id === row.id && record.sourceImportId === row.importId && record.ownerType === row.ownerType &&
+    record.ownerId === row.ownerId && record.targetType === row.targetType && record.targetId === row.targetId &&
+    record.record?.kind === row.kind && record.record?.sourceId === row.sourceId &&
+    record.source?.instanceKey === row.instanceKey && record.source?.product === row.product;
+}
+
+function archiveReceiptMetadata(receipt: SourceImport): SourceImport {
+  const metadata = { ...receipt, version: 0 };
+  delete metadata.integrity;
+  return metadata;
+}
 
 export class SourcePreservationService {
   constructor(private readonly store: Store) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS source_imports(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_records(id TEXT PRIMARY KEY,import_id TEXT NOT NULL REFERENCES source_imports(id) ON DELETE CASCADE,owner_type TEXT,owner_id TEXT,target_type TEXT,target_id TEXT,kind TEXT NOT NULL,source_instance TEXT NOT NULL,product TEXT NOT NULL,source_id TEXT NOT NULL,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS source_records_import ON source_records(import_id,kind);
+      CREATE INDEX IF NOT EXISTS source_records_archive_measurement ON source_records(import_id,id);
       CREATE INDEX IF NOT EXISTS source_records_owner ON source_records(owner_type,owner_id,kind);
       CREATE INDEX IF NOT EXISTS source_records_target ON source_records(target_type,target_id);
       CREATE INDEX IF NOT EXISTS source_records_author ON source_records(import_id,product,source_instance,kind,source_id);
@@ -82,6 +161,25 @@ export class SourcePreservationService {
   allRecords(): SourceRecordArchive[] { return this.store.all<SourceRecordArchive>('source_records'); }
   allVersions(): AttachmentVersion[] { return this.store.all<AttachmentVersion>('attachment_versions'); }
   allRelations(): IssueRelation[] { return this.store.all<IssueRelation>('issue_relations'); }
+
+  measureArchive(receipt: SourceImport): SourceArchiveMeasurement {
+    const measurement = new SourceArchiveMeasurer(receipt);
+    const rows = this.store.db.prepare(`SELECT id, import_id AS importId, owner_type AS ownerType, owner_id AS ownerId,
+      target_type AS targetType, target_id AS targetId, kind, source_instance AS instanceKey, product, source_id AS sourceId, json
+      FROM source_records WHERE import_id = ? ORDER BY id COLLATE BINARY`).iterate(receipt.id) as Iterable<ArchiveSqlRow>;
+    for (const row of rows) {
+      let archive: SourceRecordArchive | null = null;
+      try {
+        const parsed: unknown = JSON.parse(row.json);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) archive = parsed as SourceRecordArchive;
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+      measurement.add(archive, !archive || !archiveMatchesColumns(archive, row));
+    }
+    return measurement.finish();
+  }
+
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
   hasLocalAttachmentVersion(id: string): boolean {
     return Boolean(this.store.db.prepare(`SELECT 1 FROM attachment_versions WHERE id=? AND id<>attachment_id
@@ -104,9 +202,11 @@ export class SourcePreservationService {
       if ((targetType === null) !== (targetId === null) || (ownerType === null) !== (ownerId === null)) fail(400, '원본 대상·소유자 종류와 ID는 함께 있어야 합니다.');
       if (targetProjectId && !owner.projectIds.includes(targetProjectId)) fail(400, '원본 대상 프로젝트가 이관 영수증에 없습니다.');
       const expected = ({ project: 'project', issue: 'issue', page: 'document', comment: 'comment', revision: 'revision', attachment: 'attachment' } as Record<string, string>)[record.kind]; if (targetType !== null && targetType !== expected) fail(400, '원본 객체 종류와 적용 대상 종류가 다릅니다.');
-      return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId } as SourceRecordArchive;
+      if (value.excluded !== undefined && (value.excluded !== true || targetType !== null)) fail(400, '제외된 원본은 적용 대상에 연결할 수 없습니다.');
+      return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId, ...(value.excluded === true ? { excluded: true } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
+    validateArchiveManifests(imports, records);
     const localRevisions = new Map<string, number[]>();
     const versions = list(input.versions, '첨부 버전').map(raw => {
       const value = object(raw, '첨부 버전'), attachment = attachments.get(string(value.attachmentId, '첨부 ID', 200)); if (!attachment) fail(400, '첨부 버전의 현재 첨부파일이 없습니다.');
@@ -189,27 +289,57 @@ export class SourcePreservationService {
       insertBinding.run(value.product, value.instance, value.kind, value.alias, value.type, value.id, value.importId);
     }
   }
-  persistPrepared(prepared: PreparedMigration): void {
+  persistPrepared(prepared: PreparedMigration): SourceImport {
     this.callerTransaction();
     const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations }, context);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
-    if (data.imports[0].projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');
-    const existing = this.store.get<SourceImport>('source_imports', prepared.sourceImport.id);
+    const receipt = data.imports[0];
+    if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');
+    const measured = measureIncomingArchive(receipt, data.records);
+    const totals = archiveTotals(measured.packages);
+    if (measured.unmatchedRecords || data.versions.length !== totals.attachmentVersions ||
+        (receipt.counts.sourceRecords !== undefined && receipt.counts.sourceRecords !== totals.sourceRecords) ||
+        (receipt.counts.attachmentVersions !== undefined && receipt.counts.attachmentVersions !== totals.attachmentVersions)) {
+      fail(400, '보존 원본 또는 첨부 버전의 수량이 이관 영수증과 일치하지 않습니다.');
+    }
+    const sealed: SourceImport = { ...receipt, counts: { ...receipt.counts, ...totals }, integrity: { version: 1, packages: measured.packages } };
+    const existing = this.store.get<SourceImport>('source_imports', receipt.id);
     if (existing) {
-      if (stable(existing) !== stable(data.imports[0])) fail(409, '기존 원본 이관 영수증은 변경할 수 없습니다.');
+      if (stable(existing) !== stable(existing.integrity ? sealed : receipt)) fail(409, '기존 원본 이관 영수증은 변경할 수 없습니다.');
       const previousRecords = this.allRecords().filter(value => value.sourceImportId === existing.id), previousVersions = this.allVersions().filter(value => value.sourceImportId === existing.id);
       if (stable(previousRecords.slice().sort((a, b) => a.id.localeCompare(b.id))) !== stable(data.records.slice().sort((a, b) => a.id.localeCompare(b.id))) || stable(previousVersions.slice().sort((a, b) => a.id.localeCompare(b.id))) !== stable(data.versions.slice().sort((a, b) => a.id.localeCompare(b.id)))) fail(409, '기존 원본 객체·첨부 버전은 변경할 수 없습니다.');
       for (const relation of data.relations) if (stable(this.store.get('issue_relations', relation.id)) !== stable(relation)) fail(409, '기존 이관 관계가 변경되었습니다.');
-      return;
+      return existing;
     }
-    this.putData(data);
+    this.putData({ ...data, imports: [sealed] });
+    return sealed;
   }
   replaceImported(data: SourcePreservationData, previousImportVersions: Map<string, number>): void {
     this.callerTransaction();
     const previousImports = new Map(this.allImports().map(value => [value.id, value]));
-    for (const value of data.imports) { const previous = previousImports.get(value.id); if (previous && stable({ ...previous, version: 0 }) !== stable({ ...value, version: 0 })) fail(409, '동일한 이관 영수증 ID의 원본 출처·적용 설정은 변경할 수 없습니다.'); }
-    const existing = new Map(this.allRecords().map(value => [value.id, value]));
-    for (const value of data.records) { const previous = existing.get(value.id); if (previous && stable(previous) !== stable(value)) fail(409, '동일한 원본 보관 UUID의 출처·원문·적용 대상을 변경할 수 없습니다.'); }
+    const trusted = new Set<string>();
+    for (const current of data.imports) {
+      const previous = previousImports.get(current.id);
+      if (!previous) continue;
+      if (stable(archiveReceiptMetadata(previous)) !== stable(archiveReceiptMetadata(current))) {
+        fail(409, '동일한 이관 영수증 ID의 원본 출처·적용 설정은 변경할 수 없습니다.');
+      }
+      if (stable(previous.integrity) !== stable(current.integrity)) fail(409, '기존 이관 영수증의 무결성 기준은 변경할 수 없습니다.');
+      if (previous.integrity) trusted.add(current.id);
+    }
+    validateArchiveManifests(data.imports.filter(receipt => trusted.has(receipt.id)), data.records, 409);
+    const unverified = new Map(data.records.filter(record => !trusted.has(record.sourceImportId)).map(record => [record.id, record]));
+    if (unverified.size) {
+      const priorRows = this.store.db.prepare('SELECT id, json FROM source_records').iterate() as Iterable<{ id: string; json: string }>;
+      for (const { id, json } of priorRows) {
+        const incoming = unverified.get(id);
+        if (!incoming) continue;
+        let previous: unknown;
+        try { previous = JSON.parse(json); }
+        catch { fail(409, '기존 원본 보관 객체를 확인할 수 없습니다.'); }
+        if (stable(previous) !== stable(incoming)) fail(409, '동일한 원본 보관 UUID의 출처·원문·적용 대상을 변경할 수 없습니다.');
+      }
+    }
     this.store.db.exec('DELETE FROM attachment_versions;DELETE FROM issue_relations;DELETE FROM source_bindings;DELETE FROM source_records;DELETE FROM source_imports;');
     const imports = data.imports.map(value => ({ ...value, version: Math.max(value.version, (previousImportVersions.get(value.id) || 0) + 1) })); this.putData({ ...data, imports });
   }

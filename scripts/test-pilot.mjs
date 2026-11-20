@@ -281,6 +281,18 @@ async function verifyPilotSourceMigration(url, migration) {
   assert.equal(restricted.target, null);
   const audit = await (await call(url, `${base}/audit?expectedVersion=${receipt.version}`)).json();
   assert.equal(audit.receiptVersion, receipt.version);
+  assert.equal(receipt.integrity.version, 1);
+  assert.equal(audit.integrity.status, 'verified');
+  assert.deepEqual(audit.integrity.records, {expected: receipt.counts.sourceRecords, observed: receipt.counts.sourceRecords});
+  assert.deepEqual(audit.integrity.boundAttachments, {expected: expectedFiles.length, observed: expectedFiles.length});
+  assert.equal(audit.integrity.unmatchedRecords, 0);
+  assert.equal(audit.integrity.columnMismatches, 0);
+  assert.equal(audit.integrity.packages.length, receipt.packages.length);
+  for (const checked of audit.integrity.packages) {
+    const baseline = receipt.integrity.packages.find(item => item.stagingId === checked.stagingId);
+    assert.equal(checked.status, 'verified');
+    assert.deepEqual(checked.recordsSha256, {expected: baseline.recordsSha256, observed: baseline.recordsSha256});
+  }
   assert.deepEqual(audit.recordCounts, reconciliation.counts);
   assert.equal(audit.recordCounts.missing, 0);
   assert.deepEqual(audit.attachmentCounts, {verified: expectedFiles.length, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0});
@@ -299,7 +311,10 @@ async function verifyPilotSourceMigration(url, migration) {
   assert.deepEqual(attachmentLabel?.marks?.map(mark => mark.attrs.href), [`/api/attachments/${sharedFile.fileId}/content`]);
   const sharedDownload = await call(url, `/attachments/${sharedFile.fileId}/content`);
   assert.deepEqual(Buffer.from(await sharedDownload.arrayBuffer()), expectedFiles.find(file => file.sourceId === '702').bytes);
-  return {issue, document, nextStatus, originalLinks, sourceRows, worklog, recordCounts: audit.recordCounts, attachments: audit.attachments};
+  return {
+    issue, document, nextStatus, originalLinks, sourceRows, worklog,
+    integrity: audit.integrity, recordCounts: audit.recordCounts, attachments: audit.attachments,
+  };
 }
 
 async function browser(url, teamFixture) {

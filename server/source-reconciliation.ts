@@ -4,7 +4,7 @@ import fileSystem from 'node:fs/promises';
 import type { Express } from 'express';
 import type {
   Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment,
-  SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationOwner,
+  SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationOwner,
   SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget,
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
@@ -15,7 +15,7 @@ import type { TrashArchive, TrashService } from './trash.js';
 type TargetType = SourceReconciliationTarget['type'];
 type SourceIdentity = Pick<SourceReconciliationRow, 'sourceRecordId' | 'kind' | 'sourceId' | 'sourceKey' | 'title' | 'product' | 'sourceInstance'>;
 type MatchRow = SourceIdentity & {
-  originalRecordId: string; packageSha256: string;
+  originalRecordId: string; packageSha256: string; excluded: number | null;
   targetType: TargetType | null; targetId: string | null;
   targetLabel: string | null; targetProjectId: string | null; linked: number;
   ownerType: SourceReconciliationOwner['type'] | null; ownerId: string | null;
@@ -78,6 +78,7 @@ const rowsSql = (audit: boolean) => `
   SELECT r.id AS sourceRecordId, r.kind, r.source_id AS sourceId, r.product, r.source_instance AS sourceInstance,
     ${audit ? auditProjection : ''}
     json_extract(r.json,'$.record.id') AS originalRecordId, json_extract(r.json,'$.packageSha256') AS packageSha256,
+    json_type(r.json,'$.excluded')='true' AS excluded,
     coalesce(json_extract(r.json,'$.record.title'),'') AS title,
     CASE WHEN r.product='jira' THEN coalesce(
       CASE WHEN json_type(r.json,'$.record.metadata.key')='text' THEN nullif(json_extract(r.json,'$.record.metadata.key'),'') END,
@@ -129,7 +130,7 @@ const rowsSql = (audit: boolean) => `
     AND archived_attachment.owner_type=r.owner_type AND archived_attachment.owner_id=r.owner_id
   LEFT JOIN trash_entries t ON t.resource_type=CASE WHEN r.target_type IN ('issue','document') THEN r.target_type ELSE r.owner_type END
     AND t.resource_id=CASE WHEN r.target_type IN ('issue','document') THEN r.target_id ELSE r.owner_id END
-  WHERE r.import_id=? ORDER BY r.kind,r.rowid`;
+  WHERE r.import_id=? AND json_valid(r.json) ORDER BY r.kind,r.rowid`;
 
 function packageIdentity(product: string, instance: string, sha256: string) {
   return JSON.stringify([product, instance, sha256]);
@@ -171,7 +172,8 @@ function scanReceipt(
   for (const raw of store.db.prepare(rowsSql(audit)).iterate(receipt.id)) {
     const row = raw as unknown as MatchRow;
     const stagingId = packages.get(packageIdentity(row.product, row.sourceInstance, row.packageSha256));
-    let status: SourceReconciliationStatus = stagingId && excluded.has(`${stagingId}/${row.originalRecordId}`) ? 'excluded' : 'archive-only';
+    const excludedRecord = row.excluded === 1 || (stagingId && excluded.has(`${stagingId}/${row.originalRecordId}`));
+    let status: SourceReconciliationStatus = excludedRecord ? 'excluded' : 'archive-only';
     let target: SourceReconciliationTarget | null = null;
     let archivedFile: FileMetadata | undefined;
     if (status !== 'excluded' && row.targetType && row.targetId) {
@@ -278,14 +280,54 @@ function auditEntry(row: AuditMatchRow, recordStatus: SourceReconciliationStatus
   };
 }
 
+function receiptCount(value: number | undefined): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function compareArchive(receipt: SourceImport, measured: ReturnType<SourcePreservationService['measureArchive']>): SourceReconciliationIntegrity {
+  const baselines = new Map(receipt.integrity?.packages.map(value => [value.stagingId, value]));
+  const filenames = new Map(receipt.packages.map(value => [value.stagingId, value.filename]));
+  const packages = measured.packages.map((actual): SourceReconciliationIntegrityPackage => {
+    const baseline = baselines.get(actual.stagingId);
+    const records = { expected: baseline?.recordCount ?? null, observed: actual.recordCount };
+    const boundAttachments = { expected: baseline?.boundAttachmentCount ?? null, observed: actual.boundAttachmentCount };
+    const recordsSha256 = { expected: baseline?.recordsSha256 ?? null, observed: actual.recordsSha256 };
+    const matches = records.expected === records.observed && boundAttachments.expected === boundAttachments.observed
+      && recordsSha256.expected === recordsSha256.observed;
+    return {
+      stagingId: actual.stagingId, filename: filenames.get(actual.stagingId) ?? actual.stagingId,
+      status: baseline ? (matches ? 'verified' : 'mismatch') : 'unavailable', records, boundAttachments, recordsSha256,
+    };
+  });
+  const records = {
+    expected: receiptCount(receipt.counts.sourceRecords),
+    observed: measured.packages.reduce((total, value) => total + value.recordCount, measured.unmatchedRecords),
+  };
+  const boundAttachments = {
+    expected: receiptCount(receipt.counts.attachmentVersions),
+    observed: measured.packages.reduce((total, value) => total + value.boundAttachmentCount, measured.unmatchedBoundAttachments),
+  };
+  const mismatched = measured.unmatchedRecords > 0 || measured.columnMismatches > 0
+    || packages.some(value => value.status === 'mismatch')
+    || (Boolean(receipt.integrity) && (baselines.size !== packages.length || packages.some(value => value.status === 'unavailable')))
+    || [records, boundAttachments].some(value => value.expected !== null && value.expected !== value.observed);
+  let status: SourceReconciliationIntegrity['status'] = 'unavailable';
+  if (mismatched) status = 'mismatch';
+  else if (receipt.integrity) status = 'verified';
+  else if (records.expected !== null || boundAttachments.expected !== null) status = 'counts-only';
+  return { status, records, boundAttachments, unmatchedRecords: measured.unmatchedRecords, columnMismatches: measured.columnMismatches, packages };
+}
+
 function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collect: boolean) {
+  const integrity = compareArchive(receipt, dependencies.preservation.measureArchive(receipt));
   const fingerprint = createHash('sha256');
+  fingerprint.update(JSON.stringify(integrity)).update('\n');
   const entries: AuditEntry[] = [];
   const recordCounts = scanReceipt(dependencies, receipt, true, (row, status, target, archivedFile) => {
     fingerprint.update(JSON.stringify([row, status, target, archivedFile ?? null])).update('\n');
     if (collect && row.kind === 'attachment') entries.push(auditEntry(row as AuditMatchRow, status, archivedFile));
   });
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts };
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity };
 }
 
 function errorCode(error: unknown): unknown {
@@ -360,7 +402,7 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   if (!current || current.version !== expectedVersion || auditSnapshot(dependencies, current, false).fingerprint !== before.fingerprint) conflict();
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
-    recordCounts: before.recordCounts, attachmentCounts, attachments,
+    integrity: before.integrity, recordCounts: before.recordCounts, attachmentCounts, attachments,
   };
 }
 

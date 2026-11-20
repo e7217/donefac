@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { Store } from '../../server/store.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   ApiKeyCreated, AutomationRule, Issue, IssueAssignmentPreview, IssueAssignmentRule, IssueAssignmentRuleInput, IssueAssignmentRunPage,
   ProjectIssueOrder, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated,
@@ -226,7 +227,7 @@ test('board and scoped API status changes share assignment while native import r
   assert.deepEqual(page.items.map(run => run.id), [history.items[1].id]);
 
   const backup = await f.expectStatus<Backup>(200, '/export');
-  assert.equal(backup.schemaVersion, 32);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.issueAssignmentRules, [rule]);
   assert.ok(!JSON.stringify(backup).includes(history.items[0].id));
   await f.expectStatus(200, '/import', 'POST', { data: backup });

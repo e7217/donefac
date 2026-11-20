@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, RichContent, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -602,6 +602,201 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.equal((await checkFile(archiveOnly.sourceRecordId)).status, 'unbound');
     assert.deepEqual((await fullAudit(restored.receiptVersion)).attachmentCounts, { ...clean.attachmentCounts, verified: 0, missing: 3 });
   } finally { await f.close(); }
+});
+
+test('retained source verification distinguishes archival loss from deleted live targets and intentional exclusions', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jira = await f.upload(csv, 'integrity-jira.csv', 'jira');
+  const wiki = await f.upload(confluence(true).bytes, 'integrity-confluence.zip', 'confluence');
+  const linkedWiki = await f.upload(confluence().bytes, 'integrity-linked-confluence.zip', 'confluence');
+  const config = await f.configuration([jira, wiki, linkedWiki]);
+  config.excludedRecords = [`${wiki.id}/page:100`];
+  const preview = await f.preview(config);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.equal(preview.counts.explicitExcludedRecords, 1);
+  assert.ok(preview.counts.excludedDescendants > 0);
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  const reconciliationPath = `/source-imports/${receipt.id}/reconciliation`;
+  const manifest = receipt.integrity;
+  assert.ok(manifest);
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.packages.length, 3);
+
+  async function audit(service = f) {
+    const receipts = await service.call<SourceImport[]>('/source-imports');
+    assert.equal(receipts.status, 200);
+    const current = receipts.data.find(value => value.id === receipt.id);
+    assert.ok(current);
+    const response = await service.call<SourceReconciliationAudit>(`${reconciliationPath}/audit?expectedVersion=${current.version}`);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    assert.equal(response.data.receiptVersion, current.version);
+    return response.data;
+  }
+  function packageIntegrity(report: SourceReconciliationAudit, pkg: LegacyPackageSummary) {
+    const inventory = report.integrity.packages.find(value => value.stagingId === pkg.id);
+    assert.ok(inventory);
+    assert.equal(inventory.filename, pkg.filename);
+    return inventory;
+  }
+
+  const page = await f.call<SourceReconciliationPage>(`${reconciliationPath}?limit=100`);
+  assert.equal(page.status, 200);
+  const jiraIssue = page.data.rows.find(value => value.product === 'jira' && value.sourceKey === 'OLD-1');
+  const identity = page.data.rows.find(value => value.product === 'jira' && value.kind === 'identity');
+  assert.ok(jiraIssue?.target && identity);
+  assert.equal(identity.status, 'archive-only');
+  const confluenceRows = page.data.rows.filter(value => value.sourceInstance === wiki.source.instanceKey && value.kind !== 'project');
+  assert.ok(confluenceRows.some(value => value.kind === 'revision'));
+  assert.ok(confluenceRows.some(value => value.kind === 'comment'));
+  assert.ok(confluenceRows.some(value => value.kind === 'attachment'));
+  assert.equal(confluenceRows.length, preview.counts.excludedRecords);
+  assert.ok(confluenceRows.every(value => value.status === 'excluded' && value.target === null));
+  const clean = await audit();
+  assert.deepEqual(clean.recordCounts, page.data.counts);
+  assert.equal(clean.attachmentCounts.excluded, confluenceRows.filter(value => value.kind === 'attachment').length);
+  assert.equal(clean.attachmentCounts.verified, 2);
+  assert.equal(clean.attachmentCounts.unbound, 0);
+  assert.equal(clean.recordCounts.missing, 0);
+  assert.equal(clean.integrity.status, 'verified');
+  assert.deepEqual(clean.integrity.records, { expected: receipt.counts.sourceRecords, observed: receipt.counts.sourceRecords });
+  assert.deepEqual(clean.integrity.boundAttachments, { expected: 2, observed: 2 });
+  assert.equal(clean.integrity.unmatchedRecords, 0);
+  assert.equal(clean.integrity.columnMismatches, 0);
+  for (const pkg of [jira, wiki, linkedWiki]) {
+    const expected: SourceImportIntegrityPackage | undefined = manifest.packages.find(value => value.stagingId === pkg.id);
+    assert.ok(expected);
+    assert.match(expected.recordsSha256, /^[a-f\d]{64}$/);
+    const current = packageIntegrity(clean, pkg);
+    assert.equal(current.status, 'verified');
+    assert.deepEqual(current.recordsSha256, { expected: expected.recordsSha256, observed: expected.recordsSha256 });
+    assert.deepEqual(current.records, { expected: expected.recordCount, observed: expected.recordCount });
+    assert.deepEqual(current.boundAttachments, { expected: expected.boundAttachmentCount, observed: expected.boundAttachmentCount });
+  }
+
+  const trashed = await f.call<{ trashEntryId: string }>(`/issues/${jiraIssue.target.id}`, 'DELETE');
+  assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
+  assert.equal((await audit()).recordCounts.trashed, clean.recordCounts.trashed + 2, 'The ticket and its migrated comment are both still available in trash.');
+  assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}`, 'DELETE')).status, 200);
+  const afterPurge = await audit();
+  assert.equal(afterPurge.recordCounts.missing, clean.recordCounts.missing + 2);
+  assert.equal(afterPurge.recordCounts.excluded, clean.recordCounts.excluded);
+  assert.deepEqual(afterPurge.integrity, clean.integrity);
+
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] }>('/export');
+  assert.equal(backup.status, 200);
+  assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const archivedIssueRecord = backup.data.sourceRecords.find(value => value.id === jiraIssue.sourceRecordId);
+  assert.ok(archivedIssueRecord?.record.text);
+  const updateColumn = f.db.prepare('UPDATE source_records SET source_id=? WHERE id=?');
+  assert.equal(updateColumn.run('incorrect-index-value', archivedIssueRecord.id).changes, 1);
+  const inconsistentIndex = await audit();
+  assert.equal(inconsistentIndex.integrity.status, 'mismatch');
+  assert.equal(inconsistentIndex.integrity.columnMismatches, 1);
+  assert.deepEqual(packageIntegrity(inconsistentIndex, jira), packageIntegrity(clean, jira));
+  assert.equal(updateColumn.run(archivedIssueRecord.record.sourceId, archivedIssueRecord.id).changes, 1);
+
+  const privateMarker = '외부에 내보내지 않는 변형 원문';
+  const updateBody = f.db.prepare("UPDATE source_records SET json=json_set(json,'$.record.text',?) WHERE id=?");
+  const open = fileSystem.open;
+  let changedDuringAudit = false;
+  const mutateOnFileRead = t.mock.method(fileSystem, 'open', async (...args: Parameters<typeof open>) => {
+    if (!changedDuringAudit) {
+      changedDuringAudit = true;
+      assert.equal(updateBody.run(privateMarker, archivedIssueRecord.id).changes, 1);
+    }
+    return open(...args);
+  });
+  try {
+    assert.equal((await f.call(`${reconciliationPath}/audit?expectedVersion=${receipt.version}`)).status, 409);
+    assert.equal(changedDuringAudit, true);
+  } finally { mutateOnFileRead.mock.restore(); }
+  const sameCount = await audit();
+  assert.deepEqual(sameCount.recordCounts, afterPurge.recordCounts, 'Changing an archived body has no effect on link and trash classifications.');
+  assert.doesNotMatch(JSON.stringify(sameCount), new RegExp(privateMarker));
+  assert.equal(sameCount.integrity.status, 'mismatch');
+  assert.deepEqual(sameCount.integrity.records, clean.integrity.records);
+  assert.deepEqual(sameCount.integrity.boundAttachments, clean.integrity.boundAttachments);
+  assert.equal(sameCount.integrity.columnMismatches, 0);
+  const jiraIntegrity = packageIntegrity(sameCount, jira);
+  assert.equal(jiraIntegrity.status, 'mismatch');
+  assert.notEqual(jiraIntegrity.recordsSha256.observed, jiraIntegrity.recordsSha256.expected);
+  assert.deepEqual(packageIntegrity(sameCount, wiki), packageIntegrity(clean, wiki));
+  assert.deepEqual(packageIntegrity(sameCount, linkedWiki), packageIntegrity(clean, linkedWiki));
+
+  const removeIdentity = "DELETE FROM source_records WHERE import_id=? AND id=? AND kind='identity'";
+  assert.equal(f.db.prepare(removeIdentity).run(receipt.id, identity.sourceRecordId).changes, 1);
+  const incomplete = await audit();
+  assert.equal(incomplete.recordCounts['archive-only'], afterPurge.recordCounts['archive-only'] - 1);
+  assert.equal(incomplete.recordCounts.missing, afterPurge.recordCounts.missing, 'Canonical target loss and archival record loss have separate evidence.');
+  assert.deepEqual(incomplete.attachmentCounts, afterPurge.attachmentCounts);
+  assert.equal(incomplete.integrity.status, 'mismatch');
+  assert.deepEqual(incomplete.integrity.records, { expected: receipt.counts.sourceRecords, observed: receipt.counts.sourceRecords - 1 });
+  assert.deepEqual(incomplete.integrity.boundAttachments, clean.integrity.boundAttachments);
+
+  const archivedFile = backup.data.sourceRecords.find(value => value.source.instanceKey === linkedWiki.source.instanceKey && value.record.id === 'attachment:701');
+  assert.ok(archivedFile?.targetId);
+  assert.equal(f.db.prepare('DELETE FROM source_records WHERE import_id=? AND id=?').run(receipt.id, archivedFile.id).changes, 1);
+  const missingFileArchive = await audit();
+  assert.equal(missingFileArchive.integrity.status, 'mismatch');
+  assert.deepEqual(missingFileArchive.integrity.records, { expected: receipt.counts.sourceRecords, observed: receipt.counts.sourceRecords - 2 });
+  assert.deepEqual(missingFileArchive.integrity.boundAttachments, { expected: 2, observed: 1 });
+  assert.equal(packageIntegrity(missingFileArchive, linkedWiki).status, 'mismatch');
+  assert.equal(missingFileArchive.attachmentCounts.missing, 0, 'The archival row is gone even though its attachment bytes still exist.');
+  const download = await fetch(`${f.base}/attachment-versions/${archivedFile.targetId}/download`);
+  assert.equal(download.status, 200);
+  await download.arrayBuffer();
+
+  const badBackups = [
+    backup.data.sourceRecords.filter(value => value.id !== identity.sourceRecordId),
+    backup.data.sourceRecords.map(value => value.id === archivedIssueRecord.id ? { ...value, record: { ...value.record, text: privateMarker } } : value),
+    backup.data.sourceRecords.map(value => value.excluded === true ? { ...value, excluded: undefined } : value),
+  ];
+  for (const sourceRecords of badBackups) {
+    const result = await f.call('/import', 'POST', { data: { ...backup.data, sourceRecords } });
+    assert.equal(result.status, 400, JSON.stringify(result.data));
+    assert.deepEqual((await audit()).integrity, missingFileArchive.integrity);
+  }
+
+  const corruptJson = f.db.prepare('UPDATE source_records SET json=? WHERE id=?');
+  assert.equal(corruptJson.run('{', archivedIssueRecord.id).changes, 1);
+  const malformedArchive = await audit();
+  assert.equal(malformedArchive.integrity.status, 'mismatch');
+  assert.equal(malformedArchive.integrity.unmatchedRecords, 1);
+  assert.equal(malformedArchive.integrity.columnMismatches, 1);
+  assert.deepEqual(malformedArchive.integrity.records, missingFileArchive.integrity.records);
+
+  const reordered = { ...backup.data, sourceRecords: [...backup.data.sourceRecords].reverse() };
+  assert.equal((await f.call('/import', 'POST', { data: reordered })).status, 200);
+  const restored = await audit();
+  assert.equal(restored.receiptVersion, receipt.version + 1);
+  assert.deepEqual(restored.recordCounts, afterPurge.recordCounts);
+  assert.deepEqual(restored.attachmentCounts, afterPurge.attachmentCounts);
+  assert.deepEqual(restored.integrity, clean.integrity);
+
+  const legacy = await fixture();
+  t.after(() => legacy.close());
+  const oldBackup = structuredClone(backup.data);
+  oldBackup.schemaVersion = 32;
+  for (const original of oldBackup.sourceImports) delete original.integrity;
+  for (const original of oldBackup.sourceRecords) delete original.excluded;
+  const loadedOld = await legacy.call('/import', 'POST', { data: oldBackup });
+  assert.equal(loadedOld.status, 200, JSON.stringify(loadedOld.data));
+  const countsOnly = await audit(legacy);
+  assert.equal(countsOnly.integrity.status, 'counts-only');
+  assert.deepEqual(countsOnly.integrity.records, clean.integrity.records);
+  assert.deepEqual(countsOnly.integrity.boundAttachments, clean.integrity.boundAttachments);
+  assert.ok(countsOnly.integrity.packages.every(value => value.status === 'unavailable' && value.recordsSha256.expected === null));
+  assert.equal(legacy.db.prepare(removeIdentity).run(receipt.id, identity.sourceRecordId).changes, 1);
+  const oldIncomplete = await audit(legacy);
+  assert.equal(oldIncomplete.integrity.status, 'mismatch');
+  assert.deepEqual(oldIncomplete.integrity.records, incomplete.integrity.records);
+  assert.ok(oldIncomplete.integrity.packages.every(value => value.status === 'unavailable'));
+  const missingOldBackup = { ...oldBackup, sourceRecords: oldBackup.sourceRecords.filter(value => value.id !== identity.sourceRecordId) };
+  assert.equal((await legacy.call('/import', 'POST', { data: missingOldBackup })).status, 200);
+  assert.deepEqual((await audit(legacy)).integrity, oldIncomplete.integrity);
 });
 
 test('interrupted append recovery removes only uncommitted owned files and retains exact committed versions', () => {

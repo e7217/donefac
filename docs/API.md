@@ -323,13 +323,15 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.
 
-`linked`는 현재 대상, `trashed`는 휴지통에 해당 대상이 보관된 상태, `missing`은 저장한 연결에 해당하는 현재나 휴지통의 대상이 없는 상태다. `archive-only`는 직접 연결 없이 보존한 원본이고, `excluded`는 적용할 때 명시적으로 제외한 원본이다. 원본 사용자·속성 등의 매핑 자료와 직접 연결 ID가 없는 관계 자료도 원본 보관으로 표시한다.
+`linked`는 현재 대상, `trashed`는 휴지통에 해당 대상이 보관된 상태, `missing`은 저장한 연결에 해당하는 현재나 휴지통의 대상이 없는 상태다. `archive-only`는 직접 연결 없이 보존한 원본이다. 새 이관의 `excluded`에는 명시적으로 제외한 원본과 함께 제외된 하위 원본이 포함된다. 원본 사용자·속성 등의 매핑 자료와 직접 연결 ID가 없는 관계 자료는 원본 보관으로 표시한다.
 
 `GET /api/source-imports/:id/records/:recordId/check-file`은 지정한 원본 첨부 버전의 저장 바이트를 기록된 파일 크기와 SHA-256으로 검사한다. `verified`, `missing`, `corrupt`, `unbound` 상태와 연결된 파일의 식별 정보를 반환한다. 휴지통에 보관한 파일 버전도 검사할 수 있다.
 
 `GET /api/source-imports/:id/reconciliation/audit?expectedVersion=…`는 해당 영수증의 전체 대상 상태를 집계하고 활성·휴지통의 원본 첨부 버전을 검사한다. `recordCounts`와 `attachmentCounts`는 전체 건수다. `attachments`에는 원본 제품·인스턴스·패키지 해시·원본 ID·현재 대상 상태와 대상 파일 ID·기준 크기·기준 SHA-256이 들어 있다. 검증 상태는 `verified`, `missing`, `corrupt`, `unbound`, `excluded`, `unreadable`이다.
 
-서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
+`integrity`의 `records`와 `boundAttachments`는 보존 원본 수와 대상 첨부 버전 ID가 연결된 원본 수의 이관 당시 기준(`expected`)과 검사값(`observed`)이다. `packages`는 이름·수량·원본 집합 SHA-256을 패키지별로 대조한다. `verified`는 저장된 원본 기준과 일치, `mismatch`는 불일치, `counts-only`는 당시 수량만 비교 가능, `unavailable`은 당시 기준을 읽을 수 없는 상태다. `unmatchedRecords`와 `columnMismatches`는 출처를 확인할 수 없는 기록과 저장 식별 정보 불일치를 보여준다. 원본 무결성 `verified`와 현재 대상·파일 상태는 독립된 결과다.
+
+서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 
 ## 프로젝트 보고서와 주간 문서

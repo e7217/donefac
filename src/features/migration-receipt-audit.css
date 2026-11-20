@@ -11,11 +11,35 @@
 .migration-audit-status.is-verified { color: #176355; background: #dff0e8; }
 .migration-audit-status.is-unbound { color: #734b1e; background: #fcf0d8; }
 .migration-audit-status:is(.is-missing, .is-corrupt, .is-unreadable) { color: #882e33; background: #f9e6e6; }
+.migration-audit-status.is-mismatch { color: #882e33; background: #f9e6e6; }
 .migration-audit .migration-reconciliation-row code { overflow-wrap: anywhere; }
 .migration-audit .migration-reconciliation-row .btn svg { flex-shrink: 0; }
+
+.migration-audit-integrity {
+  min-width: 0;
+  padding: .75rem;
+  margin: .7rem 0 .85rem;
+  border: 1px solid #d5e3df;
+  border-radius: .45rem;
+  background: #fff;
+  font-size: .8125rem;
+  overflow-wrap: anywhere;
+}
+.migration-audit-integrity-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem .65rem; }
+.migration-audit-integrity-heading h5 { margin: 0; }
+.migration-audit-integrity p { margin: .35rem 0; }
+.migration-audit-integrity-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem .75rem; margin: .45rem 0; }
+.migration-audit-integrity-counts dt { font-weight: 650; }
+.migration-audit-integrity-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.migration-audit-integrity-findings { padding-inline-start: 1.3rem; color: #882e33; }
+.migration-audit-integrity-packages { display: grid; gap: .4rem; list-style: none; padding: 0; margin: .65rem 0 0; }
+.migration-audit-integrity-packages li { min-width: 0; padding: .55rem; border: 1px solid #dde7e3; border-radius: .35rem; background: #f8fbfa; }
+.migration-audit-integrity details { margin-top: .65rem; }
+.migration-audit-integrity summary { cursor: pointer; font-weight: 600; }
 
 @media (max-width: 640px) {
   .migration-audit { padding: .6rem; }
   .migration-audit .migration-reconciliation-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .migration-audit .migration-reconciliation-counts div { min-width: 0; overflow-wrap: anywhere; }
+  .migration-audit-integrity-counts { grid-template-columns: minmax(0, 1fr); }
 }
