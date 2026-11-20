@@ -57,6 +57,77 @@ test('pipeline branch ordering prevents late older results and MR inheritance re
   }finally{f.close();}
 });
 
+test('MR readiness refreshes an unchanged GitLab revision and reconciles sparse approval and close events', async t => {
+  const f=fixture();
+  t.after(f.close);
+  const updatedAt=new Date(Date.now()-60_000).toISOString(),head='a'.repeat(40);
+  const remote={id:101,iid:7,title:'NEO-1 review',state:'opened',updated_at:updatedAt,source_branch:'feature/review',
+    sha:head,web_url:'https://git.example.test/team/repo/-/merge_requests/7',detailed_merge_status:'not_approved'};
+  const mock=await mockServer((path,res)=>{
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify(path.includes('/merge_requests?')?[remote]:[]));
+  });
+  t.after(mock.close);
+  f.configure({baseUrl:mock.url});
+  await f.service.sync();
+  const [waiting]=links(f);
+  assert.equal(waiting.mergeReadiness?.state,'approval_required');
+  assert.equal(waiting.mergeReadiness?.source,'read');
+
+  remote.detailed_merge_status='mergeable';
+  const result=await f.service.sync();
+  assert.equal(result.linked,1);
+  const [ready]=links(f);
+  assert.equal(ready.mergeReadiness?.state,'ready');
+  assert.equal(ready.updatedAt,waiting.updatedAt);
+
+  remote.sha='b'.repeat(40);
+  remote.detailed_merge_status='conflict';
+  await f.service.sync();
+  assert.deepEqual(links(f),[ready]);
+  remote.sha=head;
+
+  const actionedAt=new Date().toISOString();
+  const sparse=(attributes:Record<string,unknown>)=>({object_kind:'merge_request',project:{id:42},
+    object_attributes:{id:remote.id,iid:remote.iid,state:'opened',sha:head,...attributes}});
+  const invalidated=f.service.webhook(request(sparse({action:'unapproved',updated_at:updatedAt,actioned_at:actionedAt})));
+  assert.equal(invalidated.linked,1);
+  const [unknown]=links(f);
+  assert.deepEqual(unknown.mergeReadiness,{state:'unknown',source:'webhook',observedAt:actionedAt});
+  assert.equal(unknown.title,ready.title);
+
+  remote.title='No ticket reference after review';
+  remote.detailed_merge_status='requested_changes';
+  await f.service.sync();
+  const [changed]=links(f);
+  assert.equal(changed.id,ready.id);
+  assert.equal(changed.updatedAt,actionedAt);
+  assert.equal(changed.title,ready.title);
+  assert.equal(changed.mergeReadiness?.state,'changes_requested');
+  assert.equal(changed.mergeReadiness?.source,'read');
+
+  remote.updated_at=new Date().toISOString();
+  remote.detailed_merge_status='ci_must_pass';
+  await f.service.sync();
+  const [newerRevision]=links(f);
+  assert.equal(newerRevision.mergeReadiness?.state,'ci_required');
+  assert.equal(newerRevision.updatedAt,remote.updated_at);
+  remote.updated_at=updatedAt;
+  remote.detailed_merge_status='mergeable';
+  await f.service.sync();
+  assert.deepEqual(links(f),[newerRevision]);
+
+  const closedAt=new Date().toISOString();
+  f.service.webhook(request(sparse({action:'close',state:'closed',updated_at:closedAt})));
+  const [closed]=links(f);
+  assert.equal(closed.state,'closed');
+  assert.equal(Object.hasOwn(closed,'mergeReadiness'),false);
+  assert.equal(closed.title,newerRevision.title);
+  assert.deepEqual(f.events.at(-1)?.issueIds,[]);
+  f.service.webhook(request(sparse({action:'update',updated_at:actionedAt,detailed_merge_status:'mergeable'})));
+  assert.deepEqual(links(f),[closed]);
+});
+
 const pushBase = 'https://git.example.test/forge';
 const pushRepo = `${pushBase}/team/engine`;
 const commitSha = (digit: string, width = 40) => digit.repeat(width);

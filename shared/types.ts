@@ -707,7 +707,14 @@ export interface NotificationSubscription {
   targetId: string;
 }
 export interface NotificationSubscriptionState { subscribed: boolean }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string }
+export type GitlabMergeReadinessState = 'ready' | 'checking' | 'draft' | 'conflict' | 'approval_required' | 'changes_requested' |
+  'discussions_unresolved' | 'ci_required' | 'ci_running' | 'rebase_required' | 'dependency' | 'policy' | 'blocked' | 'unknown';
+export interface GitlabMergeReadiness {
+  state: GitlabMergeReadinessState;
+  observedAt: string;
+  source: 'read' | 'webhook';
+}
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness }
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[] }
@@ -850,7 +857,7 @@ export interface IssueViewPlanningFilter {
   releaseId?: string | null;
   dates?: IssueViewDateFilter;
 }
-export type IssueViewGitlabFilter = 'open_merge_request' | 'failed_pipeline' | 'running_pipeline' | 'no_activity';
+export type IssueViewGitlabFilter = 'open_merge_request' | 'merge_blocked' | 'failed_pipeline' | 'running_pipeline' | 'no_activity';
 export interface SavedViewState {
   layout: 'list' | 'board';
   filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter; planning?: IssueViewPlanningFilter; gitlab?: IssueViewGitlabFilter };

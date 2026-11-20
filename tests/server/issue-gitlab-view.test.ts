@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { isRestorableGitlabLink } from '../../shared/gitlab-links.js';
+import { parseGitlabMergeReadiness } from '../../shared/gitlab-merge-readiness.js';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view.js';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import { createIssueViewMatcher, IssueViewGitlabFilterError, parseIssueViewGitlabFilter } from '../../shared/issue-view.js';
 import type { GitlabLink, Issue, SavedViewState } from '../../shared/types.js';
 
-const now = '2026-11-20T00:00:00Z';
+const now = '2026-11-20T00:00:00.000Z';
 const schema = defaultIssueSchema('team');
 const filters = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
 
@@ -31,14 +33,49 @@ function pipeline(
   });
 }
 
-test('GitLab view filter validates the four exact criteria and an omitted filter', () => {
+test('GitLab view filter validates the exact criteria and an omitted filter', () => {
   assert.equal(parseIssueViewGitlabFilter(undefined), undefined);
-  for (const criterion of ['open_merge_request', 'failed_pipeline', 'running_pipeline', 'no_activity']) {
+  for (const criterion of ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'no_activity']) {
     assert.equal(parseIssueViewGitlabFilter(criterion), criterion);
   }
   for (const invalid of [null, false, 0, [], {}, '', 'all', ' failed_pipeline', ['failed_pipeline']]) {
     assert.throws(() => parseIssueViewGitlabFilter(invalid), IssueViewGitlabFilterError);
   }
+});
+
+test('GitLab readiness normalizes trustworthy merge status and positive legacy flags', () => {
+  const normalize = (fields: Record<string, unknown>) => parseGitlabMergeReadiness(fields, now, 'read');
+  for (const [detailed_merge_status, state] of Object.entries({
+    mergeable: 'ready', not_approved: 'approval_required', requested_changes: 'changes_requested',
+    ci_must_pass: 'ci_required', ci_still_running: 'ci_running', discussions_not_resolved: 'discussions_unresolved',
+    approvals_syncing: 'checking', need_rebase: 'rebase_required', merge_request_blocked: 'dependency',
+    security_policy_violations: 'policy', commits_status: 'blocked',
+  })) assert.deepEqual(normalize({ detailed_merge_status }), { state, observedAt: now, source: 'read' });
+  assert.equal(normalize({ draft: true, detailed_merge_status: 'mergeable' })?.state, 'draft');
+  assert.equal(normalize({ work_in_progress: true })?.state, 'draft');
+  assert.deepEqual(parseGitlabMergeReadiness({ draft: true }, now, 'webhook'), { state: 'draft', observedAt: now, source: 'webhook' });
+  assert.equal(normalize({ has_conflicts: true, merge_status: 'can_be_merged' })?.state, 'conflict');
+  assert.equal(normalize({ merge_status: 'cannot_be_merged' })?.state, 'blocked');
+  assert.equal(normalize({ merge_status: 'cannot_be_merged_recheck' })?.state, 'checking');
+  for (const fields of [
+    {}, { draft: false, has_conflicts: false, blocking_discussions_resolved: false }, { merge_status: 'can_be_merged' },
+    { detailed_merge_status: 'constructor', merge_status: 'cannot_be_merged' }, { detailed_merge_status: 'not_open' },
+    { draft: 'true', has_conflicts: 'true' },
+  ]) assert.equal(normalize(fields), undefined);
+});
+
+test('only open MRs with canonical normalized readiness can be restored', () => {
+  const mr = link('first', 'merge_request', 'opened');
+  const observation = { state: 'unknown', observedAt: now, source: 'webhook' };
+  assert.ok(isRestorableGitlabLink(mr));
+  assert.ok(isRestorableGitlabLink({ ...mr, mergeReadiness: observation }));
+  for (const value of [null, {}, { ...observation, source: 'pipeline' }, { ...observation, state: 'mergeable' },
+    { ...observation, observedAt: '2026-02-31T00:00:00.000Z' }, { ...observation, observedAt: '2026-11-20T00:00:00Z' },
+    { ...observation, raw: 'unexpected' }]) {
+    assert.equal(isRestorableGitlabLink({ ...mr, mergeReadiness: value }), false);
+  }
+  assert.equal(isRestorableGitlabLink({ ...mr, state: 'merged', mergeReadiness: observation }), false);
+  assert.equal(isRestorableGitlabLink({ ...mr, kind: 'pipeline', mergeReadiness: observation }), false);
 });
 
 test('GitLab summaries use the newest pipeline object per linked ticket, instance, repository and branch', () => {
@@ -58,8 +95,8 @@ test('GitLab summaries use the newest pipeline object per linked ticket, instanc
   ];
   for (const ordered of [links, [...links].reverse()]) {
     const summaries = summarizeIssueGitlabLinks(ordered);
-    assert.deepEqual(summaries.get('first'), { activityCount: 11, openMergeRequests: 1, failedPipelines: 2, runningPipelines: 1 });
-    assert.deepEqual(summaries.get('second'), { activityCount: 1, openMergeRequests: 0, failedPipelines: 1, runningPipelines: 0 });
+    assert.deepEqual(summaries.get('first'), { activityCount: 11, openMergeRequests: 1, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 1 });
+    assert.deepEqual(summaries.get('second'), { activityCount: 1, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 0 });
     assert.equal(summaries.has('missing'), false);
   }
 });
@@ -73,7 +110,25 @@ test('GitLab summaries retain independent legacy pipelines and distinguish queue
     { ...pipeline(102, 'failed'), projectId: 77 },
   ];
   const summary = summarizeIssueGitlabLinks(links).get('first');
-  assert.deepEqual(summary, { activityCount: 12, openMergeRequests: 0, failedPipelines: 2, runningPipelines: 5 });
+  assert.deepEqual(summary, { activityCount: 12, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 5 });
+});
+
+test('merge-blocked views count actionable readiness only for open merge requests', () => {
+  const readiness = (state: NonNullable<GitlabLink['mergeReadiness']>['state']) => ({ state, observedAt: now, source: 'read' as const });
+  const gitlabLinks = [
+    link('review', 'merge_request', 'opened', { mergeReadiness: readiness('approval_required') }),
+    link('review', 'merge_request', 'opened', { id: 'another-mr', mergeReadiness: readiness('changes_requested') }),
+    link('pipeline', 'merge_request', 'opened', { mergeReadiness: readiness('ci_running') }),
+    link('merged', 'merge_request', 'merged', { mergeReadiness: readiness('conflict') }),
+    link('checking', 'merge_request', 'opened', { mergeReadiness: readiness('checking') }),
+    link('ready', 'merge_request', 'opened', { mergeReadiness: readiness('ready') }),
+    link('unknown', 'merge_request', 'opened', { mergeReadiness: readiness('unknown') }),
+    link('legacy', 'merge_request', 'opened'),
+  ];
+  const match = createIssueViewMatcher({ ...filters, gitlab: 'merge_blocked' }, { users: [], gitlabLinks }, schema);
+  const tickets = [...new Set(gitlabLinks.map(value => value.issueId))].map(issue);
+  assert.deepEqual(tickets.filter(match).map(value => value.id), ['review', 'pipeline']);
+  assert.equal(summarizeIssueGitlabLinks(gitlabLinks).get('review')?.blockedMergeRequests, 2);
 });
 
 test('GitLab criteria compose with ticket fields and do not treat branch or commit history as unlinked', () => {

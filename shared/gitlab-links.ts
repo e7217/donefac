@@ -1,4 +1,5 @@
 import { isJiraIssueKey } from './atlassian-links.js';
+import { isGitlabMergeReadiness } from './gitlab-merge-readiness.js';
 
 export function gitlabObjectSha(value: unknown): string | null {
   return typeof value === 'string' && /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value) ? value.toLowerCase() : null;
@@ -36,6 +37,8 @@ function isRestorableManualGitlabLink(link: Record<string, unknown>): boolean {
 export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
+  if (Object.hasOwn(link, 'mergeReadiness') &&
+      (link.kind !== 'merge_request' || link.state !== 'opened' || !isGitlabMergeReadiness(link.mergeReadiness))) return false;
   if (Object.hasOwn(link, 'originalJiraKey') && !isJiraIssueKey(link.originalJiraKey)) return false;
   if (Object.hasOwn(link, 'branchObservationSource') &&
       (link.kind !== 'branch' || link.branchObservationSource !== 'sync' || link.state !== 'active')) return false;

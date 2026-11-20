@@ -17,6 +17,7 @@ export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilte
   switch (value) {
     case undefined:
     case 'open_merge_request':
+    case 'merge_blocked':
     case 'failed_pipeline':
     case 'running_pipeline':
     case 'no_activity':
@@ -100,6 +101,7 @@ function matchesDateFilter(issue: Issue, filter: IssueViewDateFilter): boolean {
 function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: IssueGitlabSummary | undefined): boolean {
   switch (filter) {
     case 'open_merge_request': return Boolean(summary?.openMergeRequests);
+    case 'merge_blocked': return Boolean(summary?.blockedMergeRequests);
     case 'failed_pipeline': return Boolean(summary?.failedPipelines);
     case 'running_pipeline': return Boolean(summary?.runningPipelines);
     case 'no_activity': return !summary?.activityCount;

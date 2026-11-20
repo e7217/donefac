@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
-import type { FeatureProps, GitlabLink } from '../../shared/types';
+import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
+import type { FeatureProps, GitlabLink, GitlabMergeReadiness } from '../../shared/types';
 import './gitlab-activity.css';
 
 const kinds = [
@@ -22,6 +23,22 @@ const states = new Map([
   ['scheduled', '예약됨'], ['unknown', '미확인'],
 ]);
 const PAGE_SIZE = 12;
+const readinessLabels = {
+  ready: '병합 가능',
+  checking: '병합 상태 검사 중',
+  draft: '초안',
+  conflict: '충돌 해결 필요',
+  approval_required: '승인 대기',
+  changes_requested: '수정 요청',
+  discussions_unresolved: '미해결 토론',
+  ci_required: '파이프라인 통과 필요',
+  ci_running: '파이프라인 실행 중',
+  rebase_required: '리베이스 필요',
+  dependency: '선행 병합 요청 대기',
+  policy: '정책 또는 상태 검사 확인',
+  blocked: '병합 차단',
+  unknown: '병합 상태 미확인',
+} satisfies Record<GitlabMergeReadiness['state'], string>;
 
 export function gitlabActivityUrl(webUrl: unknown): URL | null {
   if (typeof webUrl !== 'string') return null;
@@ -43,6 +60,19 @@ export function gitlabActivityStateLabel(state: string): string {
 
 function activityTime(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0;
+}
+
+function MergeReadiness({ value }: { value?: GitlabMergeReadiness }) {
+  const state = value?.state ?? 'unknown';
+  const tone = isGitlabMergeReadinessBlocked(state) ? 'blocked' : state === 'ready' ? 'ready' : 'neutral';
+  return <span className="gitlab-merge-readiness" role="group" aria-label="MR 병합 확인">
+    <span className="gitlab-merge-badge" data-tone={tone}>{readinessLabels[state]}</span>
+    {value && <span className="gitlab-merge-observed">
+      {value.source === 'read' ? 'GitLab 조회' : 'GitLab 웹훅'} · <time dateTime={value.observedAt}>
+        {new Date(value.observedAt).toLocaleString('ko-KR')}
+      </time>
+    </span>}
+  </span>;
 }
 
 export function GitlabActivityRefresh({ refresh, notify, disabled }: Pick<FeatureProps, 'refresh' | 'notify'> & { disabled?: boolean }) {
@@ -127,6 +157,7 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
         : <div className="gitlab-activity-target">{titleContent}</div>}
       {link.kind === 'branch' && sha && <span className="gitlab-activity-detail">{deleted ? '삭제 전 HEAD' : '확인한 HEAD'} <code title={sha}>{sha.slice(0, 8)}</code></span>}
       {link.kind === 'commit' && branch && <span className="gitlab-activity-detail">{branch}</span>}
+      {link.kind === 'merge_request' && state === 'opened' && <MergeReadiness value={link.mergeReadiness} />}
       {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
       {link.manualLinkId && <span className="gitlab-activity-detail gitlab-activity-manual-label">수동 연결</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}

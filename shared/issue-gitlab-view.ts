@@ -1,9 +1,11 @@
 import { isGitlabBranchName } from './gitlab-links.js';
+import { isGitlabMergeReadinessBlocked } from './gitlab-merge-readiness.js';
 import type { GitlabLink } from './types.js';
 
 export interface IssueGitlabSummary {
   activityCount: number;
   openMergeRequests: number;
+  blockedMergeRequests: number;
   failedPipelines: number;
   runningPipelines: number;
 }
@@ -32,11 +34,14 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
   for (const link of links) {
     let summary = summaries.get(link.issueId);
     if (!summary) {
-      summary = { activityCount: 0, openMergeRequests: 0, failedPipelines: 0, runningPipelines: 0 };
+      summary = { activityCount: 0, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 0, runningPipelines: 0 };
       summaries.set(link.issueId, summary);
     }
     summary.activityCount++;
-    if (link.kind === 'merge_request' && link.state === 'opened') summary.openMergeRequests++;
+    if (link.kind === 'merge_request' && link.state === 'opened') {
+      summary.openMergeRequests++;
+      if (isGitlabMergeReadinessBlocked(link.mergeReadiness?.state)) summary.blockedMergeRequests++;
+    }
     if (link.kind !== 'pipeline') continue;
 
     const branch = pipelineBranch(link);

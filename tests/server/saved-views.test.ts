@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { PlanningItem, PlanningKind, SavedView } from '../../shared/types.js';
+import type { GitlabLink, PlanningItem, PlanningKind, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
   const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-views-'));
@@ -236,6 +236,81 @@ test('shared GitLab filter persists, preserves legacy edits and restores only va
     delete legacy.savedViews[0].filters.gitlab;
     assert.equal((await f.request('/import','POST',{data:legacy})).status, 200);
     assert.deepEqual((await f.request(listPath)).data[0].filters, {...definition.filters, query:'검토'});
+  } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
+});
+
+test('native backup preserves merge readiness and blocked views across active and trashed issues', async () => {
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; exportedAt: string; trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
+  const f = await fixture();
+  try {
+    async function createIssue(title: string) {
+      const result = await f.request('/issues', 'POST', { projectId: definition.projectId, title });
+      assert.equal(result.status, 201, JSON.stringify(result.data));
+      return result.data.id as string;
+    }
+    const active = await createIssue('합성 병합 승인 대기'), archived = await createIssue('합성 병합 충돌');
+    const makeLink = (issueId: string, iid: number, state: NonNullable<GitlabLink['mergeReadiness']>['state']): GitlabLink => ({
+      id: `gitlab:0123456789ab:42:merge_request:${iid}:${issueId}`, issueId, projectId: 42, iid, kind: 'merge_request',
+      title: `Synthetic MR ${iid}`, state: 'opened', webUrl: `https://git.example.test/team/repo/-/merge_requests/${iid}`,
+      updatedAt: '2025-01-02T00:00:00.000Z', mergeReadiness: { state, source: 'read', observedAt: '2025-01-03T00:00:00.000Z' },
+    });
+    const activeLink = makeLink(active, 501, 'approval_required'), archivedLink = makeLink(archived, 502, 'conflict');
+    const created = await f.request('/views', 'POST', { ...definition, filters: { ...definition.filters, gitlab: 'merge_blocked' } });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const restore = (data: Backup) => f.request('/import', 'POST', { data });
+    const initial = (await f.request('/export')).data as Backup;
+    assert.equal(initial.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    initial.gitlabLinks.push(activeLink, archivedLink);
+    assert.equal((await restore(initial)).status, 200);
+    const deleted = await f.request(`/issues/${archived}`, 'DELETE');
+    assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+    const entryId = deleted.data.trashEntryId as string;
+    const backup = (await f.request('/export')).data as Backup;
+    assert.deepEqual(backup.gitlabLinks, [activeLink]);
+    assert.deepEqual(backup.trashEntries.find(entry => entry.id === entryId)?.gitlabLinks, [archivedLink]);
+    assert.equal(backup.savedViews?.[0].filters.gitlab, 'merge_blocked');
+
+    for (const data of [
+      { ...backup, schemaVersion: 56, savedViews: [], trashEntries: [] },
+      { ...backup, schemaVersion: 56, savedViews: [], gitlabLinks: [] },
+      { ...backup, schemaVersion: 56, trashEntries: [], gitlabLinks: [] },
+    ]) {
+      const invalid = await restore(data);
+      assert.equal(invalid.status, 400);
+      assert.match(invalid.data.error, /schemaVersion 57/);
+    }
+    const malformed = structuredClone(backup);
+    malformed.trashEntries[0].gitlabLinks[0].state = 'closed';
+    assert.equal((await restore(malformed)).status, 400);
+    const afterExport = new Date(Date.parse(backup.exportedAt) + 1).toISOString();
+    const afterRestore = new Date(Date.now() + 3_600_000).toISOString();
+    for (const observedAt of [afterExport, afterRestore]) {
+      for (const inTrash of [false, true]) {
+        // A future export header alone cannot make a future observation acceptable.
+        const future = structuredClone(backup);
+        if (observedAt === afterRestore) future.exportedAt = afterRestore;
+        const link = inTrash ? future.trashEntries[0].gitlabLinks[0] : future.gitlabLinks[0];
+        link.mergeReadiness!.observedAt = observedAt;
+        const rejected = await restore(future);
+        assert.equal(rejected.status, 400);
+        assert.match(rejected.data.error, /관측 시각이 백업 내보내기 또는 복원 시각보다 늦습니다/);
+      }
+    }
+    assert.deepEqual((await f.request('/workspace')).data.gitlabLinks, [activeLink]);
+
+    const legacy = structuredClone(backup);
+    legacy.schemaVersion = 56;
+    legacy.savedViews![0].filters.gitlab = 'open_merge_request';
+    delete legacy.gitlabLinks[0].mergeReadiness;
+    delete legacy.trashEntries[0].gitlabLinks[0].mergeReadiness;
+    assert.equal((await restore(legacy)).status, 200);
+    assert.equal((await f.request('/workspace')).data.gitlabLinks[0].mergeReadiness, undefined);
+
+    assert.equal((await restore(backup)).status, 200);
+    assert.equal((await f.request(`/trash/${entryId}/restore`, 'POST', {})).status, 200);
+    const reopened = (await f.request('/workspace')).data as WorkspaceSnapshot;
+    assert.deepEqual(reopened.gitlabLinks.find(link => link.id === archivedLink.id), archivedLink);
+    assert.equal(reopened.savedViews?.[0].filters.gitlab, 'merge_blocked');
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
 

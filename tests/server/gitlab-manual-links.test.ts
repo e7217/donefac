@@ -39,7 +39,8 @@ async function fixture(t: TestContext) {
   const mrUrl = () => `${projectUrl()}/-/merge_requests/${mrIid}`;
   const pipelineUrl = () => `${projectUrl()}/-/pipelines/${pipelineId}`;
   let mr = { id: mrId, iid: mrIid, project_id: repositoryId, target_project_id: repositoryId,
-    title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant() };
+    title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant(),
+    detailed_merge_status: undefined as string | undefined };
   const mock = createServer(async (req, res) => {
     const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
     calls.push({ method: req.method, path, credential: req.headers['private-token'] });
@@ -179,6 +180,45 @@ test('exact GitLab refresh preserves corrected manual state without granting imp
   assert.equal((await savedIssue())?.status, 'done');
   await f.call(deletePath(f.issue.id, original), { method: 'DELETE' }, 409);
   assert.deepEqual(await f.links(), [automatic]);
+});
+
+test('manual MR readiness rechecks the same revision and discards a response held across a webhook', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  f.setMr({ detailed_merge_status: 'ci_still_running' });
+  const original = await f.call<GitlabLink>(path, f.attach(f.mrUrl), 201);
+  assert.equal(original.mergeReadiness?.state, 'ci_running');
+
+  f.setMr({ detailed_merge_status: 'mergeable', title: 'No metadata advance on this read' });
+  const ready = await f.call<GitlabLink>(path, f.attach(f.mrUrl));
+  assert.equal(ready.mergeReadiness?.state, 'ready');
+  assert.equal(ready.title, original.title);
+  assert.equal(ready.updatedAt, original.updatedAt);
+  assert.equal(ready.manualLinkId, original.manualLinkId);
+
+  let started!: () => void;
+  let proceed!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const resume = new Promise<void>(resolve => { proceed = resolve; });
+  f.holdRead(() => { started(); return resume; });
+  const pending = f.request<GitlabLink>(path, f.attach(f.mrUrl));
+  await waiting;
+  const actionedAt = new Date().toISOString();
+  try {
+    await f.webhook('merge_request', { id: mrId, iid: mrIid, state: 'opened', action: 'unapproved',
+      source_branch: sourceBranch, sha, updated_at: f.instant(), actioned_at: actionedAt });
+  } finally { proceed(); }
+  const result = await pending;
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.data.mergeReadiness, { state: 'unknown', source: 'webhook', observedAt: actionedAt });
+  assert.deepEqual(await f.links(), [result.data]);
+
+  f.setMr({ detailed_merge_status: 'not_approved' });
+  const waitingForApproval = await f.call<GitlabLink>(path, f.attach(f.mrUrl));
+  assert.equal(waitingForApproval.mergeReadiness?.state, 'approval_required');
+  assert.equal(waitingForApproval.mergeReadiness?.source, 'read');
+  assert.equal(waitingForApproval.updatedAt, actionedAt);
+  assert.equal(waitingForApproval.manualLinkId, original.manualLinkId);
 });
 
 test('GitLab link verification discards changed settings and restores manual links with a new unlink guard', async t => {

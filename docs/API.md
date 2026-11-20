@@ -310,6 +310,12 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 수동 연결을 해제하려면 `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…`에 현재 행의 `manualLinkId`를 보낸다. 자체 백업 형식 52는 활성·휴지통 수동 연결을 저장하며 복원한 연결에는 새 `manualLinkId`를 부여한다.
 
+### MR 병합 상태
+
+열린 MR의 `GitlabLink.mergeReadiness`는 확인한 `state`, 기준 시각 `observedAt`, 출처 `source`를 담는다. `source`는 `read` 또는 `webhook`이다. 기존 MR 조회와 인증된 MR 이벤트에서 GitLab의 병합 상태를 읽는다. 확인한 사유는 `approval_required`, `changes_requested`, `conflict`, `ci_required` 등 제한된 값으로 반환한다. `checking`, `unknown` 또는 필드 부재는 별도로 표시되며 병합 확인 필터의 대상에서 빠진다. 병합하거나 닫힌 MR은 일반 링크의 수명주기 상태로 표시한다. [GitLab Merge Requests API](https://docs.gitlab.com/api/merge_requests/#merge-status) · [GitLab 웹훅](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)
+
+같은 MR 수정 시각에 병합 조건만 바뀐 경우에도 확인한 리비전의 상태를 갱신한다. 저장소와 MR ID가 일치하면 티켓 키가 생략된 이벤트도 기존 연결에 반영할 수 있다. 인증 이벤트보다 먼저 시작한 조회가 뒤늦게 끝나면 해당 결과를 보류한다. 내보내기 또는 복원 시각보다 늦은 병합 관측이 들어 있는 백업은 복원을 거절한다.
+
 ## 상태별 담당자 자동 배정
 
 프로젝트의 **설정 → 상태별 담당자 자동 배정**에서 사용한다. 관리 경로는 브라우저용 `/api`에 있다. 기존 업무의 `/api/v1` 수정 요청으로 상태가 실제로 바뀌면 같은 배정 규칙을 적용한다.
@@ -582,11 +588,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | 값 | 표시할 업무 |
 | --- | --- |
 | `open_merge_request` | 저장된 연결에 열린 MR이 있는 업무 |
+| `merge_blocked` | 열린 MR에 승인·충돌·파이프라인 등 확인된 병합 차단 사유가 있는 업무 |
 | `failed_pipeline` | 최신 연결 파이프라인 중 하나 이상이 실패한 업무 |
 | `running_pipeline` | 최신 연결 파이프라인 중 하나 이상이 실행 또는 대기 중인 업무 |
 | `no_activity` | 저장된 GitLab 연결이 없는 업무 |
 
-파이프라인은 같은 업무·GitLab 인스턴스·저장소·브랜치의 연결 중 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 브랜치나 원본 ID를 확인할 수 없는 기존 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 53은 조건과 연결 자료를 복원한다.
+파이프라인은 같은 업무·GitLab 인스턴스·저장소·브랜치의 연결 중 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 브랜치나 원본 ID를 확인할 수 없는 기존 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 57은 MR 병합 상태와 `merge_blocked` 조건을 보존한다. 기존 GitLab 조건은 형식 53에서 지원한다.
 
 ## 사용자 정의 필드 집계
 
