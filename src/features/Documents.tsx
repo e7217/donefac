@@ -18,6 +18,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
+import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
 import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
@@ -779,6 +780,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </div>
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
+              {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor} />}
               <div className="docs-editor-wrap" onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 const href = event.target.closest('a[href]')?.getAttribute('href');

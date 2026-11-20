@@ -6,7 +6,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, GitCompareArrows, Histo
 import type { DocRevision, RichContent, User } from '../../shared/types';
 import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffUnit } from '../../shared/document-diff';
 import { contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
-import { ReadonlyDocumentContent } from './DocumentBlocks';
+import { containsOutlineHeading, ReadonlyDocumentContent } from './DocumentBlocks';
 import './document-history.css';
 
 export interface DocumentHistoryProps {
@@ -31,7 +31,7 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
   const [afterId, setAfterId] = useState('current');
   const ordered = [...revisions].sort((a, b) => b.version - a.version || b.createdAt.localeCompare(a.createdAt));
   const preview = ordered.find(value => value.id === previewId);
-  const previewHasPins = preview && contentReferences(preview.content).some(reference => reference.revisionId);
+  const hasFormattedPreview = preview && (containsOutlineHeading(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
   const dirtyLabel = current.dirty ? '현재 미저장 초안' : '현재 편집본';
   function openCompare(revision?: DocRevision) { setBeforeId((revision || ordered[1] || ordered[0])?.id || ''); setAfterId('current'); setCompareOpen(true); }
   return <div className="document-history">
@@ -40,7 +40,7 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
     {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}{error && <p className="docs-panel-error" role="alert">{error}</p>}
     {preview ? <div className="docs-history-preview">
       <button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>버전 {preview.version}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
-      {previewHasPins ? <><span className="document-history-preview-label">본문 미리보기</span><ReadonlyDocumentContent content={preview.content} documentId={preview.documentId} mode="history" /></> : <>
+      {hasFormattedPreview ? <><span className="document-history-preview-label">본문 미리보기</span><ReadonlyDocumentContent key={preview.id} content={preview.content} documentId={preview.documentId} mode="history" showOutline /></> : <>
         <span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}
       </>}
       <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button><button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>

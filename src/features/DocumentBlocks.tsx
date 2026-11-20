@@ -14,6 +14,7 @@ import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
+import { DocumentOutline, jumpToDocumentHeading, outlineHeadingTitle, type DocumentOutlineEntry } from './DocumentOutline';
 import './document-blocks.css';
 
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude';
@@ -43,7 +44,16 @@ function safeUrl(value: unknown, image = false): string | undefined {
   try { const url = new URL(value); if ((['https:', 'http:'].includes(url.protocol) || !image && ['mailto:', 'tel:'].includes(url.protocol)) && !url.username && !url.password) return value; } catch { /* Untrusted content stays text when the URL is invalid. */ }
 }
 type PinnedSource = { documentId: string; revisionId: string };
-type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource };
+type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[] };
+
+function headingTitle(node: RichContent) {
+  return outlineHeadingTitle(documentPlainText(node));
+}
+
+export function containsOutlineHeading(node: RichContent): boolean {
+  if (node.type === 'heading') return headingTitle(node).length > 0;
+  return node.content?.some(containsOutlineHeading) ?? false;
+}
 
 type RevisionRequest = { controller: AbortController; readers: number; result: Promise<DocRevision> };
 const revisionRequests = new Map<string, RevisionRequest>();
@@ -177,7 +187,14 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   switch (node.type) {
     case 'doc': return <div key={key}>{children}</div>;
     case 'paragraph': return <p key={key}>{children.length ? children : <br />}</p>;
-    case 'heading': return attrs.level === 1 ? <h1 key={key}>{children}</h1> : attrs.level === 2 ? <h2 key={key}>{children}</h2> : <h3 key={key}>{children}</h3>;
+    case 'heading': {
+      const level = attrs.level === 1 ? 1 : attrs.level === 2 ? 2 : 3;
+      const Heading = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3';
+      const canNavigate = state.outline && state.includeDepth === 0 && children.every(child => child !== null);
+      const title = canNavigate ? headingTitle(node) : '';
+      if (title) state.outline?.push({ target: key, level, title });
+      return <Heading key={key} data-document-outline-target={title ? key : undefined} tabIndex={title ? -1 : undefined}>{children}</Heading>;
+    }
     case 'bulletList': return <ul key={key}>{children}</ul>;
     case 'orderedList': return <ol key={key} start={typeof attrs.start === 'number' ? attrs.start : undefined}>{children}</ol>;
     case 'listItem': return <li key={key}>{children}</li>;
@@ -200,10 +217,28 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource }: { content: RichContent; documentId?: string; nodeBudget?: number; mode?: RenderState['mode']; pinnedSource?: PinnedSource }) {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false }: {
+  content: RichContent;
+  documentId?: string;
+  nodeBudget?: number;
+  mode?: RenderState['mode'];
+  pinnedSource?: PinnedSource;
+  showOutline?: boolean;
+}) {
   const context = contextOf(useContext(BlockContext));
-  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined };
-  return <div className="doc-readonly-content">{renderNode(content, context, state, 'readonly')}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>;
+  const contentRoot = useRef<HTMLDivElement>(null);
+  const outline: DocumentOutlineEntry[] | undefined = showOutline ? [] : undefined;
+  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline };
+  const body = renderNode(content, context, state, 'readonly');
+  function goToHeading(target: string) {
+    const root = contentRoot.current;
+    const heading = root?.querySelector<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`);
+    if (root && heading) jumpToDocumentHeading(heading, root, true);
+  }
+  return <>
+    {outline && <DocumentOutline entries={outline} onNavigate={goToHeading} />}
+    <div className="doc-readonly-content" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
+  </>;
 }
 function ReferenceNodeView({ node, selected, deleteNode, editor }: NodeViewProps) {
   const context = contextOf(useContext(BlockContext));

@@ -723,9 +723,11 @@ function PublicationDialog({
                 openDocument={noNavigation}
               >
                 <ReadonlyDocumentContent
+                  key={`${snapshotKind}:${selectedSnapshot.id}`}
                   content={renderedContent}
                   documentId={page.id}
                   nodeBudget={30000}
+                  showOutline
                 />
               </DocumentBlocksProvider>
             </section>
