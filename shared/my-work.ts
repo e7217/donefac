@@ -47,7 +47,7 @@ export function countActiveMyWork(data: MyWorkData, actorId: string): number {
     !isClosed(statusMeta(data, issue.projectId, issue.status).category)).length;
 }
 
-function issueDate(issue: Issue): MyWorkItem['date'] {
+export function issueDeadline(issue: Pick<Issue, 'dueDate' | 'endDate'>): MyWorkItem['date'] {
   if (isCalendarDate(issue.dueDate)) return { value: issue.dueDate, source: 'dueDate' };
   return isCalendarDate(issue.endDate) ? { value: issue.endDate, source: 'endDate' } : null;
 }
@@ -95,7 +95,7 @@ export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: strin
     const status = statusMeta(data, issue.projectId, issue.status);
     if (!options.includeClosed && isClosed(status.category)) continue;
 
-    const item: MyWorkItem = { issue, project, status, role, date: issueDate(issue) };
+    const item: MyWorkItem = { issue, project, status, role, date: issueDeadline(issue) };
     const groupId = options.grouping === 'deadline' ? deadlineGroup(item, todayDay) : status.category;
     groupById.get(groupId)!.push(item);
     total++;

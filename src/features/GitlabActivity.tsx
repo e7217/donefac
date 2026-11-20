@@ -23,7 +23,7 @@ const states = new Map([
 ]);
 const PAGE_SIZE = 12;
 
-function activityUrl(webUrl: unknown): URL | null {
+export function gitlabActivityUrl(webUrl: unknown): URL | null {
   if (typeof webUrl !== 'string') return null;
   try {
     const url = new URL(webUrl);
@@ -31,6 +31,14 @@ function activityUrl(webUrl: unknown): URL | null {
   } catch {
     return null;
   }
+}
+
+export function gitlabActivityKindLabel(kind: GitlabLink['kind']): string {
+  return kinds.find(value => value.kind === kind)?.label ?? 'GitLab';
+}
+
+export function gitlabActivityStateLabel(state: string): string {
+  return states.get(state) ?? state;
 }
 
 function activityTime(value: unknown) {
@@ -89,7 +97,7 @@ function ActivityGroup({ group, links, issueContext, heading: Heading }: {
 }
 
 function ActivityRow({ link, issueContext }: { link: GitlabLink; issueContext?: IssueContext }) {
-  const url = activityUrl(link.webUrl);
+  const url = gitlabActivityUrl(link.webUrl);
   const deleted = link.kind === 'branch' && link.state === 'deleted';
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
   const sha = gitlabObjectSha(link.sourceSha) ?? gitlabObjectSha(legacyCommitId);
@@ -116,6 +124,6 @@ function ActivityRow({ link, issueContext }: { link: GitlabLink; issueContext?: 
       {link.kind === 'commit' && branch && <span className="gitlab-activity-detail">{branch}</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
-    <span className="gitlab-activity-state">{states.get(state) ?? state}</span>
+    <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
   </li>;
 }

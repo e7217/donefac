@@ -458,3 +458,11 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 `GET /api/trash/items`로 개별 휴지통을 읽는다. `itemType`에는 `comment` 또는 `attachment`, `scope`에는 `all`·`project`·`common`을 사용할 수 있다. `scope=project`에는 `projectId`가 필요하다. `offset` 기본값은 0, `limit`은 50이며 최대 100이다. 항목에는 원래 업무·문서 ID와 `ownerAvailable`, 파일 버전 수가 표시된다.
 
 `POST /api/trash/items/:id/restore`는 원래 ID로 복원하고 항목 요약을 반환한다. 원래 업무·문서가 휴지통에 있으면 `409`, 첨부 바이트 무결성 확인에 실패하면 `503`으로 응답한다. `DELETE /api/trash/items/:id`는 해당 댓글이나 첨부와 모든 버전을 영구 삭제한다. 자체 백업 형식 31에는 `trashItems`와 보관 중인 첨부 바이트가 포함된다.
+
+## 팀 개요
+
+브라우저의 `GET /api/team-overview`는 선택 항목 `projectId`, `memberId`, `date`를 받는다. `date` 기본값은 서울의 오늘 날짜다. 프로젝트를 선택하면 해당 프로젝트만 조회하며, 전체 프로젝트 범위에서는 팀 공통 문서의 검토도 포함한다.
+
+`totals`와 `projects`는 프로젝트 워크플로에서 열린 업무의 마감 초과·오늘부터 7일 이내·일정 미정·미배정 수를 반환한다. `deadlines`에는 목표 마감일이나 계획 종료일이 해당하는 업무가 표시된다. `reviews`는 현재 검토 대기의 고정 저장본 메타데이터, `gitlab`은 기준일을 포함한 최근 7일의 저장된 티켓 연결, `reservations`는 기준일과 겹치는 확정 시간 배정이다. 한 요청에서 같은 저장 시점의 상태를 읽는다.
+
+`memberId`는 업무와 GitLab에서 담당자 또는 협력자, 검토에서는 검토자, 시간 배정에서는 배정된 팀원과 대조한다. 각 목록은 `total`, `offset`, `limit`, `items`를 포함한다. `deadlineOffset`, `reviewOffset`, `gitlabOffset`, `reservationOffset`은 각각 기본값 0, 한 번에 10건을 반환한다.

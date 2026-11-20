@@ -35,6 +35,7 @@ import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
 import { TimeReservationError, TimeReservationService } from './time-reservations.js';
+import { registerTeamOverviewRoutes } from './team-overview.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
@@ -495,6 +496,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
   app.get('/api/workspace',(_req,res)=>res.json(snapshot()));
+  registerTeamOverviewRoutes(app,{
+    store,timeReservations,
+    snapshot:()=>({projects:store.all('projects'),issues:store.all('issues'),workflows:workflows.snapshot(),gitlabLinks:store.all('gitlab_links')}),
+  });
   app.get('/api/atlassian-links',(req,res)=>{
     if(Object.keys(req.query).some(key=>key!=='targetType'&&key!=='targetId'))return fail('기존 도구 링크 조회 조건을 확인해 주세요.');
     res.set('Cache-Control','no-store').json(atlassianLinks.list(req.query.targetType,req.query.targetId));

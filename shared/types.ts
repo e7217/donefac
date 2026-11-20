@@ -332,6 +332,45 @@ export interface IssueTimeReservationEntry extends IssueTimeReservation {
   issueKey: string;
   issueTitle: string;
 }
+export interface TeamOverviewFilters { projectId: string; memberId: string; date: string }
+export interface TeamOverviewCounts {
+  open: number;
+  overdue: number;
+  dueSoon: number;
+  unscheduled: number;
+  unassigned: number;
+}
+export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }
+export interface TeamOverviewDeadline {
+  id: string;
+  projectId: string;
+  key: string;
+  title: string;
+  assigneeId: string | null;
+  statusLabel: string;
+  statusColor: string;
+  deadline: string;
+  deadlineSource: 'dueDate' | 'endDate';
+  timing: 'overdue' | 'today' | 'soon';
+}
+export interface TeamOverviewGitlabActivity {
+  issueId: string;
+  issueKey: string;
+  issueTitle: string;
+  projectId: string;
+  link: GitlabLink;
+}
+export interface TeamOverviewPage<T> { items: T[]; total: number; offset: number; limit: number }
+export interface TeamOverviewResult {
+  date: string;
+  timeZone: string;
+  totals: TeamOverviewCounts;
+  projects: TeamOverviewProject[];
+  deadlines: TeamOverviewPage<TeamOverviewDeadline>;
+  reviews: TeamOverviewPage<DocumentPublicationListItem>;
+  gitlab: TeamOverviewPage<TeamOverviewGitlabActivity>;
+  reservations: TeamOverviewPage<IssueTimeReservationEntry>;
+}
 export interface ProjectWorklogReport {
   projectId: string;
   startDate: string;

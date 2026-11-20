@@ -72,9 +72,10 @@ function display(value: ReservationRecord, issue: DisplayIssue): IssueTimeReserv
     projectId: issue.projectId, issueKey: issue.key, issueTitle: issue.title };
 }
 
-const calendarSelect = `SELECT r.json,i.project_id AS projectId,json_extract(i.json,'$.key') AS key,json_extract(i.json,'$.title') AS title
-  FROM issue_time_reservations r JOIN issues i ON i.id = r.issue_id
+const calendarFrom = `FROM issue_time_reservations r JOIN issues i ON i.id = r.issue_id
   WHERE r.state='reserved' AND r.deleted_at IS NULL AND r.start_at < ? AND r.end_at > ?`;
+const calendarColumns = "SELECT r.json,i.project_id AS projectId,json_extract(i.json,'$.key') AS key,json_extract(i.json,'$.title') AS title";
+const calendarSelect = `${calendarColumns} ${calendarFrom}`;
 
 const ORDERED_PERIOD = 'ORDER BY r.start_at,r.end_at,r.id';
 const RETIRE_REQUESTS = `INSERT INTO retired_time_reservation_requests(id,version)
@@ -150,6 +151,21 @@ export class TimeReservationService {
       .all(range.endAt, range.startAt, ...(userId === undefined ? [] : [userId]), MAX_CALENDAR_ENTRIES + 1) as CalendarRow[];
     if (rows.length > MAX_CALENDAR_ENTRIES) fail(422, '표시할 시간 배정이 많습니다. 조회 기간을 줄이거나 팀원을 선택해 주세요.');
     return rows.map(row => display(JSON.parse(row.json) as ReservationRecord, row));
+  }
+
+  /** Read one exact page of the live calendar within the caller's read snapshot. */
+  calendarPage(range: Pick<Fields, 'startAt' | 'endAt'>, filters: {
+    projectId: string | null; memberId: string | null; offset: number; limit: number;
+  }): { total: number; offset: number; limit: number; items: IssueTimeReservationEntry[] } {
+    const { projectId, memberId, offset, limit } = filters;
+    const query = `${calendarFrom}${projectId === null ? '' : ' AND i.project_id=?'}${memberId === null ? '' : ' AND r.user_id=?'}`;
+    const params = [range.endAt, range.startAt];
+    if (projectId !== null) params.push(projectId);
+    if (memberId !== null) params.push(memberId);
+    const { total } = this.store.db.prepare(`SELECT count(*) AS total ${query}`).get(...params) as { total: number };
+    const rows = this.store.db.prepare(`${calendarColumns} ${query} ${ORDERED_PERIOD} LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as CalendarRow[];
+    return { total, offset, limit, items: rows.map(row => display(JSON.parse(row.json) as ReservationRecord, row)) };
   }
 
   private create(request: Request, issueId: string, hooks: Hooks): { value: IssueTimeReservationEntry; replay: boolean } {

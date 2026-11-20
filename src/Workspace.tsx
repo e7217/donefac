@@ -2,7 +2,8 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
-import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, WorkspaceSnapshot } from '../shared/types';
+import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { issueSearchText } from '../shared/issue-schema';
@@ -24,9 +25,10 @@ const Planning = lazy(() => import('./features/Planning').then(module => ({defau
 const Reports = lazy(() => import('./features/Reports').then(module => ({default: module.Reports})));
 const Documents = lazy(() => import('./features/Documents').then(module => ({default: module.Documents})));
 const DocumentPublicationLibrary = lazy(() => import('./features/DocumentPublicationLibrary').then(module => ({default: module.DocumentPublicationLibrary})));
+const TeamOverview = lazy(() => import('./features/TeamOverview').then(module => ({default: module.TeamOverview})));
 const Trash = lazy(() => import('./features/Trash').then(module => ({default: module.Trash})));
 
-type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash';
+type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash' | 'teamoverview';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
@@ -41,8 +43,10 @@ const navigation = [
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
+  teamOverviewFilters?: TeamOverviewFilters;
 };
-const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash'];
+const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
+const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 function routeHash(route: WorkspaceRoute) {
   const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? route.reportId :
     (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
@@ -51,6 +55,12 @@ function routeHash(route: WorkspaceRoute) {
   if (route.view === 'documents' && route.documentId && route.publication) {
     query.set('publication', route.publication.kind);
     query.set('revision', route.publication.revisionId);
+  }
+  if (route.view === 'teamoverview' && route.teamOverviewFilters) {
+    const { projectId, memberId, date } = route.teamOverviewFilters;
+    if (projectId) query.set('teamProject', projectId);
+    if (memberId) query.set('teamMember', memberId);
+    if (date) query.set('teamDate', date);
   }
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
 }
@@ -69,7 +79,11 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const parameters = new URLSearchParams(query);
   const requestedIssue = parameters.get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
-  if (issue) { issueId = issue.id; projectId = issue.projectId; if (view === 'documents' || view === 'settings') { view = 'issues'; documentId = null; } }
+  if (issue) {
+    issueId = issue.id;
+    if (view !== 'teamoverview') projectId = issue.projectId;
+    if (view === 'documents' || view === 'settings') { view = 'issues'; documentId = null; }
+  }
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
   const planningId = (view === 'planning' || view === 'gantt') && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
@@ -77,7 +91,13 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
-  return { projectId, view, documentId, issueId, reportId, planningId, publicationTab, publication };
+  const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
+  const teamOverviewFilters = view === 'teamoverview' ? {
+    projectId: teamProject && snapshot.projects.some(project => project.id === teamProject) ? teamProject : '',
+    memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
+    date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
+  } : undefined;
+  return { projectId, view, documentId, issueId, reportId, planningId, publicationTab, publication, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -93,6 +113,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
+  const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
@@ -142,6 +163,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
     setPublicationTab(route.publicationTab ?? 'assigned');
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
+    const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
+    setTeamOverviewFilters(previous => previous.projectId === filters.projectId && previous.memberId === filters.memberId && previous.date === filters.date ? previous : filters);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -179,15 +202,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     return true;
   };
   const navigate = (nextView: View, nextProject = projectId, nextDoc?: string) => {
-    requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null});
+    requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
+      teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
   };
   const openIssue = (id: string) => {
     const issue = dataRef.current?.issues.find(i => i.id === id);
     if (!issue) return;
     const sameProject = issue.projectId === projectId;
     if (requestRoute({
-      projectId:issue.projectId, view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
-      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, publicationTab, issueId:id,
+      projectId:view === 'teamoverview' ? projectId : issue.projectId,
+      view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
+      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, publicationTab, issueId:id, teamOverviewFilters,
     })) setSearchOpen(false);
   };
   const openPlanIn = (nextView: 'planning' | 'gantt', id: string) =>
@@ -266,6 +291,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       <div className="workspace-brand"><div className="brand-mark"><Command size={22}/></div><div><strong>Teamspace</strong><span>함께 만드는 팀의 작업 공간</span></div><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(false)} aria-label="메뉴 닫기"><X size={18}/></button></div>
       <button className="sidebar-search" onClick={() => setSearchOpen(true)}><Search size={16}/><span>업무와 문서 검색</span><kbd>⌘ K</kbd></button>
       <nav className="sidebar-section">
+        <button className={`nav-item ${view === 'teamoverview' ? 'active' : ''}`} aria-current={view === 'teamoverview' ? 'page' : undefined} onClick={() => navigate('teamoverview')}><LayoutDashboard size={18}/><span>팀 개요</span></button>
         <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId)}</span></button>
         <button className={`nav-item ${view === 'trash' ? 'active' : ''}`} onClick={() => navigate('trash')}><Trash2 size={17}/><span>휴지통</span></button>
       </nav>
@@ -280,7 +306,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       </div>
     </aside>
     <div className="workspace-content">
-      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : view === 'trash' ? '휴지통' : navigation.find(n => n.id === view)?.label}</strong></div><div className="topbar-actions">
+      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/>{view === 'teamoverview' ? <strong>팀 개요</strong> : <><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : view === 'trash' ? '휴지통' : navigation.find(n => n.id === view)?.label}</strong></>}</div><div className="topbar-actions">
         <PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/>
         {actorId && <TeamNotifications actorId={actorId} users={data.users} onOpen={openNotification}/>}
         <button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button>
@@ -292,6 +318,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       </div></header>
       <main className={`main-content view-${view}`}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
+        {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
+          <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
+            onFiltersChange={filters => requestRoute({projectId,view,documentId:null,issueId,teamOverviewFilters:filters})}
+            openProject={(id, destination) => navigate(destination,id)}/>
+        </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'issues' && <Issues {...props}/>}
         {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} onOpenPlanning={id => openPlanIn('planning',id)}/>}
@@ -303,10 +334,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'development' && <Development {...props}/>}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}
         {view === 'trash' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>휴지통을 불러오는 중입니다.</p></div>}><Trash key={actorId} {...props}/></Suspense>}
-        {!project && view !== 'trash' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
+        {!project && view !== 'trash' && view !== 'teamoverview' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,publicationTab,issueId:null})}/>}
+    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,publicationTab,teamOverviewFilters,issueId:null})}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}

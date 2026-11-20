@@ -58,6 +58,7 @@ function joins(pointer: 'review' | 'published'): string {
 }
 const validProject = '(d.project_id IS NULL OR project.id IS NOT NULL)';
 const pending = "json_type(p.json,'$.review')='object' AND json_type(p.json,'$.review.changesRequested')='null'";
+const reviewRequestedAt = "json_extract(p.json,'$.review.requestedAt')";
 const pendingCountSql = `SELECT COUNT(*) AS count ${joins('review')}
   WHERE ${validProject} AND ${pending} AND json_extract(p.json,'$.review.reviewerId')=?`;
 function pendingCount(store: Store, actorId: string): number {
@@ -78,6 +79,41 @@ export function countDocumentAssignedReviews(store: Store, actorId: string): num
   return readSnapshot(store, () => { actor(store, actorId); return pendingCount(store, actorId); });
 }
 
+function publicationColumns(pointer: 'review' | 'published', status: string, actionAt: string): string {
+  return `SELECT p.document_id AS documentId,d.project_id AS projectId,
+    json_extract(d.json,'$.version') AS documentVersion,r.id AS revisionId,
+    json_extract(r.json,'$.version') AS revisionVersion,json_extract(r.json,'$.title') AS title,
+    ${status} AS status,json_extract(p.json,'$.${pointer}.requestedById') AS requestedById,
+    json_extract(p.json,'$.${pointer}.reviewerId') AS reviewerId,${actionAt} AS actionAt`;
+}
+
+function publicationItem(row: Row): DocumentPublicationListItem {
+  return {
+    documentId: row.documentId, projectId: row.projectId, documentVersion: row.documentVersion,
+    revision: { id: row.revisionId, version: row.revisionVersion, title: row.title }, status: row.status,
+    requestedById: row.requestedById, reviewerId: row.reviewerId, actionAt: row.actionAt,
+  };
+}
+
+/** The team overview lists still-pending pinned reviews in oldest-first order. */
+export function listPendingTeamReviews(store: Store, filters: {
+  projectId: string | null; memberId: string | null; offset: number; limit: number;
+}): { total: number; offset: number; limit: number; items: DocumentPublicationListItem[] } {
+  return readSnapshot(store, () => {
+    const { projectId, memberId, offset, limit } = filters;
+    const where = [validProject, pending, `typeof(${reviewRequestedAt})='text'`, `julianday(${reviewRequestedAt}) IS NOT NULL`];
+    const params: string[] = [];
+    if (projectId !== null) { where.push('d.project_id=?'); params.push(projectId); }
+    if (memberId !== null) { where.push('reviewer.id=?'); params.push(memberId); }
+    const query = `${joins('review')} WHERE ${where.join(' AND ')}`;
+    const { total } = store.db.prepare(`SELECT count(*) AS total ${query}`).get(...params) as { total: number };
+    const rows = store.db.prepare(`${publicationColumns('review', "'pending'", reviewRequestedAt)} ${query}
+      ORDER BY julianday(${reviewRequestedAt}) ASC,p.document_id ASC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as unknown as Row[];
+    return { total, offset, limit, items: rows.map(publicationItem) };
+  });
+}
+
 /** Read only pinned revision metadata; draft titles, bodies and review notes are
  * never materialized. Streaming Unicode matching keeps page memory bounded. */
 export function listDocumentPublications(store: Store, actorId: string, query: Record<string, unknown>): DocumentPublicationList {
@@ -88,7 +124,7 @@ export function listDocumentPublications(store: Store, actorId: string, query: R
     let status = "'published'", actionAt = "json_extract(p.json,'$.published.publishedAt')";
     if (selection.tab === 'assigned') {
       where.push(pending, "json_extract(p.json,'$.review.reviewerId')=?"); parameters.push(actorId);
-      status = "'pending'"; actionAt = "json_extract(p.json,'$.review.requestedAt')";
+      status = "'pending'"; actionAt = reviewRequestedAt;
     } else if (selection.tab === 'requested') {
       where.push("json_type(p.json,'$.review')='object'", "json_type(p.json,'$.review.changesRequested') IN ('null','object')", "json_extract(p.json,'$.review.requestedById')=?"); parameters.push(actorId);
       status = "CASE WHEN json_type(p.json,'$.review.changesRequested')='object' THEN 'changes_requested' ELSE 'pending' END";
@@ -96,22 +132,14 @@ export function listDocumentPublications(store: Store, actorId: string, query: R
     } else where.push("json_type(p.json,'$.published')='object'");
     if (selection.scope === 'project') { where.push('d.project_id=?'); parameters.push(selection.projectId!); }
     else if (selection.scope === 'common') where.push('d.project_id IS NULL');
-    const rows = store.db.prepare(`SELECT p.document_id AS documentId,d.project_id AS projectId,
-      json_extract(d.json,'$.version') AS documentVersion,r.id AS revisionId,
-      json_extract(r.json,'$.version') AS revisionVersion,json_extract(r.json,'$.title') AS title,
-      ${status} AS status,json_extract(p.json,'$.${pointer}.requestedById') AS requestedById,
-      json_extract(p.json,'$.${pointer}.reviewerId') AS reviewerId,${actionAt} AS actionAt
+    const rows = store.db.prepare(`${publicationColumns(pointer, status, actionAt)}
       ${joins(pointer)} WHERE ${where.join(' AND ')} ORDER BY actionAt DESC,p.document_id ASC`);
     const items: DocumentPublicationListItem[] = [];
     let total = 0;
     for (const raw of rows.iterate(...parameters)) {
       const row = raw as unknown as Row;
       if (selection.query && !row.title.normalize('NFC').toLowerCase().includes(selection.query)) continue;
-      if (total >= selection.offset && items.length < PAGE_SIZE) items.push({
-        documentId: row.documentId, projectId: row.projectId, documentVersion: row.documentVersion,
-        revision: { id: row.revisionId, version: row.revisionVersion, title: row.title }, status: row.status,
-        requestedById: row.requestedById, reviewerId: row.reviewerId, actionAt: row.actionAt,
-      });
+      if (total >= selection.offset && items.length < PAGE_SIZE) items.push(publicationItem(row));
       total++;
     }
     return { tab: selection.tab, scope: selection.scope, projectId: selection.projectId, offset: selection.offset, total, pendingAssigned: pendingCount(store, actorId), items };
