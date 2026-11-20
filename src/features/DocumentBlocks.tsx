@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { NodeViewWrapper, ReactNodeViewRenderer, type Editor, type NodeViewProps } from '@tiptap/react';
 import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
@@ -8,6 +8,7 @@ import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, RichContent, WorkspaceSnapshot } from '../../shared/types';
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText } from '../../shared/document-nodes';
+import { isDocumentSectionId } from '../../shared/document-sections';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
@@ -46,7 +47,7 @@ function safeUrl(value: unknown, image = false): string | undefined {
   try { const url = new URL(value); if ((['https:', 'http:'].includes(url.protocol) || !image && ['mailto:', 'tel:'].includes(url.protocol)) && !url.username && !url.password) return value; } catch { /* Untrusted content stays text when the URL is invalid. */ }
 }
 type PinnedSource = { documentId: string; revisionId: string };
-type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[] };
+type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[]; section?: { id: string; target?: string } };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -215,8 +216,11 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       const Heading = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3';
       const canNavigate = state.outline && state.includeDepth === 0 && children.every(child => child !== null);
       const title = canNavigate ? headingTitle(node) : '';
-      if (title) state.outline?.push({ target: key, level, title });
-      return <Heading key={key} data-document-outline-target={title ? key : undefined} tabIndex={title ? -1 : undefined}>{children}</Heading>;
+      const sectionId = state.includeDepth === 0 && isDocumentSectionId(attrs.sectionId) ? attrs.sectionId : undefined;
+      if (state.section && sectionId === state.section.id) state.section.target = key;
+      if (title) state.outline?.push({ target: key, level, title, sectionId });
+      return <Heading key={key} data-document-outline-target={title || sectionId ? key : undefined}
+        data-document-section-id={sectionId} tabIndex={title || sectionId ? -1 : undefined}>{children}</Heading>;
     }
     case 'bulletList': return <ul key={key}>{children}</ul>;
     case 'orderedList': return <ol key={key} start={typeof attrs.start === 'number' ? attrs.start : undefined}>{children}</ol>;
@@ -241,27 +245,44 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false }: {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref }: {
   content: RichContent;
   documentId?: string;
   nodeBudget?: number;
   mode?: RenderState['mode'];
   pinnedSource?: PinnedSource;
   showOutline?: boolean;
+  sectionId?: string | null;
+  sectionLinkHref?: (sectionId: string) => string;
 }) {
   const context = contextOf(useContext(BlockContext));
   const contentRoot = useRef<HTMLDivElement>(null);
+  const lastSection = useRef<{ documentId?: string; sectionId: string } | null>(null);
   const outline: DocumentOutlineEntry[] | undefined = showOutline ? [] : undefined;
-  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline };
+  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined };
   const body = renderNode(content, context, state, 'readonly');
-  function goToHeading(target: string) {
+  const sectionTarget = state.section?.target;
+  const goToHeading = useCallback((target: string) => {
     const root = contentRoot.current;
-    const heading = root?.querySelector<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`);
-    if (root && heading) jumpToDocumentHeading(heading, root, true);
-  }
+    if (!root) return false;
+    const heading = Array.from(root.querySelectorAll<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`))
+      .find(element => element.closest('[data-document-outline-root]') === root);
+    if (!heading) return false;
+    jumpToDocumentHeading(heading, root, true);
+    return true;
+  }, []);
+  useEffect(() => {
+    if (lastSection.current && (lastSection.current.documentId !== documentId || lastSection.current.sectionId !== sectionId)) lastSection.current = null;
+    if (!sectionId || !sectionTarget || lastSection.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (goToHeading(sectionTarget)) lastSection.current = { documentId, sectionId };
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [documentId, sectionId, sectionTarget, goToHeading]);
   return <>
-    {outline && <DocumentOutline entries={outline} onNavigate={goToHeading} />}
-    <div className="doc-readonly-content" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
+    {sectionId && !sectionTarget && <p className="document-section-not-found" role="status">이 문서에서 연결된 절을 찾을 수 없습니다.</p>}
+    {outline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
+    <div className="doc-readonly-content" data-document-outline-root="" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }
 function ReferenceNodeView({ node, selected, deleteNode, editor }: NodeViewProps) {

@@ -5,6 +5,7 @@ import type { Express, Request } from 'express';
 import type { AttachmentVersion, DocPage, Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
+import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
 import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
@@ -21,7 +22,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 2;
+const conversionVersion = 3;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -355,7 +356,8 @@ export class MigrationService {
       .all(instanceKey, JSON.stringify([...ownerPages])) as { space: string | null }[];
     return rows.length === 1 ? rows[0].space ?? undefined : undefined;
   }
-  private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false): MigrationPageAppendContext | undefined {
+  private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false,
+    sectionInventory?: boolean): MigrationPageAppendContext | undefined {
     if (!configuration.appendPagesTo) return;
     const destination = this.pageAppendDestination(packages, buildMigrationOptions(packages), configuration.appendPagesTo.refreshHistory);
     if (!destination || destination.project.id !== configuration.appendPagesTo.projectId) {
@@ -365,7 +367,7 @@ export class MigrationService {
     const selectedPageIds = new Set(packages.flatMap(pkg => pkg.dataset.records.filter(record => record.kind === 'page').map(record => record.sourceId)));
     // Bindings retain the original space after a move or deletion. A reviewed refresh can supply a newer original
     // title for that same page; local document titles never participate in source lookups.
-    const boundPages = this.store.db.prepare(`WITH page_origins AS (
+    const boundPages: MigrationPageAppendContext['knownPages'] = this.store.db.prepare(`WITH page_origins AS (
       SELECT binding.source_alias AS sourceId, binding.target_id AS documentId, document.project_id AS projectId,
         json_extract(archive.json,'$.record.containerId') AS sourceSpaceId,
         json_extract(archive.json,'$.record.title') AS sourceTitle
@@ -390,8 +392,25 @@ export class MigrationService {
         AND json_type(snapshot.json,'$.confluencePageFieldHashes')='object'
         AND json_type(receipt.json,'$.configuration.appendPagesTo.refreshExisting')='true'
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, snapshot.id DESC LIMIT 1), bound.sourceTitle) AS sourceTitle
-    FROM bound_pages AS bound ORDER BY bound.sourceId`).all(instanceKey, sourceSpaceId, instanceKey, project.id) as MigrationPageAppendContext['knownPages'];
+    FROM bound_pages AS bound ORDER BY bound.sourceId`).all(instanceKey, sourceSpaceId, instanceKey, project.id) as
+      Omit<MigrationPageAppendContext['knownPages'][number], 'sectionIds'>[];
     const knownPages = boundPages.filter(page => page.sourceSpaceId === sourceSpaceId || selectedPageIds.has(page.sourceId));
+    const hasSectionLinks = sectionInventory ?? packages.some(({ dataset }) => dataset.records.some(record => record.kind === 'page' &&
+      record.textFormat === 'confluence-storage' && /\bac:anchor\s*=|\bhref\s*=\s*["'][^"'<>]*#/.test(record.text)));
+    if (hasSectionLinks) {
+      const scoped = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
+        .map(page => [page.documentId, page]));
+      const sections = this.store.db.prepare(`SELECT DISTINCT document.id, section.atom AS sectionId
+        FROM documents AS document, json_tree(document.json, '$.content') AS section
+        WHERE document.project_id=? AND document.id IN (SELECT value FROM json_each(?))
+          AND section.key='sectionId' AND section.type='text' AND section.atom GLOB 'confluence-*' AND section.path LIKE '%.attrs'
+          AND json_extract(document.json, substr(section.path, 1, length(section.path)-6)||'.type')='heading'
+        ORDER BY document.id, section.atom`);
+      for (const { id, sectionId } of sections.iterate(project.id, JSON.stringify([...scoped.keys()])) as Iterable<{ id: string; sectionId: unknown }>) {
+        const page = scoped.get(id);
+        if (page && isDocumentSectionId(sectionId)) (page.sectionIds ??= []).push(sectionId);
+      }
+    }
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
     // Additive history checks the exact reused files at apply, so unrelated local attachment updates can proceed.
     const attachmentDigest = configuration.appendPagesTo.refreshHistory && !configuration.appendPagesTo.refreshAttachments ? undefined : digest;
@@ -401,6 +420,7 @@ export class MigrationService {
     const refreshDocuments = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
+      ...(hasSectionLinks ? { sectionInventory: true } : {}),
       ...(refreshDocuments ? { refreshDocuments } : {}), ...(knownHistory ? { knownHistory } : {}) };
   }
   private confluenceKnownHistory(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
@@ -787,7 +807,7 @@ export class MigrationService {
           }
           if (Boolean(appendPages) !== Boolean(preview.configuration.appendPagesTo)) fail(409, changedPageAppend);
           if (appendPages) {
-            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
+            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true, appendPages.sectionInventory ?? false);
             if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
             const attachmentError = this.reusedConfluenceAttachmentError(prepared, current);
             if (attachmentError) fail(409, attachmentError);

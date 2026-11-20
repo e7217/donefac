@@ -4,7 +4,7 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 6;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 7;
 export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
 export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
 export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
@@ -25,9 +25,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
-export function documentNodeSchemaVersion(nodeType: string): DocumentSchemaVersion {
+export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'heading' && attrs?.sectionId !== undefined) return 7;
   if (nodeType === 'callout' || nodeType === 'statusBadge') return 6;
   if (nodeType === 'documentRevisionInclude') return 5;
   if (nodeType === 'issueSummary') return 4;
@@ -47,7 +48,7 @@ function* documentNodes(content: RichContent): Generator<RichContent> {
 export function documentContentSchemaVersion(content: RichContent): DocumentSchemaVersion {
   let version: DocumentSchemaVersion = 1;
   for (const node of documentNodes(content)) {
-    const minimum = documentNodeSchemaVersion(node.type);
+    const minimum = documentNodeSchemaVersion(node.type, node.attrs);
     if (minimum === DOCUMENT_CONTENT_SCHEMA_VERSION) return minimum;
     if (minimum > version) version = minimum;
   }

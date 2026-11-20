@@ -95,6 +95,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 7 && backupVersion < 49) fail('문서 절 링크는 schemaVersion 49 백업이 필요합니다.');
   if (version >= 6 && backupVersion < 46) fail('안내 상자와 상태 배지는 schemaVersion 46 백업이 필요합니다.');
   if (version >= 5 && backupVersion < 26) fail('문서 버전 포함 블록은 schemaVersion 26 백업이 필요합니다.');
   if (version >= 4 && backupVersion < 22) fail('업무 현황 블록은 schemaVersion 22 백업이 필요합니다.');

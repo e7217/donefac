@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
+import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
@@ -39,6 +40,7 @@ import './documents.css';
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
   onSelectDocument: (id: string) => void;
+  sectionId?: string | null;
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
 };
@@ -61,7 +63,7 @@ const draftFromPage = (page: DocPage): Draft => ({
 });
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, publicationLink, onClosePublicationLink }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, sectionId, publicationLink, onClosePublicationLink }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const actorRef = useRef(actorId);
@@ -869,7 +871,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </div>
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
-              {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor} />}
+              {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor}
+                documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
+                sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
+                ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen} />}
               <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={navigateSlash}
                 onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
                 onClick={event => {
@@ -878,6 +883,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 if (href && /^#\/[^/?#]+\/reports\/[0-9a-f-]{36}$/i.test(href)) {
                   event.preventDefault();
                   window.location.hash = href;
+                  return;
+                }
+                if (!href) return;
+                let link: URL;
+                try { link = new URL(href, location.href); } catch { return; }
+                if (link.origin !== location.origin || link.pathname !== location.pathname) return;
+                const [path, query] = link.hash.split('?');
+                if (/^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(new URLSearchParams(query).get('section'))) {
+                  event.preventDefault();
+                  window.location.hash = link.hash;
                 }
               }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
                 {!bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
@@ -935,7 +950,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       refresh={refresh} notify={notify} onClose={closeIssueAction} />}
     {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
-      initialSnapshot={publicationLink} onClose={closePublication} notify={notify} refreshDocument={refresh} />}
+      initialSnapshot={publicationLink} projectId={selectedPage.projectId ?? projectId} sectionId={publicationLink ? sectionId : null}
+      onClose={closePublication} notify={notify} refreshDocument={refresh} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}

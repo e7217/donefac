@@ -1,5 +1,6 @@
 import type { DocRevision, RichContent } from '../../shared/types';
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
+import { isDocumentSectionId } from '../../shared/document-sections';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
 const heading = (text: string): RichContent => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
@@ -70,7 +71,11 @@ export function contentMarkdown(node: RichContent): string {
   switch (node.type) {
     case 'doc': return inline().trim() + '\n';
     case 'paragraph': return inline() + '\n\n';
-    case 'heading': return '#'.repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1))) + ' ' + inline() + '\n\n';
+    case 'heading': {
+      const sectionId = node.attrs?.sectionId;
+      const anchor = isDocumentSectionId(sectionId) ? `<a id="${sectionId}"></a>\n\n` : '';
+      return anchor + '#'.repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1))) + ' ' + inline() + '\n\n';
+    }
     case 'hardBreak': return '  \n';
     case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
     case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;

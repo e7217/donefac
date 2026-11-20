@@ -63,8 +63,9 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
     const check = (value: unknown, depth: number) => {
       if (++count > 30000 || depth > 60) throw new Error('문서 중첩 한도를 초과했습니다.');
       const node = object(value);
-      if (typeof node.type !== 'string' || documentNodeSchemaVersion(node.type) > schemaVersion || !schema.nodes[node.type]) throw new Error('이전 문서 형식에 없는 블록입니다.');
+      if (typeof node.type !== 'string' || !schema.nodes[node.type]) throw new Error('이전 문서 형식에 없는 블록입니다.');
       const attrs = attributes(node.attrs, schema.nodes[node.type].spec.attrs);
+      if (documentNodeSchemaVersion(node.type, attrs) > schemaVersion) throw new Error('이전 문서 형식에 없는 블록입니다.');
       if (node.type === 'issueReference' || node.type === 'documentReference' || node.type === 'documentInclude') {
         const id = attrs[node.type === 'issueReference' ? 'issueId' : 'documentId'];
         if (!referenceId(id) || !referenceLabel(attrs.label)) {

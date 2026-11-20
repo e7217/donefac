@@ -6,6 +6,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
+import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
@@ -116,7 +117,7 @@ const lossyConfluenceCalloutConversions = new Set([
 ]);
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
-  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', ...lossyConfluenceCalloutConversions,
+  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', ...lossyConfluenceCalloutConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -143,8 +144,13 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     const currentHash = confluencePageFieldDigest('content', currentContent);
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
       // A document imported before native annotations may still exactly match the old conversion.
-      const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations: true });
-      if (usableConfluenceBody(legacy) && confluencePageFieldDigest('content', legacy.content) === currentHash) values.content = legacy.content;
+      for (const legacyAnnotations of [false, true]) {
+        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true });
+        const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
+        const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
+          item.code !== 'ANCHOR_FLATTENED' && item.code !== 'ANCHOR_DECLARATION_FLATTENED') });
+        if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
+      }
     }
   }
   return confluencePageFieldDigests(values);
@@ -302,6 +308,9 @@ class Planner{
   private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
   private boundIssues = new Map<string, KnownIssue>();
   private boundPages = new Map<string, KnownPage>();
+  private boundPagesByDocument = new Map<string, KnownPage>();
+  private confluenceSectionProjections = new Map<Entry, ReadonlyMap<string, string>>();
+  private confluenceRefreshSections = new Map<string, Entry[]>();
   private boundPageIdsByTitle = new Map<string, Set<string>>();
   private boundPageTargets = new Set<string>();
   private retainedPageOwners = new Map<string, string | null>();
@@ -823,12 +832,14 @@ class Planner{
       }
       const bodyChanged = hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
       const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
-        ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) }) : null;
+        ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id) }) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (bodyChanged && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
-          if (lossyConfluenceCalloutConversions.has(diagnostic.code)) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
+          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || diagnostic.code === 'SECTION_LINK_UNRESOLVED') {
+            this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
+          }
         }
       }
       const values: ConfluenceMigrationDocumentValues = {};
@@ -890,11 +901,15 @@ class Planner{
       this.notice('APPEND_PAGE_TARGET_INVALID', '같은 Confluence 공간에 연결된 기존 프로젝트를 확인해 주세요.', 'error');
       return;
     }
-    this.result.appendPages = { projectId: append.project.id, token: append.token };
+    this.result.appendPages = { projectId: append.project.id, token: append.token,
+      ...(append.sectionInventory ? { sectionInventory: true } : {}) };
     for (const page of append.knownPages) {
       this.boundPages.set(page.sourceId, page);
       if (page.sourceSpaceId !== append.sourceSpaceId) continue;
-      if (page.projectId === append.project.id) this.boundPageTargets.add(page.documentId);
+      if (page.projectId === append.project.id) {
+        this.boundPageTargets.add(page.documentId);
+        this.boundPagesByDocument.set(page.documentId, page);
+      }
       if (!page.sourceTitle) continue;
       const ids = this.boundPageIdsByTitle.get(page.sourceTitle) ?? new Set<string>();
       ids.add(page.sourceId);
@@ -904,6 +919,7 @@ class Planner{
       if (container.sourceProjectId === append.sourceSpaceId) this.projectsByContainer.set(container.id, append.project);
     }
 
+    const refreshByDocument = new Map(append.refreshDocuments?.map(candidate => [candidate.document.id, candidate]));
     for (const entry of this.entries) {
       if (entry.row.kind !== 'page' || this.excluded.has(entry.key)) continue;
       const page = this.boundPages.get(entry.row.sourceId);
@@ -912,6 +928,13 @@ class Planner{
         this.notice('SOURCE_PAGE_SPACE_CONFLICT', '같은 Confluence 페이지 ID가 다른 원본 공간에 연결되어 있습니다.', 'error', entry);
       }
       this.retainedEntries.add(entry.key);
+      const refresh = refreshByDocument.get(page.documentId);
+      if (refresh && hasConfluenceBody(entry.row) && entry.row.text !== refresh.previous.record.text &&
+          newerConfluencePage(entry.row, refresh.previous.record, this.configuration.timezone, refresh.previousTimezone)) {
+        const refreshes = this.confluenceRefreshSections.get(page.documentId) ?? [];
+        refreshes.push(entry);
+        this.confluenceRefreshSections.set(page.documentId, refreshes);
+      }
     }
     const retainedPages = this.retainedEntries.size;
     const refreshHistory = mapping.refreshHistory === true;
@@ -1721,6 +1744,60 @@ class Planner{
     const known = this.originalPage(id);
     return known ? { reference: { id: known.documentId, label: title || known.sourceTitle || known.sourceId } } : null;
   }
+  private confluenceSectionProjection(entry: Entry, documentId: string): ReadonlyMap<string, string> {
+    const cached = this.confluenceSectionProjections.get(entry);
+    if (cached) return cached;
+    const converted = convertLegacyContent(entry.row, {
+      resolveReference: request => this.resolve(entry, request), sectionLinks: { documentId },
+    });
+    const sections = converted.sectionTargets ?? new Map<string, string>();
+    this.confluenceSectionProjections.set(entry, sections);
+    return sections;
+  }
+  private confluenceSectionPage(entry: Entry, request: MigrationReferenceInput) {
+    if (!request.url) return this.confluencePage(entry, request);
+    const base = this.originBases.get(entry.pkg.summary.id);
+    if (!base) return null;
+    try {
+      const url = new URL(request.url, base.origin);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+          url.searchParams.has('focusedCommentId') || !isWithinMigrationOrigin(url, base)) return null;
+      const sourceId = url.searchParams.get('pageId') || /\/pages\/(\d+)(?:\/|$)/.exec(url.pathname)?.[1];
+      if (sourceId) return this.confluencePage(entry, { sourceId });
+      const display = /\/display\/([^/]+)\/([^/]+)\/?$/.exec(url.pathname);
+      if (display) return this.confluencePage(entry, {
+        spaceKey: decodeURIComponent(display[1]),
+        title: decodeURIComponent(display[2].replaceAll('+', ' ')),
+      });
+    } catch { /* Leave invalid or unverified source URLs visible as text. */ }
+    return null;
+  }
+  private confluenceSectionLinks(entry: Entry, documentId: string) {
+    return {
+      documentId,
+      resolvePageSection: (request: MigrationReferenceInput, fragment: string, fromUrl: boolean) => {
+        const target = this.confluenceSectionPage(entry, request);
+        if (!target) return null;
+        const { id, label } = target.reference;
+        const known = this.boundPagesByDocument.get(id);
+        const aliases = fromUrl ? confluenceSectionAliases(fragment, target.entry?.row.title || known?.sourceTitle || label) : [fragment];
+        const lookup = (sections: ReadonlyMap<string, string>) => aliases.map(alias => sections.get(alias)).filter((value): value is string => Boolean(value));
+        let matches: string[];
+        if (target.entry) matches = lookup(this.confluenceSectionProjection(target.entry, id));
+        else if (known?.sectionIds) {
+          const present = new Set(known.sectionIds);
+          matches = aliases.flatMap(alias => [legacySectionId(alias, 'heading'), legacySectionId(alias, 'anchor')]).filter(sectionId => present.has(sectionId));
+          // A simultaneous refresh can remove sections. Only link to IDs present in both versions.
+          for (const incoming of this.confluenceRefreshSections.get(id) ?? []) {
+            const incomingMatches = new Set(lookup(this.confluenceSectionProjection(incoming, id)));
+            matches = matches.filter(sectionId => incomingMatches.has(sectionId));
+          }
+        } else return null;
+        const unique = new Set(matches);
+        return unique.size === 1 ? { documentId: id, sectionId: [...unique][0] } : null;
+      },
+    };
+  }
   private confluenceAttachment(entry: Entry, request: MigrationReferenceInput): Entry | null {
     const { attachmentOwner, sourceId, title } = request;
     if (attachmentOwner === null) return null;
@@ -1895,8 +1972,11 @@ class Planner{
     }
     return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }
-  converted(entry: Entry, { legacyAnnotations = false }: { legacyAnnotations?: boolean } = {}) {
-    const result = convertLegacyContent(entry.row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations });
+  converted(entry: Entry, { legacyAnnotations = false, documentId }: { legacyAnnotations?: boolean; documentId?: string } = {}) {
+    const result = convertLegacyContent(entry.row, {
+      resolveReference: request => this.resolve(entry, request), legacyAnnotations,
+      sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
+    });
     for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
     return result;
   }
@@ -1919,7 +1999,7 @@ class Planner{
         if (issue.description.length > 200000) this.notice('ISSUE_DESCRIPTION_LIMIT', '일반 텍스트 설명이 현재200000자 제한을 넘습니다.', 'error', entry);
       } else if (binding?.type === 'document') {
         const document = this.documentById.get(binding.id)!;
-        const converted = this.converted(entry);
+        const converted = this.converted(entry, { documentId: document.id });
         document.content = converted.content;
         document.plainText = converted.plainText;
       }

@@ -14,6 +14,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
+import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
@@ -992,7 +993,10 @@ test('incremental Confluence imports reuse live parents and references while pre
     ...(withAttachment ? [{ path: 'attachments/400/701/1', bytes: file }] : []),
   ]), `${name}.zip`, 'confluence', origin);
 
-  const initial = await upload('initial-pages', [space('42', 'WIKI'), page('100', '원본 상위 문서'), page('200', '원본 참조 문서'), page('300', '삭제한 원본 문서')]);
+  const initial = await upload('initial-pages', [
+    space('42', 'WIKI'), page('100', '원본 상위 문서'), body('101', 'Page', '100', '<h2>Deployment Guide</h2>'),
+    page('200', '원본 참조 문서'), page('300', '삭제한 원본 문서'),
+  ]);
   const initialPlan = await f.preview(await f.configuration(initial, 'WIKI'));
   assert.equal(initialPlan.canApply, true, JSON.stringify(initialPlan.notices));
   const initialApply = await f.apply(initialPlan);
@@ -1009,6 +1013,7 @@ test('incremental Confluence imports reuse live parents and references while pre
 
   const storage = [
     '<p><ac:link><ri:page ri:content-id="100"/><ac:link-body>식별자로 상위 문서</ac:link-body></ac:link></p>',
+    '<p><ac:link ac:anchor="DeploymentGuide"><ri:page ri:content-id="100"/><ac:link-body>상위 문서의 배포 절</ac:link-body></ac:link></p>',
     '<ac:structured-macro ac:name="include"><ac:parameter ac:name=""><ri:page ri:space-key="WIKI" ri:content-title="원본 참조 문서"/></ac:parameter></ac:structured-macro>',
     '<ac:structured-macro ac:name="include"><ac:parameter ac:name="">WIKI:원본 참조 문서</ac:parameter></ac:structured-macro>',
     '<p><ac:link><ri:attachment ri:filename="new-report.bin"/><ac:link-body>새 보고서</ac:link-body></ac:link></p>',
@@ -1051,6 +1056,20 @@ test('incremental Confluence imports reuse live parents and references while pre
   assert.equal((await f.apply(stale)).status, 409);
   assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
 
+  const sectionPreview = await f.preview(config);
+  const restoredParent = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === parent.id)!;
+  const contentSchemaVersion = documentContentSchemaVersion(parent.content);
+  const withoutSection = await f.call<DocPage>(`/documents/${parent.id}`, 'PATCH', {
+    expectedVersion: restoredParent.version,
+    contentSchemaVersion,
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '임시 본문' }] }] },
+  });
+  assert.equal(withoutSection.status, 200, JSON.stringify(withoutSection.data));
+  assert.equal((await f.apply(sectionPreview)).status, 409);
+  assert.equal((await f.call<DocPage>(`/documents/${parent.id}`, 'PATCH', {
+    expectedVersion: withoutSection.data.version, contentSchemaVersion, content: parent.content,
+  })).status, 200);
+
   const review = await f.preview(config);
   assert.equal(review.canApply, true, JSON.stringify(review.notices));
   assert.deepEqual(review.projects.map(project => [project.id, project.documentCount]), [[projectId, 1]]);
@@ -1072,6 +1091,11 @@ test('incremental Confluence imports reuse live parents and references while pre
   assert.equal(child.version, 2);
   assert.deepEqual(contentReferences(child.content).map(item => [item.kind, item.id]),
     [['reference', parent.id], ['include', reference.id], ['include', reference.id]]);
+  const sectionId = parent.content.content?.[0].attrs?.sectionId;
+  assert.equal(typeof sectionId, 'string');
+  assert.ok(child.content.content?.some(block =>
+    block.content?.some(node => node.marks?.some(mark =>
+      mark.attrs?.href === documentSectionHash(parent.id, sectionId as string)))));
   assert.deepEqual(workspace.documents.find(document => document.id === reference.id), edit.data);
   assert.equal(workspace.documents.filter(document => document.projectId === projectId).length, 3);
   assert.equal(workspace.documents.some(document => document.id === removed.id), false);
@@ -1641,7 +1665,7 @@ test('Confluence panels and status badges survive import, collaborative snapshot
   assert.deepEqual(renamed.data.content, document.content);
   const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: renamed.data.version });
   assert.equal(live.status, 200, JSON.stringify(live.data));
-  assert.equal(live.data.schemaVersion, 6);
+  assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
   assert.deepEqual(live.data.document.content, document.content);
 
   type Backup = WorkspaceSnapshot & { schemaVersion: number; collabStates: { documentId: string; schemaVersion: number }[] };

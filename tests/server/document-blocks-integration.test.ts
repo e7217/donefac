@@ -31,6 +31,66 @@ type Fixture=Awaited<ReturnType<typeof fixture>>;
 async function make(f:Fixture,title:string,content=body(p('원본')),projectId:string|null='project-neo'){const result=await f.call<DocPage>('/documents','POST',{projectId,title,content});assert.equal(result.status,201,JSON.stringify(result.data));return result.data;}
 const snapshot=async(f:Fixture)=>(await f.call<WorkspaceSnapshot>('/workspace')).data;
 
+test('stable heading sections survive protected writes, live state, native backup and trash restore', async () => {
+  const f = await fixture();
+  try {
+    const sectionId = 'validation-notes';
+    const heading = (text: string, level: number): RichContent => ({ type: 'heading', attrs: { level, sectionId }, content: [{ type: 'text', text }] });
+    const before = body(heading('검증 기준', 2), p('검토 본문'));
+    const original = await make(f, '공유할 문서 절', before);
+    const path = `/documents/${original.id}`;
+    assert.deepEqual(original.content, before);
+    const [firstRevision] = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    assert.equal(documentContentSchemaVersion(original.content), 7);
+    assert.match(contentMarkdown(original.content), /<a id="validation-notes"><\/a>\n\n## 검증 기준/u);
+
+    const oldClient = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: original.version, contentSchemaVersion: 6, content: body(p('절 정보 없이 덮어쓴 본문')),
+    });
+    assert.equal(oldClient.status, 409);
+    assert.equal(oldClient.data.details.contentSchemaVersion, 7);
+    const renamed = await f.call<DocPage>(path, 'PATCH', { expectedVersion: original.version, title: '새 문서 제목' });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(renamed.data.content, before);
+    const after = body(p('옮긴 절 앞의 본문'), heading('개정한 검증 기준', 3));
+    const edit = await f.call<DocPage>(path, 'PATCH', { expectedVersion: renamed.data.version, contentSchemaVersion: 7, content: after });
+    assert.equal(edit.status, 200);
+    assert.deepEqual(edit.data.content, after);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: edit.data.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
+    assert.deepEqual(live.data.document.content, after);
+
+    const { data: backup } = await f.call<Backup>('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    const legacy = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 48 } });
+    assert.equal(legacy.status, 400);
+    assert.match(legacy.data.error, /schemaVersion 49/u);
+    const mislabeled = structuredClone(backup);
+    const state = mislabeled.collabStates.find(item => item.documentId === original.id);
+    assert.ok(state);
+    state.schemaVersion = 6;
+    assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
+    assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.deepEqual(restored.document.content, after);
+
+    const archived = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restored.document.version });
+    assert.equal(archived.status, 200);
+    const { data: archivedBackup } = await f.call<Backup>('/export');
+    assert.equal(archivedBackup.documents.some(item => item.id === original.id), false);
+    assert.equal((await f.call('/import', 'POST', { data: { ...archivedBackup, schemaVersion: 48 } })).status, 400);
+    assert.equal((await f.call('/import', 'POST', { data: archivedBackup })).status, 200);
+    assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document.content, after);
+    const history = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    assert.deepEqual(history.find(revision => revision.id === firstRevision.id)?.content, before);
+  } finally {
+    await f.close();
+  }
+});
+
 test('manual writes, cycles and live historical restore preserve reference IDs and folded content atomically',async()=>{
   const f=await fixture();try{
     const target=await make(f,'포함할 원본');

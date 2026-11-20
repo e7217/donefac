@@ -4,8 +4,10 @@ import {
   type CalloutVariant, type StatusBadgeTone,
 } from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
+import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
+import { confluenceSectionAliases, scanConfluenceSections, type ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // Format references (conversion is local and never requests these URLs):
 // https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html
@@ -21,9 +23,17 @@ export interface MigrationContentContext {
   resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
   // Text-only fields and older migration checkpoints used explicit annotation labels.
   legacyAnnotations?: boolean;
+  legacySectionBaseline?: boolean;
+  sectionLinks?: {
+    documentId: string;
+    resolvePageSection?: (page: MigrationReferenceInput, fragment: string, fromUrl: boolean) => { documentId: string; sectionId: string } | null;
+  };
 }
 export interface MigrationContentDiagnostic { severity: 'warning' | 'error'; code: string; message: string }
-export interface MigrationContentResult { content: RichContent; plainText: string; diagnostics: MigrationContentDiagnostic[] }
+export interface MigrationContentResult {
+  content: RichContent; plainText: string; diagnostics: MigrationContentDiagnostic[];
+  sectionTargets?: ReadonlyMap<string, string>;
+}
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024, MAX_NODES = 30000, MAX_DEPTH = 50, MAX_WORK = 100000, MAX_MS = 2500;
 const sourceStatusTones = new Map<string, StatusBadgeTone>([
   ['neutral', 'neutral'], ['grey', 'neutral'], ['gray', 'neutral'], ['blue', 'blue'], ['green', 'green'],
@@ -47,7 +57,6 @@ function flow(nodes: RichContent[], type = 'paragraph', attrs?: Record<string, u
 }
 const codeBlock = (value: string, language = ''): RichContent => ({ type: 'codeBlock', ...(language ? { attrs: { language } } : {}), content: text(value) });
 class ConversionLimit extends Error {}
-interface XmlNode { name: string; attrs: Record<string, string>; children: (XmlNode | string)[] }
 function pageIdentity(node: XmlNode): MigrationPageIdentity {
   return { sourceId: node.attrs['ri:content-id'] || node.attrs['ri:page-id'], title: node.attrs['ri:content-title'], spaceKey: node.attrs['ri:space-key'] };
 }
@@ -74,7 +83,42 @@ function decodeXml(value: string): string {
 }
 class Converter {
   diagnostics: MigrationContentDiagnostic[] = []; private codes = new Set<string>(); private work = 0; private started = performance.now();
+  private sections?: ReturnType<typeof scanConfluenceSections>;
+  private localSectionLinks = new Map<Mark, { id: string; originalTarget: string }>();
+  private sourceTitle = '';
   constructor(readonly source: string, readonly context: MigrationContentContext) {}
+  sectionTargets(content: RichContent): ReadonlyMap<string, string> | undefined {
+    if (!this.sections?.targets.size) return undefined;
+    const present = this.presentSections(content);
+    return new Map([...this.sections.targets].filter(([, id]) => present.has(id)));
+  }
+  private presentSections(content: RichContent): Set<string> {
+    const present = new Set<string>();
+    const pending = [content];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.type === 'heading' && isDocumentSectionId(node.attrs?.sectionId)) present.add(node.attrs.sectionId);
+      for (const child of node.content ?? []) pending.push(child);
+    }
+    return present;
+  }
+  verifyLocalSectionLinks(content: RichContent): void {
+    if (!this.localSectionLinks.size) return;
+    const present = this.presentSections(content);
+    if ([...this.localSectionLinks.values()].every(link => present.has(link.id))) return;
+    const pending = [content];
+    while (pending.length) {
+      const node = pending.pop()!;
+      const mark = node.marks?.find(mark => mark.type === 'link');
+      const link = mark && this.localSectionLinks.get(mark);
+      if (link && !present.has(link.id)) {
+        node.marks = node.marks?.filter(item => item !== mark);
+        node.text += ` (${link.originalTarget})`;
+        this.unresolvedSection();
+      }
+      for (const child of node.content ?? []) pending.push(child);
+    }
+  }
   tick(depth = 0) { if (depth > MAX_DEPTH || ++this.work > MAX_WORK || performance.now() - this.started > MAX_MS) throw new ConversionLimit('변환 작업·중첩·시간 예산을 초과했습니다.'); }
   warn(code: string, message: string, severity: 'warning' | 'error' = 'warning') {
     const key = `${severity}:${code}`; if (this.codes.has(key)) return; this.codes.add(key);
@@ -107,6 +151,30 @@ class Converter {
     if (special) this.warn('LINK_TARGET_SHOWN_AS_TEXT', '코드·이미지 등 링크를 직접 적용할 수 없는 내용 뒤에 원본 링크 주소를 텍스트로 남겼습니다.');
     const marked = label.map(node => node.type === 'text' && !node.marks?.some(mark => mark.type === 'code') ? { ...node, marks: [...(node.marks || []).filter(mark => mark.type !== 'link'), { type: 'link', attrs: { href: safe } }] } : node);
     return special ? [...marked, ...text(` (${url})`)] : marked;
+  }
+  sectionLink(label: RichContent[], display: string, fragment: string, page?: MigrationReferenceInput, fromUrl = false): RichContent[] {
+    const settings = this.context.sectionLinks!;
+    let target: { documentId: string; sectionId: string } | null = null;
+    if (page) target = settings.resolvePageSection?.(page, fragment, fromUrl) ?? null;
+    else {
+      const aliases = fromUrl ? confluenceSectionAliases(fragment, this.sourceTitle) : [fragment];
+      const matches = new Set(aliases.map(alias => this.sections?.targets.get(alias)).filter((id): id is string => Boolean(id)));
+      if (matches.size === 1) target = { documentId: settings.documentId, sectionId: [...matches][0] };
+    }
+    const originalTarget = page?.url || (page?.sourceId || [page?.spaceKey, page?.title].filter(Boolean).join(':')) + '#' + fragment;
+    if (target && isDocumentSectionId(target.sectionId) && !label.some(node => node.type !== 'text' || node.marks?.some(mark => mark.type === 'code'))) {
+      const linked = this.link(label.length ? label : text(display || fragment), documentSectionHash(target.documentId, target.sectionId));
+      if (!page) for (const node of linked) {
+        const mark = node.marks?.find(mark => mark.type === 'link');
+        if (mark) this.localSectionLinks.set(mark, { id: target.sectionId, originalTarget });
+      }
+      return linked;
+    }
+    this.unresolvedSection();
+    return text(`${display || '절 링크'} (${originalTarget})`);
+  }
+  private unresolvedSection(): void {
+    this.warn('SECTION_LINK_UNRESOLVED', 'Confluence 절 링크의 대상이나 표시 형식을 확정할 수 없어 링크 이름과 원본 대상 정보를 텍스트로 보존했습니다.');
   }
   image(input: MigrationReferenceInput, alt: string): RichContent[] {
     const found = this.resolve({ ...input, kind: 'attachment' });
@@ -247,8 +315,12 @@ class Converter {
   }
   xml(node: XmlNode | string, depth = 0): RichContent[] {
     this.tick(depth); if (typeof node === 'string') return text(node);
+    if (this.sections?.bound.has(node)) return [];
     const type = node.name, children = () => this.xmlParts(node.children, depth), child = (name: string) => node.children.find(value => typeof value !== 'string' && value.name === name) as XmlNode | undefined;
-    if (/^h[1-6]$/.test(type)) return flow(children(), 'heading', { level: this.headingLevel(type.slice(1)) });
+    if (/^h[1-6]$/.test(type)) {
+      const sectionId = this.sections?.ids.get(node);
+      return flow(children(), 'heading', { level: this.headingLevel(type.slice(1)), ...(sectionId ? { sectionId } : {}) });
+    }
     if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt'].includes(type)) return this.marked(children(), { type: ({ b: 'bold', strong: 'bold', i: 'italic', em: 'italic', s: 'strike', strike: 'strike', del: 'strike', u: 'underline', code: 'code', tt: 'code' } as Record<string, string>)[type] });
     switch (type) {
       case 'migration-root': case 'div': case 'ac:rich-text-body': return this.xmlParts(node.children, depth, true);
@@ -291,10 +363,28 @@ class Converter {
       case 'td': case 'th': return [{ type: type === 'td' ? 'tableCell' : 'tableHeader', attrs: { colspan: this.span(node.attrs.colspan), rowspan: this.span(node.attrs.rowspan) }, content: flow(this.xmlParts(node.children, depth, true)) }];
       case 'a': {
         const url = node.attrs.href || '', reference = this.urlReference(url), label = this.xmlText(node);
-        const values = children(); return reference ? this.reference(reference, false, label) : this.link(values.length ? values : text(url), url);
+        const values = children();
+        const hash = url.indexOf('#');
+        const page = reference?.kind === 'page' ? reference : undefined;
+        if (this.context.sectionLinks && hash >= 0 && (page || hash === 0 && !url.startsWith('#/'))) {
+          const encoded = url.slice(hash + 1);
+          let fragment = encoded;
+          try { fragment = decodeURIComponent(encoded); } catch { /* Keep the original target in the warning fallback. */ }
+          if (fragment) return this.sectionLink(values, label || url, fragment, page, true);
+        }
+        return reference ? this.reference(reference, false, label) : this.link(values.length ? values : text(url), url);
       }
       case 'ac:link': {
         const page = child('ri:page'), attachment = child('ri:attachment'), body = child('ac:plain-text-link-body') || child('ac:link-body'), label = body ? this.xmlText(body) : '';
+        const fragment = node.attrs['ac:anchor']?.trim();
+        if (this.context.sectionLinks && fragment) {
+          if (node.children.some(value => typeof value === 'string' ? value.trim() : value !== page && value !== body)) {
+            this.unresolvedSection();
+            return this.fallback('비정형 Confluence 절 링크', serializeXml(node));
+          }
+          const display = body?.name === 'ac:link-body' ? this.xmlParts(body.children, depth + 1) : text(label);
+          return this.sectionLink(display, label, fragment, page ? { kind: 'page', ...pageIdentity(page) } : undefined);
+        }
         if (page) return this.reference({ kind: 'page', ...pageIdentity(page) }, false, label);
         if (attachment) {
           const input = attachmentIdentity(attachment), found = this.resolve(input);
@@ -370,10 +460,11 @@ class Converter {
     }
     if ((name === 'jira' || name === 'jiraissues') && params.key) return this.reference({ kind: 'issue', sourceId: params.key });
     if (name === 'excerpt') { this.warn('EXCERPT_FLATTENED', '발췌문 정의는 본문으로 유지했으며 발췌 범위 의미는 원본 보관 자료에 남습니다.'); return blocks(); }
-    this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
+    if (name === 'anchor' && this.context.legacySectionBaseline) this.warn('ANCHOR_DECLARATION_FLATTENED', '이전 앵커 매크로의 원문 표현을 확인했습니다.');
+    else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
   }
-  storage(): RichContent[] {
+  storage(title: string): RichContent[] {
     const htmlEntities: Record<string, string> = { nbsp: '160', mdash: '8212', ndash: '8211', hellip: '8230', copy: '169', reg: '174', trade: '8482', euro: '8364', lsquo: '8216', rsquo: '8217', ldquo: '8220', rdquo: '8221', laquo: '171', raquo: '187', bull: '8226', middot: '183' };
     const rawCdata: string[] = [];
     const source = this.source.replace(/<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|&([a-zA-Z]+);/g, (match, cdata: string | undefined, entity: string | undefined) => {
@@ -395,6 +486,10 @@ class Converter {
       });
     };
     const roots = build(parsed, 0); if (cdataIndex !== rawCdata.length) throw new Error('CDATA 수가 일치하지 않습니다.');
+    if (this.context.sectionLinks) {
+      this.sourceTitle = title;
+      this.sections = scanConfluenceSections(roots, () => this.tick());
+    }
     return flow(roots.flatMap(value => this.xml(value)));
   }
   wikiInline(source: string, depth = 0): RichContent[] {
@@ -492,7 +587,7 @@ class Converter {
   convert(record: LegacyRecord): RichContent[] {
     if (record.textFormat === 'none' || record.textFormat === 'plain') return this.plain(this.source);
     if (record.textFormat === 'adf') { const parsed = object(JSON.parse(this.source)); if (parsed.type !== 'doc' || parsed.version !== 1 || !Array.isArray(parsed.content)) throw new Error('ADF 루트 또는 버전이 올바르지 않습니다.'); return this.adf(parsed); }
-    if (record.textFormat === 'confluence-storage') return this.storage();
+    if (record.textFormat === 'confluence-storage') return this.storage(record.title);
     if (record.textFormat === 'jira-wiki') return this.wiki();
     return this.fallback(record.textFormat, this.source);
   }
@@ -506,9 +601,12 @@ export function convertLegacyContent(record: LegacyRecord, context: MigrationCon
   try {
     if (typeof record.text !== 'string' || Buffer.byteLength(record.text) > MAX_SOURCE_BYTES) throw new ConversionLimit('원본 본문이 변환 크기 한도를 초과했습니다.');
     content = { type: 'doc', content: converter.convert(record) };
+    converter.verifyLocalSectionLinks(content);
     let count = 0; const stack = [{ node: content, depth: 0 }];
     while (stack.length) { const { node, depth } = stack.pop()!; converter.tick(depth); if (++count > MAX_NODES) throw new ConversionLimit('변환 문서 노드 수를 초과했습니다.'); for (const child of node.content || []) stack.push({ node: child, depth: depth + 1 }); }
-    return { ...normalizeDocumentContent(content), diagnostics: converter.diagnostics };
+    const normalized = normalizeDocumentContent(content);
+    const sectionTargets = converter.sectionTargets(normalized.content);
+    return { ...normalized, diagnostics: converter.diagnostics, ...(sectionTargets ? { sectionTargets } : {}) };
   } catch (cause) {
     if (cause instanceof ConversionLimit) converter.warn('CONVERSION_LIMIT_EXCEEDED', '원본 본문이 변환 크기·구조·작업 한도를 초과했습니다. 원본 보관 자료를 분할하거나 별도 검토해야 합니다.', 'error');
     else {

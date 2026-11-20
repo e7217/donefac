@@ -9,16 +9,23 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc,yDocToProsemirrorJSON } from 'y-prosemirror';
+import { getExtensionField, getSchema } from '@tiptap/core';
+import { EditorState, type Plugin } from '@tiptap/pm/state';
+import StarterKit from '@tiptap/starter-kit';
 import { Store } from '../../server/store.js';
 import { DocumentContentService,DocumentContentError,normalizeDocumentContent,readDocumentSelection } from '../../server/document-content.js';
 import { CollaborationService,CollaborationError } from '../../server/collaboration.js';
-import { createEditorSchema } from '../../shared/editor-schema.js';
+import { createEditorExtensions, createEditorSchema } from '../../shared/editor-schema.js';
 import { COLLABORATION_SCHEMA,type CollaborationServerMessage } from '../../shared/collaboration.js';
 import { contentReferences, documentContentSchemaVersion, documentRevisionIncludes, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
+import { documentSectionHash } from '../../shared/document-sections.js';
 import type { DocPage,DocRevision,Issue,RichContent } from '../../shared/types.js';
 
 const now='2026-11-16T00:00:00.000Z',schema=createEditorSchema();
 const body=(text='원본'):RichContent=>({type:'doc',content:[{type:'paragraph',content:text?[{type:'text',text}]:undefined}]});
+function heading(text: string, sectionId?: string, level = 1): RichContent {
+  return {type:'heading',attrs:{level,...(sectionId && {sectionId})},content:[{type:'text',text}]};
+}
 const ref=(type:string,id:string,label=''):RichContent=>({type,attrs:{[type==='issueReference'?'issueId':'documentId']:id,label}});
 const issueList=():RichContent=>({type:'issueList',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무'}});
 const issueSummary=():RichContent=>({type:'issueSummary',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무 현황',groupBy:'priority'}});
@@ -40,6 +47,50 @@ class Peer{
   send(value:unknown){this.ws.send(JSON.stringify(value));}
   async next<T extends CollaborationServerMessage['type']>(type:T):Promise<Extract<CollaborationServerMessage,{type:T}>>{const index=this.queue.findIndex(message=>message.type===type);if(index>=0)return this.queue.splice(index,1)[0] as Extract<CollaborationServerMessage,{type:T}>;const message=await Promise.race([new Promise<CollaborationServerMessage>(resolve=>this.waiters.push({type,resolve})),new Promise<never>((_,reject)=>{const timer=setTimeout(()=>reject(new Error(`No ${type} message`)),3000);timer.unref();})]);return message as Extract<CollaborationServerMessage,{type:T}>;}
 }
+
+test('heading section IDs are canonical, unique within one document, and require content schema 7 only when present', () => {
+  const legacy: RichContent = { type: 'doc', content: [heading('기존 제목')] };
+  const current: RichContent = { type: 'doc', content: [heading('개정 제목', 'section_a-1'), heading('같은 제목', 'section_b')] };
+  const normalizedLegacy = normalizeDocumentContent(legacy);
+  assert.equal(Object.hasOwn(normalizedLegacy.content.content![0].attrs!, 'sectionId'), false);
+  assert.equal(documentContentSchemaVersion(normalizedLegacy.content), 1);
+  assert.equal(JSON.stringify(normalizedLegacy.content), JSON.stringify(legacy));
+  const normalized = normalizeDocumentContent(current);
+  assert.equal(normalized.content.content?.[0].attrs?.sectionId, 'section_a-1');
+  assert.equal(documentContentSchemaVersion(normalized.content), 7);
+  assert.equal(normalized.plainText, '개정 제목\n같은 제목');
+  assert.equal(readDocumentSelection(normalized.content, 1, 6), '개정 제목');
+  assert.equal(documentSectionHash('문서/&', 'section_a-1'), '#/all/documents/%EB%AC%B8%EC%84%9C%2F%26?section=section_a-1');
+  assert.equal(documentSectionHash('doc-a', 'section_a-1', 'space', { kind: 'review', revisionId: 'rev?&' }),
+    '#/space/documents/doc-a?publication=review&revision=rev%3F%26&section=section_a-1');
+
+  for (const invalid of [null, 1, '', '_start', '잘못된 문자', 'bad/name', 'end\n', 'A'.repeat(81)]) {
+    const invalidHeading = { ...heading('제목'), attrs: { level: 1, sectionId: invalid } };
+    rejects(() => normalizeDocumentContent({ type: 'doc', content: [invalidHeading] }));
+  }
+  rejects(() => normalizeDocumentContent({ type: 'doc', content: [heading('제목', 'same'),
+    { type: 'blockquote', content: [heading('중첩 제목', 'same')] }] }));
+  rejects(() => normalizeDocumentContent({ type: 'doc', content: [{ type: 'paragraph', attrs: { sectionId: 'heading-only' } }] }));
+  assert.equal(normalizeDocumentContent({ type: 'doc', content: [heading('다른 문서', 'section_a-1')] }).content.content?.[0].attrs?.sectionId, 'section_a-1');
+});
+
+test('editor heading copies and splits preserve the original ID and multi-heading formatting keeps each identity', () => {
+  const document = schema.nodeFromJSON({ type: 'doc', content: [heading('첫 제목', 'first'), heading('둘째 제목', 'second', 3)] });
+  const extension = createEditorExtensions().find(candidate => candidate.name === 'headingSections');
+  assert.ok(extension);
+  const plugins = getExtensionField<() => Plugin[]>(extension, 'addProseMirrorPlugins')();
+  const state = EditorState.create({ doc: document, plugins });
+  const first = document.firstChild!;
+  const copied = state.applyTransaction(state.tr.insert(0, first)).state.doc;
+  assert.deepEqual(copied.content.content.map(node => node.attrs.sectionId), [undefined, 'first', 'second']);
+  const split = state.applyTransaction(state.tr.split(2)).state.doc;
+  assert.deepEqual(split.content.content.map(node => node.attrs.sectionId), ['first', undefined, 'second']);
+  const cut = state.applyTransaction(state.tr.delete(0, first.nodeSize)).state;
+  const moved = cut.applyTransaction(cut.tr.insert(cut.doc.content.size, first)).state.doc;
+  assert.deepEqual(moved.content.content.map(node => node.attrs.sectionId), ['second', 'first']);
+  const reformatted = state.applyTransaction(state.tr.setBlockType(1, document.content.size - 1, schema.nodes.heading, { level: 2 })).state.doc;
+  assert.deepEqual(reformatted.content.content.map(node => [node.attrs.level, node.attrs.sectionId]), [[2, 'first'], [2, 'second']]);
+});
 
 test('callouts and inline status badges preserve canonical text, selection, and required schema version', () => {
   const status = { type: 'statusBadge', attrs: { label: '검증 중' } };
@@ -105,7 +156,7 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 through v5 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades v1 through v6 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
@@ -120,15 +171,22 @@ test('startup upgrades v1 through v5 rooms atomically, preserving Yjs bytes and 
     f.store.put('revisions',{id:'revision-test',documentId:'doc-b',version:1,title:'고정할 설계',content:body(),
       plainText:'원본',authorId:'user-test',createdAt:now,summary:'합성 저장본'} satisfies DocRevision);
     const pinned=insertState(f.store,'doc-f',{type:'doc',content:[pinnedInclude()]},5);
+    const legacyHeading = { type: 'doc', content: [heading('기존 절 제목')] };
+    f.store.put('documents', document('doc-g', legacyHeading));
+    const legacyRoom = prosemirrorJSONToYDoc(getSchema([StarterKit]), legacyHeading, 'default');
+    const legacyBytes = Buffer.from(Y.encodeStateAsUpdate(legacyRoom));
+    legacyRoom.destroy();
+    const g = insertState(f.store, 'doc-g', legacyHeading, 6, randomUUID(), legacyBytes);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
     request.run('doc-d',d.epoch,'old-request-v3','old-hash');
     request.run('doc-e',e.epoch,'old-request-v4','old-hash');
     request.run('doc-f',pinned.epoch,'old-request-v5','old-hash');
+    request.run('doc-g',g.epoch,'old-request-v6','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -137,6 +195,7 @@ test('startup upgrades v1 through v5 rooms atomically, preserving Yjs bytes and 
         assert.deepEqual(Buffer.from(state.state,'base64'),prior.bytes);
         assert.ok(session.document.plainText.includes(label));
       }
+      assert.equal(JSON.stringify(migrated.session('doc-g').document.content), JSON.stringify(legacyHeading));
       assert.deepEqual(migrated.session('doc-c'),current);
       assert.deepEqual(f.store.db.prepare('SELECT request_id FROM collaboration_requests').all().map(row=>row.request_id),['current-request']);
       const before=migrated.session('doc-a');const second=new CollaborationService(f.store,f.contents);try{assert.deepEqual(second.session('doc-a'),before);}finally{second.close();}
@@ -185,7 +244,13 @@ test('one invalid persisted room prevents every migration write, and legacy impo
       ] }).content);
       const decoratedState = { ...current, state: encode(decorated.content).toString('base64') };
       assert.equal(service.validateImport([decoratedState], [decorated])[0].schemaVersion, COLLABORATION_SCHEMA);
+      assert.equal(service.validateImport([{ ...decoratedState, schemaVersion: 6 }], [decorated])[0].schemaVersion, COLLABORATION_SCHEMA);
       assert.throws(() => service.validateImport([{ ...decoratedState, schemaVersion: 5 }], [decorated]),
+        (error: unknown) => error instanceof CollaborationError && error.code === 'SCHEMA_MISMATCH');
+      const anchored = document('doc-c', normalizeDocumentContent({ type: 'doc', content: [heading('연결할 절', 'section')] }).content);
+      const anchoredState = { ...current, state: encode(anchored.content).toString('base64') };
+      assert.equal(service.validateImport([anchoredState], [anchored])[0].schemaVersion, COLLABORATION_SCHEMA);
+      assert.throws(() => service.validateImport([{ ...anchoredState, schemaVersion: 6 }], [anchored]),
         (error: unknown) => error instanceof CollaborationError && error.code === 'SCHEMA_MISMATCH');
       f.store.transaction(()=>{f.store.put('documents',legacyDoc);service.replaceImported(valid);});assert.ok(service.session('doc-a').document.plainText.includes('기존 형식'));
     }finally{service.close();}
@@ -212,11 +277,11 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('live updates validate references/includes before durable ACK and reject v1 through v5 protocol clients',async()=>{
+test('live updates validate references/includes before durable ACK and reject v1 through v6 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{
     const session=service.enable('doc-a',1,'user-test');
-    for(const schemaVersion of [1,2,3,4,5]){
+    for(const schemaVersion of [1,2,3,4,5,6]){
       const old=new Peer(url);
       peers.push(old);
       await once(old.ws,'open');

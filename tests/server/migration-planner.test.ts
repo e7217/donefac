@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { buildMigrationOptions,buildMigrationPlan } from '../../server/migration-planner.js';
+import { convertLegacyContent } from '../../server/migration-content.js';
 import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
 import type { LegacyDataset,LegacyRecord,LegacyValue,User } from '../../shared/types.js';
 import { contentReferences } from '../../shared/document-nodes.js';
+import { documentSectionHash } from '../../shared/document-sections.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
 
@@ -482,6 +484,19 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
   const conflict = refresh([updatedAnnotation], edited, previousAnnotations);
   assert.equal(conflict.preview.documentRefresh?.[0].fields[0].decision, 'conflict');
   assert.deepEqual(conflict.documentUpdates, []);
+  const anchored = '<p><ac:link ac:anchor="release"><ac:link-body>절 보기</ac:link-body></ac:link></p>' +
+    '<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">release</ac:parameter></ac:structured-macro><h2>Release notes</h2>';
+  const previousAnchors = { ...olderArchive, record: { ...olderArchive.record, text: anchored } };
+  const flattened = convertLegacyContent(previousAnchors.record, { resolveReference: () => null });
+  const oldDocument = { ...canonical, content: flattened.content, plainText: flattened.plainText };
+  const editedSource = next({ text: anchored.replace('Release notes', 'New release notes') });
+  const upgraded = refresh([editedSource], oldDocument, previousAnchors);
+  assert.equal(upgraded.preview.documentRefresh?.[0].fields[0].decision, 'apply');
+  const upgradedContent = upgraded.documentUpdates?.[0].changes.content?.content;
+  const upgradedId = upgradedContent?.[1].attrs?.sectionId as string;
+  assert.equal(upgradedContent?.[0].content?.[0].marks?.[0].attrs?.href, documentSectionHash(canonical.id, upgradedId));
+  const localAnchorConflict = refresh([editedSource], edited, previousAnchors);
+  assert.equal(localAnchorConflict.preview.documentRefresh?.[0].fields[0].decision, 'conflict');
   const customBody = callout.replace('>Yellow<', '>#123456<');
   const custom = refresh([next({ title: '원본의 새 제목', text: customBody })]);
   assert.deepEqual(custom.documentUpdates?.[0].changes, { title: '원본의 새 제목' });
@@ -501,6 +516,35 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
   const cycle = refresh([next({ text: include('20') }), page('20', { authorId: null, text: include('10') })]);
   assert.equal(cycle.preview.canApply, false);
   assert.ok(notices(cycle).has('DOCUMENT_INCLUDE_CYCLE'));
+});
+
+test('Confluence section references use source page scope and preserve verified URL fragments', () => {
+  const pageLink = (fragment: string, label: string, targetId: string) =>
+    `<p><ac:link ac:anchor="${fragment}"><ri:page ri:content-id="${targetId}"/><ac:link-body>${label}</ac:link-body></ac:link></p>`;
+  const source = pkg('section-wiki', 'confluence', [
+    record('project', 's', { title: 'Synthetic wiki', metadata: { spaceKey: 'TEAM' } }),
+    page('100', { authorId: null, text: [
+      pageLink('ReleaseNotes', 'Structured', '200'),
+      '<p><a href="https://wiki.example.test/wiki/display/TEAM/Target+page#Targetpage-ReleaseNotes">Verified URL</a></p>',
+      pageLink('Hidden', 'Excluded', '300'),
+    ].join('') }),
+    page('200', { title: 'Target page', authorId: null, text: '<h2>Release Notes</h2>' }),
+    page('300', { authorId: null, text: '<h2>Hidden</h2>' }),
+  ]);
+  const request = input([source]);
+  request.configuration.sourceBaseUrls = { 'section-wiki': 'https://wiki.example.test/wiki' };
+  request.configuration.excludedRecords = ['section-wiki/page:300'];
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const from = plan.documents.find(document => document.title === '문서 100')!;
+  const target = plan.documents.find(document => document.title === 'Target page')!;
+  const section = target.content.content?.[0].attrs?.sectionId as string;
+  assert.equal(typeof section, 'string');
+  for (const node of from.content.content!.slice(0, 2)) {
+    assert.equal(node.content?.[0].marks?.[0].attrs?.href, documentSectionHash(target.id, section));
+  }
+  assert.ok(from.plainText.includes('Excluded (300#Hidden)'));
+  assert.ok(notices(plan).has('SECTION_LINK_UNRESOLVED'));
 });
 
 test('all available attachment versions retain distinct files and a missing newest version requires acknowledgement',()=>{

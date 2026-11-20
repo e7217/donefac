@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-react';
 import { ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { documentSectionHash } from '../../shared/document-sections';
 import type {
   DocPage,
   DocRevision,
@@ -27,6 +28,8 @@ export interface DocumentPublicationProps {
   notify: FeatureProps['notify'];
   refreshDocument?: () => Promise<void>;
   initialSnapshot?: DocumentPublicationTarget | null;
+  projectId?: string;
+  sectionId?: string | null;
 }
 
 type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
@@ -84,6 +87,8 @@ function PublicationDialog({
   notify,
   refreshDocument,
   initialSnapshot,
+  projectId,
+  sectionId,
 }: DocumentPublicationProps) {
   const titleId = useId();
   const [view, setView] = useState<DocumentPublicationView | null>(null);
@@ -728,6 +733,9 @@ function PublicationDialog({
                   documentId={page.id}
                   nodeBudget={30000}
                   showOutline
+                  sectionId={initialSnapshot && initialSnapshot.kind === snapshotKind && initialSnapshot.revisionId === selectedSnapshot.id ? sectionId : null}
+                  sectionLinkHref={snapshotKind && !previousSnapshot ? id => documentSectionHash(page.id, id, page.projectId ?? projectId,
+                    { kind: snapshotKind, revisionId: selectedSnapshot.id }) : undefined}
                 />
               </DocumentBlocksProvider>
             </section>

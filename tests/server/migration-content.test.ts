@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { LegacyRecord, RichContent } from '../../shared/types.js';
 import { contentReferences, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
+import { documentSectionHash } from '../../shared/document-sections.js';
 import { normalizeDocumentContent } from '../../server/document-content.js';
 import { convertLegacyContent, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
@@ -35,6 +36,35 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
   assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, code); assert.equal(nodes(result.content, 'codeBlock')[0].attrs?.language, 'javascript');
   assert.equal(nodes(result.content, 'tableHeader')[0].attrs?.colspan, 2); assert.equal(nodes(result.content, 'taskItem')[0].attrs?.checked, true);
   assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 3); assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '펼쳐 보기'); assert.ok(result.plainText.includes('접힌 내용'));
+});
+
+test('Confluence section links preserve proven case-sensitive anchors and degrade ambiguous or unavailable targets', () => {
+  const marker = (name: string) => `<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">${name}</ac:parameter></ac:structured-macro>`;
+  const link = (name: string, label: string) => `<p><ac:link ac:anchor="${name}"><ac:link-body><strong>${label}</strong></ac:link-body></ac:link></p>`;
+  const xml = [
+    link('deploy', 'Named'), '<p><a href="#ReleaseNotes">Title</a></p>',
+    link('duplicate', 'Ambiguous'), link('DEPLOY', 'Unknown'), link('raw-id', 'Literal ID'),
+    `<p>${marker('deploy')}</p><h2>Deploy guide</h2><h2>Release Notes</h2><h3 id="raw-id">Literal</h3>`,
+    `${marker('duplicate')}<h2>First</h2><p>Unrelated</p>${marker('duplicate')}`,
+    '<h2>ab c</h2><h2>a bc</h2>',
+  ].join('');
+  const context = { ...resolver(), sectionLinks: { documentId: 'doc-self' } };
+  const convert = (text: string) => convertLegacyContent(source('confluence-storage', text), context);
+  const result = convert(xml);
+  canonical(result);
+  const href = (label: string) => nodes(result.content, 'text').find(node => node.text === label)?.marks?.find(mark => mark.type === 'link')?.attrs?.href;
+  const targets = result.sectionTargets!;
+  for (const [label, alias] of [['Named', 'deploy'], ['Title', 'ReleaseNotes'], ['Literal ID', 'raw-id']]) {
+    assert.ok(targets.get(alias));
+    assert.equal(href(label), documentSectionHash('doc-self', targets.get(alias)!));
+  }
+  assert.equal(nodes(result.content, 'text').find(node => node.text === 'Named')?.marks?.some(mark => mark.type === 'bold'), true);
+  assert.equal(targets.get('abc'), undefined);
+  assert.notEqual(targets.get('ab c'), targets.get('a bc'));
+  assert.ok(result.plainText.includes('Ambiguous (#duplicate)'));
+  assert.ok(result.plainText.includes('Unknown (#DEPLOY)'));
+  assert.equal(result.diagnostics.some(item => item.code === 'SECTION_LINK_UNRESOLVED'), true);
+  assert.equal(convert(xml.replace('Deploy guide', 'Renamed guide')).sectionTargets?.get('deploy'), targets.get('deploy'));
 });
 
 test('Confluence callouts preserve types, titles and nested blocks, and status macros remain inline', () => {

@@ -107,7 +107,9 @@ curl --fail-with-body \
 
 삭제할 때는 `?expectedVersion=3`처럼 전달한다. 하위 업무·문서가 있으면 삭제를 거절한다. 문서 `content`는 Tiptap JSON이며, 공동 편집 문서의 본문 교체는 편집 세대를 바꾸므로 의도한 전체 교체에만 사용한다.
 
-문서 본문 형식 6은 블록 노드 `callout`과 인라인 노드 `statusBadge`를 지원한다. `callout`은 `attrs: {variant, title}`과 하나 이상의 하위 블록을 받는다. `variant`는 `info`, `note`, `warning`, `tip`, `panel` 중 하나이고 선택 제목은 최대 300자다. `statusBadge`는 `attrs: {label, tone}`을 받는다. 표시 이름은 필수이며 최대 120자다. 색상은 `neutral`, `blue`, `green`, `amber`, `red`, `purple` 중 하나다. 이 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 6`을 보내야 한다. 제목과 같은 문서 속성만 바꿀 때는 생략할 수 있다. 자체 백업 형식 46은 현재 문서와 저장 이력의 두 노드를 보존한다.
+문서 본문 형식 6은 블록 노드 `callout`과 인라인 노드 `statusBadge`를 지원한다. `callout`은 `attrs: {variant, title}`과 하나 이상의 하위 블록을 받는다. `variant`는 `info`, `note`, `warning`, `tip`, `panel` 중 하나이고 선택 제목은 최대 300자다. `statusBadge`는 `attrs: {label, tone}`을 받는다. 표시 이름은 필수이며 최대 120자다. 색상은 `neutral`, `blue`, `green`, `amber`, `red`, `purple` 중 하나다. 이 노드가 있는 본문을 바꾸는 `PATCH`에는 해당 본문을 지원하는 `contentSchemaVersion` 6 이상을 보내야 한다. 제목과 같은 문서 속성만 바꿀 때는 생략할 수 있다. 자체 백업 형식 46은 현재 문서와 저장 이력의 두 노드를 보존한다.
+
+본문 형식 7은 `heading.attrs.sectionId`를 지원한다. ID는 영문자 또는 숫자로 시작하며 영문자·숫자·`_`·`-`로 구성된 1~80자다. 한 문서에 같은 ID를 두 번 지정하면 저장을 거절한다. 이 속성이 있는 본문을 수정할 때는 `contentSchemaVersion: 7`을 보낸다. 절 주소는 `#/project-id/documents/document-id?section=section-id`를 사용한다. 검토·발행 고정본 주소는 `publication=review` 또는 `publication=published`와 `revision`을 함께 넣는다. 자체 백업 형식 49와 문서 JSON 형식 7에서 절 ID를 보존한다.
 
 ## 상위 업무에서 하위 업무 만들기
 
@@ -393,6 +395,8 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.
 
 `counts.documents`는 새 문서 수, `retainedPages`와 `retainedRecords`는 이전에 이관한 페이지와 함께 제출해 원본으로 보관하는 기록 수다. 이미 이관한 문서의 현재 제목·본문과 휴지통 상태를 보존한다. 새 문서는 같은 공간과 프로젝트에서 확인한 기존 문서를 상위 문서나 본문 참조에 쓸 수 있다. 적용 직전에 원본 연결과 대상 문서의 현재 프로젝트를 확인한다. 형식 38 자체 백업은 추가 이관의 대상을 보존한다.
+
+현재 페이지 본문의 앵커는 대상이 유일한 제목 절을 확인했을 때 Teamspace 문서 절 링크로 바꾼다. 대상을 확인하기 어려운 링크는 읽을 수 있는 원본 표기를 남기고 `SECTION_LINK_UNRESOLVED`로 표시한다. 기존 문서의 절을 가리키는 계획은 적용 시 그 절이 남아 있는지 다시 확인한다.
 
 ### 이미 이관한 Confluence 문서에 원본 변경분 반영
 

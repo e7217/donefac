@@ -8,6 +8,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../sh
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { issueSearchText } from '../shared/issue-schema';
 import { countActiveMyWork } from '../shared/my-work';
+import { isDocumentSectionId } from '../shared/document-sections';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
@@ -45,6 +46,7 @@ type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   ganttViewId?: string | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
+  sectionId?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
 };
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
@@ -59,6 +61,7 @@ function routeHash(route: WorkspaceRoute) {
     query.set('publication', route.publication.kind);
     query.set('revision', route.publication.revisionId);
   }
+  if (route.view === 'documents' && route.documentId && route.sectionId) query.set('section', route.sectionId);
   if (route.view === 'teamoverview' && route.teamOverviewFilters) {
     const { projectId, memberId, date } = route.teamOverviewFilters;
     if (projectId) query.set('teamProject', projectId);
@@ -66,6 +69,11 @@ function routeHash(route: WorkspaceRoute) {
     if (date) query.set('teamDate', date);
   }
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
+}
+function isSectionNavigation(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
+  return previous.view === 'documents' && next.view === 'documents' && previous.documentId !== null &&
+    previous.sectionId !== next.sectionId &&
+    routeHash({ ...previous, sectionId: null }) === routeHash({ ...next, sectionId: null });
 }
 function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRoute {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
@@ -95,13 +103,15 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
+  const section = parameters.get('section');
+  const sectionId = view === 'documents' && documentId && isDocumentSectionId(section) ? section : null;
   const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
   const teamOverviewFilters = view === 'teamoverview' ? {
     projectId: teamProject && snapshot.projects.some(project => project.id === teamProject) ? teamProject : '',
     memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
   } : undefined;
-  return { projectId, view, documentId, issueId, reportId, planningId, ganttViewId, publicationTab, publication, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, reportId, planningId, ganttViewId, publicationTab, publication, sectionId, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -118,6 +128,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [ganttViewId, setGanttViewId] = useState<string | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
+  const [sectionId, setSectionId] = useState<string | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
@@ -169,6 +180,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setGanttViewId(route.ganttViewId ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
+    setSectionId(route.sectionId ?? null);
     const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
     setTeamOverviewFilters(previous => previous.projectId === filters.projectId && previous.memberId === filters.memberId && previous.date === filters.date ? previous : filters);
   }, []);
@@ -184,7 +196,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const incoming = normalizeRoute(snapshot, location.hash);
     const storedIndex = history.state?.teamspaceRouteIndex;
     const index = Number.isInteger(storedIndex) ? storedIndex : previous ? routeIndexRef.current + 1 : 0;
-    if (previousHash && routeHash(incoming) !== previousHash && !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) {
+    if (previous && previousHash && routeHash(incoming) !== previousHash && !isSectionNavigation(previous, incoming) &&
+        !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) {
       const delta = routeIndexRef.current - index;
       if (delta) { rollbackHashRef.current = previousHash; history.go(delta); }
       else history.replaceState({...history.state, teamspaceRouteIndex:routeIndexRef.current}, '', previousHash);
@@ -202,8 +215,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const requestRoute = (route: WorkspaceRoute) => {
     if (!dataRef.current) return false;
     const next = normalizeRoute(dataRef.current, routeHash(route));
-    if (acceptedRouteRef.current && routeHash(next) === routeHash(acceptedRouteRef.current)) { setSidebarOpen(false); return true; }
-    if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return false;
+    const previous = acceptedRouteRef.current;
+    if (previous && routeHash(next) === routeHash(previous)) { setSidebarOpen(false); return true; }
+    if ((!previous || !isSectionNavigation(previous, next)) && !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return false;
     writeRoute(next, routeIndexRef.current + 1, 'push'); setSidebarOpen(false);
     return true;
   };
@@ -274,7 +288,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     if (current?.view === 'documents' && current.documentId === id && current.publication?.kind === target.kind &&
       current.publication.revisionId === target.revisionId) {
-      writeRoute({...current, publication:null},routeIndexRef.current,'replace');
+      writeRoute({...current, publication:null, sectionId:null},routeIndexRef.current,'replace');
     }
   }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
@@ -337,7 +351,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,ganttViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
-        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink}/></Suspense>}
+        {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink}/></Suspense>}
         {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} initialTab={publicationTab} onOpenPublication={openPublication}
           onTabChange={tab => requestRoute({projectId,view:'publication',documentId:null,issueId:null,publicationTab:tab})}/></Suspense>}
         {view === 'development' && <Development {...props}/>}

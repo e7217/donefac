@@ -4,6 +4,7 @@ import {
   isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
   MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
+import { isDocumentSectionId } from '../shared/document-sections.js';
 import { documentSelectionText } from '../shared/document-selection.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
@@ -37,11 +38,22 @@ function referenceLabel(value: unknown): boolean {
   return value === undefined || typeof value === 'string' && value.length <= 300;
 }
 
+function omitUnsetSectionIds(node: RichContent) {
+  if (node.type === 'heading' && node.attrs?.sectionId === undefined) {
+    // ProseMirror's toJSON may share the attribute object with its node.
+    const attributes: Record<string, unknown> = Object.assign(Object.create(null), node.attrs);
+    delete attributes.sectionId;
+    node.attrs = attributes;
+  }
+  node.content?.forEach(omitUnsetSectionIds);
+}
+
 /** Shared canonical shape for manual writes, imported snapshots and live Yjs updates. */
 export function normalizeDocumentContent(value:unknown):{content:RichContent;plainText:string}{
   let serialized:string|undefined;try{serialized=JSON.stringify(value);}catch{invalid('문서 내용이 JSON 형식이 아닙니다.');}
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
   let count=0, issueBlockCount=0;
+  const sectionIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
     const node=object(value);if(typeof node.type!=='string')invalid('문서 노드 종류가 필요합니다.');const type=schema.nodes[node.type];if(!type)invalid('지원하지 않는 문서 노드입니다.');
@@ -49,7 +61,15 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     if(node.marks!==undefined&&!Array.isArray(node.marks))invalid('문서 서식이 올바르지 않습니다.');
     for(const value of Array.isArray(node.marks)?node.marks:[]){const mark=object(value);if(typeof mark.type!=='string'||!schema.marks[mark.type])invalid('지원하지 않는 문서 서식입니다.');const attributes=attrs(mark.attrs,schema.marks[mark.type].spec.attrs);if(mark.type==='link'&&typeof attributes.href==='string'&&/^(?:javascript|vbscript|data):/i.test(attributes.href.trim()))invalid('지원하지 않는 링크 형식입니다.');}
     if(node.type==='image'&&typeof attributes.src==='string'&&!/^(?:https?:\/\/|\/)/i.test(attributes.src))invalid('이미지는 http(s) 또는 첨부파일 주소를 사용해 주세요.');
-    if(node.type==='heading'&&(typeof attributes.level!=='number'||![1,2,3].includes(attributes.level)))invalid('제목 단계는 1~3이어야 합니다.');
+    if (node.type === 'heading') {
+      if (typeof attributes.level !== 'number' || ![1, 2, 3].includes(attributes.level)) invalid('제목 단계는 1~3이어야 합니다.');
+      const id = attributes.sectionId;
+      if (id !== undefined) {
+        if (!isDocumentSectionId(id)) invalid('문서 절 ID는 영문·숫자로 시작하며 영문·숫자·하이픈·밑줄을 사용해 80자 이내여야 합니다.');
+        if (sectionIds.has(id)) invalid('한 문서에서 같은 절 ID를 두 번 사용할 수 없습니다.');
+        sectionIds.add(id);
+      }
+    }
     if(['issueReference','documentReference','documentInclude','documentRevisionInclude'].includes(node.type)){
       const key=node.type==='issueReference'?'issueId':'documentId',id=attributes[key];
       if(!referenceId(id))invalid('참조 대상 ID는 1~200자여야 합니다.');
@@ -77,7 +97,7 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
   check(value,0);
-  try{const node=schema.nodeFromJSON(value);if(node.type!==schema.topNodeType)invalid('문서 루트가 올바르지 않습니다.');node.check();const content=node.toJSON() as RichContent;return{content,plainText:documentPlainText(content)};}
+  try{const node=schema.nodeFromJSON(value);if(node.type!==schema.topNodeType)invalid('문서 루트가 올바르지 않습니다.');node.check();const content=node.toJSON() as RichContent;omitUnsetSectionIds(content);return{content,plainText:documentPlainText(content)};}
   catch(error){if(error instanceof DocumentContentError)throw error;return invalid('지원하지 않는 문서 노드·속성·서식입니다.');}
 }
 
