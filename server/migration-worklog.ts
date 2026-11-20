@@ -23,7 +23,10 @@ const restrictionNames = new Set([
   'restrictionvalue', 'viewrole', 'viewrolelevel', 'viewgroup', 'viewgrouplevel',
   'permissions',
 ]);
-const attributeName = (name: string) => name.replace(/[\s_-]/g, '').toLowerCase();
+export function jiraWorklogRestrictionAttribute(name: string): string | null {
+  const normalized = name.replace(/[\s_-]/g, '').toLowerCase();
+  return restrictionNames.has(normalized) ? normalized : null;
+}
 
 export function isJiraWorklog(row: LegacyRecord): boolean {
   return row.kind === 'history' && row.metadata.kind === 'worklog';
@@ -40,7 +43,7 @@ function nonempty(value: LegacyValue): boolean {
 
 export function isRestrictedJiraWorklog(row: LegacyRecord): boolean {
   return isJiraWorklog(row) && Object.entries(row.metadata).some(
-    ([name, value]) => restrictionNames.has(attributeName(name)) && nonempty(value),
+    ([name, value]) => jiraWorklogRestrictionAttribute(name) !== null && nonempty(value),
   );
 }
 

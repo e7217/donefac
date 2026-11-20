@@ -336,28 +336,25 @@ test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 
   }
 });
 
-test('360px에서 기존 Jira 업무에 새 댓글과 작업 시간 기록을 한 번씩 추가한다', async ({ page, request }) => {
+test('360px에서 별도 Jira REST 페이지로 기존 업무에 새 댓글과 작업 시간을 한 번씩 추가한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), sourceKey = `JHR${id}`, targetKey = `THR${id}`, instance = `jira-history-${id}`;
   const teamTitle = `팀에서 편집한 업무 ${id}`, teamComment = 'Teamspace에서 남긴 댓글', teamWorklog = 'Teamspace에서 남긴 작업 시간';
   const originalComment = '처음 이관한 원본 댓글', newComment = '새로 내보낸 원본 댓글', rejectedComment = '같은 원본 ID로 변경한 댓글';
   const originalAuthor = { name: `history-worker-${id}`, displayName: `원본 작성자 ${id}` };
-  const exportJira = (next: boolean) => Buffer.from(JSON.stringify({ issues: [{ id: '200', key: `${sourceKey}-1`, fields: {
+  const sourceUrl = 'https://jira.example.test/company/rest/api/3/issue/200';
+  const firstComment = { id: '610', author: originalAuthor, created: '2021-01-02T00:00:00Z', body: originalComment };
+  const exportJira = (next: boolean) => ({ issues: [{ id: '200', key: `${sourceKey}-1`, self: sourceUrl, fields: {
     project: { id: '2040', key: sourceKey, name: `Jira 원본 프로젝트 ${id}` },
     summary: next ? '두 번째 Jira 원본 제목' : '처음 이관한 Jira 업무',
     created: '2021-01-01T00:00:00Z', updated: next ? '2021-01-04T00:00:00Z' : '2021-01-02T00:00:00Z',
     status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
-    comment: { comments: [
-      { id: '610', author: originalAuthor, created: '2021-01-02T00:00:00Z', body: next ? rejectedComment : originalComment },
-      ...(next ? [{ id: '611', author: originalAuthor, created: '2021-01-04T00:00:00Z', body: newComment }] : []),
-    ] },
-    worklog: { worklogs: next ? [{ id: '710', author: originalAuthor, started: '2021-01-04T09:00:00+0900',
-      timeSpentSeconds: 91, comment: '새 원본 작업 메모' }] : [] },
-  } }] }));
+    ...(next ? {} : { comment: { comments: [firstComment] } }),
+  } }] });
   const staged: LegacyPackageSummary[] = [];
   try {
-    const initial = await upload(request, `jira-history-original-${id}.json`, exportJira(false), instance);
+    const initial = await upload(request, `jira-history-original-${id}.json`, Buffer.from(JSON.stringify(exportJira(false))), instance);
     staged.push(initial);
     const { import: first } = await importIntoProject(request, initial, targetKey, `기존 Jira 이관 프로젝트 ${id}`);
     const [projectId] = first.projectIds;
@@ -373,7 +370,17 @@ test('360px에서 기존 Jira 업무에 새 댓글과 작업 시간 기록을 �
     } });
     expect(worklogResponse.status(), await worklogResponse.text()).toBe(201);
 
-    const next = await upload(request, `jira-history-next-${id}.json`, exportJira(true), instance);
+    const pages = {
+      'issue.json': exportJira(true),
+      'comment.json': { startAt: 0, total: 2, comments: [
+        { ...firstComment, self: `${sourceUrl}/comment/610`, body: rejectedComment },
+        { id: '611', self: `${sourceUrl}/comment/611`, author: originalAuthor, created: '2021-01-04T00:00:00Z', body: newComment },
+      ] },
+      'worklog.json': { startAt: 0, total: 1, worklogs: [{ id: '710', self: `${sourceUrl}/worklog/710`, issueId: '200',
+        author: originalAuthor, started: '2021-01-04T09:00:00+0900', timeSpentSeconds: 91, comment: '새 원본 작업 메모' }] },
+    };
+    const archive = zip(Object.entries(pages).map(([path, value]) => ({ path, bytes: Buffer.from(JSON.stringify(value)) })));
+    const next = await upload(request, `jira-history-next-${id}.zip`, archive, instance);
     staged.push(next);
     const { settings } = await open(page, request);
     await selectPackage(settings, next.filename);
@@ -1638,26 +1645,33 @@ test('매핑과 다른 설정이 함께 수정되면 한 탐색 거절이 모든
   } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
 });
 
-test('Jira 작업 시간을 검토해 이관하고 티켓과 기간 보고서에서 초 단위로 확인한다', async ({ page, request }) => {
+test('별도 Jira REST 댓글과 작업 시간 페이지를 이관하고 티켓과 기간 보고서에서 확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
-  const unique = suffix(), key = `TM${unique}`, filename = `worklog-${unique}.json`;
+  await page.setViewportSize({ width: 360, height: 820 });
+  const unique = suffix(), key = `TM${unique}`, filename = `activity-${unique}.zip`;
   const workDate = '2020-02-03', title = `이관 작업 시간 ${unique}`;
+  const sourceUrl = 'https://jira.example.test/company/rest/api/2/issue/1901';
   const originalAuthor = { name: `worker-${unique}`, displayName: `원본 작업자 ${unique}` };
+  const originalComment = '별도 REST 페이지에 있던 댓글';
   const data = {
     issues: [{
-      id:'1901', key:`${key}-1`, fields:{
+      id:'1901', key:`${key}-1`, self: sourceUrl, fields:{
         project:{id:'101',key,name:`원본 시간 프로젝트 ${unique}`},summary:title,
         issuetype:{id:'1',name:'Task'},status:{id:'1',name:'Open'},
         created:'2020-01-02T03:00:00Z',updated:'2020-02-03T18:00:00Z',
-        worklog:{startAt:0,total:1,worklogs:[{
-          id:'200',author:originalAuthor,started:`${workDate}T00:15:00.000+0900`,
-          timeSpentSeconds:91,comment:'원래 작업 메모',
-        }]},
       },
       changelog:{startAt:0,total:0,histories:[]},
     }],
   };
-  const pkg = await upload(request, filename, Buffer.from(JSON.stringify(data)), `worklog-browser-${unique}`);
+  const pages = {
+    'comment-page.json': { startAt: 0, total: 1, comments: [{ id: '300', self: `${sourceUrl}/comment/300`, author: originalAuthor,
+      created: '2020-02-03T01:00:00+0900', body: originalComment }] },
+    'worklog-page.json': { startAt: 0, total: 1, worklogs: [{ id: '200', self: `${sourceUrl}/worklog/200`, issueId: '1901',
+      author: originalAuthor, started: `${workDate}T00:15:00.000+0900`, timeSpentSeconds: 91, comment: '원래 작업 메모' }] },
+    'search.json': data,
+  };
+  const archive = zip(Object.entries(pages).map(([path, value]) => ({ path, bytes: Buffer.from(JSON.stringify(value)) })));
+  const pkg = await upload(request, filename, archive, `worklog-browser-${unique}`);
   try {
     const {settings} = await open(page, request);
     await selectPackage(settings, filename);
@@ -1666,7 +1680,7 @@ test('Jira 작업 시간을 검토해 이관하고 티켓과 기간 보고서에
     await settings.getByLabel(`사용자 매핑 ${originalAuthor.displayName}`, {exact:true}).selectOption(currentActor);
     const checked = await preview(page, settings);
     expect(checked.canApply, JSON.stringify(checked.notices)).toBe(true);
-    expect(checked.counts.worklogs).toBe(1);
+    expect(checked.counts).toMatchObject({ comments: 1, worklogs: 1 });
     const review = settings.getByRole('region', {name:'이관 적용 미리보기',exact:true});
     await expect(review).toContainText('적용할 작업 시간 1');
     await acknowledge(settings, checked);
@@ -1682,6 +1696,7 @@ test('Jira 작업 시간을 검토해 이관하고 티켓과 기간 보고서에
 
     await page.goto(`/#/${issue.projectId}/issues?issue=${issue.id}`);
     const drawer = page.getByRole('dialog', {name:title,exact:true});
+    await expect(drawer.locator('.issue-comment p').filter({ hasText: originalComment })).toHaveCount(1);
     await drawer.getByRole('button', {name:'작업 시간',exact:true}).click();
     const worklogs = drawer.getByRole('region', {name:'업무 작업 기록'});
     await expect(worklogs.getByLabel('업무 총 작업 시간')).toHaveText('1분 31초');
@@ -1695,6 +1710,7 @@ test('Jira 작업 시간을 검토해 이관하고 티켓과 기간 보고서에
     await expect(worklogs.getByLabel('업무 총 작업 시간')).toHaveText('1분 31초');
 
     await drawer.getByRole('button', {name:'업무 상세 닫기'}).click();
+    await page.getByRole('button', {name:'메뉴 열기',exact:true}).click();
     await page.getByRole('button', {name:'보고서',exact:true}).click();
     await page.getByRole('tab', {name:'작업 시간',exact:true}).click();
     await page.getByLabel('작업 시간 시작일', {exact:true}).fill(workDate);

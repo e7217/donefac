@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type {
+  Comment,
   IssueWorklogPage,
   LegacyPackageSummary,
   MigrationApplyResult,
@@ -17,6 +19,7 @@ import type {
   MigrationPreview,
   ProjectWorklogReport,
   SourceImport,
+  SourceReconciliationAudit,
   SourceReconciliationPage,
   SourceRecordArchive,
   SourceRecordPage,
@@ -47,16 +50,17 @@ async function fixture() {
     });
     return { status: response.status, data: (await response.json()) as T };
   }
-  async function upload(value: unknown) {
+  async function upload(value: unknown, filename?: string) {
     const params = new URLSearchParams({
-      filename: typeof value === 'string' ? 'entities.xml' : `worklogs-${randomUUID()}.json`,
+      filename: filename ?? (typeof value === 'string' ? 'entities.xml' : `worklogs-${randomUUID()}.json`),
       product: 'jira',
       instanceKey: `synthetic-worklogs-${randomUUID()}`,
     });
+    const body = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
     const response = await fetch(`${base}/legacy-import/packages?${params}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-min' },
-      body: Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)),
+      body,
     });
     const data = (await response.json()) as LegacyPackageSummary;
     assert.equal(response.status, 201, JSON.stringify(data));
@@ -187,6 +191,130 @@ function restPayload() {
     ],
   };
 }
+
+test('standalone Jira REST activity pages in the issue ZIP migrate exact comments and worklogs once', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const issueUrl = 'https://jira.example.test/company/rest/api/3/issue/100';
+  const visibility = { type: 'group', value: 'jira-private' };
+  const comment = (id: string, body: string) => ({
+    id, self: `${issueUrl}/comment/${id}`, author: mappedAuthor, body, created: sourceCreated,
+  });
+  const worklog = (id: string, note: string, timeSpentSeconds: number) => ({
+    id, issueId: '100', self: `${issueUrl}/worklog/${id}`, author: mappedAuthor, comment: note,
+    started, created: sourceCreated, timeSpentSeconds,
+  });
+  const embeddedComment = comment('310', '포함된 댓글');
+  const externalComment = comment('311', '별도 페이지에만 있는 댓글');
+  const restrictedComment = { ...comment('312', '비공개 원본 댓글'), visibility };
+  const embeddedWorklog = worklog('410', '포함된 작업 시간', 73);
+  const externalWorklog = worklog('411', '별도 페이지에만 있는 작업 시간', 91);
+  const roleRestrictedWorklog = {
+    ...worklog('412', '역할 제한 원본 작업 시간', 119), role_level: 'synthetic-restricted-worklog-role',
+  };
+  const flagRestrictedWorklog = { ...worklog('413', '공개 제한 원본 작업 시간', 127), is_restricted: true };
+  const issue = {
+    id: '100', key: 'OLD-1', self: issueUrl,
+    changelog: { startAt: 0, total: 0, histories: [] },
+    fields: {
+      project: { id: '20', key: 'OLD', name: '원본 REST 프로젝트' },
+      summary: 'REST 별도 활동 페이지', reporter: mappedAuthor,
+      created: sourceCreated, updated: sourceCreated,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      comment: { startAt: 0, maxResults: 1, total: 3, comments: [embeddedComment] },
+      worklog: { startAt: 0, maxResults: 1, total: 4, worklogs: [embeddedWorklog] },
+    },
+  };
+  const commentPage = (startAt: number, comments: object[]) => ({ startAt, maxResults: 2, total: 3, comments });
+  const worklogPage = (startAt: number, worklogs: object[]) => ({ startAt, maxResults: 2, total: 4, worklogs });
+  const data = zip(Object.entries({
+    'export/activity/comments-2.json': commentPage(2, [restrictedComment]),
+    'export/activity/worklogs-2.json': worklogPage(2, [roleRestrictedWorklog, flagRestrictedWorklog]),
+    'export/activity/comments-0.json': commentPage(0, [embeddedComment, externalComment]),
+    'export/activity/worklogs-0.json': worklogPage(0, [embeddedWorklog, externalWorklog]),
+    'export/issues/search.json': { startAt: 0, total: 1, issues: [issue] },
+  }).map(([path, value]) => ({ path, bytes: Buffer.from(JSON.stringify(value)) })));
+  const pkg = await f.upload(data, 'jira-rest-activity-pages.zip');
+  assert.equal(pkg.counts.comment, 3);
+  assert.equal(pkg.counts.history, 4);
+  const config = await f.configure(pkg, mappedAuthor.accountId);
+  const restrictedKeys = [`${pkg.id}/comment:312`, `${pkg.id}/history:worklog:412`, `${pkg.id}/history:worklog:413`];
+  const blocked = await f.preview(config);
+  assert.equal(blocked.canApply, false, JSON.stringify(blocked.notices));
+  const restrictions = blocked.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT');
+  assert.deepEqual(restrictions.map(notice => notice.recordId).sort(), restrictedKeys);
+  assert.equal((await f.apply(blocked)).status, 409);
+  config.excludedRecords = restrictedKeys;
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(plan.notices.every(notice => !['COMMENTS_PARTIAL', 'WORKLOGS_PARTIAL'].includes(notice.code)));
+  assert.equal(plan.counts.comments, 2);
+  assert.equal(plan.counts.worklogs, 2);
+  assert.equal(plan.counts.archivedWorklogs, 2);
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  const ticket = await f.importedIssue(receipt.id);
+
+  const comments = await f.call<Comment[]>(`/comments?resourceType=issue&resourceId=${ticket.id}`);
+  assert.equal(comments.status, 200, JSON.stringify(comments.data));
+  assert.deepEqual(comments.data.map(entry => entry.body).sort(), [embeddedComment.body, externalComment.body].sort());
+  assert.ok(comments.data.every(entry => entry.authorId === 'user-seo' && entry.resourceId === ticket.id));
+  const logs = await f.list(ticket.id);
+  assert.equal(logs.totalEntries, 2);
+  assert.deepEqual(logs.entries.map(entry => [entry.note, entry.durationSeconds]).sort(), [
+    [embeddedWorklog.comment, 73], [externalWorklog.comment, 91],
+  ].sort());
+  assert.ok(logs.entries.every(entry => entry.authorId === 'user-seo' && entry.workDate === '2020-01-02'));
+
+  const path = `/source-imports/${receipt.id}/reconciliation`;
+  const reconciliation = await f.call<SourceReconciliationPage>(`${path}?limit=100`);
+  assert.equal(reconciliation.status, 200, JSON.stringify(reconciliation.data));
+  const activities = reconciliation.data.rows.filter(row => row.kind === 'comment' || row.kind === 'history');
+  assert.equal(activities.length, 7);
+  assert.deepEqual(Object.fromEntries(activities.map(row => [row.sourceId, row.status])), {
+    '310': 'linked', '311': 'linked', '312': 'excluded',
+    'worklog:410': 'linked', 'worklog:411': 'linked', 'worklog:412': 'excluded', 'worklog:413': 'excluded',
+  });
+  const commentRow = activities.find(row => row.sourceId === externalComment.id);
+  assert.ok(commentRow);
+  assert.equal(commentRow?.target?.id, comments.data.find(entry => entry.body === externalComment.body)?.id);
+  assert.equal(commentRow?.target?.owner?.id, ticket.id);
+  const logRow = activities.find(row => row.sourceId === `worklog:${externalWorklog.id}`);
+  const log = logs.entries.find(entry => entry.note === externalWorklog.comment);
+  assert.ok(logRow && log);
+  assert.equal(logRow.target?.id, log.id);
+  assert.equal(logRow.target?.owner?.id, ticket.id);
+  assert.equal(log.sourceRecordId, logRow.sourceRecordId);
+  const originalLog = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${logRow.sourceRecordId}`);
+  assert.equal(originalLog.status, 200, JSON.stringify(originalLog.data));
+  assert.equal(originalLog.data.record.containerId, issue.id);
+  assert.equal(Number(originalLog.data.record.metadata.timeSpentSeconds), 91);
+  for (const [sourceId, name, value] of [
+    ['worklog:412', 'role_level', roleRestrictedWorklog.role_level],
+    ['worklog:413', 'is_restricted', flagRestrictedWorklog.is_restricted],
+  ] as const) {
+    const row = activities.find(activity => activity.sourceId === sourceId);
+    assert.ok(row);
+    assert.equal(row.target, null);
+    const original = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${row.sourceRecordId}`);
+    assert.equal(original.status, 200, JSON.stringify(original.data));
+    assert.equal(original.data.record.metadata[name], value);
+    assert.equal(original.data.excluded, true);
+    assert.equal(original.data.ownerId, null);
+  }
+  const origins = await f.call<SourceRecordPage>(`/resource-origins?resourceType=issue&resourceId=${ticket.id}&kind=history`);
+  assert.equal(origins.status, 200, JSON.stringify(origins.data));
+  assert.deepEqual(origins.data.records.map(row => row.record.sourceId).sort(), ['worklog:410', 'worklog:411']);
+  const audit = await f.call<SourceReconciliationAudit>(`${path}/audit?expectedVersion=${receipt.version}`);
+  assert.equal(audit.status, 200, JSON.stringify(audit.data));
+  assert.equal(audit.data.integrity.status, 'verified');
+  assert.deepEqual(audit.data.recordCounts, reconciliation.data.counts);
+  for (const type of ['comments', 'worklogs'] as const) {
+    assert.equal(audit.data.targetContent[type].count, 2);
+    assert.match(audit.data.targetContent[type].sha256, /^[a-f0-9]{64}$/);
+  }
+});
 
 test('real REST staging blocks restricted worklogs, preserves archive-only reasons and imports exact mapped seconds with source-local date', async () => {
   const f = await fixture();

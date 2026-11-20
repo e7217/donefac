@@ -4,9 +4,11 @@ import { isDeepStrictEqual } from 'node:util';
 import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKind,LegacyReference,LegacyValue } from '../shared/types.js';
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
+import { JiraActivityPages, type JiraActivityKind } from './legacy-import-jira-activity-pages.js';
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
+import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
 
 // Primary dialect references: Jira search export documentation, Importers JSON
 // documentation, and Jira Server parser constants (Action/FileAttachment/ChangeGroup).
@@ -57,6 +59,51 @@ function jsonHistoryGroup(context: Context, raw: unknown, issueId: string, fallb
   return context.put('history', groupId, { title: '변경 이력', containerId: issueId, authorId,
     createdAt: context.date(group.created, `history:${groupId}`), metadata,
     references: [...ref('issue', issueId, 'historyOf'), ...ref('identity', authorId, 'author')] });
+}
+
+function jsonWorklogMetadata(input: ObjectValue, syntheticId: boolean): Record<string, LegacyValue> {
+  const metadata: Record<string, LegacyValue> = {
+    kind: 'worklog', ...selected(input, ['started', 'startDate', 'startdate', 'timeSpent', 'timeSpentSeconds', 'timeworked']),
+  };
+  if (syntheticId) metadata.syntheticId = true;
+  let hasVisibility = false;
+  for (const [name, value] of Object.entries(input)) {
+    const restriction = jiraWorklogRestrictionAttribute(name);
+    if (!restriction) continue;
+    metadata[name] = jsonValue(value);
+    if (restriction === 'visibility') hasVisibility = true;
+  }
+  if (!hasVisibility) metadata.visibility = null;
+  return metadata;
+}
+
+function jsonActivity(context: Context, kind: JiraActivityKind, raw: unknown, issueId: string, index: number, allowPageOverlap = false): void {
+  const input = obj(raw);
+  const originalId = str(input.id);
+  const worklog = kind === 'worklog';
+  const recordKind = worklog ? 'history' : 'comment';
+  const sourceId = worklog ? `worklog:${originalId || `${issueId}:${index}`}` : originalId || `json:${issueId}:comment:${index}`;
+  const recordId = `${recordKind}:${sourceId}`;
+  const authorId = context.identity(input.author);
+  const body = worklog ? input.comment : input.body;
+  const richText = typeof body === 'object' && (worklog || body !== null);
+  const textFormat = richText ? 'adf' : worklog ? 'plain' : 'jira-wiki';
+  const created = worklog ? input.created || input.startDate || input.started || input.startdate : input.created;
+  const metadata = worklog ? jsonWorklogMetadata(input, !originalId) : jiraVisibilityMetadata(input, !originalId);
+  const previous = allowPageOverlap ? context.byId.get(recordId) : undefined;
+  if (previous) {
+    if (previous.containerId === issueId && previous.authorId === authorId && previous.createdAt === (str(created) || null) &&
+        previous.updatedAt === (str(input.updated) || null) && previous.textFormat === textFormat &&
+        isDeepStrictEqual(richText ? JSON.parse(previous.text) : previous.text, richText ? body : str(body)) &&
+        isDeepStrictEqual(previous.metadata, metadata)) return;
+    throw new LegacyImportError(400, '같은 Jira 댓글·작업 시간 ID의 업무 또는 원본 내용이 페이지마다 다릅니다.');
+  }
+  context.put(recordKind, sourceId, {
+    title: worklog ? '작업 시간 기록' : '댓글', containerId: issueId, authorId,
+    createdAt: context.date(created, worklog ? undefined : recordId), updatedAt: context.date(input.updated, worklog ? undefined : recordId),
+    text: richText ? JSON.stringify(body) : str(body), textFormat, metadata,
+    references: [...ref('issue', issueId, worklog ? 'worklogOf' : 'commentOn'), ...ref('identity', authorId, 'author')],
+  });
 }
 
 function restIssueLocation(value: unknown, changelog = false): { alias: string; base: string } | null {
@@ -161,6 +208,7 @@ class Context{
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   readonly restIssues = new Map<LegacyRecord, JiraRestIssueHistory>();
   readonly historyPages: JiraHistoryPage[] = [];
+  readonly activityPages = new JiraActivityPages((code, message, recordId, path) => this.warn(code, message, recordId, path));
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
   ensure(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord|undefined{const sourceId=str(id);if(!sourceId)return undefined;return this.byId.get(`${kind}:${sourceId}`)||this.put(kind,sourceId,value);}
@@ -205,6 +253,7 @@ class Context{
   }
   finish():LegacyDataset{
     applyStandaloneHistory(this);
+    this.activityPages.finish((kind, raw, issue, _path, index) => jsonActivity(this, kind, raw, issue.sourceId, index, true));
     this.scheduleDates.apply();
     this.sprints.apply(this.dataset);
     for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
@@ -383,6 +432,10 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   if (description === null || typeof description === 'string' || Object.hasOwn(obj(description), 'type')) jiraSnapshotFields.push('description');
   if (fields.assignee === null || fields.assignee === '' || assignee) jiraSnapshotFields.push('assigneeId');
   const item=context.put('issue',id,{title:str(fields.summary),containerId:containerId||null,parentId:parentId||null,authorId,createdAt:context.date(fields.created,`issue:${id}`),updatedAt:context.date(fields.updated,`issue:${id}`),text:typeof description==='object'&&description!==null?JSON.stringify(description):str(description),textFormat:typeof description==='object'&&description!==null?'adf':'jira-wiki',metadata:{key,dialect:importers?'importers-json':'rest-json',...selected(fields,['resolutiondate','duedate','environment','originalEstimate','timeSpent','estimate']),jiraSnapshotFields,fields:{}},references:[...ref('project',containerId,'project'),...ref('identity',authorId,'creatorOrReporter'),...ref('identity',assignee,'assignee'),...ref('issue',parentId,'parent')]});
+  const readActivity = (kind: JiraActivityKind, envelope: unknown, rows: unknown[]) => {
+    for (const [position, raw] of rows.entries()) jsonActivity(context, kind, raw, id, position);
+    if (!importers) context.activityPages.track(item, input.self, kind, envelope, rows.map(raw => str(obj(raw).id) || null), path);
+  };
   const values=item.metadata.fields as Record<string,LegacyValue>;
   const scheduleValues = ['startDate', 'endDate', 'dueDate', 'duedate', 'estimate'];
   const jiraScheduleFields = Object.fromEntries(scheduleValues.filter(name=>Object.hasOwn(fields,name) &&
@@ -426,9 +479,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
       item.references.push(...ref('identity', jiraCustomUser(context, profile, str(field.metadata.fieldType)), 'customFieldUser'));
     }
   }
-  const commentEnvelope=obj(fields.comment),comments=importers?list(fields.comments):list(commentEnvelope.comments);
-  if(Number(commentEnvelope.total)>comments.length||Number(commentEnvelope.startAt)>0)context.warn('COMMENTS_PARTIAL','REST 댓글 페이지 일부만 제공되었습니다.',item.id,path);
-  for(let commentIndex=0;commentIndex<comments.length;commentIndex++){const comment=obj(comments[commentIndex]),sourceId=str(comment.id),commentId=sourceId||`json:${id}:comment:${commentIndex}`,author=context.identity(comment.author),body=comment.body;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:author,createdAt:context.date(comment.created,`comment:${commentId}`),updatedAt:context.date(comment.updated,`comment:${commentId}`),text:typeof body==='object'&&body!==null?JSON.stringify(body):str(body),textFormat:typeof body==='object'&&body!==null?'adf':'jira-wiki',metadata:jiraVisibilityMetadata(comment,!sourceId),references:[...ref('issue',id,'commentOn'),...ref('identity',author,'author')]});}
+  readActivity('comment', fields.comment, list(importers ? fields.comments : obj(fields.comment).comments));
   for(let attachmentIndex=0;attachmentIndex<list(fields.attachments||fields.attachment).length;attachmentIndex++){const attachment=obj(list(fields.attachments||fields.attachment)[attachmentIndex]);context.attachment(str(attachment.id)||`json:${id}:attachment:${attachmentIndex}`,id,attachment);}
   const changelog = obj(input.changelog);
   const embedded = Array.isArray(changelog.histories) ? changelog.histories : Array.isArray(changelog.values) ? changelog.values : undefined;
@@ -444,15 +495,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     }
     context.restIssues.set(item, { location: restIssueLocation(input.self), embeddedIds, embeddedTotal: total });
   }
-  const worklogEnvelope=obj(fields.worklog),worklogs=importers?list(fields.worklogs):list(worklogEnvelope.worklogs);if(Number(worklogEnvelope.total)>worklogs.length||Number(worklogEnvelope.startAt)>0)context.warn('WORKLOGS_PARTIAL','REST 작업 시간 기록 페이지 일부만 제공되었습니다.',item.id,path);
-  for(let index=0;index<worklogs.length;index++){
-    const worklog=obj(worklogs[index]),sourceId=str(worklog.id),worklogId=`worklog:${sourceId||`${id}:${index}`}`,author=context.identity(worklog.author);
-    context.put('history',worklogId,{title:'작업 시간 기록',containerId:id,authorId:author,createdAt:context.date(worklog.created||worklog.startDate||worklog.started||worklog.startdate),updatedAt:context.date(worklog.updated),text:typeof worklog.comment==='object'?JSON.stringify(worklog.comment):str(worklog.comment),textFormat:typeof worklog.comment==='object'?'adf':'plain',metadata:{
-      kind:'worklog',...(!sourceId?{syntheticId:true}:{}),...selected(worklog,['started','startDate','startdate','timeSpent','timeSpentSeconds','timeworked']),
-      ...Object.fromEntries(['role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'].filter(name=>Object.hasOwn(worklog,name)).map(name=>[name,jsonValue(worklog[name])])),
-      visibility:jsonValue(worklog.visibility??null),
-    },references:[...ref('issue',id,'worklogOf'),...ref('identity',author,'author')]});
-  }
+  readActivity('worklog', fields.worklog, list(importers ? fields.worklogs : obj(fields.worklog).worklogs));
   for(let linkIndex=0;linkIndex<list(fields.issuelinks).length;linkIndex++){const link=obj(list(fields.issuelinks)[linkIndex]),inward=obj(link.inwardIssue),outward=obj(link.outwardIssue),type=obj(link.type),other=str(inward.id||inward.key||outward.id||outward.key),linkId=str(link.id)||`json:${id}:link:${linkIndex}`;context.ensure('relation',linkId,{title:str(type.name)||'업무 연결',containerId:id,metadata:{direction:link.inwardIssue?'inward':'outward',...selected(type,['id','name','inward','outward'])},references:[...ref('issue',id,'source'),...ref('issue',other,'target')]});}
   const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','closedSprints','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
   for(const name of Object.keys(fields))if(!known.has(name)&&!/^customfield_\d+$/.test(name))context.unsupported(`json-field:${name}`);
@@ -515,8 +558,8 @@ function parseJson(context:Context,path:string,source:string):void{
   else {
     const page = standaloneHistoryPage(root, path);
     if (page) context.historyPages.push(page);
-    else {
-      context.warn('JSON_DIALECT_UNSUPPORTED','지원하는 Jira REST 검색/단일 이슈/변경 이력 또는 Importers JSON 구조가 아닙니다.',null,path,'error');
+    else if (!context.activityPages.read(root, path)) {
+      context.warn('JSON_DIALECT_UNSUPPORTED','지원하는 Jira REST 업무·활동 페이지 또는 Importers JSON 구조가 아닙니다.',null,path,'error');
       context.unsupported('json:unrecognized-root');
     }
   }

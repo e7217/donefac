@@ -395,6 +395,8 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 관리 경로는 `/api/v1` 키로 사용할 수 없다. 분석 패키지는 현재 신뢰하는 관리 브라우저 범위에서 접근하며, 기존 도구의 권한을 재현하는 기능은 아니다. 제한된 콘텐츠는 진단으로 표시하고 실제 적용 단계에서 검토해야 한다. 자체 JSON 백업에는 분석 패키지·원본이 포함되지 않고 백업 가져오기 후에도 유지되므로, 분석 자료까지 백업하려면 서버 DB와 `data/legacy-imports/`를 함께 보관한다.
 
+Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간(`worklogs`) 응답을 같은 ZIP에 넣을 수 있다. 분석기는 업무와 페이지의 `self` 주소에서 Jira 서버 및 서비스 경로, 업무 ID 또는 키, 기록 ID를 대조한다. 페이지 주소가 생략된 응답은 각 기록의 `self`를 사용한다. 겹치는 동일 기록은 한 번만 가져오고, 같은 기록 ID의 소유 업무나 내용이 다르면 패키지 분석을 중단한다. 소유 업무와 연결할 수 없는 페이지는 `JIRA_ACTIVITY_PAGE_OWNER_UNRESOLVED`, 범위나 형식이 잘못된 페이지는 `JIRA_ACTIVITY_PAGE_INVALID`로 표시한다. 제공된 범위에 누락이나 불일치가 있으면 `COMMENTS_PARTIAL` 또는 `WORKLOGS_PARTIAL`이 남는다. 완전성은 응답이 보고한 범위에 대한 확인이다. [Jira 댓글 페이지](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/#api-rest-api-3-issue-issueidorkey-comment-get) · [Jira 작업 시간 페이지](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-worklogs/#api-rest-api-3-issue-issueidorkey-worklog-get)
+
 ## 검토한 원본 이관 적용
 
 | 요청 | 동작 |
@@ -555,7 +557,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 Jira 이관 작업에는 `sourceRecordId`와 `durationSeconds`가 함께 반환된다. 이관 기록의 `minutes`와 보고서 합계는 초를 분으로 표현하므로 소수일 수 있다. 이관 기록의 PATCH에서 생략한 날짜·메모·시간은 유지된다. `minutes`를 생략하면 초 단위 시간도 유지된다. 분을 명시하면 1~1,440분 범위의 새 시간으로 변경한다. 기본 작업 기록은 분 입력이 필요하다. schema12 백업에서 이관 시간의 원본 ID와 초 단위를 보관·검증한다.
 
-Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorklogs` 건수가 포함된다. 관리자 XML의 Worklog 및 업무 JSON에 포함된 REST·Importers 개별 작업 기록이 대상이다. 업무 단위 합계만 있는 파일에서는 개별 작업 시간을 생성하지 않는다. 원래 작성자를 팀원으로 매핑하고 작업일과 길이를 확인할 수 있는 기록을 집계에 반영한다. 시작 시각·작성자·원본 메모는 원본 기록에서도 볼 수 있다. 제한된 작업 기록은 이관에서 명시적으로 제외할 때까지 적용을 차단한다. 상대 날짜나 설정에 따라 달라지는 일·주 길이는 원본에 보관하고 진단에서 확인한다. [Jira Data Center 작업 기록 API](https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue/), [Jira JSON 작업 시간 예시](https://confluence.atlassian.com/servicedeskcloud/importing-data-from-json-1097176631.html#ImportingdatafromJSON-Worklogs).
+Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorklogs` 건수가 포함된다. 관리자 XML의 Worklog와 REST 업무 응답·같은 ZIP의 별도 REST 페이지·Importers JSON에 담긴 개별 작업 기록이 대상이다. 업무 단위 합계만 있는 파일에서는 개별 작업 시간을 생성하지 않는다. 원래 작성자를 팀원으로 매핑하고 작업일과 길이를 확인할 수 있는 기록을 집계에 반영한다. 시작 시각·작성자·원본 메모는 원본 기록에서도 볼 수 있다. 제한된 작업 기록은 이관에서 명시적으로 제외할 때까지 적용을 차단한다. 상대 날짜나 설정에 따라 달라지는 일·주 길이는 원본에 보관하고 진단에서 확인한다. [Jira Data Center 작업 기록 API](https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue/) · [Jira JSON 작업 시간 예시](https://confluence.atlassian.com/servicedeskcloud/importing-data-from-json-1097176631.html#ImportingdatafromJSON-Worklogs)
 
 
 ## 사용자 정의 필드 조건
