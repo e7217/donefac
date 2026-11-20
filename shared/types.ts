@@ -58,8 +58,32 @@ export interface ReportIssueMetric {
   cycleHours: number | null;
   deleted: boolean;
 }
+export interface ReportStatusVisitMetric {
+  statusId: string;
+  statusLabel: string;
+  category: StatusCategory;
+  samples: number;
+  unknownEntries: number;
+  medianHours: number | null;
+  maxHours: number | null;
+}
+export interface ReportOpenStatusIssue {
+  issueId: string;
+  key: string;
+  title: string;
+  statusId: string;
+  statusLabel: string;
+  category: StatusCategory;
+  assigneeId: string | null;
+  enteredAt: string | null;
+  elapsedHours: number | null;
+}
+export interface ReportStatusDuration {
+  completedVisits: ReportStatusVisitMetric[];
+  openIssues: ReportOpenStatusIssue[];
+}
 export interface ProjectReport {
-  definitionVersion: 1;
+  definitionVersion: 1 | 2;
   query: ReportQuery;
   generatedAt: string;
   rangeStartAt: string;
@@ -85,6 +109,7 @@ export interface ProjectReport {
   };
   days: ReportDay[];
   issues: ReportIssueMetric[];
+  statusDuration?: ReportStatusDuration;
 }
 export interface ReportSnapshot {
   id: string;

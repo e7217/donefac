@@ -76,6 +76,76 @@ test('actual completion/reopen transitions use observed work entry outside the p
   assert.deepEqual(value.days.map(day => day.coverage), ['complete', 'complete']);
   assert.equal(value.days[0].state?.done, 3);
 });
+test('status durations group distinct status IDs and measure only exits using the pre-transition filters', () => {
+  const event = events();
+  const firstReview = state('a', 'review', { statusId: 'first-review', statusLabel: '초기 검토 이름', assigneeId: 'bob' });
+  const assigned = { ...firstReview, assigneeId: 'alice' };
+  const renamed = { ...assigned, statusLabel: '검토' };
+  const secondReviewBob = { ...renamed, statusId: 'second-review', assigneeId: 'bob' };
+  const secondReviewAlice = { ...secondReviewBob, assigneeId: 'alice' };
+  const otherReview = state('b', 'review', { statusId: 'first-review', statusLabel: '초기 검토 이름' });
+  const excludedReview = state('bug', 'review', { statusId: 'first-review', statusLabel: '검토', type: 'bug' });
+  const at = '2026-11-02T10:30:00Z';
+  const ledger = { coverage: [epoch()], events: [
+    event('2026-11-01T08:00:00Z', 'created', null, firstReview),
+    event('2026-11-01T10:00:00Z', 'changed', firstReview, assigned),
+    event('2026-11-02T04:30:00Z', 'created', null, otherReview),
+    event('2026-11-02T08:00:00Z', 'changed', otherReview, state('b', 'done')),
+    event('2026-11-02T08:30:00Z', 'reclassified', assigned, renamed),
+    event(at, 'changed', renamed, secondReviewBob),
+    event(at, 'changed', secondReviewBob, secondReviewAlice),
+    event(at, 'changed', secondReviewAlice, state('a', 'done')),
+    event('2026-11-02T12:00:00Z', 'created', null, excludedReview),
+    event('2026-11-02T15:00:00Z', 'changed', excludedReview, state('bug', 'done')),
+    event('2026-11-04T00:00:00Z', 'changed', state('a', 'done'), state('a', 'todo')),
+  ].reverse() };
+  const result = report(ledger, [], query({ assigneeId: 'alice', issueType: 'task' }));
+  assert.equal(result.definitionVersion, 2);
+  assert.deepEqual(result.statusDuration?.completedVisits, [
+    { statusId: 'first-review', statusLabel: '검토', category: 'review', samples: 2, unknownEntries: 0, medianHours: 15, maxHours: 26.5 },
+    { statusId: 'second-review', statusLabel: '검토', category: 'review', samples: 1, unknownEntries: 0, medianHours: 0, maxHours: 0 },
+  ]);
+  assert.deepEqual(result.statusDuration?.openIssues, []);
+});
+test('current open status ages survive a past report range and keep unobserved or inconsistent entries unknown', () => {
+  const event = events();
+  const observed = state('10', 'review', { title: '현재 제목' });
+  const recent = state('20', 'in_progress');
+  const recentTodo = state('20', 'todo');
+  const baseline = state('30', 'review');
+  const restore = state('40', 'todo');
+  const mismatched = state('50', 'review');
+  const done = state('60', 'done');
+  const bob = state('70', 'review', { assigneeId: 'bob' });
+  const otherProject = state('80', 'review');
+  const ledger = { coverage: [epoch()], events: [
+    event('2026-11-01T00:00:00Z', 'baseline', null, baseline),
+    event('2026-11-01T02:00:00Z', 'created', null, observed),
+    event('2026-11-01T03:00:00Z', 'created', null, state('50', 'todo')),
+    event('2026-11-01T04:00:00Z', 'created', null, done),
+    event('2026-11-01T05:00:00Z', 'created', null, bob),
+    event('2026-11-01T06:00:00Z', 'created', null, restore),
+    event('2026-11-01T07:00:00Z', 'created', null, { ...otherProject, projectId: 'other' }),
+    event('2026-11-02T00:00:00Z', 'deleted', restore, null),
+    event('2026-11-03T00:00:00Z', 'restored', null, restore),
+    event('2026-11-03T01:00:00Z', 'created', null, recentTodo),
+    event('2026-11-04T11:30:00Z', 'changed', recentTodo, recent),
+    event('2026-11-04T12:01:00Z', 'changed', recent, state('20', 'review')),
+  ] };
+  const current = [recent, mismatched, done, restore, observed, bob, baseline, otherProject];
+  const result = report(ledger, current, query({ endDate: '2026-11-02', assigneeId: 'alice' }));
+  assert.deepEqual(result.statusDuration?.completedVisits, []);
+  assert.deepEqual(result.statusDuration?.openIssues, [
+    { issueId: '10', key: 'P-10', title: '현재 제목', statusId: 'review', statusLabel: 'review', category: 'review', assigneeId: 'alice', enteredAt: '2026-11-01T02:00:00.000Z', elapsedHours: 82 },
+    ...[
+      ['20', 'in_progress', '2026-11-04T11:30:00.000Z', 0.5],
+      ['30', 'review', null, null],
+      ['40', 'todo', null, null],
+      ['50', 'review', null, null],
+      ['80', 'review', null, null],
+    ].map(([issueId, statusId, enteredAt, elapsedHours]) => ({ issueId, key: `P-${issueId}`, title: issueId, statusId, statusLabel: statusId, category: statusId, assigneeId: 'alice', enteredAt, elapsedHours })),
+  ]);
+});
 test('baseline imported work and created-done do not manufacture created/completed or cycle samples; semantic reclassification stays separate', () => {
   const event = events(), todo = state('a', 'todo'), active = state('a', 'in_progress'), done = state('a', 'done'), createdDone = state('b', 'done');
   const value = report({ coverage: [epoch()], events: [event('2026-11-02T00:00:00Z', 'baseline', null, todo), event('2026-11-02T01:00:00Z', 'changed', todo, active), event('2026-11-02T02:00:00Z', 'reclassified', active, done), event('2026-11-02T03:00:00Z', 'created', null, createdDone)] }, [done, createdDone]);
@@ -85,6 +155,9 @@ test('baseline imported work and created-done do not manufacture created/complet
   assert.equal(value.period.reopened, 0);
   assert.equal(value.period.cycleSamples, 0);
   assert.equal(value.days[0].state?.done, 2);
+  assert.deepEqual(value.statusDuration?.completedVisits, [
+    { statusId: 'todo', statusLabel: 'todo', category: 'todo', samples: 0, unknownEntries: 1, medianHours: null, maxHours: null },
+  ]);
 });
 test('closed/restored gaps have null unknown day-close snapshots and never carry a cycle start through a new epoch', () => {
   const event = events(), todo = state('a', 'todo'), active = state('a', 'in_progress'), done = state('a', 'done');
@@ -95,6 +168,12 @@ test('closed/restored gaps have null unknown day-close snapshots and never carry
   assert.equal(value.days[1].state?.done, 1);
   assert.equal(value.period.completionTransitions, 1);
   assert.equal(value.period.cycleSamples, 0);
+  assert.deepEqual(value.statusDuration?.completedVisits, [
+    { statusId: 'in_progress', statusLabel: 'in_progress', category: 'in_progress', samples: 0, unknownEntries: 1, medianHours: null, maxHours: null },
+    { statusId: 'todo', statusLabel: 'todo', category: 'todo', samples: 0, unknownEntries: 1, medianHours: null, maxHours: null },
+  ]);
+  const inGap = report({ coverage, events: [event('2026-11-02T10:00:00Z', 'created', null, active)] }, [active], query(), '2026-11-03T11:00:00Z');
+  assert.equal(inGap.statusDuration?.openIssues[0].enteredAt, null);
   const separate = report({ coverage: [epoch('e', '2026-11-02T00:00:00Z', '2026-11-02T12:00:00Z'), epoch('restored', '2026-11-02T12:00:00Z')], events: [] }, [], query({ endDate: '2026-11-02' }));
   assert.equal(separate.days[0].coverage, 'partial');
   assert.equal(separate.days[0].state?.todo, 0);

@@ -1,29 +1,63 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import express from 'express';
 import { createApp } from '../../server/app.js';
+import { createPilotAccess, type PilotAccess } from '../../server/pilot-access.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { contentReferences, documentPlainText } from '../../shared/document-nodes.js';
-import type { Issue, Project, ProjectReport, ReportingLedgerData, ReportQuery, ReportSnapshot, ReportSnapshotSummary, DocRevision, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Issue, Project, ProjectReport, ReportingLedgerData, ReportQuery, ReportSnapshot, ReportSnapshotSummary, ReportStatusDuration, DocRevision, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; exportedAt: string; reportingLedger: ReportingLedgerData; reportSnapshots: ReportSnapshot[]; revisions: DocRevision[] };
-async function fixture() {
+async function fixture(teamAccess = false) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-reporting-integration-'));
-  const service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1');
+  const service = createApp({ dataDir: dir, outboundWorker: false });
+  let access: PilotAccess | null = null;
+  const web = express();
+  web.use((request, response, next) => access ? access.middleware(request, response, next) : next());
+  web.use(service.app);
+  const server = web.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+  const address = `127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const base = `http://${address}/api`, origin = `https://${address}`;
+  async function close() {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    access?.close();
+    service.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  let cookie = '';
+  if (teamAccess) {
+    try {
+      const accessCode = 'a'.repeat(64), accessFile = join(dir, 'access.code');
+      writeFileSync(accessFile, accessCode, { mode: 0o600 });
+      access = createPilotAccess({ NODE_ENV: 'test', TEAMSPACE_PILOT_ORIGIN: origin, TEAMSPACE_PILOT_ACCESS_FILE: accessFile });
+      const login = await fetch(`http://${address}/pilot-access`, {
+        method: 'POST', headers: { Origin: origin }, redirect: 'manual', body: new URLSearchParams({ accessCode }),
+      });
+      cookie = login.headers.getSetCookie()[0]?.split(';')[0] ?? '';
+      assert.equal(login.status, 303);
+      assert.ok(cookie);
+    } catch (error) {
+      await close();
+      throw error;
+    }
+  }
   return {
     dir,
-    async call<T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown, actorId = 'user-yun') {
-      const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    async call<T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown, actorId = 'user-yun', signedIn = true) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Actor-Id': actorId };
+      if (teamAccess) headers.Origin = origin;
+      if (cookie && signedIn) headers.Cookie = cookie;
+      const response = await fetch(base + path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       return { status: response.status, data: await response.json() as T };
     },
-    async close() { await new Promise<void>(resolve => server.close(() => resolve())); service.close(); rmSync(dir, { recursive: true, force: true }); },
+    close,
   };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -153,5 +187,87 @@ test('schema10 restores immutable snapshots and closed historical coverage with 
     assert.deepEqual((await f.call<ReportSnapshot>(`/projects/${p.id}/report-snapshots/${snapshot.id}`)).data, snapshot);
     assert.deepEqual((await f.call<Backup>('/export')).data.reportingLedger.events, afterBackup.reportingLedger.events);
     assert.deepEqual((await report(f, q)).period, afterReport.period);
+  } finally { await f.close(); }
+});
+
+test('format 55 validates and restores state dwell while signed-in teams retain access to earlier report snapshots', async () => {
+  const f = await fixture(true);
+  try {
+    const p = await project(f), today = Date.now(), day = 86_400_000;
+    const q = { ...query(p.id), assigneeId: 'user-seo', startDate: new Date(today - day).toISOString().slice(0, 10),
+      endDate: new Date(today + day).toISOString().slice(0, 10) };
+    let ticket = await createIssue(f, p.id, '검토를 기다리는 합성 업무');
+    ticket = await change(f, ticket, { status: 'in_progress', assigneeId: 'user-seo' });
+    ticket = await change(f, ticket, { status: 'review' });
+    const other = await createIssue(f, p.id, '범위 밖 담당자의 합성 업무');
+    await change(f, other, { status: 'in_progress', assigneeId: 'user-yun' });
+    const outside = await createIssue(f, 'project-team', '다른 프로젝트 합성 업무');
+    await change(f, outside, { assigneeId: 'user-seo' });
+
+    const snapshot = await capture(f, q);
+    assert.equal(snapshot.report.definitionVersion, 2);
+    const dwell = snapshot.report.statusDuration;
+    assert.ok(dwell);
+    assert.deepEqual(dwell.openIssues.map(row => row.issueId), [ticket.id]);
+    assert.equal(dwell.openIssues[0].statusId, 'review');
+    assert.ok(dwell.openIssues[0].elapsedHours !== null);
+    assert.ok(dwell.completedVisits.some(row => row.statusId === 'in_progress' && row.samples === 1));
+    const path = `/projects/${p.id}/report-snapshots/${snapshot.id}`;
+    const workspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const document = workspace.documents.find(value => value.id === snapshot.documentId);
+    assert.ok(document);
+    assert.match(document.plainText, /상태별 체류 시간/u);
+    assert.match(document.plainText, /미완료 업무 1개 중 현재 상태 진입 관측 1개/u);
+    assert.deepEqual(contentReferences(document.content).map(reference => reference.id), [ticket.id]);
+    assert.equal(workspace.resourceLinks.filter(link => link.issueId === ticket.id && link.documentId === document.id).length, 1);
+    const blocks = document.content.content ?? [];
+    const ticketLink = blocks.findIndex(block => block.type === 'issueReference' && block.attrs?.issueId === ticket.id);
+    const capturedAge = blocks[ticketLink - 1];
+    assert.equal(capturedAge?.type, 'paragraph');
+    assert.match(documentPlainText(capturedAge), new RegExp(`^${ticket.key} · ${dwell.openIssues[0].statusLabel} · (1분 미만|[\\d,.]+(?:분|시간)) 체류$`, 'u'));
+
+    const { data: backup } = await f.call<Backup>('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    await change(f, ticket, { title: '보고를 작성한 뒤 변경한 제목', status: 'todo' });
+    assert.equal((await report(f, q)).statusDuration?.openIssues[0].statusId, 'todo');
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(value => value.id === document.id), document);
+    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 54 } });
+    assert.equal(downgraded.status, 400);
+    assert.match(downgraded.data.error, /schemaVersion 55/u);
+    const missing = structuredClone(backup);
+    delete missing.reportSnapshots[0].report.statusDuration;
+    assert.equal((await f.call('/import', 'POST', { data: missing })).status, 400);
+    const corruptions: ((value: ReportStatusDuration) => void)[] = [
+      value => { const row = value.openIssues[0]; row.elapsedHours = (row.elapsedHours ?? 0) + 1; },
+      value => { value.openIssues[0].category = 'done'; },
+      value => { value.openIssues[0].issueId = outside.id; },
+      value => { value.completedVisits.push({ ...value.completedVisits[0] }); },
+      value => { value.completedVisits[0].samples = 0; },
+    ];
+    for (const corrupt of corruptions) {
+      const damaged = structuredClone(backup);
+      const value = damaged.reportSnapshots[0].report.statusDuration;
+      assert.ok(value);
+      corrupt(value);
+      const rejected = await f.call('/import', 'POST', { data: damaged });
+      assert.equal(rejected.status, 400);
+    }
+    assert.deepEqual((await f.call<ReportSnapshot>(path)).data, snapshot);
+    const restored = await f.call('/import', 'POST', { data: backup });
+    assert.equal(restored.status, 200, JSON.stringify(restored.data));
+    assert.deepEqual((await f.call<ReportSnapshot>(path)).data, snapshot);
+
+    const earlier = structuredClone(backup), legacy = earlier.reportSnapshots[0];
+    earlier.schemaVersion = 54;
+    legacy.report.definitionVersion = 1;
+    delete legacy.report.statusDuration;
+    const older = await f.call('/import', 'POST', { data: earlier });
+    assert.equal(older.status, 200, JSON.stringify(older.data));
+    assert.equal((await f.call(path, 'GET', undefined, 'user-yun', false)).status, 401);
+    assert.deepEqual((await f.call<ReportSnapshot>(path)).data, legacy);
+    assert.equal((await f.call(`/projects/project-team/report-snapshots/${snapshot.id}`)).status, 404);
+    const afterRestore = await report(f, q);
+    assert.equal(afterRestore.definitionVersion, 2);
+    assert.deepEqual(afterRestore.statusDuration?.openIssues, [{ ...dwell.openIssues[0], enteredAt: null, elapsedHours: null }]);
   } finally { await f.close(); }
 });

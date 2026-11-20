@@ -1,4 +1,4 @@
-import type { IssueReportEvent, ProjectReport, ReportDay, ReportIssueMetric, ReportIssueState, ReportQuery, ReportingCoverage, ReportingLedgerData, StatusCategory } from '../shared/types.js';
+import type { IssueReportEvent, ProjectReport, ReportDay, ReportIssueMetric, ReportIssueState, ReportOpenStatusIssue, ReportQuery, ReportingCoverage, ReportingLedgerData, ReportStatusVisitMetric, StatusCategory } from '../shared/types.js';
 import { calendarDay, isCalendarDate } from '../shared/calendar.js';
 export class ReportingMetricsError extends Error {
   constructor(public status: number, message: string) {
@@ -32,6 +32,13 @@ const emptyState = (): Record<StatusCategory, number> => ({
 });
 const terminal = (state: ReportIssueState) => state.category === 'done' || state.category === 'cancelled';
 const working = (state: ReportIssueState) => state.category === 'in_progress' || state.category === 'review';
+const sameStatus = (before: ReportIssueState | null | undefined, after: ReportIssueState) =>
+  before?.projectId === after.projectId && before.statusId === after.statusId;
+function medianSortedHours(sorted: number[]): number | null {
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
 export function parseReportQuery(input: unknown): ReportQuery {
   if (!input || typeof input !== 'object' || Array.isArray(input))
     fail(400, '보고서 조회 조건이 필요합니다.');
@@ -142,6 +149,12 @@ interface DayWork {
   at: number;
   inclusive: boolean;
 }
+interface StatusVisits {
+  state: ReportIssueState;
+  latest: { at: number; sequence: number };
+  hours: number[];
+  unknownEntries: number;
+}
 export function aggregateProjectReport(rawQuery: ReportQuery, input: {
   current: ReportIssueState[];
   ledger: ReportingLedgerData;
@@ -241,6 +254,9 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     !previous || at > previous.at || at === previous.at && sequence > previous.sequence;
   const completedIssueIds = new Set<string>();
   const cycleSamplesHours: number[] = [];
+  const statusVisits = new Map<string, StatusVisits>();
+  const openStatusEntries = new Map<string, number>();
+  const currentEpoch = epochs.find(epoch => epoch.start <= generated && epoch.end > generated);
   const period: ProjectReport['period'] = {
     created: 0,
     deleted: 0,
@@ -293,6 +309,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     const knownStates = new Map<string, ReportIssueState>();
     const snapshotCounts = emptyState();
     const cycleStartedAt = new Map<string, number>();
+    const statusEnteredAt = new Map<string, number>();
     const snapshotRequests = days
       .filter(day => day.epoch === epoch)
       .sort((a, b) => a.at - b.at);
@@ -304,6 +321,30 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
       const before = event.before;
       const after = event.after;
       const previous = knownStates.get(event.issueId);
+      const statusChanged = event.kind === 'changed' && before !== null && after !== null && before.statusId !== after.statusId;
+      if (statusChanged && at >= rangeStart && at < rangeEnd && matches(before)) {
+        let visits = statusVisits.get(before.statusId);
+        if (!visits) {
+          if (statusVisits.size >= MAX_REPORT_ISSUES)
+            fail(413, '보고서에 관측된 상태가 5,000개를 초과했습니다. 기간·유형·담당자를 좁혀 주세요.');
+          visits = { state: before, latest: { at, sequence: event.sequence }, hours: [], unknownEntries: 0 };
+          statusVisits.set(before.statusId, visits);
+        }
+        else if (follows(visits.latest, at, event.sequence)) {
+          visits.state = before;
+          visits.latest = { at, sequence: event.sequence };
+        }
+        const enteredAt = sameStatus(previous, before) ? statusEnteredAt.get(event.issueId) : undefined;
+        if (enteredAt === undefined) visits.unknownEntries++;
+        else visits.hours.push((at - enteredAt) / HOUR);
+      }
+      if (statusChanged || (event.kind === 'created' && before === null && after !== null)) {
+        statusEnteredAt.set(event.issueId, at);
+      }
+      // Baselines and restores establish a state without establishing its entry time.
+      else if (!after || !sameStatus(before, after) || !sameStatus(previous, after)) {
+        statusEnteredAt.delete(event.issueId);
+      }
       if (matches(previous || null))
         snapshotCounts[previous!.category]--;
       if (after) {
@@ -377,7 +418,8 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
         issueMetric.reopened++;
       }
     };
-    const observedUntil = Math.min(generated, rangeEnd);
+    // Current-state ages run through capture time even for a past date range.
+    const observedUntil = epoch === currentEpoch ? generated : Math.min(generated, rangeEnd);
     for (const request of snapshotRequests) {
       const belongsToSnapshot = (at: number) => request.inclusive
         ? at <= request.at
@@ -391,18 +433,38 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     }
     while (eventCursor < epoch.events.length && epoch.events[eventCursor].at <= observedUntil) {
       const event = epoch.events[eventCursor++];
-      if (event.at < rangeEnd)
+      if (event.at < rangeEnd || epoch === currentEpoch)
         applyObservedEvent(event);
+    }
+    if (epoch === currentEpoch) {
+      for (const issue of current) {
+        const enteredAt = statusEnteredAt.get(issue.issueId);
+        if (enteredAt !== undefined && sameStatus(knownStates.get(issue.issueId), issue))
+          openStatusEntries.set(issue.issueId, enteredAt);
+      }
     }
   }
   period.completedIssues = completedIssueIds.size;
   period.repeatedCompletions = period.completionTransitions - completedIssueIds.size;
   period.cycleSamples = cycleSamplesHours.length;
-  if (cycleSamplesHours.length) {
-    cycleSamplesHours.sort((a, b) => a - b);
-    const middle = Math.floor(cycleSamplesHours.length / 2);
-    period.medianCycleHours = cycleSamplesHours.length % 2 ? cycleSamplesHours[middle] : (cycleSamplesHours[middle - 1] + cycleSamplesHours[middle]) / 2;
-  }
+  period.medianCycleHours = medianSortedHours(cycleSamplesHours.sort((a, b) => a - b));
+  const completedVisits = [...statusVisits].map(([statusId, visits]): ReportStatusVisitMetric => {
+    const hours = visits.hours.sort((a, b) => a - b);
+    return {
+      statusId, statusLabel: visits.state.statusLabel, category: visits.state.category,
+      samples: hours.length, unknownEntries: visits.unknownEntries,
+      medianHours: medianSortedHours(hours), maxHours: hours.at(-1) ?? null,
+    };
+  }).sort((a, b) => (b.medianHours ?? -1) - (a.medianHours ?? -1) || a.statusLabel.localeCompare(b.statusLabel) || a.statusId.localeCompare(b.statusId));
+  const openIssues = current.filter(issue => !terminal(issue)).map((issue): ReportOpenStatusIssue => {
+    const { issueId, key, title, statusId, statusLabel, category, assigneeId } = issue;
+    const enteredAt = openStatusEntries.get(issueId);
+    return {
+      issueId, key, title, statusId, statusLabel, category, assigneeId,
+      enteredAt: enteredAt === undefined ? null : new Date(enteredAt).toISOString(),
+      elapsedHours: enteredAt === undefined ? null : (generated - enteredAt) / HOUR,
+    };
+  }).sort((a, b) => (b.elapsedHours ?? -1) - (a.elapsedHours ?? -1) || a.key.localeCompare(b.key) || a.issueId.localeCompare(b.issueId));
   const coverage = epochs.filter(epoch =>
     epoch.start <= generated && epoch.start < rangeEnd && epoch.end >= rangeStart &&
     Math.min(epoch.end, generated, rangeEnd) >= rangeStart
@@ -419,7 +481,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     a.issue.issueId.localeCompare(b.issue.issueId)
   );
   return {
-    definitionVersion: 1,
+    definitionVersion: 2,
     query,
     generatedAt: input.generatedAt,
     rangeStartAt: new Date(rangeStart).toISOString(),
@@ -428,6 +490,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     coverage: coverage.map(epoch => epoch.coverage),
     current: { total: current.length, state: currentState, overdue, dueSoon },
     period,
+    statusDuration: { completedVisits, openIssues },
     days: days.map(value => value.output),
     issues
   };

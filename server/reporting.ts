@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { z } from 'zod';
-import { STATUS, type Project, type ProjectReport, type ReportQuery, type ReportSnapshot, type ReportSnapshotSummary, type RichContent, type StatusCategory, type User } from '../shared/types.js';
+import { STATUS, type Issue, type Project, type ProjectReport, type ReportOpenStatusIssue, type ReportQuery, type ReportSnapshot, type ReportSnapshotSummary, type RichContent, type StatusCategory, type User } from '../shared/types.js';
 import type { ReportingLedger } from './reporting-ledger.js';
 import { aggregateProjectReport, parseReportQuery } from './reporting-metrics.js';
 import type { Store } from './store.js';
@@ -11,6 +11,7 @@ export class ReportingError extends Error {
 }
 
 const categories = ['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'] as const;
+const openCategories = ['backlog', 'todo', 'in_progress', 'review'] as const;
 const category = z.enum(categories);
 const count = z.number().int().nonnegative().safe();
 const duration = z.number().finite().nonnegative().nullable();
@@ -25,8 +26,18 @@ const queryShape = z.object({
   projectId: name, startDate: day, endDate: day, timeZone: name,
   issueType: name.nullable(), assigneeId: name.nullable(),
 }).strict();
-const reportShape = z.object({
-  definitionVersion: z.literal(1), query: queryShape, generatedAt: timestamp,
+const statusDurationShape = z.object({
+  completedVisits: z.array(z.object({
+    statusId: name, statusLabel: name, category, samples: count, unknownEntries: count,
+    medianHours: duration, maxHours: duration,
+  }).strict()).max(5000),
+  openIssues: z.array(z.object({
+    issueId: name, key: name, title: name, statusId: name, statusLabel: name,
+    category: z.enum(openCategories), assigneeId: name.nullable(), enteredAt: timestamp.nullable(), elapsedHours: duration,
+  }).strict()).max(5000),
+}).strict();
+const reportBase = z.object({
+  query: queryShape, generatedAt: timestamp,
   rangeStartAt: rangeTimestamp, rangeEndAt: rangeTimestamp, observedThrough: timestamp.nullable(),
   coverage: z.array(z.object({
     id: name, startedAt: timestamp, endedAt: timestamp.nullable(), reason: z.enum(['initial', 'restore']),
@@ -50,6 +61,11 @@ const reportShape = z.object({
     cycleHours: duration, deleted: z.boolean(),
   }).strict()).max(5000),
 }).strict();
+const reportShape = z.discriminatedUnion('definitionVersion', [
+  reportBase.extend({ definitionVersion: z.literal(1) }),
+  reportBase.extend({ definitionVersion: z.literal(2), statusDuration: statusDurationShape }),
+]);
+type DwellReport = Extract<z.infer<typeof reportShape>, { definitionVersion: 2 }>;
 const titleShape = z.string().trim().min(1).max(200);
 const snapshotShape = z.object({
   id: z.string().uuid(), projectId: name, actorId: name, title: titleShape, createdAt: timestamp,
@@ -63,6 +79,43 @@ interface ReportRoutes {
 
 function stateSummary(state: Record<StatusCategory, number>) {
   return categories.map(key => `${STATUS[key].label} ${state[key]}개`).join(' · ');
+}
+
+function validateStatusDuration(report: DwellReport): void {
+  const { completedVisits, openIssues } = report.statusDuration;
+  const statusIds = new Set<string>();
+  for (const visit of completedVisits) {
+    const { samples, unknownEntries, medianHours, maxHours } = visit;
+    const validDurations = samples === 0 ? medianHours === null && maxHours === null
+      : medianHours !== null && maxHours !== null && medianHours <= maxHours && (samples > 1 || medianHours === maxHours);
+    if (statusIds.has(visit.statusId) || !validDurations || samples === 0 && unknownEntries === 0) {
+      throw new ReportingError(400, '백업에 중복된 상태 또는 일치하지 않는 체류 시간 표본이 있습니다.');
+    }
+    statusIds.add(visit.statusId);
+  }
+
+  const reportIssues = new Set(report.issues.filter(row => !row.deleted).map(row => row.issue.issueId));
+  const openIds = new Set<string>();
+  const openCounts = { backlog: 0, todo: 0, in_progress: 0, review: 0 };
+  const generatedAt = Date.parse(report.generatedAt);
+  for (const row of openIssues) {
+    const expectedHours = row.enteredAt === null ? null : (generatedAt - Date.parse(row.enteredAt)) / 3_600_000;
+    if (openIds.has(row.issueId) || !reportIssues.has(row.issueId) || expectedHours !== row.elapsedHours ||
+        report.query.assigneeId !== null && row.assigneeId !== report.query.assigneeId) {
+      throw new ReportingError(400, '백업의 미완료 업무 상태 또는 체류 시각이 보고서와 일치하지 않습니다.');
+    }
+    openIds.add(row.issueId);
+    openCounts[row.category]++;
+  }
+  if (openCategories.some(key => openCounts[key] !== report.current.state[key])) {
+    throw new ReportingError(400, '백업의 미완료 업무 수가 보고서의 상태 집계와 일치하지 않습니다.');
+  }
+}
+
+function elapsedTime(hours: number): string {
+  if (hours > 0 && hours < 1 / 60) return '1분 미만';
+  if (hours < 1) return `${(hours * 60).toLocaleString('ko-KR', { maximumFractionDigits: 1 })}분`;
+  return `${hours.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}시간`;
 }
 
 export class ReportingService {
@@ -102,6 +155,7 @@ export class ReportingService {
           report.days.some((entry, i) => i > 0 && report.days[i - 1].date >= entry.date)) {
         throw new ReportingError(400, '백업에 중복된 보고서 보관본 또는 잘못된 프로젝트·기간·시각이 있습니다.');
       }
+      if (parsed.data.report.definitionVersion === 2) validateStatusDuration(parsed.data.report);
       ids.add(snapshot.id);
       documentIds.add(snapshot.documentId);
       return snapshot;
@@ -129,7 +183,6 @@ export class ReportingService {
     const heading = (text: string): RichContent => ({type:'heading',attrs:{level:2},content:[{type:'text',text}]});
     const href = `#/${encodeURIComponent(snapshot.projectId)}/reports/${snapshot.id}`;
     const covered = report.days.filter(value => value.coverage === 'complete').length;
-    const items = [...report.issues].sort((a, b) => b.completed - a.completed || b.reopened - a.reopened || a.issue.key.localeCompare(b.issue.key)).slice(0, 30);
     const issueIds: string[] = [];
     const content: RichContent[] = [
       paragraph(`${query.startDate} ~ ${query.endDate} · ${query.timeZone}`),
@@ -140,13 +193,34 @@ export class ReportingService {
       heading('작성 시점 업무 현황'),
       paragraph(`${stateSummary(current.state)} · 마감 지연 ${current.overdue}개`),
     ];
-    if (items.length) content.push(heading(`관련 업무 ${items.length}/${report.issues.length}개`));
-    for (const row of items) {
-      const label = `${row.issue.key} ${row.issue.title}`;
-      if (!row.deleted && this.store.get('issues', row.issue.issueId)) {
-        issueIds.push(row.issue.issueId);
-        content.push({type:'issueReference',attrs:{issueId:row.issue.issueId,label:label.slice(0,300)}});
+    const addIssue = (id: string, label: string, deleted = false) => {
+      if (!deleted && this.store.get<Issue>('issues', id)?.projectId === snapshot.projectId) {
+        issueIds.push(id);
+        content.push({type:'issueReference',attrs:{issueId:id,label:label.slice(0,300)}});
       } else content.push(paragraph(label));
+    };
+    const dwellIds = new Set<string>();
+    if (report.statusDuration) {
+      const { completedVisits, openIssues } = report.statusDuration;
+      const samples = completedVisits.reduce((sum, row) => sum + row.samples, 0);
+      const unknownExits = completedVisits.reduce((sum, row) => sum + row.unknownEntries, 0);
+      const timed = openIssues.filter((row): row is ReportOpenStatusIssue & { elapsedHours: number } => row.elapsedHours !== null);
+      content.push(heading('상태별 체류 시간'), paragraph(
+        `기간 내 상태 이탈 ${samples.toLocaleString()}건의 체류 시간 집계 · 진입 미관측 ${unknownExits.toLocaleString()}건`
+      ), paragraph(
+        `미완료 업무 ${openIssues.length.toLocaleString()}개 중 현재 상태 진입 관측 ${timed.length.toLocaleString()}개`
+      ));
+      for (const issue of timed.slice(0, 3)) {
+        dwellIds.add(issue.issueId);
+        content.push(paragraph(`${issue.key} · ${issue.statusLabel} · ${elapsedTime(issue.elapsedHours)} 체류`));
+        addIssue(issue.issueId, `${issue.key} ${issue.title}`);
+      }
+    }
+    const items = report.issues.filter(row => !dwellIds.has(row.issue.issueId))
+      .sort((a, b) => b.completed - a.completed || b.reopened - a.reopened || a.issue.key.localeCompare(b.issue.key)).slice(0, 30 - dwellIds.size);
+    if (items.length) content.push(heading(`관련 업무 ${items.length}/${report.issues.length - dwellIds.size}개`));
+    for (const row of items) {
+      addIssue(row.issue.issueId, `${row.issue.key} ${row.issue.title}`, row.deleted);
     }
     content.push(heading('회의 메모'), {type:'paragraph'});
     return {content:{type:'doc',content},issueIds};

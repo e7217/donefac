@@ -115,7 +115,7 @@ test('body contents navigation survives live state and active and archived versi
     assert.deepEqual(live.data.document.content, after);
 
     const { data: backup } = await f.call<Backup>('/export');
-    assert.equal(backup.schemaVersion, 54);
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 53 } });
     assert.equal(downgraded.status, 400);
     assert.match(downgraded.data.error, /schemaVersion 54/u);
@@ -125,7 +125,7 @@ test('body contents navigation survives live state and active and archived versi
     state.schemaVersion = 7;
     assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
     assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
-    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 54 } })).status, 200);
     const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
     assert.deepEqual(restored.document.content, after);
 

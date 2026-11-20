@@ -18,6 +18,7 @@ import { api } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { WorklogReport } from './WorklogReport';
 import { FieldBreakdownReport } from './FieldBreakdownReport';
+import { reportDuration, StatusDurationReport } from './ReportStatusDuration';
 import './reports.css';
 
 type Props = FeatureProps & { snapshotId?: string | null };
@@ -73,13 +74,6 @@ function time(value: string | null, zone?: string) {
   } catch {
     return value;
   }
-}
-function duration(hours: number | null): string {
-  if (hours === null) return '표본 없음';
-  if (hours > 0 && hours < 1 / 60) return '1분 미만';
-  return hours > 0 && hours < 1
-    ? `${(hours * 60).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}분`
-    : `${hours.toLocaleString('ko-KR', { maximumFractionDigits: 2 })}시간`;
 }
 function summary(snapshot: ReportSnapshot): ReportSnapshotSummary {
   const { report, ...rest } = snapshot;
@@ -767,7 +761,7 @@ function ReportBody({
         <Stat label="재오픈 전이" value={report.period.reopened} />
         <Stat
           label="관측 진행→완료 중앙값"
-          value={duration(report.period.medianCycleHours)}
+          value={reportDuration(report.period.medianCycleHours)}
           detail={`실제 관측 ${report.period.cycleSamples}개 표본`}
         />
       </div>
@@ -820,6 +814,10 @@ function ReportBody({
           </div>
         )}
       </details>
+      {report.statusDuration ? <StatusDurationReport key={`${frozen ? report.generatedAt : ''}:${JSON.stringify(report.query)}`}
+        data={data} report={report.statusDuration} projectId={report.query.projectId} frozen={frozen}
+        openIssue={openIssue} formatTime={value => time(value, report.query.timeZone)} />
+        : frozen && <p className="reports-method">이 보관본에는 상태별 체류 시간 기록이 없습니다.</p>}
       <section className="card reports-drilldown" aria-label="보고서 업무 상세">
         <header>
           <div>
@@ -955,7 +953,7 @@ function IssueRow({
         {row.completed} / {row.reopened}
       </td>
       <td>{time(row.lastCompletedAt, timeZone)}</td>
-      <td>{duration(row.cycleHours)}</td>
+      <td>{reportDuration(row.cycleHours)}</td>
     </tr>
   );
 }
