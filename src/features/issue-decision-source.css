@@ -26,6 +26,21 @@
   overflow-wrap: anywhere;
 }
 
+.issue-document-entry {
+  flex: 1;
+  min-width: 0;
+}
+
+.issue-document-entry-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 3px;
+  color: #4d6b5c;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .issue-document-preview-trigger {
   display: inline-flex;
   flex: none;

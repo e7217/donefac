@@ -2,13 +2,14 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
 import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
+import { findIssueDocumentReferences } from '../../shared/document-references';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
@@ -54,6 +55,8 @@ function IssuePanelContent(props: IssuePanelProps) {
     refresh, notify, openIssue, openDocument } = props;
   const issue = data.issues.find(i => i.id === issueId);
   const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
+  const bodyReferences = useMemo(() => new Map(findIssueDocumentReferences(data.documents, issueId)
+    .map(reference => [reference.document.id, reference])), [data.documents, issueId]);
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
@@ -238,7 +241,9 @@ function IssuePanelContent(props: IssuePanelProps) {
 
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
-  const availableDocuments = data.documents.filter(d => !linkedDocuments.some(l => l.documentId === d.id));
+  const linkedDocumentIds = new Set(linkedDocuments.map(link => link.documentId));
+  const availableDocuments = data.documents.filter(doc => !linkedDocumentIds.has(doc.id));
+  const bodyOnlyReferences = [...bodyReferences.values()].filter(({ document }) => !linkedDocumentIds.has(document.id));
   const activities = data.activities.filter(a => a.resourceId === issueId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const children = data.issues.filter(i => i.parentId === issueId).map(child => ({
     child, status: statusMeta(data, child.projectId, child.status),
@@ -351,6 +356,27 @@ function IssuePanelContent(props: IssuePanelProps) {
     } catch (err) { notify(errorMessage(err), 'error'); }
     requestAnimationFrame(() => (opener.isConnected ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
   }
+  function linkedDocumentRow(doc: DocPage, link?: ResourceLink) {
+    const count = bodyReferences.get(doc.id)?.count;
+    const space = link ? undefined : data.projects.find(project => project.id === doc.projectId)?.name ?? '팀 공통';
+    const title = doc.title || '제목 없는 문서';
+    return <div className="issue-related-row">
+      <FileText size={15} aria-hidden="true" />
+      <div className="issue-document-entry">
+        <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link">{title}</button>
+        {(space || count) && <small className="issue-document-entry-meta">
+          {space && <span>{space}</span>}
+          {count && <span>본문 참조 {count}곳</span>}
+        </small>}
+      </div>
+      <button type="button" className="issue-document-preview-trigger" aria-label={`${title} 미리보기`} data-preview-document-id={doc.id}
+        onClick={event => {
+          if (onPreviewDocument(doc.id)) previewOpener.current = event.currentTarget;
+        }}><Eye size={14} aria-hidden="true" />미리보기</button>
+      {link && <button type="button" className="issue-icon-button" onClick={() => unlinkDocument(link.id)}
+        aria-label={`${title} 연결 해제`} title="연결 해제"><X size={14} /></button>}
+    </div>;
+  }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <>
     <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor || previewDocument)} onMouseDown={event => {
@@ -447,15 +473,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           if (!doc) return null;
           const source = link.documentSource;
           return <div key={link.id}>
-            <div className="issue-related-row">
-              <FileText size={15} />
-              <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link">{doc.title}</button>
-              <button type="button" className="issue-document-preview-trigger" aria-label={`${doc.title} 미리보기`} data-preview-document-id={doc.id}
-                onClick={event => {
-                  if (onPreviewDocument(doc.id)) previewOpener.current = event.currentTarget;
-                }}><Eye size={14} aria-hidden="true" />미리보기</button>
-              <button type="button" className="issue-icon-button" onClick={() => unlinkDocument(link.id)} aria-label={`${doc.title} 연결 해제`} title="연결 해제"><X size={14} /></button>
-            </div>
+            {linkedDocumentRow(doc, link)}
             {source && <section className="issue-decision-source" aria-label="결정 근거">
               <h4>결정 근거</h4>
               <blockquote>{source.text}</blockquote>
@@ -467,6 +485,10 @@ function IssuePanelContent(props: IssuePanelProps) {
         })}
         <div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div>
       </section>
+      {bodyOnlyReferences.length > 0 && <section className="issue-related-section issue-linked-documents" aria-label="본문에서 이 업무를 참조한 문서">
+        <h3><Link2 size={16} aria-hidden="true" /> 본문에서 이 업무를 참조한 문서 <span>{bodyOnlyReferences.length}</span></h3>
+        {bodyOnlyReferences.map(({ document }) => <div key={document.id}>{linkedDocumentRow(document)}</div>)}
+      </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} links={gitlabLinks} refresh={refresh} notify={notify}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} />
@@ -496,8 +518,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>
     </aside></div>
     {previewDocument && <IssueDocumentPreview key={previewDocument.id} data={data} document={previewDocument}
+      referenceIssueId={bodyReferences.has(previewDocument.id) ? issueId : undefined}
       onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
-      openIssue={navigateIssue} openDocument={navigateDocument} />}
+      openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
       anchor={{ issueId, otherRole: dependencyEditor.otherRole }} staleMessage={staleDependencyMessage} busy={dependencyBusy}

@@ -43,17 +43,26 @@
 
 .issue-document-preview-body:focus-visible { outline: 2px solid #348478; outline-offset: -2px; }
 .issue-document-preview-body > .document-outline { margin-top: 0; }
+.issue-document-preview-body [data-preview-issue-reference][aria-current="location"] {
+  outline: 2px solid #348478;
+  outline-offset: -2px;
+  background: #eaf6ef;
+}
 
 .issue-document-preview-footer {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 8px;
   padding: 10px 20px;
   border-top: 1px solid #e5ede8;
   background: #fff;
 }
 
 .issue-document-preview-footer > .btn { min-height: 40px; }
+.issue-document-preview-reference-status { width: 100%; color: #567065; font-size: .8125rem; }
+.issue-document-preview-reference-status:empty { position: absolute; }
 
 @media (max-width: 480px) {
   .issue-document-preview-header, .issue-document-preview-body, .issue-document-preview-footer { padding-inline: 14px; }

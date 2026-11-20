@@ -32,9 +32,9 @@ export function DocumentBlocksProvider({ data, documentId, content, openIssue, o
 }
 function contextOf(value: Context | null): Context { if (!value) throw new Error('문서 블록을 표시할 문맥이 없습니다.'); return value; }
 function textAttr(node: RichContent, name: string) { return typeof node.attrs?.[name] === 'string' ? node.attrs[name] as string : ''; }
-function issueCard(context: Context, id: string, label: string, key?: string) {
+function issueCard(context: Context, id: string, label: string, key?: string, previewReference = false) {
   const issue = context.data.issues.find(item => item.id === id), meta = issue ? statusMeta(context.data, issue.projectId, issue.status) : null;
-  return <button key={key} type="button" className={`doc-reference-card issue ${issue ? '' : 'is-missing'}`} disabled={!issue} aria-label={issue ? `참조 업무 열기 ${issue.key} ${issue.title}` : `찾을 수 없는 업무 ${label || id}`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (issue) context.openIssue(issue.id); }}><span className="doc-reference-icon"><Link2 size={15} /></span><span><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || label || id}</strong></span>{meta && <em style={{ color: meta.color }}><i style={{ background: meta.color }} />{meta.label}</em>}</button>;
+  return <button key={key} type="button" className={`doc-reference-card issue ${issue ? '' : 'is-missing'}`} disabled={!issue} data-preview-issue-reference={previewReference && issue ? '' : undefined} aria-label={issue ? `참조 업무 열기 ${issue.key} ${issue.title}` : `찾을 수 없는 업무 ${label || id}`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (issue) context.openIssue(issue.id); }}><span className="doc-reference-icon"><Link2 size={15} /></span><span><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || label || id}</strong></span>{meta && <em style={{ color: meta.color }}><i style={{ background: meta.color }} />{meta.label}</em>}</button>;
 }
 function documentCard(context: Context, id: string, label: string, included = false, key?: string) {
   const document = context.data.documents.find(item => item.id === id);
@@ -47,7 +47,7 @@ function safeUrl(value: unknown, image = false): string | undefined {
   try { const url = new URL(value); if ((['https:', 'http:'].includes(url.protocol) || !image && ['mailto:', 'tel:'].includes(url.protocol)) && !url.username && !url.password) return value; } catch { /* Untrusted content stays text when the URL is invalid. */ }
 }
 type PinnedSource = { documentId: string; revisionId: string };
-type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[]; section?: { id: string; target?: string } };
+type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -192,7 +192,10 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (state.mode && ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'issueList', 'issueSummary'].includes(node.type)) {
     return <p className="doc-pinned-reference" key={key}>{documentPlainText(node)}</p>;
   }
-  if (node.type === 'issueReference') return issueCard(context, textAttr(node, 'issueId'), textAttr(node, 'label'), key);
+  if (node.type === 'issueReference') {
+    const id = textAttr(node, 'issueId');
+    return issueCard(context, id, textAttr(node, 'label'), key, state.includeDepth === 0 && id === state.referenceIssueId);
+  }
   if (node.type === 'documentReference') return documentCard(context, textAttr(node, 'documentId'), textAttr(node, 'label'), false, key);
   if (node.type === 'documentInclude') return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key);
   if (node.type === 'issueList' || node.type === 'issueSummary') {
@@ -246,7 +249,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref }: {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId }: {
   content: RichContent;
   documentId?: string;
   nodeBudget?: number;
@@ -255,12 +258,13 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   showOutline?: boolean;
   sectionId?: string | null;
   sectionLinkHref?: (sectionId: string) => string;
+  referenceIssueId?: string;
 }) {
   const context = contextOf(useContext(BlockContext));
   const contentRoot = useRef<HTMLDivElement>(null);
   const lastSection = useRef<{ documentId?: string; sectionId: string } | null>(null);
   const outline: DocumentOutlineEntry[] | undefined = showOutline ? [] : undefined;
-  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined };
+  const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId };
   const body = renderNode(content, context, state, 'readonly');
   const sectionTarget = state.section?.target;
   const goToHeading = useCallback((target: string) => {

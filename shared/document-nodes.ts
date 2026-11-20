@@ -1,4 +1,5 @@
 import { Node, mergeAttributes } from '@tiptap/core';
+import { documentNodes } from './document-references.js';
 import type { ContentReference, RichContent } from './types.js';
 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
@@ -34,15 +35,6 @@ export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<strin
   if (nodeType === 'issueSummary') return 4;
   if (nodeType === 'issueList') return 3;
   return versionTwoNodes.has(nodeType) ? 2 : 1;
-}
-
-function* documentNodes(content: RichContent): Generator<RichContent> {
-  const pending = [content];
-  while (pending.length) {
-    const node = pending.pop()!;
-    yield node;
-    for (let index = (node.content?.length || 0) - 1; index >= 0; index--) pending.push(node.content![index]);
-  }
 }
 
 export function documentContentSchemaVersion(content: RichContent): DocumentSchemaVersion {

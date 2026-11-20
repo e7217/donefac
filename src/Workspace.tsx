@@ -9,6 +9,7 @@ import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflo
 import { issueSearchText } from '../shared/issue-schema';
 import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
+import { countIssueDocumentReferences } from '../shared/document-references';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
@@ -87,8 +88,9 @@ function hasDocumentIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'documents' && route.documentId && route.issueId);
 }
 function canPreviewIssueDocument(snapshot: WorkspaceSnapshot, issueId: string, documentId: string): boolean {
-  return snapshot.documents.some(document => document.id === documentId) &&
-    snapshot.resourceLinks.some(link => link.issueId === issueId && link.documentId === documentId);
+  const document = snapshot.documents.find(value => value.id === documentId);
+  return Boolean(document && (snapshot.resourceLinks.some(link => link.issueId === issueId && link.documentId === documentId) ||
+    countIssueDocumentReferences(document.content, issueId) > 0));
 }
 function confirmRouteNavigation(previous: WorkspaceRoute | null, next: WorkspaceRoute): boolean {
   if (previous?.issueId && previous.documentPreviewId !== next.documentPreviewId &&
