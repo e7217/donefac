@@ -130,3 +130,21 @@
 .issue-children-heading > h3 { margin: 0; }
 .issue-children-heading > .btn { margin-inline-start: auto; }
 .issue-children-completed { color: #546a5d; font-size: 11px; }
+.issue-panel-document-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  pointer-events: none;
+}
+
+.issue-panel-document-layer > * {
+  pointer-events: auto;
+}
+
+.issue-panel-document-layer .issue-panel-content {
+  overscroll-behavior: contain;
+}
+
+.issue-panel-document-layer ~ .toast {
+  z-index: 310;
+}

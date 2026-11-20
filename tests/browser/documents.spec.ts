@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test';
-import type { Comment, DocPage, DocRevision, Issue, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import { test as base, expect, type APIRequestContext, type Dialog, type Page } from '@playwright/test';
+import { documentSectionHash } from '../../shared/document-sections';
+import type { Comment, DocPage, DocRevision, DocumentPublicationView, Issue, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 const richParagraph = (text: string): RichContent => ({
   type: 'doc',
@@ -16,7 +17,7 @@ type DocumentFixture = {
 // This context belongs to the fixture, rather than page.request. Its teardown can
 // remove synthetic records even after a test timeout has closed the browser page.
 const test = base.extend<{ syntheticDocument: DocumentFixture }>({
-  syntheticDocument: [async ({ playwright, baseURL }, use, testInfo) => {
+  syntheticDocument: [async ({ playwright, baseURL }, provideFixture, testInfo) => {
     const requests = await playwright.request.newContext({ baseURL });
     const prefix = `문서 회귀 검증 ${randomUUID()}`;
     const initialText = '합성 원본 문서입니다. 실제 팀 자료를 사용하지 않습니다.';
@@ -32,7 +33,7 @@ const test = base.extend<{ syntheticDocument: DocumentFixture }>({
       });
       expect(response.status()).toBe(201);
       created = await response.json() as DocPage;
-      await use({ document: created, requests, initialText });
+      await provideFixture({ document: created, requests, initialText });
     } finally {
       try {
         const response = await requests.get('/api/workspace', { timeout: 5_000 });
@@ -287,23 +288,198 @@ test('문서 저장 응답을 기다리는 동안 작업자 전환을 막고 다
   expect(revisions[0].plainText).toBe('작업자 A가 저장하는 내용');
 });
 
-test('편집 중인 문서에서 연결 업무를 열 때 이동 확인은 한 번만 표시된다', async ({ page, syntheticDocument }) => {
+test('360px에서 다른 프로젝트 연결 업무를 열고 돌아와도 문서 절과 초안을 유지한다', async ({ page, syntheticDocument }) => {
+  test.setTimeout(65_000);
   const { document, requests } = syntheticDocument;
+  const workspace = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const documentProject = workspace.projects.find(project => project.id === document.projectId);
+  const issueProject = workspace.projects.find(project => project.id !== document.projectId);
+  const assignee = workspace.users[1];
+  if (!documentProject || !issueProject || !assignee) throw new Error('교차 프로젝트 업무를 검증할 합성 자료가 없습니다.');
+  const sectionId = `decision-${randomUUID()}`;
+  const sectionHeading = '일정 결정 사항';
+  const originalBody = '업무를 연결한 저장 본문입니다.';
+  const saved = await requests.patch(`/api/documents/${document.id}`, {
+    data: { expectedVersion: document.version, content: { type: 'doc', content: [
+      { type: 'heading', attrs: { level: 2, sectionId }, content: [{ type: 'text', text: sectionHeading }] },
+      richParagraph(originalBody).content![0],
+    ] } },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+  const documentHash = documentSectionHash(document.id, sectionId, documentProject.id);
+  const routePath = documentHash.split('?')[0];
+  const currentRoute = () => {
+    const [path, search] = new URL(page.url()).hash.split('?');
+    return { path, parameters: Object.fromEntries(new URLSearchParams(search)) };
+  };
+  const prompts: string[] = [];
+  let approve = false;
+  const handleDialog = async (dialog: Dialog) => {
+    prompts.push(dialog.message());
+    if (approve) await dialog.accept();
+    else await dialog.dismiss();
+  };
   let issue: Issue | undefined;
   try {
-    const response = await requests.post('/api/issues', { data: { projectId: document.projectId, title: `${document.title} 연결 업무` } });
-    expect(response.status()).toBe(201);
+    const response = await requests.post('/api/issues', { data: {
+      projectId: issueProject.id, title: `${document.title} 연결 업무`, assigneeId: assignee.id, status: 'in_progress',
+    } });
+    expect(response.status(), await response.text()).toBe(201);
     issue = await response.json() as Issue;
     expect((await requests.post('/api/resource-links', { data: { issueId: issue.id, documentId: document.id, kind: 'related' } })).status()).toBe(201);
-    await openDocument(page, document);
-    await page.locator('.docs-prose').fill('업무를 열기 전에 임시 보관할 문서 편집');
-    await page.getByRole('button', { name: '연결', exact: true }).click();
-    let dialogs = 0;
-    const accept = async (dialog: import('@playwright/test').Dialog) => { dialogs++; await dialog.accept(); };
-    page.on('dialog', accept);
-    await page.locator('.docs-linked-issue').filter({ hasText: issue.title }).click();
-    await expect(page.getByRole('dialog').getByRole('heading', { name: issue.title, exact: true })).toBeVisible();
-    expect(dialogs).toBe(1);
-    page.off('dialog', accept);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/${documentHash}`);
+    const localTitle = `${document.title} 현지 편집`;
+    const localBody = '업무를 확인하는 동안에도 유지할 문서 편집';
+    const localComment = '아직 보내지 않은 이 문서의 댓글';
+    const docTitle = page.locator('.docs-title-input');
+    const editor = page.locator('.docs-prose');
+    const section = editor.locator(`[data-document-section-id="${sectionId}"]`);
+    const documentComment = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await expect(section).toHaveText(sectionHeading);
+    await expect(docTitle).toHaveValue(document.title);
+    await docTitle.fill(localTitle);
+    const paragraph = editor.getByText(originalBody, { exact: true });
+    await paragraph.click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(` ${localBody}`);
+    await expect(editor).toContainText(localBody);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    await documentComment.fill(localComment);
+    const details = page.getByLabel('문서 상세 정보', { exact: true });
+    await details.getByRole('button', { name: '연결', exact: true }).click();
+    const linkedIssue = details.locator('.docs-linked-issue').filter({ hasText: issue.title });
+    await expect(linkedIssue).toContainText(assignee.name);
+    await expect(linkedIssue).toContainText('진행 중');
+
+    page.on('dialog', handleDialog);
+    await linkedIssue.click();
+    const drawer = page.getByRole('dialog', { name: issue.title, exact: true });
+    const ticketTitle = drawer.getByRole('textbox', { name: '제목', exact: true });
+    const ticketComment = drawer.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const closeTicket = drawer.getByRole('button', { name: '업무 상세 닫기', exact: true });
+    await expect(drawer.locator('.issue-panel-breadcrumb')).toContainText(issueProject.name);
+    await expect(closeTicket).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect.poll(() => drawer.evaluate(element => element.contains(window.document.activeElement))).toBe(true);
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId, issue: issue.id } });
+    await expect(docTitle).toHaveValue(localTitle);
+    await expect(editor).toContainText(localBody);
+    await expect(section).toHaveText(sectionHeading);
+    expect(prompts).toEqual([]);
+
+    // The ticket still has its own confirmation, even though the document stays mounted.
+    const localTicketTitle = '아직 저장하지 않은 연결 업무 제목';
+    const localTicketComment = '아직 보내지 않은 연결 업무의 댓글';
+    await ticketTitle.fill(localTicketTitle);
+    await ticketComment.fill(localTicketComment);
+    await page.goBack();
+    await expect.poll(() => prompts.length).toBe(1);
+    expect(prompts[0]).toContain('저장하지 않은 업무 변경사항');
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId, issue: issue.id } });
+    await expect(ticketTitle).toHaveValue(localTicketTitle);
+    await expect(ticketComment).toHaveValue(localTicketComment);
+    await expect(docTitle).toHaveValue(localTitle);
+
+    approve = true;
+    await page.goBack();
+    await expect(drawer).toHaveCount(0);
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId } });
+    await expect(linkedIssue).toBeFocused();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('저장하지 않은 업무 변경사항');
+    await page.goForward();
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId, issue: issue.id } });
+    await expect(ticketTitle).toHaveValue(issue.title);
+    await expect(ticketComment).toHaveValue('');
+    await drawer.getByRole('button', { name: document.title, exact: true }).click();
+    await expect(drawer).toHaveCount(0);
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId } });
+    expect(prompts).toHaveLength(2);
+    await expect(linkedIssue).toBeVisible();
+    await details.getByRole('button', { name: '댓글', exact: true }).click();
+    await expect(documentComment).toHaveValue(localComment);
+    await expect(docTitle).toHaveValue(localTitle);
+    await expect(editor).toContainText(localBody);
+
+    // Leaving the document is still guarded, and the approved departure stashes its drafts.
+    await details.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
+    approve = false;
+    await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
+    const issueNavigation = page.locator('.project-navigation button').filter({ hasText: /^업무/ });
+    await issueNavigation.click();
+    await expect.poll(() => prompts.length).toBe(3);
+    expect(prompts[2]).toContain('저장하지 않은 편집');
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId } });
+    await expect(docTitle).toHaveValue(localTitle);
+    approve = true;
+    await issueNavigation.click();
+    await expect(page.locator('.documents-feature')).toHaveCount(0);
+    await page.goBack();
+    await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId } });
+    await expect(docTitle).toHaveValue(localTitle);
+    await expect(editor).toContainText(localBody);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    await expect(documentComment).toHaveValue(localComment);
+    expect(prompts).toHaveLength(4);
+  } finally {
+    page.off('dialog', handleDialog);
+    if (issue) await requests.delete(`/api/issues/${issue.id}`);
+  }
+});
+
+test('고정 발행 문서 주소에 업무 상세를 열어도 발행 버전과 절을 유지한다', async ({ page, syntheticDocument }) => {
+  test.setTimeout(60_000);
+  const { document, requests, initialText } = syntheticDocument;
+  const workspace = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const author = workspace.users.find(user => user.id === document.authorId);
+  const reviewer = workspace.users.find(user => user.id !== document.authorId);
+  const otherProject = workspace.projects.find(project => project.id !== document.projectId);
+  if (!author || !reviewer || !document.projectId || !otherProject) throw new Error('고정 발행본을 검증할 합성 자료가 없습니다.');
+  const path = `/api/documents/${document.id}/publication`;
+  const sectionId = `published-${randomUUID()}`;
+  const sectionHeading = '발행한 업무 결정';
+  let issue: Issue | undefined;
+  try {
+    const response = await requests.post('/api/issues', { data: { projectId: otherProject.id, title: `${document.title} 발행 연결 업무` } });
+    expect(response.status(), await response.text()).toBe(201);
+    issue = await response.json() as Issue;
+    const prepared = await requests.patch(`/api/documents/${document.id}`, {
+      headers: { 'X-Actor-Id': author.id }, data: { expectedVersion: document.version, content: { type: 'doc', content: [
+        { type: 'heading', attrs: { level: 2, sectionId }, content: [{ type: 'text', text: sectionHeading }] },
+        richParagraph(initialText).content![0],
+        { type: 'issueReference', attrs: { issueId: issue.id, label: issue.title } },
+      ] } },
+    });
+    expect(prepared.status(), await prepared.text()).toBe(200);
+    const state = await (await requests.get(path)).json() as DocumentPublicationView;
+    const reviewResponse = await requests.post(path, { headers: { 'X-Actor-Id': author.id }, data: {
+      action: 'request', reviewerId: reviewer.id, expectedVersion: state.version, workspaceGeneration: state.workspaceGeneration,
+      expectedDocumentVersion: state.documentVersion,
+    } });
+    expect(reviewResponse.status(), await reviewResponse.text()).toBe(200);
+    const review = await reviewResponse.json() as DocumentPublicationView;
+    const publishResponse = await requests.post(path, { headers: { 'X-Actor-Id': reviewer.id }, data: {
+      action: 'publish', expectedVersion: review.version, workspaceGeneration: review.workspaceGeneration,
+    } });
+    expect(publishResponse.status(), await publishResponse.text()).toBe(200);
+    const release = await publishResponse.json() as DocumentPublicationView;
+    const revision = release.publishedRevision;
+    if (!revision) throw new Error('발행 검증에 사용할 저장본이 생성되지 않았습니다.');
+    const publishedHash = documentSectionHash(document.id, sectionId, document.projectId, { kind: 'published', revisionId: revision.id });
+    await page.goto(`/${publishedHash}&issue=${issue.id}`);
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    await expect(ticket.locator('.issue-panel-breadcrumb')).toContainText(otherProject.name);
+    await expect.poll(() => Object.fromEntries(new URLSearchParams(new URL(page.url()).hash.split('?')[1]))).toEqual({
+      issue: issue.id, publication: 'published', revision: revision.id, section: sectionId,
+    });
+    await expect(ticket.getByRole('button', { name: '업무 상세 닫기', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(ticket).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).hash).toBe(publishedHash);
+    const publishedContent = page.getByRole('region', { name: '발행 고정본 내용', exact: true });
+    await expect(publishedContent).toContainText(initialText);
+    await expect(publishedContent.getByRole('heading', { name: sectionHeading, exact: true })).toBeVisible();
   } finally { if (issue) await requests.delete(`/api/issues/${issue.id}`); }
 });

@@ -118,8 +118,11 @@ test('360px 문서에서 공유 보기 업무 목록을 삽입하고 현재 상�
     const title = page.getByRole('textbox', {name:'문서 제목',exact:true});
     const editedTitle = `${f.source.title} 목록과 함께 저장`;
     await title.fill(editedTitle);
-    page.once('dialog', dialog => dialog.dismiss());
     await initial.click();
+    const details = page.getByRole('dialog', {name:f.issue.title,exact:true});
+    await expect(details).toBeVisible();
+    await expect(page.locator('.docs-title-input')).toHaveValue(editedTitle);
+    await details.getByRole('button', {name:'업무 상세 닫기',exact:true}).click();
     await expect(title).toHaveValue(editedTitle);
     await page.locator('.docs-save-button').click();
     await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
@@ -143,8 +146,9 @@ test('360px 문서에서 공유 보기 업무 목록을 삽입하고 현재 상�
     await expect(latest).toContainText(f.workspace.users[1].name);
     expect((await currentDoc(f)).version).toBe(saved.version);
     await latest.click();
-    await expect(page.getByRole('dialog', {name:latestTitle,exact:true})).toBeVisible();
-    await open(page, f);
+    const updatedDetails = page.getByRole('dialog', {name:latestTitle,exact:true});
+    await expect(updatedDetails).toBeVisible();
+    await updatedDetails.getByRole('button', {name:'업무 상세 닫기',exact:true}).click();
 
     expect((await f.requests.delete(`/api/views/${view.id}?expectedVersion=${view.version}`)).status()).toBe(200);
     await page.getByRole('button', {name:'참조 새로고침',exact:true}).click();
@@ -208,8 +212,10 @@ test('360px 회의록에서 공유 보기 업무 현황을 바꾸고 묶음별 �
     await expect(ticket(ongoing)).toBeVisible();
     expect((await currentDoc(f)).version).toBe(initial.version);
     await ticket(waiting).click();
-    await expect(page.getByRole('dialog', {name:waiting.title,exact:true})).toBeVisible();
-    await open(page, f);
+    const details = page.getByRole('dialog', {name:waiting.title,exact:true});
+    await expect(details).toBeVisible();
+    await details.getByRole('button', {name:'업무 상세 닫기',exact:true}).click();
+    await expect(ticket(waiting)).toBeVisible();
 
     const settings = page.getByRole('dialog', {name:'업무 현황 설정',exact:true});
     async function regroup(value: string) {

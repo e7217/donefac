@@ -15,7 +15,7 @@ import type {
   WorkspaceSnapshot,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { DocumentBlocksProvider, ReadonlyDocumentContent } from './DocumentBlocks';
 import './document-publication.css';
 
@@ -30,6 +30,7 @@ export interface DocumentPublicationProps {
   initialSnapshot?: DocumentPublicationTarget | null;
   projectId?: string;
   sectionId?: string | null;
+  covered?: boolean;
 }
 
 type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
@@ -89,6 +90,7 @@ function PublicationDialog({
   initialSnapshot,
   projectId,
   sectionId,
+  covered = false,
 }: DocumentPublicationProps) {
   const titleId = useId();
   const [view, setView] = useState<DocumentPublicationView | null>(null);
@@ -109,6 +111,7 @@ function PublicationDialog({
   const [snapshotError, setSnapshotError] = useState('');
   const dialog = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const wasCovered = useRef(covered);
   const active = useRef(true);
   const pending = useRef(false);
   const dirty = useRef(false);
@@ -189,15 +192,25 @@ function PublicationDialog({
 
   useEffect(() => {
     const previous = window.document.activeElement;
-    closeButton.current?.focus();
+    closeButton.current?.focus({ preventScroll: true });
     return () => {
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };
   }, []);
 
   useEffect(() => {
+    const revealed = wasCovered.current && !covered;
+    wasCovered.current = covered;
+    if (!revealed) return;
+    const frame = requestAnimationFrame(() => {
+      if (!dialog.current?.contains(window.document.activeElement)) closeButton.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [covered]);
+
+  useEffect(() => {
     const navigate = (event: Event) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || isDocumentPreservedByNavigation(event, page.id)) return;
       if (pending.current) {
         event.preventDefault();
         notify('문서 검토 처리가 끝난 뒤 이동해 주세요.', 'error');
@@ -224,7 +237,7 @@ function PublicationDialog({
       window.removeEventListener('teamspace:navigate', navigate);
       window.removeEventListener('beforeunload', unload);
     };
-  }, [notify, onClose, resetNotes]);
+  }, [notify, onClose, page.id, resetNotes]);
 
   const close = useCallback(() => {
     if (pending.current) {
@@ -237,6 +250,7 @@ function PublicationDialog({
   }, [notify, onClose, resetNotes]);
 
   useEffect(() => {
+    if (covered) return;
     function keyboard(event: KeyboardEvent) {
       const modal = dialog.current;
       if (!modal) return;
@@ -260,7 +274,7 @@ function PublicationDialog({
     }
     window.addEventListener('keydown', keyboard, true);
     return () => window.removeEventListener('keydown', keyboard, true);
-  }, [close]);
+  }, [close, covered]);
 
   const fetchSnapshot = useCallback(async ({kind,revisionId}:DocumentPublicationTarget, generation:string|null) => {
     snapshotRequest.current?.abort();
@@ -417,6 +431,7 @@ function PublicationDialog({
   return createPortal(
     <div
       className="document-publication-backdrop"
+      inert={covered}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) close();
       }}
@@ -425,7 +440,7 @@ function PublicationDialog({
         ref={dialog}
         className="document-publication-dialog"
         role="dialog"
-        aria-modal="true"
+        aria-modal={covered ? undefined : true}
         aria-labelledby={titleId}
         tabIndex={-1}
       >

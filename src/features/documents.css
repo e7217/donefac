@@ -158,8 +158,11 @@
 .docs-comment-form .btn { font-size:10px!important; padding:8px 10px!important; }
 .docs-linked-issue { display:block; background:#fff; border:1px solid #e6ebf3; border-radius:7px; width:100%; padding:12px; text-align:left; margin-bottom:9px; cursor:pointer; }
 .docs-linked-issue:hover { border-color:#c2d1f6; background:#f9fbff; }
-.docs-linked-issue>span { display:flex; align-items:center; justify-content:space-between; font-size:9px; color:#869ac0; }
-.docs-linked-issue strong { display:block; margin-top:6px; color:#6c7b94; font-size:11px; line-height:1.6; font-weight:500; }
+.docs-linked-issue-key { display:flex; align-items:center; justify-content:space-between; font-size:9px; color:#869ac0; }
+.docs-linked-issue strong { display:block; margin-top:6px; color:#6c7b94; font-size:11px; line-height:1.6; font-weight:500; overflow-wrap:anywhere; }
+.docs-linked-issue-meta { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:baseline; margin-top:6px; color:#53647c; font-size:10px; line-height:1.5; overflow-wrap:anywhere; }
+.docs-linked-issue-status { display:inline-flex; align-items:center; gap:5px; min-width:0; }
+.docs-linked-issue-status i { width:6px; height:6px; flex:none; border-radius:50%; }
 .docs-issue-search { display:flex; align-items:center; padding:10px; gap:7px; border:1px solid #e5eaf2; border-radius:6px; color:#acb6c6; margin-top:17px; }
 .docs-issue-results { margin-top:5px; border:1px solid #e6ebf4; border-radius:6px; overflow:hidden; background:#fff; }
 .docs-issue-results button { display:flex; align-items:center; gap:7px; width:100%; border:0; border-bottom:1px solid #f0f2f7; background:#fff; text-align:left; padding:10px; cursor:pointer; color:#7a8fb7; }

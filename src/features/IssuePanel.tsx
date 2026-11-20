@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import { PRIORITY, type Comment, type Dependency, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
@@ -29,18 +29,24 @@ import './issue-decision-source.css';
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
 type IssueDependencyEditor = { otherRole: RelatedIssueDirection; dependency?: Dependency };
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
-type IssuePanelProps = FeatureProps & { issueId: string; onClose: () => void; onOpenIssueSchedule: (id: string) => boolean };
+type IssuePanelProps = FeatureProps & {
+  issueId: string;
+  documentOverlay?: boolean;
+  onClose: () => void;
+  onOpenIssueSchedule: (id: string) => boolean;
+};
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
 export function IssuePanel(props: IssuePanelProps) {
-  return <IssuePanelContent key={`${props.issueId}:${props.actorId}`} {...props} />;
+  const panel = <IssuePanelContent key={`${props.issueId}:${props.actorId}`} {...props} />;
+  return props.documentOverlay ? <div className="issue-panel-document-layer">{panel}</div> : panel;
 }
 
 function IssuePanelContent(props: IssuePanelProps) {
-  const { data, issueId, onClose, onOpenIssueSchedule, refresh, notify, openIssue, openDocument } = props;
+  const { data, issueId, documentOverlay, onClose, onOpenIssueSchedule, refresh, notify, openIssue, openDocument } = props;
   const issue = data.issues.find(i => i.id === issueId);
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
@@ -175,13 +181,38 @@ function IssuePanelContent(props: IssuePanelProps) {
       window.removeEventListener('teamspace:workspace-imported', loadComments);
     };
   }, [issueId, props.actorId]);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (documentOverlay) closeButton.current?.focus({ preventScroll: true });
+  }, [documentOverlay]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || dependencyEditor) return;
+      if (documentOverlay) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      if (!saving && !dependencyBusyRef.current) closePanel();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation, dependencyEditor]);
+  }, [closePanel, saving, childCreation, dependencyEditor, documentOverlay]);
+
+  function keepDocumentOverlayFocus(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key !== 'Tab' || event.defaultPrevented) return;
+    const panel = event.currentTarget;
+    const focusable = [...panel.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), select:not(:disabled), textarea:not(:disabled), input:not(:disabled), a[href], summary, [tabindex="0"], [contenteditable="true"]',
+    )].filter(element => element.tabIndex >= 0 && !element.closest('[inert]') && element.getClientRects().length > 0);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    const active = document.activeElement;
+    if (!first || active === panel || (event.shiftKey ? active === first : active === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last ?? panel : first ?? panel).focus({ preventScroll: true });
+    }
+  }
+
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
   const availableDocuments = data.documents.filter(d => !linkedDocuments.some(l => l.documentId === d.id));
@@ -301,12 +332,13 @@ function IssuePanelContent(props: IssuePanelProps) {
   return <>
     <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor)} onMouseDown={event => {
       if (event.target === event.currentTarget && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
-    }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading">
+    }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
+      tabIndex={documentOverlay ? -1 : undefined} onKeyDown={documentOverlay ? keepDocumentOverlayFocus : undefined}>
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
-        <button className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
+        <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
     <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력 <span>{activities.length}</span></button><button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button><button className={tab === 'reservations' ? 'active' : ''} onClick={() => switchTab('reservations')}>시간 배정</button><button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button></div></div>
