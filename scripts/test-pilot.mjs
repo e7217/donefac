@@ -338,20 +338,35 @@ async function browser(url, teamFixture) {
 }
 
 const syntheticToken = randomUUID();
+const manualBranchName = 'feature/existing-refactor';
+const manualCommitSha = 'd'.repeat(40);
 let authenticatedReads = 0;
 const gitlab = createServer((request, response) => {
-  if (request.method !== 'GET' || request.headers['private-token'] !== syntheticToken ||
-    !/^\/api\/v4\/projects\/42\/(merge_requests|pipelines)\?/.test(request.url ?? '')) {
+  if (request.method !== 'GET' || request.headers['private-token'] !== syntheticToken) {
     response.writeHead(403).end();
     return;
   }
+  const project = `http://${request.headers.host}/platform/pilot`;
+  const url = new URL(request.url, project);
+  const projectEndpoint = '/api/v4/projects/42';
+  let payload;
+  if (url.pathname === projectEndpoint) {
+    payload = { id: 42, web_url: project, path_with_namespace: 'platform/pilot' };
+  } else if (url.pathname === `${projectEndpoint}/repository/branches/${encodeURIComponent(manualBranchName)}`) {
+    payload = { name: manualBranchName, commit: { id: manualCommitSha } };
+  } else if (url.pathname === `${projectEndpoint}/repository/commits/${manualCommitSha}`) {
+    payload = { id: manualCommitSha, title: 'Repository refactor', committed_date: '2020-01-02T00:00:00Z' };
+  } else if (url.pathname === `${projectEndpoint}/merge_requests`) {
+    payload = [{ id: 530, iid: 12, title: 'OLD-1 파일럿 원본 업무', source_branch: 'feature/OLD-1',
+      web_url: `${project}/-/merge_requests/12`, state: 'merged', updated_at: '2020-01-02T01:02:00Z' }];
+  } else if (url.pathname === `${projectEndpoint}/pipelines`) {
+    payload = [];
+  } else {
+    response.writeHead(404).end();
+    return;
+  }
   authenticatedReads++;
-  const rows = request.url.startsWith('/api/v4/projects/42/merge_requests?') ? [{
-    id: 530, iid: 12, title: 'OLD-1 파일럿 원본 업무', source_branch: 'feature/OLD-1',
-    web_url: `http://${request.headers.host}/platform/pilot/-/merge_requests/12`,
-    state: 'merged', updated_at: '2020-01-02T01:02:00Z',
-  }] : [];
-  response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(rows));
+  response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload));
 });
 
 async function teamSnapshot(url, fixture, evidence) {
@@ -599,11 +614,13 @@ async function runStandardPilot() {
   await once(gitlab,'listening');
   const settings = await (await call(pilot.url,'/integrations/gitlab')).json();
   const syntheticWebhookSecret = `pilot-webhook-${randomUUID()}`;
+  const gitlabBase = `http://127.0.0.1:${gitlab.address().port}`;
   const jiraRoutes = [{repositoryId:42,projectId:sourceAudit.issue.projectId,jiraInstanceKey:'pilot-jira'}];
-  const gitlabLinksPath = `/issues/${sourceAudit.issue.id}/gitlab-links?kind=merge_request`;
-  await call(pilot.url,'/integrations/gitlab',{
-    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken,webhookSecret:syntheticWebhookSecret,jiraRoutes},
-  });
+  const gitlabIssuePath = `/issues/${sourceAudit.issue.id}/gitlab-links`;
+  const gitlabLinksPath = `${gitlabIssuePath}?kind=merge_request`;
+  const gitlabSettings = await (await call(pilot.url,'/integrations/gitlab',{
+    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:gitlabBase,projectIds:[42],token:syntheticToken,webhookSecret:syntheticWebhookSecret,jiraRoutes},
+  })).json();
   const gitlabWebhook = {
     method: 'POST', headers: { 'X-Gitlab-Token': syntheticWebhookSecret, 'Idempotency-Key': randomUUID() },
     body: { object_kind: 'push', project_id: 42, ref: 'refs/heads/preview-without-ticket', before: '0'.repeat(40), after: 'a'.repeat(40), commits: [] },
@@ -619,6 +636,14 @@ async function runStandardPilot() {
   assert.equal(firstSync.linked,1);
   const gitlabActivity = await (await call(pilot.url,gitlabLinksPath)).json();
   assert.deepEqual(gitlabActivity.links.map(link => [link.issueId, link.originalJiraKey]), [[sourceAudit.issue.id, 'OLD-1']]);
+  const attachDevelopment = async url => (await call(pilot.url,gitlabIssuePath,{
+    method:'POST',status:201,body:{repositoryId:42,url,expectedSettingsVersion:gitlabSettings.version},
+  })).json();
+  const manualBranch = await attachDevelopment(`${gitlabBase}/platform/pilot/-/tree/${manualBranchName}?ref_type=heads`);
+  const manualCommit = await attachDevelopment(`${gitlabBase}/platform/pilot/-/commit/${manualCommitSha}`);
+  assert.deepEqual([manualBranch.kind,manualBranch.sourceBranch,manualBranch.sourceSha,manualCommit.kind,manualCommit.sourceSha],
+    ['branch',manualBranchName,manualCommitSha,'commit',manualCommitSha]);
+  assert.ok(manualBranch.manualLinkId && manualCommit.manualLinkId);
   const afterGitlabSync = await (await call(pilot.url,'/workspace')).json();
   assert.equal(afterGitlabSync.issues.find(item => item.id === sourceAudit.issue.id)?.status,sourceAudit.issue.status);
   const trashedIssue = await (await call(pilot.url,`/issues/${issue.id}?expectedVersion=${issue.version}`,{method:'DELETE'})).json();
@@ -728,8 +753,19 @@ async function runStandardPilot() {
   const restoredGitlab = await (await call(copy.url,'/integrations/gitlab')).json();
   assert.deepEqual(restoredGitlab.jiraRoutes,jiraRoutes);
   assert.deepEqual(await (await call(copy.url,gitlabLinksPath)).json(),gitlabActivity);
+  const restoredBranchPath = `${gitlabIssuePath}?kind=branch`;
+  assert.deepEqual((await (await call(copy.url,restoredBranchPath)).json()).links,[manualBranch]);
+  assert.deepEqual((await (await call(copy.url,`${gitlabIssuePath}?kind=commit`)).json()).links,[manualCommit]);
   assert.deepEqual(await (await call(copy.url, webhookStatusPath)).json(), gitlabWebhookStatus);
   assert.equal((await (await call(copy.url, '/integrations/gitlab/webhook', gitlabWebhook)).json()).duplicate, true);
+  const nextHead = 'e'.repeat(40);
+  const afterRestore = await (await call(copy.url, '/integrations/gitlab/webhook', {
+    method:'POST',headers:{'X-Gitlab-Token':syntheticWebhookSecret,'Idempotency-Key':randomUUID()},
+    body:{object_kind:'push',project_id:42,ref:`refs/heads/${manualBranchName}`,before:manualCommitSha,after:nextHead,commits:[]},
+  })).json();
+  assert.deepEqual(afterRestore,{ok:true,linked:1,duplicate:false,runs:[]});
+  const [updatedBranch] = (await (await call(copy.url,restoredBranchPath)).json()).links;
+  assert.deepEqual([updatedBranch.id,updatedBranch.manualLinkId,updatedBranch.sourceSha],[manualBranch.id,manualBranch.manualLinkId,nextHead]);
   const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {
     method: 'PATCH', body: {expectedVersion: restoredAudit.issue.version, status: restoredAudit.nextStatus},
   })).json();
@@ -737,9 +773,9 @@ async function runStandardPilot() {
   assert.equal(updatedMigratedIssue.version, restoredAudit.issue.version + 1);
   const restoredSync = await (await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(restoredSync.linked,0);
-  assert.equal(authenticatedReads,4);
+  assert.equal(authenticatedReads,8);
   await stop(copy);
-  console.log('Pilot rehearsal passed for browser workflows, Jira administrator backup and Confluence space migration, GitLab activity linked by migrated Jira keys, cold backup integrity, ticket form conditions, automation history, time reservations and individual trash restore.');
+  console.log('Pilot rehearsal passed for browser workflows, Jira and Confluence migration, GitLab activity linked by migrated keys and by branch and commit URLs, cold backup integrity, ticket form conditions, automation history, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);

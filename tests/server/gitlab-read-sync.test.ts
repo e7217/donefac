@@ -277,6 +277,102 @@ test('foreign and malformed GitLab URLs cause no reads and a different repositor
   assert.deepEqual(requests, ['/gitlab/api/v4/projects/42']);
 });
 
+test('direct GitLab branch and commit reads verify exact refs and preserve the configured subpath', async t => {
+  const requests: string[] = [];
+  const resolved: [string, string][] = [];
+  const token = 'synthetic-manual-reference-inspection';
+  const basePath = '/gitlab/-/tree/instance';
+  const projectPath = `${basePath}/api/v4/projects/42`;
+  const branchName = 'feature/-/tree/기존-작업';
+  const branchPath = `${projectPath}/repository/branches/${encodeURIComponent(branchName)}`;
+  const sha = 'abcdef1234'.repeat(4);
+  const head = '9876abcdef'.repeat(4);
+  const commitPath = `${projectPath}/repository/commits/${sha}`;
+  const origin = await upstream(t, (request, response) => {
+    requests.push(request.url!);
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], token);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === projectPath) response.end(JSON.stringify({ id: 42, path_with_namespace: 'team/subgroup/repo', web_url: repository }));
+    else if (request.url === branchPath) {
+      assert.deepEqual(resolved.at(-1), [branchName, branchUrl]);
+      response.end(JSON.stringify({ name: branchName, commit: { id: head }, web_url: 'https://outside.invalid/wrong' }));
+    } else if (request.url === commitPath) {
+      response.end(JSON.stringify({ id: sha, title: 'An existing non-keyed commit', committed_date: '2025-01-01T00:00:00Z' }));
+    } else response.writeHead(404).end();
+  });
+  const baseUrl = origin + basePath;
+  const repository = `${baseUrl}/team/subgroup/repo`;
+  const branchUrl = `${repository}/-/tree/${encodeURIComponent(branchName)}`;
+  const commitUrl = `${repository}/-/commit/${sha}`;
+  const resolveBranch = (name: string, webUrl: string) => resolved.push([name, webUrl]);
+  const unescapedBranchSlashes = branchName.split('/').map(encodeURIComponent).join('/');
+  for (const pasted of [branchUrl, `${repository}/-/tree/${unescapedBranchSlashes}?ref_type=heads#files`]) {
+    assert.deepEqual(await readGitlabManualObject({ baseUrl, token }, 42, pasted, undefined, resolveBranch), {
+      kind: 'branch', webUrl: branchUrl, object: { name: branchName, commit: { id: head }, web_url: branchUrl },
+    });
+  }
+  assert.deepEqual(await readGitlabManualObject({ baseUrl, token }, 42,
+    `${repository}/-/commit/${sha.toUpperCase()}?view=parallel#note_1`, undefined, resolveBranch), {
+    kind: 'commit', webUrl: commitUrl, object: { id: sha, title: 'An existing non-keyed commit',
+      committed_date: '2025-01-01T00:00:00Z', web_url: commitUrl },
+  });
+  assert.deepEqual(requests, [projectPath, branchPath, projectPath, branchPath, projectPath, commitPath]);
+  assert.deepEqual(resolved, [[branchName, branchUrl], [branchName, branchUrl]]);
+});
+
+test('direct GitLab ref reads reject foreign, ambiguous and inconsistent branch or commit identities', async t => {
+  const requests: string[] = [];
+  const projectPath = '/gitlab/api/v4/projects/42';
+  const ref = 'feature/nested';
+  const head = 'a1'.repeat(20);
+  let object: Record<string, unknown>;
+  let resolved = 0;
+  const origin = await upstream(t, (request, response) => {
+    requests.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify(request.url === projectPath ? { id: 42, web_url: repository } : object));
+  });
+  const baseUrl = `${origin}/gitlab`;
+  const repository = `${baseUrl}/team/repo`;
+  const connection = { baseUrl };
+  const branch = `${repository}/-/tree/${encodeURIComponent(ref)}`;
+  const commit = `${repository}/-/commit/${head}`;
+  const resolveBranch = () => resolved++;
+  for (const url of [
+    branch + '?ref_type=tags', branch + '?ref_type=heads&ref_type=tags', branch + '?ref_type=',
+    `${repository}/-/tree/feature/%2e%2e/other`, `${repository}/-/tree/feature%2f%2fother`,
+    `${repository}/-/tree/feature/%XY`, `${repository}/-/tree/feature%5cother`,
+    `${baseUrl}/team%2frepo/-/tree/feature`, `${origin}/gitlab-other/team/repo/-/tree/feature`,
+    `https://outside.invalid/gitlab/team/repo/-/tree/feature`,
+    `${repository}/-/commit/${head.slice(0, 8)}`, commit + '/diff', `${repository}/-/commit/${'0'.repeat(40)}`,
+  ]) await assert.rejects(readGitlabManualObject(connection, 42, url, undefined, resolveBranch), GitlabManualUrlError);
+  assert.deepEqual(requests, []);
+  assert.equal(resolved, 0);
+
+  await assert.rejects(readGitlabManualObject(connection, 42, `${baseUrl}/other/repo/-/tree/feature`,
+    undefined, resolveBranch), GitlabManualUrlError);
+  assert.deepEqual(requests, [projectPath]);
+  assert.equal(resolved, 0);
+
+  for (const [url, reply, stage] of [
+    [branch, { name: 'feature/another', commit: { id: head } }, 'branches'],
+    [branch, { name: ref, commit: { id: '0'.repeat(40) } }, 'branches'],
+    [branch, { name: ref, id: head }, 'branches'],
+    [commit, { id: 'b2'.repeat(20) }, 'commits'],
+    [commit, { id: head, project_id: 43 }, 'commits'],
+  ] as const) {
+    object = reply;
+    await assert.rejects(readGitlabManualObject(connection, 42, url, undefined, resolveBranch), (error: unknown) =>
+      error instanceof GitlabReadError && error.stage === stage && error.code === 'invalid-response');
+  }
+  assert.deepEqual(requests.slice(1), [
+    ...Array.from({ length: 3 }, () => [projectPath, `${projectPath}/repository/branches/${encodeURIComponent(ref)}`]).flat(),
+    ...Array.from({ length: 2 }, () => [projectPath, `${projectPath}/repository/commits/${head}`]).flat(),
+  ]);
+  assert.equal(resolved, 3);
+});
+
 test('direct GitLab reads require consistent project, object and returned web identities', async t => {
   let projectFields: Record<string, unknown>;
   let objectFields: Record<string, unknown>;

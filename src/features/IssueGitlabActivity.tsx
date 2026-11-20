@@ -195,10 +195,11 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
           {settings?.projectIds.map(id => <option value={id} key={id}>저장소 #{id}</option>)}
         </select>
       </label>
-      <label className="issue-form-label">GitLab MR 또는 파이프라인 URL
+      <label className="issue-form-label">GitLab URL
         <input ref={linkInput} className="field" type="url" value={draft.url} autoComplete="off" spellCheck={false} maxLength={4000} required disabled={controlsDisabled}
-          onChange={event => setDraft({ ...draft, url: event.target.value })} />
+          aria-describedby={`${formHeading}-url-help`} onChange={event => setDraft({ ...draft, url: event.target.value })} />
       </label>
+      <p id={`${formHeading}-url-help`} className="gitlab-activity-hint">브랜치, 전체 SHA가 포함된 커밋, MR, 파이프라인 주소를 연결할 수 있습니다.</p>
       {actionError && <p className="issue-form-error" role="alert">{actionError}</p>}
       <div className="gitlab-activity-actions">
         <button className="btn btn-ghost" type="button" disabled={busy} onClick={closeAction}>취소</button>

@@ -28,7 +28,7 @@ import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
 import { AutomationService, AutomationError } from './automation.js';
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
-import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
+import { GitlabIntegrationService, GitlabIntegrationError, branchObjectId } from './gitlab-integration.js';
 import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -1597,6 +1597,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if (data.schemaVersion < 52 && (data.gitlabLinks.some((link:GitlabLink) => link.manualLinkId !== undefined) ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.manualLinkId !== undefined)))) {
       fail('GitLab 수동 연결을 포함한 백업은 schemaVersion 52가 필요합니다.');
+    }
+    if (data.schemaVersion < 60) {
+      const isManualRepositoryLink = (link: GitlabLink) => link.manualLinkId !== undefined && (link.kind === 'branch' || link.kind === 'commit');
+      if (data.gitlabLinks.some(isManualRepositoryLink) || importedTrash.some(entry => entry.gitlabLinks.some(isManualRepositoryLink))) {
+        fail('GitLab 브랜치·커밋 수동 연결을 포함한 백업은 schemaVersion 60이 필요합니다.');
+      }
+    }
+    const hasInvalidManualBranch = (link: GitlabLink) => link.kind === 'branch' && link.manualLinkId !== undefined &&
+      (typeof link.sourceBranch !== 'string' || link.id.split(':', 5)[4] !== branchObjectId(link.sourceBranch));
+    if (data.gitlabLinks.some(hasInvalidManualBranch) || importedTrash.some(entry => entry.gitlabLinks.some(hasInvalidManualBranch))) {
+      fail('GitLab 수동 연결의 브랜치 이름과 식별자가 일치하지 않습니다.');
     }
     if (data.schemaVersion < 57 && (data.gitlabLinks.some((link:GitlabLink) => link.mergeReadiness !== undefined) ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.mergeReadiness !== undefined)))) {

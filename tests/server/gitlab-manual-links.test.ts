@@ -19,6 +19,7 @@ const token = 'synthetic-gitlab-read';
 const secret = 'synthetic-gitlab-events';
 const sourceBranch = 'feature/existing-work';
 const sha = '1'.repeat(40);
+const commitSha = 'a'.repeat(40);
 const mrId = 1007;
 const mrIid = 17;
 const pipelineId = 215;
@@ -34,10 +35,14 @@ async function fixture(t: TestContext) {
   const instant = (offset = 0) => new Date(time + 1000 * offset).toISOString();
   let baseUrl = '';
   let objectGate: (() => Promise<void>) | undefined;
+  let branchGate: (() => Promise<void>) | undefined;
+  let branchHead = sha;
   const projectPath = `/gitlab/api/v4/projects/${repositoryId}`;
   const projectUrl = () => `${baseUrl}/team/subgroup/product`;
   const mrUrl = () => `${projectUrl()}/-/merge_requests/${mrIid}`;
   const pipelineUrl = () => `${projectUrl()}/-/pipelines/${pipelineId}`;
+  const branchUrl = () => `${projectUrl()}/-/tree/${encodeURIComponent(sourceBranch)}`;
+  const commitUrl = () => `${projectUrl()}/-/commit/${commitSha}`;
   let mr = { id: mrId, iid: mrIid, project_id: repositoryId, target_project_id: repositoryId,
     title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant(),
     detailed_merge_status: undefined as string | undefined };
@@ -48,6 +53,9 @@ async function fixture(t: TestContext) {
     const mergeRequest = { ...mr, web_url: mrUrl() };
     const pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha,
       status: 'running', updated_at: instant(), web_url: pipelineUrl() };
+    const branch = { name: sourceBranch, commit: { id: branchHead }, web_url: branchUrl() };
+    const commitTitle = 'Existing repository changes';
+    const commit = { id: commitSha, title: commitTitle, message: commitTitle, committed_date: instant(), web_url: commitUrl() };
     if (path === projectPath) res.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/subgroup/product', web_url: projectUrl() }));
     else if (path === `${projectPath}/merge_requests/${mrIid}`) {
       await objectGate?.();
@@ -55,6 +63,12 @@ async function fixture(t: TestContext) {
     } else if (path === `${projectPath}/pipelines/${pipelineId}`) res.end(JSON.stringify(pipeline));
     else if (path === `${projectPath}/merge_requests`) res.end(JSON.stringify([mergeRequest]));
     else if (path === `${projectPath}/pipelines`) res.end(JSON.stringify([pipeline]));
+    else if (path === `${projectPath}/repository/branches/${encodeURIComponent(sourceBranch)}`) {
+      await branchGate?.();
+      res.end(JSON.stringify(branch));
+    } else if (path === `${projectPath}/repository/commits/${commitSha}`) res.end(JSON.stringify(commit));
+    else if (path === `${projectPath}/repository/branches`) res.end(JSON.stringify([branch]));
+    else if (path === `${projectPath}/repository/commits`) res.end(JSON.stringify([commit]));
     else {
       res.statusCode = 404;
       res.end(JSON.stringify({ message: `fixture ${token}` }));
@@ -97,7 +111,14 @@ async function fixture(t: TestContext) {
     method: 'POST', headers: { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
     body: { object_kind: kind, project: { id: repositoryId, web_url: projectUrl() }, object_attributes: attributes },
   });
-  return { call, request, issue, attach, configure, links, webhook, instant, calls, projectPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
+  const push = (before: string, after: string, commits: Record<string, unknown>[] = [], branch = sourceBranch) => call<{ linked: number; runs: unknown[] }>(
+    '/integrations/gitlab/webhook', { method: 'POST', headers: { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() }, body: {
+      object_kind: 'push', project_id: repositoryId, ref: `refs/heads/${branch}`, before, after, commits,
+      project: { id: repositoryId, web_url: projectUrl(), path_with_namespace: 'team/subgroup/product' },
+    } });
+  return { call, request, issue, attach, configure, links, webhook, push, instant, calls, projectPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
+    branchUrl: branchUrl(), commitUrl: commitUrl(), setBranchHead(value: string) { branchHead = value; },
+    holdBranchRead(gate: () => Promise<void>) { branchGate = gate; },
     setMr(patch: Partial<typeof mr>) { mr = { ...mr, ...patch }; }, holdRead(gate: () => Promise<void>) { objectGate = gate; } };
 }
 
@@ -142,6 +163,142 @@ test('manual GitLab links verify saved repositories and store one canonical reco
   assert.deepEqual(snapshot.issues.find(issue => issue.id === f.issue.id), f.issue);
   assert.equal(snapshot.activities.filter(event => event.action === 'GitLab 활동 수동 연결').length, 3);
   assert.equal(snapshot.activities.filter(event => event.action === 'GitLab 수동 연결 해제').length, 1);
+});
+
+test('keyless branch and commit attachments reuse canonical activity and follow authenticated pushes', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const branch = await f.call<GitlabLink>(path, f.attach(`${f.branchUrl.replace('%2F', '/')}?ref_type=heads#files`), 201);
+  assert.deepEqual({ kind: branch.kind, ref: branch.sourceBranch, head: branch.sourceSha, state: branch.state, url: branch.webUrl },
+    { kind: 'branch', ref: sourceBranch, head: sha, state: 'active', url: f.branchUrl });
+  assert.equal(branch.branchObservationSource, 'sync');
+  assert.ok(isGitlabManualLinkId(branch.manualLinkId));
+  assert.deepEqual(f.calls.map(call => [call.method, call.path, call.credential]), [
+    ['GET', f.projectPath, token], ['GET', `${f.projectPath}/repository/branches/${encodeURIComponent(sourceBranch)}`, token],
+  ]);
+  const commit = await f.call<GitlabLink>(path, f.attach(`${f.commitUrl}?ref_type=heads`), 201);
+  assert.deepEqual({ kind: commit.kind, sha: commit.sourceSha, title: commit.title, url: commit.webUrl },
+    { kind: 'commit', sha: commitSha, title: 'Existing repository changes', url: f.commitUrl });
+  assert.ok(isGitlabManualLinkId(commit.manualLinkId));
+  assert.deepEqual(await f.call(path, f.attach(f.commitUrl)), commit);
+  assert.equal((await f.call<GitlabLink>(path, f.attach(f.branchUrl))).manualLinkId, branch.manualLinkId);
+
+  const readHead = '2'.repeat(40);
+  f.setBranchHead(readHead);
+  await f.call('/integrations/gitlab/sync', { method: 'POST', body: { includeHistory: true } });
+  let current = (await f.links()).find(link => link.id === branch.id)!;
+  assert.equal(current.sourceSha, readHead);
+  assert.equal(current.branchObservationSource, 'sync');
+  assert.equal(current.manualLinkId, branch.manualLinkId);
+
+  const nextHead = '3'.repeat(40);
+  let started!: () => void;
+  let proceed!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const resume = new Promise<void>(resolve => { proceed = resolve; });
+  f.holdBranchRead(() => { started(); return resume; });
+  const pending = f.request<GitlabLink>(path, f.attach(f.branchUrl));
+  await Promise.race([waiting, pending.then(result => assert.fail(`Branch read did not reach the mock endpoint (${result.status})`))]);
+  try { assert.deepEqual((await f.push(readHead, nextHead)).runs, []); }
+  finally { proceed(); }
+  const refreshed = await pending;
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.data.sourceSha, nextHead);
+  assert.equal(refreshed.data.manualLinkId, branch.manualLinkId);
+  assert.equal(refreshed.data.branchObservationSource, undefined);
+  assert.equal((await f.push(sha, '4'.repeat(40))).linked, 0);
+  assert.equal((await f.links()).find(link => link.id === branch.id)?.sourceSha, nextHead);
+
+  f.setBranchHead('6'.repeat(40));
+  const mismatch = await f.call<{ error: string }>(path, f.attach(f.branchUrl), 409);
+  assert.match(mismatch.error, /푸시/);
+  assert.equal((await f.links()).find(link => link.id === branch.id)?.sourceSha, nextHead);
+
+  const deletedHead = '0'.repeat(40);
+  await f.push(nextHead, deletedHead);
+  await f.call('/integrations/gitlab/sync', { method: 'POST', body: { includeHistory: true } });
+  current = (await f.links()).find(link => link.id === branch.id)!;
+  assert.equal(current.state, 'deleted');
+  assert.equal(current.sourceSha, nextHead);
+  assert.equal(current.manualLinkId, branch.manualLinkId);
+  assert.deepEqual((await f.links()).find(link => link.id === commit.id), commit);
+
+  await f.push(deletedHead, commitSha, [{ id: commitSha, title: commit.title, message: commit.title, url: f.commitUrl }], `feature/${f.issue.key}`);
+  const promoted = (await f.links()).find(link => link.id === commit.id)!;
+  assert.equal(promoted.manualLinkId, undefined);
+  assert.equal(promoted.sourceSha, commitSha);
+  assert.equal(promoted.sourceBranch, `feature/${f.issue.key}`);
+  await f.call(deletePath(f.issue.id, commit), { method: 'DELETE' }, 409);
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.issues.find(issue => issue.id === f.issue.id), f.issue);
+  await f.call(deletePath(f.issue.id, current), { method: 'DELETE' });
+  assert.ok(!(await f.links()).some(link => link.id === branch.id));
+});
+
+test('manual branch and commit identities survive native and trash restore with a fresh unlink guard', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const original = await Promise.all([f.branchUrl, f.commitUrl].map(url => f.call<GitlabLink>(path, f.attach(url), 201)));
+  const restore = (data: Backup, status = 200) => f.call<{ error?: string }>('/import', { method: 'POST', body: { data } }, status);
+  const backup = await f.call<Backup>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.match((await restore({ ...backup, schemaVersion: 59 }, 400)).error!, /schemaVersion 60/);
+
+  const wrongBranch = structuredClone(backup);
+  const branch = wrongBranch.gitlabLinks.find(link => link.id === original[0].id)!;
+  const [, instance, repository, kind, , issue] = branch.id.split(':');
+  branch.id = `gitlab:${instance}:${repository}:${kind}:${'a'.repeat(64)}:${issue}`;
+  await restore(wrongBranch, 400);
+  const wrongCommit = structuredClone(backup);
+  wrongCommit.gitlabLinks.find(link => link.id === original[1].id)!.sourceSha = 'f'.repeat(40);
+  await restore(wrongCommit, 400);
+
+  await restore(backup);
+  const restored = await f.links();
+  for (const saved of original) {
+    const live = restored.find(link => link.id === saved.id)!;
+    assert.deepEqual({ ...live, manualLinkId: saved.manualLinkId }, saved);
+    assert.notEqual(live.manualLinkId, saved.manualLinkId);
+    await f.call(deletePath(f.issue.id, saved), { method: 'DELETE' }, 409);
+  }
+  const issueVersion = (await f.call<WorkspaceSnapshot>('/workspace')).issues.find(item => item.id === f.issue.id)!.version;
+  const trash = await f.call<{ trashEntryId: string }>(`/issues/${f.issue.id}`, { method: 'DELETE', body: { expectedVersion: issueVersion } });
+  const archived = await f.call<Backup>('/export');
+  assert.deepEqual(new Set(archived.trashEntries.find(entry => entry.id === trash.trashEntryId)?.gitlabLinks.map(link => link.id)),
+    new Set(original.map(link => link.id)));
+  assert.match((await restore({ ...archived, schemaVersion: 59 }, 400)).error!, /schemaVersion 60/);
+  await restore(archived);
+  await f.call(`/trash/${trash.trashEntryId}/restore`, { method: 'POST', body: {} });
+  for (const saved of restored) {
+    const recovered = (await f.links()).find(link => link.id === saved.id)!;
+    assert.deepEqual({ ...recovered, manualLinkId: saved.manualLinkId }, saved);
+    assert.notEqual(recovered.manualLinkId, saved.manualLinkId);
+    await f.call(deletePath(f.issue.id, recovered), { method: 'DELETE' });
+  }
+  assert.deepEqual(await f.links(), []);
+});
+
+test('the first keyless branch attachment cannot save a HEAD displaced during verification', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const newHead = '5'.repeat(40);
+  let started!: () => void;
+  let proceed!: () => void;
+  const waiting = new Promise<void>(resolve => { started = resolve; });
+  const resume = new Promise<void>(resolve => { proceed = resolve; });
+  f.holdBranchRead(() => { started(); return resume; });
+  const pending = f.request(path, f.attach(f.branchUrl));
+  await Promise.race([waiting, pending.then(result => assert.fail(`Branch read did not reach the mock endpoint (${result.status})`))]);
+  try { assert.equal((await f.push(sha, newHead)).linked, 0); }
+  finally { proceed(); }
+  assert.equal((await pending).status, 409);
+  assert.deepEqual(await f.links(), []);
+
+  f.setBranchHead(newHead);
+  const link = await f.call<GitlabLink>(path, f.attach(f.branchUrl), 201);
+  assert.equal(link.sourceSha, newHead);
+  assert.equal(link.branchObservationSource, undefined);
+  assert.ok(isGitlabManualLinkId(link.manualLinkId));
 });
 
 test('exact GitLab refresh preserves corrected manual state without granting implicit automation', async t => {

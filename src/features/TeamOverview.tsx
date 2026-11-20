@@ -245,7 +245,7 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
         <Section title="최근 GitLab 활동" icon={<GitBranch size={18} aria-hidden="true" />} page={result.gitlab}
           busy={busy} onPage={offset => pageTo('gitlab', offset)} empty="기준일을 포함한 최근 7일간 연결된 GitLab 활동이 없습니다."
           renderItem={({ link, issueId, issueKey, issueTitle, projectId }) => {
-            const url = link.kind === 'branch' && link.state === 'deleted' ? null : gitlabActivityUrl(link.webUrl);
+            const url = link.kind === 'branch' && link.state === 'deleted' ? null : gitlabActivityUrl(link.webUrl, link.kind);
             const title = link.kind === 'branch' ? link.sourceBranch || link.title : link.title;
             const kind = gitlabActivityKindLabel(link.kind);
             return <li key={link.id} className="team-overview-gitlab-row">

@@ -1,10 +1,13 @@
-import { gitlabRepositoryUrl } from './gitlab-push.js';
+import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
+import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits';
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large';
 type Connection = { baseUrl: string; token?: string | null };
-type ManualObjectKind = 'merge_request' | 'pipeline';
+type ManualPage =
+  | { repositoryPath: string; kind: 'merge_request' | 'pipeline'; id: number }
+  | { repositoryPath: string; kind: 'branch' | 'commit'; id: string };
 type RepositoryHistory = {
   project: GitlabReadObject;
   branches: GitlabReadObject[];
@@ -149,53 +152,93 @@ function canonicalPath(pathname: string): string | null {
   } catch { return null; }
 }
 
-function gitlabPage(raw: unknown, base: URL, allowSuffix: boolean) {
+function gitlabPageAddress(raw: unknown, base: URL, allowSuffix: boolean) {
   if (typeof raw !== 'string' || raw.length > 4000 || !raw.isWellFormed()) return null;
   const text = raw.trim();
   if (/[\u0000-\u0020\u007f\\]/u.test(text)) return null;
   // Check the original path before URL parsing can resolve dot segments.
   const input = /^https?:\/\/[^/?#@]+(\/[^?#]*)?(?:[?#]|$)/iu.exec(text);
   if (!input?.[1]) return null;
-  const path = canonicalPath(input[1]);
   const scope = canonicalPath(base.pathname.replace(/\/+$/, '') + '/');
-  if (!path || scope === null || !path.startsWith(`${scope}/`)) return null;
+  if (scope === null) return null;
   try {
     const url = new URL(text);
     if (url.origin !== base.origin || url.username || url.password || (!allowSuffix && (text.includes('?') || text.includes('#')))) return null;
-    return path;
+    return { pathname: input[1], scope, search: url.searchParams };
   } catch { return null; }
 }
 
-function manualPage(raw: unknown, base: URL, allowSuffix: boolean) {
-  const path = gitlabPage(raw, base, allowSuffix);
+function gitlabPathInScope(pathname: string, scope: string) {
+  const path = canonicalPath(pathname);
+  return path && path.startsWith(`${scope}/`) ? path : null;
+}
+
+function manualPage(raw: unknown, base: URL, allowSuffix: boolean): ManualPage | null {
+  const address = gitlabPageAddress(raw, base, allowSuffix);
+  if (!address) return null;
+  const { pathname, scope, search } = address;
+  // A branch ref may contain raw or encoded slashes. Canonicalize only the repository path first.
+  for (const route of pathname.matchAll(/\/-\/(tree|commit)\//gu)) {
+    const repositoryPath = gitlabPathInScope(pathname.slice(0, route.index), scope);
+    if (!repositoryPath) continue;
+    try {
+      const ref = decodeURIComponent(pathname.slice(route.index + route[0].length));
+      if (route[1] === 'tree') return isGitlabBranchName(ref) && search.getAll('ref_type').every(type => type === 'heads')
+        ? { repositoryPath, kind: 'branch', id: ref } : null;
+      const sha = gitlabObjectSha(ref);
+      return sha && !/^0+$/.test(sha) ? { repositoryPath, kind: 'commit', id: sha } : null;
+    } catch { return null; }
+  }
+  const path = gitlabPathInScope(pathname, scope);
   if (!path) return null;
   const match = /^(.+)\/(merge_requests|pipelines)\/([1-9]\d*)$/u.exec(path);
   if (!match || !Number.isSafeInteger(Number(match[3]))) return null;
   const repositoryPath = match[1].replace(/\/-$/u, '');
-  const kind: ManualObjectKind = match[2] === 'merge_requests' ? 'merge_request' : 'pipeline';
+  const kind = match[2] === 'merge_requests' ? 'merge_request' : 'pipeline';
   return { repositoryPath, kind, id: Number(match[3]) };
 }
 
-export async function readGitlabManualObject(connection: Connection, projectId: number, rawUrl: unknown, signal?: AbortSignal): Promise<{
-  kind: ManualObjectKind;
+export async function readGitlabManualObject(
+  connection: Connection, projectId: number, rawUrl: unknown, signal?: AbortSignal,
+  onResolvedBranch?: (name: string, webUrl: string) => void,
+): Promise<{
+  kind: ManualPage['kind'];
   object: GitlabReadObject;
   webUrl: string;
 }> {
   const { base, headers, projectUrl } = projectReadRequest(connection, projectId, 'project');
   const page = manualPage(rawUrl, base, true);
-  if (!page) throw new GitlabManualUrlError('설정한 GitLab의 MR 또는 파이프라인 페이지 주소를 입력해 주세요.');
+  if (!page) throw new GitlabManualUrlError('설정한 GitLab의 브랜치·커밋·MR·파이프라인 주소를 입력해 주세요.');
 
   const project = await readJson(projectUrl, headers, 'project', signal);
   if (!isReadObject(project) || project.id !== projectId) throw new GitlabReadError('project', 'invalid-response');
-  const repositoryPath = gitlabPage(project.web_url, base, false);
+  const address = gitlabPageAddress(project.web_url, base, false);
+  const repositoryPath = address && gitlabPathInScope(address.pathname, address.scope);
   const namespace = project.path_with_namespace === undefined ? gitlabRepositoryUrl(connection.baseUrl, { web_url: project.web_url })
     : gitlabRepositoryUrl(connection.baseUrl, { path_with_namespace: project.path_with_namespace });
   if (!repositoryPath || !namespace || canonicalPath(namespace.pathname) !== repositoryPath) throw new GitlabReadError('project', 'invalid-response');
-  if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 MR 또는 파이프라인 주소를 입력해 주세요.');
+  if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 활동 주소를 입력해 주세요.');
 
+  const itemUrl = new URL(projectUrl);
+  if (page.kind === 'branch' || page.kind === 'commit') {
+    const stage = page.kind === 'branch' ? 'branches' : 'commits';
+    const webUrl = gitlabPushLinkUrl(namespace, page.kind === 'branch' ? 'tree' : 'commit', page.id);
+    if (!webUrl) throw new GitlabManualUrlError('GitLab 활동 주소가 너무 깁니다.');
+    itemUrl.pathname += `/repository/${stage}/${encodeURIComponent(page.id)}`;
+    if (page.kind === 'branch') onResolvedBranch?.(page.id, webUrl);
+    const object = await readJson(itemUrl, headers, stage, signal);
+    if (!isReadObject(object) || object.project_id !== undefined && object.project_id !== projectId) {
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
+    const sourceId = page.kind === 'branch' ? (isReadObject(object.commit) ? object.commit.id : undefined) : object.id;
+    const sha = gitlabObjectSha(sourceId);
+    if (!sha || /^0+$/.test(sha) || (page.kind === 'branch' ? object.name !== page.id : sha !== page.id)) {
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
+    return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+  }
   const stage = page.kind === 'merge_request' ? 'merge-requests' : 'pipelines';
   const collection = page.kind === 'merge_request' ? 'merge_requests' : 'pipelines';
-  const itemUrl = new URL(projectUrl);
   itemUrl.pathname += `/${collection}/${page.id}`;
   const object = await readJson(itemUrl, headers, stage, signal);
   if (!isReadObject(object) || object.project_id !== projectId || typeof object.id !== 'number' ||

@@ -40,11 +40,13 @@ const readinessLabels = {
   unknown: '병합 상태 미확인',
 } satisfies Record<GitlabMergeReadiness['state'], string>;
 
-export function gitlabActivityUrl(webUrl: unknown): URL | null {
+export function gitlabActivityUrl(webUrl: unknown, kind: GitlabLink['kind']): URL | null {
   if (typeof webUrl !== 'string') return null;
   try {
     const url = new URL(webUrl);
-    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url : null;
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) return null;
+    if (kind === 'branch' && url.pathname.includes('/-/tree/')) url.searchParams.set('ref_type', 'heads');
+    return url;
   } catch {
     return null;
   }
@@ -132,7 +134,7 @@ function ActivityGroup({ group, links, issueContext, heading: Heading, manualAct
 }
 
 function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; issueContext?: IssueContext; manualActions?: ManualLinkActions }) {
-  const url = gitlabActivityUrl(link.webUrl);
+  const url = gitlabActivityUrl(link.webUrl, link.kind);
   const deleted = link.kind === 'branch' && link.state === 'deleted';
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
   const sha = gitlabObjectSha(link.sourceSha) ?? gitlabObjectSha(legacyCommitId);

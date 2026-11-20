@@ -196,7 +196,7 @@ test('360px 티켓에서 MR 전에 GitLab 브랜치와 커밋을 확인하고 �
     const refresh = gitlab.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true });
     await expect(branches).toBeVisible({ timeout: 24_000 });
     await expect(branches.locator('[data-gitlab-kind="branch"]')).toHaveAttribute('data-gitlab-state', 'active');
-    await expect(branches.getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', branchUrl);
+    await expect(branches.getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', `${branchUrl}?ref_type=heads`);
     await expect(branches.locator('code')).toHaveText(initialHead.slice(0, 8));
     await expect(commits).toHaveCount(0);
     await expect(gitlab.getByRole('region', { name: 'MR', exact: true })).toHaveCount(0);
@@ -328,7 +328,7 @@ test('360px에서 기존 GitLab 이력을 선택해 브랜치와 커밋을 미�
     expect(sync.request().postDataJSON()).toEqual({ expectedVersion: (await saved.json() as GitlabSettings).version, includeHistory: true });
     await expect(page.getByRole('status', { name: '기존 개발 이력 동기화 결과', exact: true })).toContainText('브랜치 1개 · 커밋 1개 조회');
     const activity = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
-    await expect(activity.getByRole('region', { name: '브랜치', exact: true }).getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', branchUrl);
+    await expect(activity.getByRole('region', { name: '브랜치', exact: true }).getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', `${branchUrl}?ref_type=heads`);
     await expect(activity.getByRole('region', { name: '커밋', exact: true }).getByRole('link', { name: new RegExp(title) })).toHaveAttribute('href', commitUrl);
     expect((await workspace()).issues.find(value => value.id === issue.id)).toMatchObject({ status: issue.status, version: issue.version });
     expect(await (await request.get('/api/automation-runs')).json()).toEqual(runs);

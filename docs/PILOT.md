@@ -40,6 +40,8 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 **개발 · GitLab → GitLab 웹훅 수신 확인**에서 저장소별 마지막 인증 수신을 확인한다. 업무 연결이 0건이어도 수신 시각과 이벤트가 표시된다. GitLab에서 이벤트를 보낸 뒤 **수신 상태 새로고침**을 누른다. 수신이 표시되지 않으면 GitLab의 **Settings → Webhooks → Edit → Recent events**에서 전송 결과를 확인할 수 있다. [GitLab 웹훅 전송 이력](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
 
+티켓 키가 없는 작업은 티켓의 **GitLab 개발 활동**에서 허용 저장소를 선택하고 기존 브랜치·커밋·MR·파이프라인 주소를 붙여 넣어 연결한다. 브랜치는 해당 브랜치의 루트 페이지 주소, 커밋은 전체 SHA가 들어간 주소를 사용한다. 연결된 브랜치는 인증된 푸시로 확인한 마지막 SHA와 삭제 상태를 표시한다.
+
 ## Jira·Confluence 원본 조회
 
 업무 상세 또는 문서 **연결** 탭에서 **기존 도구 연결**을 사용한다. Jira는 `/browse/TEAM-17`, Confluence는 `/pages/viewpage.action?pageId=1234`, `/display/TEAM/Release+Notes`, `/spaces/TEAM/pages/1234/Release-Notes`처럼 브라우저에서 쓰는 주소를 받는다. 기존 서버의 `/jira` 또는 `/wiki` 같은 경로도 주소에 포함한다.
@@ -97,7 +99,7 @@ npm run test:pilot
 
 휴지통에 보낸 업무가 비운 시간을 다른 프로젝트의 업무에 배정한다. 별도 물리 복원본에서 원래 업무를 다시 살린 뒤, 새 배정은 확정된 상태로 남고 원래 배정은 재검토 상태와 기존 시각을 유지하는지 확인한다.
 
-이관한 Jira 업무를 합성 GitLab MR의 원래 키로 연결한다. 별도 물리 복원본에서도 저장소의 Jira 원본 매핑과 링크의 원래 키를 확인하고, 같은 MR을 다시 읽어도 링크가 중복되지 않는지 검사한다.
+이관한 Jira 업무를 합성 GitLab MR의 원래 키로 연결하고, 티켓 키가 없는 브랜치와 커밋을 주소로 추가한다. 별도 물리 복원본에서 저장소의 Jira 원본 매핑과 링크를 대조한다. 같은 MR을 다시 읽어도 중복되지 않고, 복원한 브랜치는 인증된 푸시로 갱신되는지 검사한다.
 
 합성 티켓을 착수 상태로 전환할 때 표시 조건에 따라 필수 확인 항목을 요청한다. 해당 값을 넣으면 상태와 담당자 자동 배정을 함께 적용한다. 물리 복원 뒤에도 양식 설정과 입력값을 읽고 동일한 필수 규칙을 확인한다.
 

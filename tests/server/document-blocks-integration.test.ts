@@ -67,7 +67,7 @@ test('label list options are canonical, bounded and protected in live and archiv
     assert.deepEqual(live.data.document.content, canonical);
 
     const { data: backup } = await f.call<Backup>('/export');
-    assert.equal(backup.schemaVersion, 59);
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 58 } });
     assert.equal(downgraded.status, 400);
     assert.match(downgraded.data.error, /schemaVersion 59/u);
@@ -75,7 +75,7 @@ test('label list options are canonical, bounded and protected in live and archiv
     mislabeled.collabStates.find(state => state.documentId === document.id)!.schemaVersion = 8;
     assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
     assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
-    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 59 } })).status, 200);
     const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
     assert.notEqual(restored.epoch, live.data.epoch);
     assert.deepEqual(restored.document.content, canonical);

@@ -30,7 +30,7 @@ type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRo
 type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
 type SyncOptions=Pick<ReadOptions,'includeHistory'> & { expectedVersion?: unknown; repositoryIds?: unknown };
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
-type ManualKind=Extract<GitlabLink['kind'],'merge_request'|'pipeline'>;
+type WorkflowGitlabKind=Extract<GitlabLink['kind'],'merge_request'|'pipeline'>;
 type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'>;
 type JiraKeyBinding={issueId:string;originalJiraKey:string};
 type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
@@ -203,6 +203,8 @@ function applyMergeObservation(link:GitlabLink,existing:GitlabLink,draft:LinkDra
   return next;
 }
 function matchesManualLink(existing:GitlabLink,draft:LinkDraft):boolean{
+  if(existing.kind==='branch')return isGitlabBranchName(draft.sourceBranch)&&existing.sourceBranch===draft.sourceBranch&&draft.id===branchObjectId(draft.sourceBranch);
+  if(existing.kind==='commit')return draft.id===draft.sourceSha&&existing.sourceSha===draft.id&&gitlabObjectSha(draft.id)===draft.id;
   return Boolean(draft.numericId&&draft.id===draft.numericId&&(existing.kind!=='merge_request'||existing.iid===draft.iid));
 }
 function manualTitle(title:string,token:string|null):string{
@@ -219,9 +221,20 @@ function refreshExistingLink(existing:GitlabLink,draft:LinkDraft,token:string|nu
   return applyMergeObservation(next,existing,draft,approvalAt);
 }
 function automaticLinkForAttached(existing:GitlabLink,draft:LinkDraft,originalJiraKey:string|undefined,token:string|null):GitlabLink{
-  const verified={...refreshExistingLink(existing,draft,token)};
+  return promoteAttachedLink(refreshExistingLink(existing,draft,token),originalJiraKey);
+}
+function promoteAttachedLink(link:GitlabLink,originalJiraKey?:string):GitlabLink{
+  const verified={...link};
   delete verified.manualLinkId;
   return originalJiraKey?{...verified,originalJiraKey}:verified;
+}
+function refreshAttachedBranch(link:GitlabLink, {state,sourceSha,webUrl,updatedAt,branchObservationSource}:Pick<GitlabLink,'state'|'sourceSha'|'webUrl'|'updatedAt'|'branchObservationSource'>):GitlabLink{
+  if(branchObservationSource==='sync' && (link.branchObservationSource!=='sync' || Date.parse(link.updatedAt)>Date.parse(updatedAt)))return link;
+  if(link.state===state&&link.sourceSha===sourceSha&&link.webUrl===webUrl&&link.branchObservationSource===branchObservationSource)return link;
+  const refreshed={...link,state,sourceSha,webUrl,updatedAt};
+  if(branchObservationSource===undefined)delete refreshed.branchObservationSource;
+  else refreshed.branchObservationSource=branchObservationSource;
+  return refreshed;
 }
 function emptyCounts(includeHistory=false):GitlabSyncPreviewCounts{
   return {mergeRequests:0,pipelines:0,matched:0,unmatched:0,skipped:0,create:0,update:0,unchanged:0,...(includeHistory?{branches:0,commits:0}:{})};
@@ -230,7 +243,7 @@ function branchHead(branch:unknown,sha:unknown):string|null{
   const ref=bound(branch,512),head=bound(sha,128);
   return ref&&head?JSON.stringify([ref,head]):null;
 }
-const branchObjectId=(branch:string)=>createHash('sha256').update(branch).digest('hex');
+export const branchObjectId=(branch:string)=>createHash('sha256').update(branch).digest('hex');
 function pushCursorId(instance: string, projectId: number, branch: string): string {
   return `gitlab:${instance}:${projectId}:branch:${branchObjectId(branch)}`;
 }
@@ -248,21 +261,21 @@ function safePreviewValue(value:string,token:string|null):string{
   return token?value.replaceAll(token,'[숨김]'):value;
 }
 
-function repositoryBranchDraft(object:Obj, repository:URL, readKeys:KeyReader):LinkDraft{
+function repositoryBranchDraft(object:Obj, readKeys:KeyReader):LinkDraft{
   const branch=object.name, sha=gitlabObjectSha(record(object.commit).id);
   if(!isGitlabBranchName(branch)||!sha||/^0+$/.test(sha))return readLink('branch',{},[]);
   const draft=readLink('branch',{
-    id:branchObjectId(branch),title:branch,source_branch:branch,sha,state:'active',web_url:gitlabPushLinkUrl(repository,'tree',branch),
+    id:branchObjectId(branch),title:branch,source_branch:branch,sha,state:'active',web_url:object.web_url,
   },[],readKeys);
   return {...draft,title:branch,iid:0};
 }
 
-function repositoryCommitDraft(object:Obj, repository:URL, readKeys:KeyReader):LinkDraft{
+function repositoryCommitDraft(object:Obj, readKeys:KeyReader):LinkDraft{
   const sha=gitlabObjectSha(object.id);
   if(!sha||/^0+$/.test(sha))return readLink('commit',{},[]);
   return readLink('commit',{
     id:sha,sha,title:object.title,message:object.message,state:'committed',
-    updated_at:object.committed_date,web_url:gitlabPushLinkUrl(repository,'commit',sha),
+    updated_at:object.committed_date,web_url:object.web_url,
   },readKeys(object.title,object.message),readKeys);
 }
 
@@ -289,7 +302,8 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
   if(!repository)throw new GitlabReadError('project','invalid-response');
   const {branches,commits,branchesLimited,commitsLimited}=scan.history;
   return {projectId,mergeRequests,pipelines,history:{
-    branches:branches.map(object=>repositoryBranchDraft(object,repository,readKeys)),commits:commits.map(object=>repositoryCommitDraft(object,repository,readKeys)),
+    branches:branches.map(object=>repositoryBranchDraft({...object,web_url:gitlabPushLinkUrl(repository,'tree',string(object.name))},readKeys)),
+    commits:commits.map(object=>repositoryCommitDraft({...object,web_url:gitlabPushLinkUrl(repository,'commit',gitlabObjectSha(object.id)??'')},readKeys)),
     limits:{branches:branchesLimited,commits:commitsLimited},
   }};
 }
@@ -298,6 +312,8 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
 export class GitlabIntegrationService{
   // Branch list snapshots have no revision number for reconciling overlapping manual scans.
   private historySyncActive=false;
+  // A verified branch read can race its first webhook before a link exists.
+  private readonly pendingBranchReads=new Map<string,{count:number;webUrl:string}>();
   private readonly manualLinkRows:StatementSync;
   private readonly linkedMergeRequestRows:StatementSync;
   constructor(private readonly store:Store,private readonly hooks:Hooks){
@@ -341,47 +357,53 @@ export class GitlabIntegrationService{
     const issue=this.requireIssue(issueId);
     const token=captured.token?this.store.unseal(captured.token):null;
     const startedAt=now();
+    const instance=this.instance(captured);
+    let pendingBranchId:string|undefined;
+    let branchCursorBeforeRead:PushObservation|undefined;
     let verified:Awaited<ReturnType<typeof readGitlabManualObject>>;
     try {
-      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},repositoryId,input.url,signal);
+      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},repositoryId,input.url,signal,(name,webUrl)=>{
+        if(token&&(name.includes(token)||webUrl.includes(token)))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
+        const id=pushCursorId(instance,repositoryId,name);
+        const pending=this.pendingBranchReads.get(id);
+        this.pendingBranchReads.set(id,{count:(pending?.count??0)+1,webUrl});
+        pendingBranchId=id;
+        branchCursorBeforeRead=this.store.get<PushObservation>('gitlab_push_cursors',id);
+      });
     } catch(error) {
       signal?.throwIfAborted();
       assertSettingsVersion(captured.version,this.raw().version);
       if(error instanceof GitlabManualUrlError)fail(error.message,400);
       if(error instanceof GitlabReadError)fail(error.message,error.httpStatus===404?404:502,{stage:error.stage,httpStatus:error.httpStatus});
       throw error;
+    } finally {
+      if(pendingBranchId){
+        const pending=this.pendingBranchReads.get(pendingBranchId)!;
+        if(pending.count===1)this.pendingBranchReads.delete(pendingBranchId);
+        else pending.count--;
+      }
     }
     signal?.throwIfAborted();
     const {kind,object,webUrl}=verified;
     if(token&&webUrl.includes(token))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
-    const iid=kind==='merge_request'?object.iid:Number(numericObjectId(object.iid)||numericObjectId(object.id));
-    const draft=readLink(kind,{...object,iid,web_url:webUrl},[],keys,{source:'read',observedAt:startedAt});
+    const data={...object,web_url:webUrl};
+    const draft=kind==='branch'?repositoryBranchDraft(data,keys):kind==='commit'?repositoryCommitDraft(data,keys):readLink(kind,{
+      ...data,iid:kind==='merge_request'?object.iid:Number(numericObjectId(object.iid)||numericObjectId(object.id)),
+    },[],keys,{source:'read',observedAt:startedAt});
+    if(!draft.id||!draft.webUrl)fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.',502);
     return this.store.transaction(()=>{
       assertSettingsVersion(captured.version,this.raw().version);
       const currentIssue=this.requireIssue(issueId);
       if(currentIssue.projectId!==issue.projectId)fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 연결해 주세요.',409);
-      const instance=this.instance(captured);
       const snapshot=linkForIssue(instance,repositoryId,kind,{issue:currentIssue},draft);
       const existing=this.store.get<GitlabLink>('gitlab_links',snapshot.id);
       if(existing&&!existing.manualLinkId)return {link:existing,created:false};
       if(existing&&!matchesManualLink(existing,draft))fail('저장한 GitLab 활동의 식별자와 일치하지 않습니다.',409);
-      const cursor=this.store.get<ObjectCursor>('gitlab_object_cursors',`${instance}:${repositoryId}:${kind}:${draft.id}`);
-      const cursorTime=Date.parse(cursor?.occurredAt??''),readTime=Date.parse(draft.incomingTime??'');
-      const webhookDuringRead=kind==='merge_request'&&Date.parse(cursor?.receivedAt??'')>=Date.parse(startedAt);
-      const approvalAt=kind==='merge_request'&&existing?matchingApprovalTime(cursor,draft):undefined;
-      const approvalRead=Boolean(approvalAt)&&approvalAt===existing?.updatedAt;
-      if(webhookDuringRead||!approvalRead&&Number.isFinite(cursorTime)&&(!Number.isFinite(readTime)||cursorTime>readTime||cursorTime===readTime&&cursor?.state!==draft.state)){
-        if(existing)return {link:existing,created:false};
-        fail('방금 GitLab 활동 상태가 변경되었습니다. 다시 확인해 주세요.',409);
-      }
-      const {sourceBranch,sourceSha,...identity}=snapshot;
-      const verifiedLink:GitlabLink=existing?refreshExistingLink(existing,draft,token,approvalAt):{...identity,manualLinkId:randomUUID(),
-        title:manualTitle(snapshot.title,token)||`GitLab #${snapshot.iid}`,
-        state:bound(safePreviewValue(snapshot.state,token),100)||'unknown',
-        ...(sourceBranch?{sourceBranch:safePreviewValue(sourceBranch,token).slice(0,512)}:{}),
-        ...(sourceSha?{sourceSha:safePreviewValue(sourceSha,token).slice(0,128)}:{}),
-      };
-      const link=verifiedLink.webUrl===webUrl?verifiedLink:{...verifiedLink,webUrl};
+      const link=kind==='branch'
+        ?this.verifiedBranchAttachment(instance,snapshot,existing,startedAt,branchCursorBeforeRead)
+        :kind==='commit'
+          ?existing??{...snapshot,title:manualTitle(snapshot.title,token)||`commit #${snapshot.sourceSha}`,manualLinkId:randomUUID()}
+          :this.verifiedWorkflowAttachment(kind,instance,snapshot,draft,existing,token,startedAt);
       if(link!==existing){
         if(!isRestorableGitlabLink(link))fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.',502);
         this.store.put('gitlab_links',link);
@@ -389,6 +411,35 @@ export class GitlabIntegrationService{
       if(!existing)afterAttach?.(link);
       return {link,created:!existing};
     });
+  }
+  private verifiedBranchAttachment(instance:string,snapshot:GitlabLink,existing:GitlabLink|undefined,startedAt:string,before?:PushObservation):GitlabLink{
+    const cursor=this.store.get<PushObservation>('gitlab_push_cursors',pushCursorId(instance,snapshot.projectId,snapshot.sourceBranch!));
+    if(cursor&&(cursor.state!=='active'||cursor.sourceSha!==snapshot.sourceSha)){
+      const changedDuringRead=cursor.state!==before?.state||cursor.sourceSha!==before?.sourceSha||cursor.updatedAt!==before?.updatedAt;
+      if(existing&&(changedDuringRead||Date.parse(cursor.updatedAt)>Date.parse(startedAt)))return existing;
+      fail('GitLab에서 조회한 브랜치 HEAD가 마지막으로 확인한 푸시 기록과 다릅니다.',409);
+    }
+    const sample:GitlabLink=cursor?{...snapshot,updatedAt:cursor.updatedAt}:{...snapshot,branchObservationSource:'sync',updatedAt:startedAt};
+    return existing?refreshAttachedBranch(existing,sample):{...sample,manualLinkId:randomUUID()};
+  }
+  private verifiedWorkflowAttachment(kind:WorkflowGitlabKind,instance:string,snapshot:GitlabLink,draft:LinkDraft,existing:GitlabLink|undefined,token:string|null,startedAt:string):GitlabLink{
+    const cursor=this.store.get<ObjectCursor>('gitlab_object_cursors',`${instance}:${snapshot.projectId}:${kind}:${draft.id}`);
+    const cursorTime=Date.parse(cursor?.occurredAt??''),readTime=Date.parse(draft.incomingTime??'');
+    const webhookDuringRead=kind==='merge_request'&&Date.parse(cursor?.receivedAt??'')>=Date.parse(startedAt);
+    const approvalAt=kind==='merge_request'&&existing?matchingApprovalTime(cursor,draft):undefined;
+    const approvalRead=Boolean(approvalAt)&&approvalAt===existing?.updatedAt;
+    if(webhookDuringRead||!approvalRead&&Number.isFinite(cursorTime)&&(!Number.isFinite(readTime)||cursorTime>readTime||cursorTime===readTime&&cursor?.state!==draft.state)){
+      if(existing)return existing;
+      fail('방금 GitLab 활동 상태가 변경되었습니다. 다시 확인해 주세요.',409);
+    }
+    const {sourceBranch,sourceSha,...identity}=snapshot;
+    const verified:GitlabLink=existing?refreshExistingLink(existing,draft,token,approvalAt):{...identity,manualLinkId:randomUUID(),
+      title:manualTitle(snapshot.title,token)||`GitLab #${snapshot.iid}`,
+      state:bound(safePreviewValue(snapshot.state,token),100)||'unknown',
+      ...(sourceBranch?{sourceBranch:safePreviewValue(sourceBranch,token).slice(0,512)}:{}),
+      ...(sourceSha?{sourceSha:safePreviewValue(sourceSha,token).slice(0,128)}:{}),
+    };
+    return verified.webUrl===snapshot.webUrl?verified:{...verified,webUrl:snapshot.webUrl};
   }
   removeAttachedLink(issueId:string,linkId:string,expectedManualLinkId:unknown,afterRemove?:(link:GitlabLink)=>void):void{
     if(!isGitlabManualLinkId(expectedManualLinkId))fail('해제할 GitLab 수동 연결을 다시 선택해 주세요.');
@@ -484,12 +535,15 @@ export class GitlabIntegrationService{
       return match?[match]:[];
     });
   }
-  private manualLinksForObject(instance:string,projectId:number,kind:ManualKind,draft:LinkDraft):GitlabLink[]{
-    if(!draft.numericId||draft.id!==draft.numericId)return[];
-    const key=gitlabLinkObjectKey(instance,projectId,kind,draft.numericId);
+  private manualLinksForKey(instance:string,projectId:number,kind:GitlabLink['kind'],objectId:string):GitlabLink[]{
+    const key=gitlabLinkObjectKey(instance,projectId,kind,objectId);
     const rows=this.manualLinkRows.all(`${key}:`,`${key};`) as {json:string}[];
     return rows.map(row=>JSON.parse(row.json) as GitlabLink).filter(link=>
-      link.id===`${key}:${link.issueId}`&&link.kind===kind&&link.projectId===projectId&&matchesManualLink(link,draft));
+      link.id===`${key}:${link.issueId}`&&link.kind===kind&&link.projectId===projectId);
+  }
+  private manualLinksForObject(instance:string,projectId:number,kind:GitlabLink['kind'],draft:LinkDraft):GitlabLink[]{
+    if(kind!=='branch'&&kind!=='commit'&&(!draft.numericId||draft.id!==draft.numericId))return[];
+    return this.manualLinksForKey(instance,projectId,kind,draft.id).filter(link=>matchesManualLink(link,draft));
   }
   private existingAutomaticMergeRequests(instance:string,projectId:number,draft:LinkDraft,matcher:TicketMatcher){
     if(!draft.numericId||draft.id!==draft.numericId)return [];
@@ -503,7 +557,7 @@ export class GitlabIntegrationService{
       return match?[{link,match}]:[];
     });
   }
-  private upsert(instance:string,projectId:number,kind:ManualKind,draft:LinkDraft,matches:TicketMatch[],preserveExisting:boolean,token:string|null):number{
+  private upsert(instance:string,projectId:number,kind:WorkflowGitlabKind,draft:LinkDraft,matches:TicketMatch[],preserveExisting:boolean,token:string|null):number{
     let linked=0;
     for(const match of matches){
       const link=linkForIssue(instance,projectId,kind,match,draft);
@@ -527,40 +581,54 @@ export class GitlabIntegrationService{
     return linked;
   }
   private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, matches: TicketMatch[]): number {
-    const id = pushCursorId(instance, projectId, head.branch);
+    const objectId = branchObjectId(head.branch);
+    const id = gitlabLinkObjectKey(instance, projectId, 'branch', objectId);
+    const attached = this.manualLinksForKey(instance, projectId, 'branch', objectId).filter(link=>link.sourceBranch===head.branch);
+    const pending = this.pendingBranchReads.get(id);
     let previous = this.store.get<PushObservation>('gitlab_push_cursors', id);
     let snapshotUrl: string | undefined;
     if (!previous) {
       // Native backups contain branch links without transient webhook cursors.
-      const persisted = matches.flatMap(({issue:{id:issueId}}) => {
-        const prior = this.store.get<GitlabLink>('gitlab_links', `${id}:${issueId}`);
-        if (prior?.branchObservationSource === 'sync') snapshotUrl ??= prior.webUrl;
-        const observed = prior && pushObservationFromLink(prior);
-        return observed ? [observed] : [];
+      const storedLinks=matches.map(({issue:{id:issueId}})=>this.store.get<GitlabLink>('gitlab_links',`${id}:${issueId}`));
+      const persisted=[...storedLinks,...attached].flatMap(prior=>{
+        if(prior?.branchObservationSource==='sync')snapshotUrl??=prior.webUrl;
+        const observed=prior&&pushObservationFromLink(prior);
+        return observed?[observed]:[];
       });
       previous = persisted.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
     }
-    const archived = !previous && !matches.length ? this.hooks.findArchivedBranchLink?.(id) : undefined;
+    const archived = !previous && !matches.length && !attached.length ? this.hooks.findArchivedBranchLink?.(id) : undefined;
     if (archived) previous = pushObservationFromLink(archived) ?? undefined;
-    if (!previous && !matches.length && !archived) return 0;
-    const lastHead = previous?.state === 'deleted' ? '0'.repeat(previous.sourceSha.length) : previous?.sourceSha;
+    if (!previous && !matches.length && !attached.length && !pending && !archived) return 0;
+    const latestAttached = [...attached, ...(archived?.manualLinkId ? [archived] : [])].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt))[0];
+    const baseline = previous ?? (latestAttached && pushObservationFromLink(latestAttached,true));
+    const lastHead = baseline?.state === 'deleted' ? '0'.repeat(baseline.sourceSha.length) : baseline?.sourceSha;
     const sameHead = lastHead === head.after;
     if (lastHead !== undefined && !sameHead && lastHead !== head.before) return 0;
 
     const treeUrl = repository && gitlabPushLinkUrl(repository, 'tree', head.branch);
-    const webUrl = treeUrl || gitlabScopedPushUrl(baseUrl, previous?.webUrl ?? snapshotUrl ?? archived?.webUrl);
+    const webUrl = treeUrl || gitlabScopedPushUrl(baseUrl, previous?.webUrl ?? snapshotUrl ?? pending?.webUrl ?? archived?.webUrl);
     if (!webUrl) return 0;
     const observation: PushObservation = sameHead && previous ? { ...previous, webUrl } : {
       id, state: head.deleted ? 'deleted' : 'active', sourceSha: head.deleted ? head.before : head.after, webUrl, updatedAt: now(),
     };
     this.store.put('gitlab_push_cursors', observation);
     let linked = 0;
+    const matchedIds = new Set<string>();
     for (const {issue:{id:issueId},originalJiraKey} of matches) {
+      matchedIds.add(issueId);
       const link: GitlabLink = { ...observation, id: `${id}:${issueId}`, issueId, projectId, iid: 0, kind: 'branch', title: head.branch, sourceBranch: head.branch, ...(originalJiraKey?{originalJiraKey}:{}) };
       const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
       const next=retainOriginalJiraKey(link,existing);
-      if (existing?.state === next.state && !existing.branchObservationSource && existing.sourceSha === next.sourceSha && existing.webUrl === next.webUrl && existing.originalJiraKey === next.originalJiraKey) continue;
+      if (existing?.state === next.state && !existing.manualLinkId && !existing.branchObservationSource && existing.sourceSha === next.sourceSha && existing.webUrl === next.webUrl && existing.originalJiraKey === next.originalJiraKey) continue;
       this.store.put('gitlab_links', next);
+      linked++;
+    }
+    for(const prior of attached){
+      if(matchedIds.has(prior.issueId))continue;
+      const next=refreshAttachedBranch(prior,observation);
+      if(next===prior)continue;
+      this.store.put('gitlab_links',next);
       linked++;
     }
     return linked;
@@ -588,7 +656,7 @@ export class GitlabIntegrationService{
     const readKeys=route?routedKeys:keys;
     const branchKeys = head ? readKeys(head.branch) : [];
     const commits = Array.isArray(body.commits) ? body.commits : [];
-    if (!branchKeys.length && !commits.length) return 0;
+    if (!head && !commits.length) return 0;
 
     const repository = gitlabRepositoryUrl(raw.baseUrl, project);
     const matcher=this.ticketMatcher(this.syncIssues(),route);
@@ -618,6 +686,13 @@ export class GitlabIntegrationService{
         const link = linkForIssue(instance, projectId, 'commit', match, draft);
         const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
         if (existing) {
+          if(existing.manualLinkId){
+            if(!matchesManualLink(existing,draft))continue;
+            const promoted=promoteAttachedLink(existing,link.originalJiraKey);
+            this.store.put('gitlab_links',{...promoted,...(!promoted.sourceBranch&&link.sourceBranch?{sourceBranch:link.sourceBranch}:{})});
+            linked++;
+            continue;
+          }
           const shaToAdd = existing.sourceSha ? undefined : link.sourceSha;
           const branchToAdd = existing.sourceBranch ? undefined : link.sourceBranch;
           const aliasToAdd = existing.originalJiraKey ? undefined : link.originalJiraKey;
@@ -729,15 +804,14 @@ export class GitlabIntegrationService{
           counts.skipped++;continue;
         }
       }
-      const attached=kind==='merge_request'||kind==='pipeline'
-        ?this.manualLinksForObject(instance,projectId,kind,draft).map(link=>planned.get(link.id)??link).filter(link=>link.manualLinkId):[];
+      const attached=this.manualLinksForObject(instance,projectId,kind,draft).map(link=>planned.get(link.id)??link).filter(link=>link.manualLinkId);
       const known=kind==='merge_request'?this.existingAutomaticMergeRequests(instance,projectId,draft,matcher):[];
       if(!draft.webUrl&&!attached.length&&!known.length){counts.skipped++;continue;}
       const attachedIssueIds=new Set(attached.map(link=>link.issueId));
       const targets=matcher.match(draft.matchedKeys).filter(match=>Boolean(draft.webUrl)||attachedIssueIds.has(match.issue.id));
       // A sampled branch can add a scoped Jira link to the exact authenticated head without replacing that observation.
-      const matched=observation?targets.filter(target=>target.originalJiraKey):targets;
-      if(observation&&!matched.length){counts.skipped++;continue;}
+      const matched=observation?targets.filter(target=>target.originalJiraKey||attachedIssueIds.has(target.issue.id)):targets;
+      if(observation&&!matched.length&&!attached.length){counts.skipped++;continue;}
       if(!matched.length&&!attached.length&&!known.length){counts.unmatched++;continue;}
       counts.matched++;
       const matchedIssueIds=new Set(matched.map(match=>match.issue.id));
@@ -760,7 +834,9 @@ export class GitlabIntegrationService{
         }
         if(existing?.manualLinkId){
           if(!matchesManualLink(existing,draft))continue;
-          const next=automaticLinkForAttached(existing,draft,match.originalJiraKey,token);
+          const next=kind==='branch'
+            ?promoteAttachedLink(refreshAttachedBranch(existing,{...link,updatedAt:observation?.updatedAt??new Date(startedAt).toISOString()}),match.originalJiraKey)
+            :kind==='commit'?promoteAttachedLink(existing,match.originalJiraKey):automaticLinkForAttached(existing,draft,match.originalJiraKey,token);
           counts.update++;
           planned.set(link.id,next);
           visit(next,match,'update',kind,draft.id);
@@ -793,7 +869,9 @@ export class GitlabIntegrationService{
         if(matchedIssueIds.has(prior.issueId))continue;
         const issue=this.store.get<Issue>('issues',prior.issueId);
         if(!issue)continue;
-        const next=refreshExistingLink(prior,draft,token,approvalAt);
+        const next=kind==='branch'
+          ?refreshAttachedBranch(prior,observation??{state:draft.state,sourceSha:draft.sourceSha,webUrl:draft.webUrl,updatedAt:new Date(startedAt).toISOString(),branchObservationSource:'sync'})
+          :kind==='commit'?prior:refreshExistingLink(prior,draft,token,approvalAt);
         const action=next===prior?'unchanged':'update';
         counts[action]++;
         if(action==='update')planned.set(next.id,next);
