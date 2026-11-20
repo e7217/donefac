@@ -44,6 +44,7 @@ type GanttProps = FeatureProps & {
   onOpenPlanning?: (id: string) => void;
   ganttViewId?: string | null;
   onChangeGanttView?: (id: string | null) => boolean;
+  onOpenSavedIssueView?: (id: string) => boolean;
   focusIssueId?: string | null;
   issueFocusActivation?: number;
   issueOverlayOpen?: boolean;
@@ -90,7 +91,7 @@ export function Gantt(props: GanttProps) {
 }
 
 function ProjectGantt(props: GanttProps) {
-  const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView,
+  const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView, onOpenSavedIssueView,
     focusIssueId, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus } = props;
   const focusedIssue = focusIssueId ? data.issues.find(issue => issue.id === focusIssueId && issue.projectId === projectId) : undefined;
   const focusedDate = focusedIssue?.startDate || focusedIssue?.endDate;
@@ -568,6 +569,8 @@ function ProjectGantt(props: GanttProps) {
           {sharedViews.map(view => <option key={view.id} value={view.id}>{view.name}</option>)}
         </select>
       </label>
+      {sharedView && onOpenSavedIssueView && <button type="button" className="btn btn-ghost" disabled={busy}
+        onClick={() => onOpenSavedIssueView(sharedView.id)}>업무 보기에서 열기 <ArrowRight size={14} aria-hidden="true" /></button>}
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
       {sharedPlanningLabels.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 계획·일정 조건">
         {sharedPlanningLabels.map(label => <li key={label}>{label}</li>)}

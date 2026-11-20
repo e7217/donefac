@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
-import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type SavedView, type SavedViewState } from '../../shared/types';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
@@ -26,6 +26,7 @@ type BoardDrop = IssuePlacement & { status: IssueStatus };
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
 type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning'>;
+const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 
 function IssueOrderControls({ issue, previous, next, busy, move }: {
   issue: Issue; previous?: Issue; next?: Issue; busy: boolean;
@@ -68,8 +69,19 @@ export function IssueTypeIcon({ type, size = 15, data, projectId }: { type: stri
 export function StatusDot({ color }: { color: string }) { return <span className="issue-status-dot" style={{ background: color }} />; }
 function PriorityIcon({ value }: { value: keyof typeof PRIORITY }) { return value === 'urgent' || value === 'high' ? <ArrowUp size={14} className={value === 'urgent' ? 'issue-priority-urgent' : 'issue-priority-high'} /> : value === 'low' ? <ArrowDown size={14} className="muted" /> : <span className="issue-priority-medium">=</span>; }
 
-export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) => void }) {
-  const { data, projectId, refresh, notify, openIssue, onOpenGantt } = props;
+export function Issues(props: FeatureProps & {
+  savedViewId?: string | null;
+  onChangeSavedView?: (id: string | null) => boolean;
+  onOpenGantt?: (viewId: string) => void;
+}) {
+  const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt } = props;
+  const [loadedViews, setLoadedViews] = useState<{ projectId: string; snapshot: typeof data.savedViews; values: SavedView[] }>();
+  const workspaceViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
+    .sort((left, right) => left.name.localeCompare(right.name, 'ko')), [data.savedViews, projectId]);
+  const projectViews = loadedViews?.projectId === projectId && loadedViews.snapshot === data.savedViews ? loadedViews.values : workspaceViews;
+  const selectedView = savedViewId ? projectViews.find(value => value.id === savedViewId) : undefined;
+  const unavailableView = Boolean(savedViewId && !selectedView);
+  const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; id: string | null; applied: boolean }>();
   const [view, setView] = useState<'list' | 'board'>('list');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
@@ -102,7 +114,7 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
-  const issues = projectIssues.filter(matchesIssue);
+  const issues = unavailableView ? [] : projectIssues.filter(matchesIssue);
   const bulk = useIssueBulkEdit(props, issues);
   const projectSelected = data.projects.some(project => project.id === projectId);
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
@@ -125,6 +137,10 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
     setType(value.filters.type);
     updateProjectFilters({ fieldFilter: value.filters.fieldFilter, planning: value.filters.planning });
     setFilterEditorEpoch(epoch => epoch + 1);
+  }
+  if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
+    setAppliedRouteView({ projectId, id: savedViewId, applied: Boolean(selectedView) });
+    if (selectedView || savedViewId || appliedRouteView?.id) applySavedView(selectedView ?? defaultView);
   }
   function clearFilters() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
@@ -274,16 +290,16 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
       <IssuePlanningFilters key={`planning:${projectId}:${filterEditorEpoch}`} projectId={projectId} planningItems={planningItems}
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
-    <SavedViews projectId={projectId} actorId={props.actorId} planningItems={planningItems}
-      current={{layout:view,filters}}
-      onApply={applySavedView} onOpenGantt={onOpenGantt} onViewsChanged={refresh} notify={notify} />
+    <SavedViews projectId={projectId} planningItems={planningItems} views={projectViews} selectedId={savedViewId}
+      current={{layout:view,filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
+      onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>
     {order && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
     </div>}
     {bulk.active && <IssueBulkEdit editor={bulk} statuses={statuses} users={data.users} onClose={closeBulkEdit} />}
-    {view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
+    {!unavailableView && (view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
       const user = data.users.find(u => u.id === issue.assigneeId);
       const selected = bulk.active && bulk.selectedIds.has(issue.id);
       return <tr key={issue.id} data-issue-id={issue.id} className={selected ? 'issue-bulk-selected' : undefined}>
@@ -321,7 +337,7 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
           </div>;
         })}{column.length === 0 && <div className="issue-column-empty">이 상태의 업무가 없습니다</div>}
       </section>;
-    })}</div>}
+    })}</div>)}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
   </div>;
 }
