@@ -34,6 +34,7 @@ type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
+  modalFocus?: boolean;
   previewDocumentId: string | null;
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
@@ -51,8 +52,9 @@ export function IssuePanel(props: IssuePanelProps) {
 }
 
 function IssuePanelContent(props: IssuePanelProps) {
-  const { data, issueId, documentOverlay, previewDocumentId, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
+  const { data, issueId, documentOverlay, modalFocus, previewDocumentId, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
     refresh, notify, openIssue, openDocument } = props;
+  const manageFocus = Boolean(documentOverlay || modalFocus);
   const issue = data.issues.find(i => i.id === issueId);
   const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
   const bodyReferences = useMemo(() => new Map(findIssueDocumentReferences(data.documents, issueId)
@@ -209,12 +211,12 @@ function IssuePanelContent(props: IssuePanelProps) {
     return () => cancelAnimationFrame(frame);
   }, [previewDocumentId]);
   useEffect(() => {
-    if (documentOverlay) closeButton.current?.focus({ preventScroll: true });
-  }, [documentOverlay]);
+    if (manageFocus) closeButton.current?.focus({ preventScroll: true });
+  }, [manageFocus]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || dependencyEditor || previewDocumentId) return;
-      if (documentOverlay) {
+      if (manageFocus) {
         event.preventDefault();
         event.stopPropagation();
       }
@@ -222,9 +224,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation, dependencyEditor, documentOverlay, previewDocumentId]);
+  }, [closePanel, saving, childCreation, dependencyEditor, manageFocus, previewDocumentId]);
 
-  function keepDocumentOverlayFocus(event: ReactKeyboardEvent<HTMLElement>) {
+  function keepIssuePanelFocus(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key !== 'Tab' || event.defaultPrevented) return;
     const panel = event.currentTarget;
     const focusable = [...panel.querySelectorAll<HTMLElement>(
@@ -382,7 +384,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     <div className="issue-panel-backdrop" inert={Boolean(childCreation || dependencyEditor || previewDocument)} onMouseDown={event => {
       if (event.target === event.currentTarget && !saving && !childCreation && !dependencyEditor && !dependencyBusyRef.current) closePanel();
     }}><aside ref={issuePanel} className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
-      tabIndex={documentOverlay ? -1 : undefined} onKeyDown={documentOverlay ? keepDocumentOverlayFocus : undefined}>
+      tabIndex={manageFocus ? -1 : undefined} onKeyDown={manageFocus ? keepIssuePanelFocus : undefined}>
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">

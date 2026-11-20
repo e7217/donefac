@@ -13,6 +13,7 @@ import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
+import { BoardCapacityDetails, BoardCapacityNote, BoardCapacitySummary, type BoardStatusCapacity } from './IssueBoardCapacity';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { GitlabActivityRefresh } from './GitlabActivity';
 import { ISSUE_GITLAB_FILTER_LABELS, IssueGitlabSummary } from './IssueGitlabSummary';
@@ -76,8 +77,9 @@ export function Issues(props: FeatureProps & {
   savedViewId?: string | null;
   onChangeSavedView?: (id: string | null) => boolean;
   onOpenGantt?: (viewId: string) => void;
+  onOpenBoardCapacityIssue?: (id: string, source: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
 }) {
-  const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt } = props;
+  const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt, onOpenBoardCapacityIssue } = props;
   const [loadedViews, setLoadedViews] = useState<{ projectId: string; snapshot: typeof data.savedViews; values: SavedView[] }>();
   const workspaceViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((left, right) => left.name.localeCompare(right.name, 'ko')), [data.savedViews, projectId]);
@@ -108,9 +110,13 @@ export function Issues(props: FeatureProps & {
   const [orderEditProject, setOrderEditProject] = useState<string | null>(null);
   const [orderNotice, setOrderNotice] = useState<OrderNotice | null>(null);
   const [dropTarget, setDropTarget] = useState<BoardDrop | null>(null);
+  const [capacitySelection, setCapacitySelection] = useState<{ projectId: string; statusId: string } | null>(null);
   const pendingMutation = useRef(false);
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
+  const boardCanvas = useRef<HTMLDivElement>(null);
+  const capacityHeading = useRef<HTMLHeadingElement>(null);
+  const capacityOpener = useRef<HTMLButtonElement | null>(null);
   const order = isAll(projectId) ? undefined : data.issueOrders?.find(value => value.projectId === projectId);
   const ordering = Boolean(order) && orderEditProject === projectId;
   const notice = orderNotice?.projectId === projectId ? orderNotice : null;
@@ -122,6 +128,21 @@ export function Issues(props: FeatureProps & {
   const issues = unavailableView ? [] : projectIssues.filter(matchesIssue);
   const bulk = useIssueBulkEdit(props, issues);
   const projectSelected = data.projects.some(project => project.id === projectId);
+  const capacities = useMemo(() => {
+    const byStatus = new Map<string, BoardStatusCapacity>();
+    if (projectSelected && view === 'board') {
+      const labelCounts = new Map<string, number>();
+      for (const status of statuses) labelCounts.set(status.label, (labelCounts.get(status.label) ?? 0) + 1);
+      for (const status of statuses) {
+        if (typeof status.wipLimit !== 'number') continue;
+        const label = (labelCounts.get(status.label) ?? 0) > 1 ? `${status.label} (${status.id})` : status.label;
+        byStatus.set(status.id, { status: { ...status, label }, limit: status.wipLimit, issues: [] });
+      }
+      if (byStatus.size) for (const issue of projectIssues) byStatus.get(issue.status)?.issues.push(issue);
+    }
+    return byStatus;
+  }, [projectSelected, view, statuses, projectIssues]);
+  const selectedCapacity = capacitySelection?.projectId === projectId ? capacities.get(capacitySelection.statusId) : undefined;
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
   const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab);
@@ -155,6 +176,22 @@ export function Issues(props: FeatureProps & {
   }
   function closeBulkEdit() {
     if (bulk.close()) bulkToggle.current?.focus({ preventScroll: true });
+  }
+  function openCapacity(statusId: string, opener: HTMLButtonElement) {
+    capacityOpener.current = opener;
+    setCapacitySelection({ projectId, statusId });
+    requestAnimationFrame(() => capacityHeading.current?.focus());
+  }
+  function closeCapacity() {
+    const opener = capacityOpener.current;
+    const id = capacitySelection?.statusId;
+    setCapacitySelection(null);
+    capacityOpener.current = null;
+    requestAnimationFrame(() => {
+      const columnHeading = id && boardCanvas.current?.querySelector<HTMLElement>(`[data-status-id="${CSS.escape(id)}"] .issue-board-heading`);
+      if (opener?.isConnected) opener.focus();
+      else if (columnHeading) columnHeading.focus();
+    });
   }
   function toggleBulkEdit() {
     if (bulk.active) { closeBulkEdit(); return; }
@@ -326,15 +363,26 @@ export function Issues(props: FeatureProps & {
         <td className="issue-date-cell">{dateLabel(issue.endDate || issue.dueDate)}</td>
         <td><div className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}{issue.labels.length > 2 && <span className="muted">+{issue.labels.length - 2}</span>}</div></td>
       </tr>;
-    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={15} /> 업무 만들기</button></div>}</div> : <div className="issue-board">{statuses.map(state => {
+    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={15} /> 업무 만들기</button></div>}</div> : <>
+      <BoardCapacitySummary columns={[...capacities.values()]} open={openCapacity} />
+      {selectedCapacity && <BoardCapacityDetails key={selectedCapacity.status.id} value={selectedCapacity}
+        visibleIds={new Set(issues.map(issue => issue.id))} users={data.users} heading={capacityHeading}
+        openIssue={onOpenBoardCapacityIssue ?? openIssue} close={closeCapacity} />}
+      <div className="issue-board" ref={boardCanvas}>{statuses.map(state => {
       const key = state.id;
       const column = issues.filter(i => i.status === key);
+      const capacity = capacities.get(key);
       const target = dropTarget?.status === key ? dropTarget : null;
       return <section key={key} className={`issue-board-column ${target ? 'is-drag-over' : ''}`} data-status-id={key}
+        data-capacity={capacity && (capacity.issues.length > capacity.limit ? 'over' : capacity.issues.length === capacity.limit ? 'at' : 'under')}
         onDragOver={event => boardDragOver(event, key, column)}
         onDragLeave={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDropTarget(current => current?.status === key ? null : current); }}
         onDrop={event => dropOnBoard(event, key, column)}>
-        <div className="issue-board-heading"><StatusDot color={state.color} /><strong>{state.label}</strong><span>{column.length}</span><button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} onClick={() => { beginCreate(key); }}><Plus size={15} /></button></div>
+        <div className="issue-board-heading" tabIndex={capacity ? -1 : undefined}><StatusDot color={state.color} /><strong>{capacity?.status.label ?? state.label}</strong>
+          {capacity ? <span className="board-capacity-count" title="프로젝트 전체 업무 수 / 한도" role="status"
+            aria-label={`프로젝트 전체 업무 ${capacity.issues.length}개, 한도 ${capacity.limit}개`}>{capacity.issues.length.toLocaleString()} / {capacity.limit.toLocaleString()}</span> : <span>{column.length}</span>}
+          <button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} onClick={() => { beginCreate(key); }}><Plus size={15} /></button></div>
+        {capacity && <BoardCapacityNote value={capacity} visible={column.length} open={openCapacity} />}
         {column.map((issue, index) => {
           const user = data.users.find(u => u.id === issue.assigneeId);
           return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
@@ -348,9 +396,9 @@ export function Issues(props: FeatureProps & {
             <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
             {controls(issue, column, index)}
           </div>;
-        })}{column.length === 0 && <div className="issue-column-empty">이 상태의 업무가 없습니다</div>}
+        })}{column.length === 0 && <div className="issue-column-empty">{capacity?.issues.length ? '필터에 맞는 업무가 없습니다' : '이 상태의 업무가 없습니다'}</div>}
       </section>;
-    })}</div>)}
+    })}</div></>)}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
   </div>;
 }

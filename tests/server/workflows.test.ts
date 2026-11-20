@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { Issue, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Issue, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dataDir?: string, seed = true) {
   const dir = dataDir || mkdtempSync(join(tmpdir(), 'teamspace-workflows-'));
@@ -61,6 +61,71 @@ test('workflow CAS, stable state names, in-use deletion guard and initial custom
     const invalid = await f.request('/projects/project-neo/workflow', 'PATCH', { ...renamed.data, expectedVersion: 3, statuses: [{ id: 'intake', label: '접수', color: 'red', category: 'todo' }] }); assert.equal(invalid.status, 400);
     await f.close(); const next = await fixture(f.dir); try { const persisted = await next.request<ProjectWorkflow>('/projects/project-neo/workflow'); assert.equal(persisted.data.version, 3); assert.equal(persisted.data.initialStatusId, 'intake'); assert.equal(persisted.data.statuses.find(status => status.id === 'intake')?.label, '요청 접수'); } finally { await next.close(); }
   } finally { await f.close(); f.remove(); }
+});
+
+test('board limits preserve old workflow clients, allow transitions above the limit, and roundtrip format 56', async () => {
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; reportingLedger: ReportingLedgerData };
+  const f = await fixture(), target = await fixture(undefined, false);
+  const projectId = 'project-neo';
+  const path = `/projects/${projectId}/workflow`;
+  const save = (workflow: ProjectWorkflow, limit: unknown) => f.request<ProjectWorkflow>(path, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    statuses: workflow.statuses.map(status => status.id === 'review' ? { ...status, wipLimit: limit } : status),
+  });
+  const statusIn = (workflow: ProjectWorkflow, id = 'review') => workflow.statuses.find(status => status.id === id)!;
+  try {
+    const original = (await f.request<ProjectWorkflow>(path)).data;
+    assert.equal(Object.hasOwn(statusIn(original), 'wipLimit'), false);
+    const before = (await f.request<Backup>('/export')).data;
+    const ready = await save(original, 1);
+    assert.equal(ready.status, 200);
+    assert.equal(statusIn(ready.data).wipLimit, 1);
+    const afterLimit = (await f.request<Backup>('/export')).data;
+    assert.deepEqual(afterLimit.issues, before.issues);
+    assert.deepEqual(afterLimit.reportingLedger.events, before.reportingLedger.events);
+    assert.equal((await save(original, null)).status, 409);
+    for (const invalid of [0, -1, 0.5, 10_001, '3', true, {}, []]) {
+      assert.equal((await save(ready.data, invalid)).status, 400, JSON.stringify(invalid));
+    }
+    assert.deepEqual((await f.request<ProjectWorkflow>(path)).data, ready.data);
+
+    const oldStatuses = ready.data.statuses.map(({ id, label, color, category }) => ({ id, label, color, category }));
+    const oldClient = await f.request<ProjectWorkflow>(path, 'PATCH', {
+      ...ready.data, expectedVersion: ready.data.version,
+      statuses: oldStatuses.reverse().map(status => status.id === 'done' ? { ...status, wipLimit: 10_000 } : status),
+    });
+    assert.equal(oldClient.status, 200);
+    assert.equal(statusIn(oldClient.data).wipLimit, 1);
+    assert.equal(statusIn(oldClient.data, 'done').wipLimit, 10_000);
+    for (const title of ['한도에 도달하는 업무', '한도를 넘겨 이동하는 업무']) {
+      const created = await f.request<Issue>('/issues', 'POST', { projectId, title });
+      assert.equal(created.status, 201);
+      const moved = await f.request<Issue>(`/issues/${created.data.id}`, 'PATCH', { expectedVersion: created.data.version, status: 'review' });
+      assert.equal(moved.status, 200);
+      assert.equal(moved.data.status, 'review');
+    }
+
+    const exported = (await f.request<Backup>('/export')).data;
+    assert.equal(exported.schemaVersion, 56);
+    assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
+    const restored = (await target.request<ProjectWorkflow>(path)).data;
+    assert.equal(statusIn(restored).wipLimit, 1);
+    assert.equal(statusIn(restored, 'done').wipLimit, 10_000);
+    const mislabeled = await target.request<{ error: string }>('/import', 'POST', { data: { ...exported, schemaVersion: 55 } });
+    assert.equal(mislabeled.status, 400);
+    assert.match(mislabeled.data.error, /schemaVersion 56/);
+    assert.equal(statusIn((await target.request<ProjectWorkflow>(path)).data).wipLimit, 1);
+    const broken = structuredClone(exported);
+    statusIn(broken.workflows!.find(workflow => workflow.projectId === projectId)!).wipLimit = -1;
+    assert.equal((await target.request('/import', 'POST', { data: broken })).status, 400);
+
+    const cleared = await save(oldClient.data, null);
+    assert.equal(cleared.status, 200);
+    assert.equal(Object.hasOwn(statusIn(cleared.data), 'wipLimit'), false);
+    assert.equal(statusIn(cleared.data, 'done').wipLimit, 10_000);
+    assert.equal((await target.request('/import', 'POST', { data: { ...before, schemaVersion: 55 } })).status, 200);
+    assert.equal(Object.hasOwn(statusIn((await target.request<ProjectWorkflow>(path)).data), 'wipLimit'), false);
+  } finally { for (const fixture of [f, target]) { await fixture.close(); fixture.remove(); } }
 });
 
 test('current backup roundtrips custom workflows; legacy1/2 receive defaults; invalid imported state references rollback', async () => {

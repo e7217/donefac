@@ -136,6 +136,12 @@ curl --fail-with-body \
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
+## 보드 상태별 업무 한도
+
+브라우저의 `GET /api/projects/:projectId/workflow`에서 설정된 상태의 `statuses[].wipLimit`을 읽을 수 있다. 기존 `PATCH /api/projects/:projectId/workflow` 요청의 `expectedVersion`과 상태 목록에 `wipLimit`을 1~10,000의 정수로 전달한다. `null`은 한도를 해제한다. 속성을 생략하면 같은 ID의 기존 한도를 유지한다. 자체 백업의 형식 56에 설정을 보존한다.
+
+한도는 보드에서 해당 상태의 전체 업무 수와 비교한다. 하위 업무와 보드의 필터 밖 업무도 포함한다. 업무 생성·상태 변경의 허용 여부는 워크플로의 전이 및 필수 속성 규칙이 결정한다.
+
 ## 워크플로 상태 일괄 이동
 
 `POST /api/projects/:projectId/workflow/status-migration-preview`에 `{fromStatusId,toStatusId,expectedWorkflowVersion}`을 보낸다. 두 상태 ID는 같은 프로젝트의 저장된 워크플로에서 고른다. 서버가 출발 상태인 활성 티켓 전체를 조회하며 최대 1,000건을 검토한다. 응답 형식은 [업무 일괄 편집](#업무-일괄-편집) 미리보기와 같다. 이동할 업무가 없거나 검증이 차단된 업무가 있으면 `previewId`가 `null`이다.

@@ -121,7 +121,7 @@ export interface ReportSnapshot {
   report: ProjectReport;
 }
 export type ReportSnapshotSummary = Omit<ReportSnapshot, 'report'> & { query: ReportQuery };
-export interface WorkflowStatus { id: string; label: string; color: string; category: StatusCategory }
+export interface WorkflowStatus { id: string; label: string; color: string; category: StatusCategory; wipLimit?: number | null }
 export const STATUS: Record<string, Omit<WorkflowStatus, 'id'>> = {
   backlog: { label: '백로그', color: '#8b93a5', category: 'backlog' },
   todo: { label: '할 일', color: '#677386', category: 'todo' },

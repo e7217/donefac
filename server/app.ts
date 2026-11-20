@@ -1430,6 +1430,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       Array.isArray(schema?.fields)&&schema.fields.some((field:unknown)=>field&&typeof field==='object'&&Object.hasOwn(field,'visibleWhen'))
     ))fail('필드 표시 조건이 있는 백업은 schemaVersion 34가 필요합니다.');
     const importedSchemas=issueSchemas.validateImport(data.schemaVersion>=6?data.issueSchemas:[],data.projects,data.issues,{legacy:data.schemaVersion<6,users:data.users});
+    if(data.schemaVersion<56&&Array.isArray(data.workflows)&&data.workflows.some((workflow:{statuses?:unknown}|null)=>
+      Array.isArray(workflow?.statuses)&&workflow.statuses.some((status:{wipLimit?:unknown}|null)=>status?.wipLimit!=null)
+    ))fail('상태별 보드 업무 한도가 있는 백업은 schemaVersion 56이 필요합니다.');
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
     validateVisibilityStatuses(importedSchemas,importedWorkflows);
     if(data.schemaVersion<13&&Array.isArray(data.savedViews)&&data.savedViews.some((value:unknown)=>

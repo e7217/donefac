@@ -1,6 +1,6 @@
 import type { Express, Request } from 'express';
 import { type Issue, type IssueRequiredField, type Project, type ProjectIssueSchema, type ProjectWorkflow, type WorkflowFieldRule, type WorkflowStatus, type WorkflowTransition } from '../shared/types.js';
-import { defaultWorkflow, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
+import { defaultWorkflow, MAX_WORKFLOW_WIP_LIMIT, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
 import { BASE_REQUIRED_FIELD_LABELS, defaultIssueSchema, fieldApplies, hasCustomValue, requiredFieldLabels } from '../shared/issue-schema.js';
 import { visibilityFieldsWithMissingStatuses, type IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
@@ -15,16 +15,23 @@ function fields(value: unknown, schema: ProjectIssueSchema): IssueRequiredField[
   return [...new Set(value)] as IssueRequiredField[];
 }
 function nonempty(value: unknown, label: string, limit: number): string { if (typeof value !== 'string' || !value.trim() || value.trim().length > limit) invalid(`${label}을(를) 확인해 주세요.`); return value.trim(); }
-function config(projectId: string, value: unknown, version: number, updatedAt: string, schema: ProjectIssueSchema): ProjectWorkflow {
+function config(projectId: string, value: unknown, version: number, updatedAt: string, schema: ProjectIssueSchema, previousStatuses: readonly WorkflowStatus[] = []): ProjectWorkflow {
   const source = object(value);
   const issueTypes = new Set(schema.issueTypes.map(type => type.id));
+  const previousLimits = new Map(previousStatuses.map(status => [status.id, status.wipLimit]));
   if (!Array.isArray(source.statuses) || source.statuses.length < 1 || source.statuses.length > 40) invalid('상태는 1~40개여야 합니다.');
   const statuses: WorkflowStatus[] = source.statuses.map(value => {
     const status = object(value), id = nonempty(status.id, '상태 ID', 48), label = nonempty(status.label, '상태 이름', 40);
     if (!/^[a-z][a-z0-9_-]*$/.test(id)) invalid('상태 ID는 영문 소문자로 시작하는 영문·숫자·밑줄·하이픈이어야 합니다.');
     if (typeof status.color !== 'string' || !/^#[a-f\d]{6}$/i.test(status.color)) invalid('상태 색상은 #RRGGBB 형식이어야 합니다.');
     if (typeof status.category !== 'string' || !Object.hasOwn(STATUS_CATEGORY_LABELS, status.category)) invalid('상태 분류를 확인해 주세요.');
-    return { id, label, color: status.color, category: status.category as WorkflowStatus['category'] };
+    const limit = status.wipLimit === undefined ? previousLimits.get(id) : status.wipLimit;
+    const normalized = { id, label, color: status.color, category: status.category as WorkflowStatus['category'] };
+    if (limit === undefined || limit === null) return normalized;
+    if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_WORKFLOW_WIP_LIMIT) {
+      invalid('상태별 보드 업무 한도는 1~10,000의 정수 또는 null이어야 합니다.');
+    }
+    return { ...normalized, wipLimit: limit };
   });
   const ids = new Set(statuses.map(status => status.id));
   if (ids.size !== statuses.length) invalid('중복된 상태 ID가 있습니다.');
@@ -84,7 +91,7 @@ export class WorkflowService {
       if (!Number.isInteger(expectedVersion)) invalid('expectedVersion이 필요합니다.');
       if (expectedVersion !== previous.version) invalid('다른 작업자가 워크플로를 변경했습니다. 최신 설정을 불러온 뒤 다시 편집해 주세요.', 409, { currentVersion: previous.version });
       const schema = this.issueSchemas?.get(projectId) ?? defaultIssueSchema(projectId);
-      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), schema);
+      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), schema, previous.statuses);
       const statusIds = new Set(next.statuses.map(status => status.id));
       const visibilityFields = visibilityFieldsWithMissingStatuses(schema, statusIds);
       if (visibilityFields.length) invalid('필드 표시 조건에서 참조하는 상태입니다. 표시 조건을 변경한 뒤 상태를 삭제해 주세요.', 409, { fieldIds: visibilityFields.map(field => field.id) });

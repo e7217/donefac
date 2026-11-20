@@ -3,6 +3,7 @@ import { BASE_REQUIRED_FIELD_LABELS, fieldApplies, projectIssueSchema } from './
 
 export const REQUIRED_FIELD_LABELS: Record<string, string> = BASE_REQUIRED_FIELD_LABELS;
 export const STATUS_CATEGORY_LABELS = { backlog: '백로그', todo: '할 일', in_progress: '진행 중', review: '검토', done: '완료', cancelled: '취소' } as const;
+export const MAX_WORKFLOW_WIP_LIMIT = 10_000;
 export function defaultWorkflow(projectId: string, updatedAt = '1970-01-01T00:00:00.000Z'): ProjectWorkflow {
   const statuses = Object.entries(STATUS).map(([id, meta]) => ({ id, ...meta }));
   return { id: projectId, projectId, version: 1, initialStatusId: 'todo', statuses, transitions: statuses.flatMap(from => statuses.filter(to => to.id !== from.id).map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [] }))), fieldRules: [], updatedAt };
