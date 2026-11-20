@@ -89,7 +89,7 @@ function routeHash(route: WorkspaceRoute) {
 }
 function hasSameDocumentContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'documents' && next.view === 'documents' && previous.documentId !== null &&
-    previous.projectId === next.projectId && previous.documentId === next.documentId &&
+    previous.documentId === next.documentId &&
     previous.publication?.kind === next.publication?.kind && previous.publication?.revisionId === next.publication?.revisionId;
 }
 function hasDocumentIssueOverlay(route: WorkspaceRoute | null): boolean {
@@ -103,7 +103,7 @@ function canPreviewIssueDocument(snapshot: WorkspaceSnapshot, issueId: string, d
 function confirmRouteNavigation(previous: WorkspaceRoute | null, next: WorkspaceRoute): boolean {
   if (previous?.issueId && previous.documentPreviewId !== next.documentPreviewId &&
       routeHash({ ...previous, documentPreviewId: null }) === routeHash({ ...next, documentPreviewId: null })) return true;
-  if (previous && hasSameDocumentContext(previous, next)) {
+  if (previous && previous.projectId === next.projectId && hasSameDocumentContext(previous, next)) {
     if (previous.issueId === next.issueId && previous.sectionId !== next.sectionId &&
         previous.documentPreviewId === next.documentPreviewId) return true;
     return dispatchWorkspaceNavigation(previous.documentId);
@@ -296,7 +296,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const incoming = normalizeRoute(snapshot, location.hash);
     const storedIndex = history.state?.teamspaceRouteIndex;
     const index = Number.isInteger(storedIndex) ? storedIndex : previous ? routeIndexRef.current + 1 : 0;
-    if (previous && previousHash && routeHash(incoming) !== previousHash && !confirmRouteNavigation(previous, incoming)) {
+    // A refreshed workspace can update the space of the document already open.
+    const movedOpenDocument = previous && location.hash === previousHash && hasSameDocumentContext(previous, incoming) &&
+      previous.projectId !== incoming.projectId && routeHash({ ...incoming, projectId: previous.projectId }) === previousHash;
+    if (previous && previousHash && routeHash(incoming) !== previousHash && !movedOpenDocument && !confirmRouteNavigation(previous, incoming)) {
       const delta = routeIndexRef.current - index;
       if (delta) { rollbackHashRef.current = previousHash; history.go(delta); }
       else history.replaceState({...history.state, teamspaceRouteIndex:routeIndexRef.current}, '', previousHash);

@@ -224,6 +224,44 @@
 .docs-location-fields { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 .docs-modal-footer { display:flex; justify-content:flex-end; gap:8px; border-top:1px solid #edf0f6; padding-top:19px; margin-top:26px; }
 .docs-modal-footer .btn { font-size:11px; }
+.docs-move-dialog {
+  width:min(570px, calc(100% - 24px));
+  max-height:88dvh;
+  padding:0;
+  background:#fff;
+  color:#27334a;
+  border:1px solid #e4e9f1;
+  border-radius:14px;
+  box-shadow:0 20px 70px #15254533;
+}
+.docs-move-dialog[open] { display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+.docs-move-dialog::backdrop { background:#19243e63; }
+.docs-move-dialog > header,.docs-move-dialog > footer {
+  display:flex;
+  gap:8px;
+  align-items:center;
+  padding:12px clamp(12px, 4vw, 22px);
+  margin:0;
+}
+.docs-move-dialog > header { justify-content:space-between; border-bottom:1px solid #edf0f6; }
+.docs-move-dialog > footer { justify-content:flex-end; flex-wrap:wrap; border-top:1px solid #edf0f6; }
+.docs-move-dialog h2 { margin:0; font-size:18px; line-height:1.4; }
+.docs-move-body { overflow:auto; overscroll-behavior:contain; padding:14px clamp(12px, 4vw, 22px); font-size:13px; }
+.docs-move-body p { margin:0 0 10px; line-height:1.55; overflow-wrap:anywhere; }
+.docs-move-fields {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));
+  gap:12px;
+  min-width:0;
+  border:0;
+  padding:0;
+  margin:12px 0;
+}
+.docs-move-fields > button { justify-self:start; }
+.docs-move-preview { border-top:1px solid #edf0f6; margin-top:14px; padding-top:12px; }
+.docs-move-preview h3 { font-size:14px; margin:0 0 8px; overflow-wrap:anywhere; }
+.docs-move-list { margin:0 0 10px; padding-inline-start:20px; line-height:1.6; overflow-wrap:anywhere; }
+.docs-move-pagination { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .documents-feature button:disabled { opacity:.5; cursor:not-allowed; }
 .documents-feature button:focus-visible,.documents-feature input:focus-visible,.documents-feature select:focus-visible,.documents-feature textarea:focus-visible { outline:2px solid #a4b9f2; outline-offset:2px; }
 .docs-spin { animation:docs-spin 1s linear infinite; }

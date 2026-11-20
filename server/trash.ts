@@ -31,6 +31,7 @@ type DocumentArchive = ArchiveBase & {
   publication: DocumentPublicationState | null; collaboration: CollaborationExport | null;
 };
 export type TrashArchive = IssueArchive | DocumentArchive;
+export type ArchivedDocumentTreeMember = { id: string; resourceId: string; parentId: string; projectId: string | null; version: number };
 type DocumentSnapshots = {publication?: DocumentPublicationState | null; collaboration?: CollaborationExport | null};
 type ImportContext = {
   users: User[]; projects: Project[]; issues: Issue[]; documents: DocPage[];
@@ -86,6 +87,8 @@ function formatSummary(entry: TrashArchive): TrashEntrySummary {
 }
 
 export class TrashService {
+  private readonly findDocumentChildren;
+
   constructor(private readonly store: Store) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS trash_entries (
       id TEXT PRIMARY KEY, resource_type TEXT NOT NULL CHECK(resource_type IN ('issue','document')),
@@ -95,6 +98,9 @@ export class TrashService {
     CREATE INDEX IF NOT EXISTS trash_deleted_at ON trash_entries(deleted_at DESC,id);
     CREATE INDEX IF NOT EXISTS trash_project_type ON trash_entries(project_id,resource_type,deleted_at DESC,id);
     CREATE INDEX IF NOT EXISTS trash_parent ON trash_entries(resource_type,parent_id);`);
+    this.findDocumentChildren = store.db.prepare(`SELECT id,resource_id AS resourceId,parent_id AS parentId,
+      project_id AS projectId,json_extract(json,'$.resource.version') AS version FROM trash_entries
+      WHERE resource_type='document' AND parent_id=? ORDER BY resource_id`);
   }
   private assertTransaction() {
     if (!this.store.db.isTransaction) fail(500, '휴지통 변경에는 트랜잭션이 필요합니다.');
@@ -141,6 +147,18 @@ export class TrashService {
   }
   hasChildren(type: TrashResourceType, resourceId: string): boolean {
     return Boolean(this.store.db.prepare('SELECT 1 FROM trash_entries WHERE resource_type=? AND parent_id=? LIMIT 1').get(type, resourceId));
+  }
+  documentChildren(parentId: string): ArchivedDocumentTreeMember[] {
+    return this.findDocumentChildren.all(parentId) as ArchivedDocumentTreeMember[];
+  }
+  moveDocumentEntries(entries: ArchivedDocumentTreeMember[], projectId: string | null): void {
+    this.assertTransaction();
+    const update = this.store.db.prepare(`UPDATE trash_entries SET project_id=?,
+      json=json_set(json,'$.projectId',?,'$.resource.projectId',?),summary=json_set(summary,'$.projectId',?)
+      WHERE id=? AND resource_type='document'`);
+    for (const entry of entries) {
+      if (entry.projectId !== projectId) update.run(projectId, projectId, projectId, projectId, entry.id);
+    }
   }
   hasLocalAttachmentVersion(id: string): boolean {
     return Boolean(this.store.db.prepare(`SELECT 1 FROM trash_entries, json_each(trash_entries.json,'$.attachmentVersions') AS version

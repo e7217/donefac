@@ -55,6 +55,7 @@ import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js'
 import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { TrashItemsService, trashItemFiles } from './trash-items.js';
+import { DocumentTreeMoveError, DocumentTreeMoveService } from './document-tree-move.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
@@ -173,6 +174,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const issueRelations=new IssueRelationsService(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);
+  const documentTreeMove=new DocumentTreeMoveService(store,trash);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
@@ -1033,6 +1035,19 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     store.transaction(()=>{validateDocument(d);store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);notifyDocumentCreated(d);});
     res.status(201).json(d);
   });
+  app.post('/api/documents/:id/move-preview',(req,res)=>{
+    res.set('Cache-Control','no-store').json(documentTreeMove.preview(req.params.id,actor(req),req.body));
+  });
+  app.post('/api/documents/:id/move',(req,res)=>{
+    const actorId=actor(req);
+    const {preview,moved}=documentTreeMove.move(req.params.id,actorId,req.body,document=>{
+      revision(document,actorId,'문서 이동');
+      activity(req,'document',document.id,'문서 이동',document.title);
+      notifyDocumentUpdate(document,actorId,document.updatedAt);
+    });
+    for(const document of moved)collaboration.notifyMetadata(document.id);
+    res.json(preview);
+  });
   app.patch('/api/documents/:id',(req,res)=>{
     const bodyChanged=Object.hasOwn(req.body,'content');
     const updated=store.transaction(()=>{
@@ -1816,6 +1831,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
+    if(error instanceof DocumentTreeMoveError)return res.status(error.status).json({error:error.message});
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});

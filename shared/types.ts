@@ -565,6 +565,17 @@ export interface DocPage {
   version: number; authorId: string; createdAt: string; updatedAt: string;
   labels?: string[];
 }
+export interface DocumentTreeMovePreview {
+  token: string;
+  documentId: string;
+  sourceProjectId: string | null;
+  sourceParentId: string | null;
+  projectId: string | null;
+  parentId: string | null;
+  documents: { id: string; title: string }[];
+  archivedCount: number;
+  changed: boolean;
+}
 export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string; confluenceSourceVersion?: number }
 export interface DocumentReview {
   revisionId: string;

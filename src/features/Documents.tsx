@@ -7,7 +7,7 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronRight,
-  Code2, FileCheck2, FileClock, FilePlus2, Files, FileText, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, FileCheck2, FileClock, FilePlus2, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
@@ -24,6 +24,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
+import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
@@ -102,6 +103,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [conflict, setConflict] = useState(false);
   const [showLatest, setShowLatest] = useState(false);
   const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
+  const [moveDocumentId, setMoveDocumentId] = useState<string | null>(null);
+  const closeMove = useCallback(() => setMoveDocumentId(null), []);
   const publicationOpener = useRef<HTMLButtonElement>(null);
   const closePublication = useCallback(() => {
     setPublicationDocumentId(null);
@@ -169,12 +172,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
+  const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
   const liveDocument = liveState?.document;
   const latestPage = selectedPage && liveDocument?.id === selectedPage.id && liveDocument.version > selectedPage.version ? liveDocument : selectedPage;
+  const liveLocationChanged = latestPage !== selectedPage &&
+    (latestPage?.projectId !== selectedPage?.projectId || latestPage?.parentId !== selectedPage?.parentId);
   const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
   const searchKey = documentLabelKey(search.trim());
   const filtersActive = Boolean(searchKey || documentLabel);
@@ -197,6 +203,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     || draft?.labels.find(label => documentLabelKey(label) === documentLabel) || documentLabel);
 
   useEffect(() => { if (window.matchMedia('(max-width: 1180px)').matches) setSidebarOpen(false); }, []);
+  useEffect(() => {
+    if (liveLocationChanged) void refresh().catch(() => {});
+  }, [liveLocationChanged, liveDocument?.id, liveDocument?.projectId, liveDocument?.parentId, refresh]);
 
   const rememberDraft = useCallback((value: Draft | null, owner = actorRef.current) => {
     if (!value || typeof window === 'undefined') return;
@@ -505,13 +514,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (issueDrawerOpen) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        if (!publicationOpen) void saveDraft();
+        if (!publicationOpen && !moveOpen) void saveDraft();
       }
       if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setIssueBlockSelection(null); setExportOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, issueDrawerOpen]);
+  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen]);
+
+  const moveBlocker = () => {
+    if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
+    if (draftRef.current?.dirty || listDrafts.current.size) return '문서 편집과 목록 설정을 저장한 뒤 이동해 주세요.';
+    if (liveStateRef.current?.pending || manualRecoveryRef.current || archivedLiveRecoveryRef.current ||
+        (selectedDocumentId && hasPendingCollaboration(actorId, selectedDocumentId))) {
+      return '이 브라우저의 공동 편집을 동기화하거나 복구한 뒤 문서를 이동해 주세요.';
+    }
+    return null;
+  };
+  const moveSaved = () => {
+    closeMove();
+    notify('문서를 이동했습니다.');
+    void refresh().catch(() => notify('문서 이동을 저장했습니다. 화면을 새로 고쳐 현재 위치를 확인해 주세요.', 'error'));
+  };
 
   const documentId = draft?.id;
   useEffect(() => {
@@ -992,6 +1016,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
               <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
+              <button type="button" className="btn btn-ghost docs-icon-button" title="문서 이동" aria-label="문서 이동" onClick={() => {
+                const blocker = moveBlocker();
+                if (blocker) { notify(blocker, 'error'); return; }
+                setExportOpen(false);
+                setMoveDocumentId(selectedPage.id);
+              }}><FolderInput size={16} aria-hidden="true" /></button>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
               <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
             </div>
@@ -1153,6 +1183,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} projectId={selectedPage.projectId ?? projectId} sectionId={publicationLink ? sectionId : null} covered={issueDrawerOpen}
       onClose={closePublication} notify={notify} refreshDocument={refresh} />}
+    {moveOpen && selectedPage && <DocumentTreeMove key={selectedPage.id} document={selectedPage} documents={data.documents}
+      projects={data.projects} beforeApply={moveBlocker} refreshWorkspace={refresh}
+      onClose={closeMove} onMoved={moveSaved} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}
