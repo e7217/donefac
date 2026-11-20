@@ -356,8 +356,25 @@ export class MigrationService {
       .all(instanceKey, JSON.stringify([...ownerPages])) as { space: string | null }[];
     return rows.length === 1 ? rows[0].space ?? undefined : undefined;
   }
+  private confluenceLabelListIsolated({ project, instanceKey, sourceSpaceId }: PageAppendDestination): boolean {
+    const row = this.store.db.prepare(`WITH source_pages AS (
+      SELECT DISTINCT binding.target_id AS id FROM source_bindings AS binding
+      JOIN source_records AS archive ON archive.import_id=binding.import_id AND archive.product=binding.product
+        AND archive.source_instance=binding.source_instance AND archive.kind=binding.kind AND archive.source_id=binding.source_alias
+        AND archive.target_type=binding.target_type AND archive.target_id=binding.target_id AND json_valid(archive.json)
+      WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
+        AND json_extract(archive.json,'$.record.containerId')=? AND json_extract(archive.json,'$.record.metadata.sourceClass')='Page'
+    ) SELECT NOT EXISTS (
+      SELECT 1 FROM source_bindings WHERE product='confluence' AND kind='project' AND target_type='project' AND target_id=?
+        AND (source_instance<>? OR source_alias<>?)
+    ) AND NOT EXISTS (
+      SELECT 1 FROM documents AS document LEFT JOIN source_pages AS source ON source.id=document.id
+      WHERE document.project_id=? AND source.id IS NULL
+    ) AS isolated`).get(instanceKey, sourceSpaceId, project.id, instanceKey, sourceSpaceId, project.id) as { isolated: number };
+    return row.isolated === 1;
+  }
   private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false,
-    sectionInventory?: boolean): MigrationPageAppendContext | undefined {
+    sectionInventory?: boolean, labelListInventory?: boolean): MigrationPageAppendContext | undefined {
     if (!configuration.appendPagesTo) return;
     const destination = this.pageAppendDestination(packages, buildMigrationOptions(packages), configuration.appendPagesTo.refreshHistory);
     if (!destination || destination.project.id !== configuration.appendPagesTo.projectId) {
@@ -412,6 +429,11 @@ export class MigrationService {
       }
     }
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
+    const needsLabelListScope = labelListInventory ?? packages.some(({ dataset }) => dataset.records.some(record =>
+      (record.kind === 'page' || record.kind === 'revision') && record.textFormat === 'confluence-storage' &&
+      (record.text.includes('contentbylabel') || record.text.includes('content-by-label'))));
+    const labelListScope = needsLabelListScope ? this.confluenceLabelListIsolated(destination) ? 'isolated' : 'mixed' : undefined;
+    if (labelListScope) digest.update(JSON.stringify(['label-list-scope', labelListScope]));
     // Additive history checks the exact reused files at apply, so unrelated local attachment updates can proceed.
     const attachmentDigest = configuration.appendPagesTo.refreshHistory && !configuration.appendPagesTo.refreshAttachments ? undefined : digest;
     const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, attachmentDigest);
@@ -420,6 +442,7 @@ export class MigrationService {
     const refreshDocuments = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
+      ...(labelListScope ? { labelListScope } : {}),
       ...(hasSectionLinks ? { sectionInventory: true } : {}),
       ...(refreshDocuments ? { refreshDocuments } : {}), ...(knownHistory ? { knownHistory } : {}) };
   }
@@ -807,7 +830,8 @@ export class MigrationService {
           }
           if (Boolean(appendPages) !== Boolean(preview.configuration.appendPagesTo)) fail(409, changedPageAppend);
           if (appendPages) {
-            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true, appendPages.sectionInventory ?? false);
+            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true,
+              appendPages.sectionInventory ?? false, appendPages.labelListInventory ?? false);
             if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
             const attachmentError = this.reusedConfluenceAttachmentError(prepared, current);
             if (attachmentError) fail(409, attachmentError);

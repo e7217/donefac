@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-react';
-import { ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { documentPlainText, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
 import type {
   DocPage,
@@ -41,6 +41,9 @@ const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 
 /** Resolve live includes to their saved labels while keeping immutable revision includes readable. */
 function snapshotContent(node: RichContent): RichContent {
+  if (node.type === 'documentLabelList') {
+    return { type: 'paragraph', content: [{ type: 'text', text: `${documentPlainText(node)} · 이 저장본에는 목록 조건이 보관됩니다.` }] };
+  }
   if (node.type === 'issueSummary') {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
     const projectId = typeof node.attrs?.projectId === 'string' ? node.attrs.projectId : '';

@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import * as Y from 'yjs';
-import { prosemirrorJSONToYDoc,yDocToProsemirrorJSON } from 'y-prosemirror';
+import { prosemirrorJSONToYDoc,prosemirrorJSONToYXmlFragment,yDocToProsemirrorJSON } from 'y-prosemirror';
 import { getExtensionField, getSchema } from '@tiptap/core';
 import { EditorState, type Plugin } from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
@@ -18,6 +18,7 @@ import { CollaborationService,CollaborationError } from '../../server/collaborat
 import { createEditorExtensions, createEditorSchema } from '../../shared/editor-schema.js';
 import { COLLABORATION_SCHEMA,type CollaborationServerMessage } from '../../shared/collaboration.js';
 import { contentReferences, documentContentSchemaVersion, documentRevisionIncludes, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
+import { DOCUMENT_LABEL_LIST_DEFAULTS } from '../../shared/document-label-list.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import type { DocPage,DocRevision,Issue,RichContent } from '../../shared/types.js';
 
@@ -174,7 +175,7 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 through v7 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades v1 through v8 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
@@ -198,6 +199,9 @@ test('startup upgrades v1 through v7 rooms atomically, preserving Yjs bytes and 
     const anchoredHeading = { type: 'doc', content: [heading('연결된 저장 절', 'retained-section')] };
     f.store.put('documents', document('doc-h', anchoredHeading));
     const h = insertState(f.store, 'doc-h', anchoredHeading, 7);
+    const tocBody: RichContent = { type: 'doc', content: [{ type: 'documentToc', attrs: { minLevel: 2, maxLevel: 3, layout: 'flat' } }, heading('목차의 제목') ] };
+    f.store.put('documents', document('doc-i'));
+    const i = insertState(f.store, 'doc-i', tocBody, 8);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
@@ -206,9 +210,10 @@ test('startup upgrades v1 through v7 rooms atomically, preserving Yjs bytes and 
     request.run('doc-f',pinned.epoch,'old-request-v5','old-hash');
     request.run('doc-g',g.epoch,'old-request-v6','old-hash');
     request.run('doc-h',h.epoch,'old-request-v7','old-hash');
+    request.run('doc-i',i.epoch,'old-request-v8','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목'],['doc-h',h,'연결된 저장 절']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목'],['doc-h',h,'연결된 저장 절'],['doc-i',i,'목차의 제목']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -219,6 +224,7 @@ test('startup upgrades v1 through v7 rooms atomically, preserving Yjs bytes and 
       }
       assert.equal(JSON.stringify(migrated.session('doc-g').document.content), JSON.stringify(legacyHeading));
       assert.deepEqual(migrated.session('doc-h').document.content, anchoredHeading);
+      assert.deepEqual(migrated.session('doc-i').document.content, tocBody);
       assert.deepEqual(migrated.session('doc-c'),current);
       assert.deepEqual(f.store.db.prepare('SELECT request_id FROM collaboration_requests').all().map(row=>row.request_id),['current-request']);
       const before=migrated.session('doc-a');const second=new CollaborationService(f.store,f.contents);try{assert.deepEqual(second.session('doc-a'),before);}finally{second.close();}
@@ -301,11 +307,11 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('live updates validate references/includes before durable ACK and reject v1 through v7 protocol clients',async()=>{
+test('live updates validate references, includes and label lists before durable ACK and reject v1 through v8 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{
     const session=service.enable('doc-a',1,'user-test');
-    for(const schemaVersion of [1,2,3,4,5,6,7]){
+    for(const schemaVersion of [1,2,3,4,5,6,7,8]){
       const old=new Peer(url);
       peers.push(old);
       await once(old.ws,'open');
@@ -345,6 +351,21 @@ test('live updates validate references/includes before durable ACK and reject v1
         assert.deepEqual(pinnedAck.document.content.content?.at(-1), pinnedInclude());
         assert.match(pinnedAck.document.plainText, /revision-test/);
         assert.deepEqual(service.session('doc-a').document, pinnedAck.document);
+
+        const beforeList = pinnedAck.document.content.content ?? [];
+        const list: RichContent = { type: 'documentLabelList', attrs: {
+          ...DOCUMENT_LABEL_LIST_DEFAULTS, projectId: 'project-test', labels: ['배포', '설계'], title: '설계 문서',
+        } };
+        prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [...beforeList, list] }, clean.getXmlFragment('default'));
+        peer.send({ type: 'update', epoch: session.epoch, requestId: 'valid-label-list', update: Buffer.from(accepted!).toString('base64') });
+        const listAck = await peer.next('ack');
+        assert.equal(listAck.requestId, 'valid-label-list');
+        assert.deepEqual(listAck.document.content.content?.at(-1), list);
+        const missingScope = { ...list, attrs: { ...list.attrs, projectId: 'missing-project' } };
+        prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [...beforeList, missingScope] }, clean.getXmlFragment('default'));
+        peer.send({ type: 'update', epoch: session.epoch, requestId: 'missing-label-list-project', update: Buffer.from(accepted!).toString('base64') });
+        assert.equal((await peer.next('error')).code, 'REFERENCE_NOT_FOUND');
+        assert.deepEqual(service.session('doc-a').document, listAck.document);
       } finally { clean.destroy(); }
     }finally{ydoc.destroy();}
   }finally{for(const peer of peers)peer.ws.terminate();service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));f.close();}

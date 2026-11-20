@@ -119,7 +119,8 @@ const lossyConfluenceCalloutConversions = new Set([
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
   'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
-  'LEGACY_TOC_REPRESENTATION', ...lossyConfluenceCalloutConversions,
+  'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'LEGACY_TOC_REPRESENTATION',
+  'LEGACY_LABEL_LIST_REPRESENTATION', ...lossyConfluenceCalloutConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -147,10 +148,12 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
       // An older document can still exactly match the former annotation, section and table of contents conversion.
       for (const legacyAnnotations of [false, true]) {
-        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true, legacyDocumentToc: true });
+        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true,
+          legacyDocumentToc: true, legacyDocumentLabelList: true });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
-          !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION'].includes(item.code)) });
+          !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION',
+            'LEGACY_LABEL_LIST_REPRESENTATION'].includes(item.code)) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -257,6 +260,7 @@ interface JiraCustomFieldConversion {
 }
 type KnownIssue = { issueId: string; projectId: string | null };
 type KnownPage = MigrationPageAppendContext['knownPages'][number];
+type LabelListProjectScope = { source: string; origin?: string };
 type ResolvedReference = { id: string; label: string; url?: string };
 type AttachmentOwner = Binding & {type: 'issue' | 'document'};
 interface ConfluenceAttachmentSeries {
@@ -317,6 +321,7 @@ class Planner{
   private boundPageTargets = new Set<string>();
   private retainedPageOwners = new Map<string, string | null>();
   private restrictedSourcePages = new Set<string>();
+  private labelListProjectScopes?: Map<string, LabelListProjectScope | null>;
   constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
@@ -834,12 +839,14 @@ class Planner{
       }
       const bodyChanged = hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
       const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
-        ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id) }) : null;
+        ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
+          resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id) }) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (bodyChanged && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
-          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED'].includes(diagnostic.code)) {
+          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
+            'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED'].includes(diagnostic.code)) {
             this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
           }
         }
@@ -904,6 +911,7 @@ class Planner{
       return;
     }
     this.result.appendPages = { projectId: append.project.id, token: append.token,
+      ...(append.labelListScope ? { labelListInventory: true } : {}),
       ...(append.sectionInventory ? { sectionInventory: true } : {}) };
     for (const page of append.knownPages) {
       this.boundPages.set(page.sourceId, page);
@@ -1743,6 +1751,47 @@ class Planner{
     const retainedPage = this.configuration.appendPagesTo?.refreshHistory && this.retainedPageOwners.get(entry.key);
     return retainedPage ? this.originalPage(retainedPage)?.sourceSpaceId ?? null : null;
   }
+  private sourceLabelListScope(entry: Entry) {
+    const { product, instanceKey } = entry.pkg.dataset.source;
+    const spaceId = product === 'confluence' && entry.row.metadata.sourceClass === 'Page' ? this.confluenceSpace(entry) : null;
+    return spaceId ? { spaceId, source: JSON.stringify([instanceKey, spaceId]), origin: this.originIdentity(entry) } : null;
+  }
+  private isolatedLabelListScopes() {
+    if (this.labelListProjectScopes) return this.labelListProjectScopes;
+    const scopes = new Map<string, LabelListProjectScope | null>();
+    for (const page of this.result.documents) {
+      if (!page.projectId) continue;
+      const entry = this.primaryById.get(page.id);
+      const current = entry && this.sourceLabelListScope(entry);
+      const known = scopes.get(page.projectId);
+      if (!current || known === null || known &&
+          (known.source !== current.source || known.origin && current.origin && known.origin !== current.origin)) {
+        scopes.set(page.projectId, null);
+      } else {
+        scopes.set(page.projectId, { source: current.source, origin: known?.origin ?? current.origin });
+      }
+    }
+    this.labelListProjectScopes = scopes;
+    return scopes;
+  }
+  private confluenceLabelListProject(entry: Entry, spaceKey: string | null, projectId?: string | null): string | null {
+    if (!projectId) return null;
+    const scope = this.sourceLabelListScope(entry);
+    if (!scope) return null;
+    const append = this.input.appendPages;
+    const sourceSpace = this.sourceEntry(entry, 'project', scope.spaceId);
+    if (sourceSpace && this.excluded.has(sourceSpace.key) || !sourceSpace && !append) return null;
+    const key = string(sourceSpace?.row.metadata.spaceKey || sourceSpace?.row.metadata.key || append?.sourceSpaceKey);
+    if (key.startsWith('~') || string(sourceSpace?.row.metadata.spaceType).toLowerCase() === 'personal') return null;
+    if (spaceKey && (spaceKey !== key || this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? [])
+      .some(candidate => candidate.row.sourceId !== scope.spaceId))) return null;
+
+    const projected = this.isolatedLabelListScopes().get(projectId);
+    if (projected === null || projected && (projected.source !== scope.source ||
+        projected.origin && scope.origin && projected.origin !== scope.origin)) return null;
+    if (append && (append.labelListScope !== 'isolated' || append.project.id !== projectId || append.sourceSpaceId !== scope.spaceId)) return null;
+    return append || projected ? projectId : null;
+  }
   private originIdentity(entry: Entry): string | undefined {
     const base = this.originBases.get(entry.pkg.summary.id);
     return base && `${base.origin}${base.contextPath}`;
@@ -2035,6 +2084,7 @@ class Planner{
     const result = convertLegacyContent(entry.row, {
       resolveReference: request => this.resolve(entry, request), legacyAnnotations,
       sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
+      resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, this.project(entry)?.id),
     });
     for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
     return result;
@@ -2236,6 +2286,7 @@ class Planner{
         resolveReference: request => version !== null && request.kind === 'attachment'
           ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request),
         legacyAnnotations: version === null,
+        resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, owner.projectId),
       });
       const createdAt = version !== null ? row.updatedAt || row.createdAt : row.createdAt;
       const invalidBody = version === null

@@ -1471,6 +1471,135 @@ test('Confluence refresh replaces an exact legacy table of contents and preserve
   assert.deepEqual(result.find(document => document.id === edited.id)?.content, restoredEdited?.content);
 });
 
+type LabelListSourcePage = { id: string; title: string; version?: number; space?: string; kind?: 'Page' | 'BlogPost'; body?: string };
+const confluenceListParameter = (name: string, value: string) => `<ac:parameter ac:name="${name}">${value}</ac:parameter>`;
+const confluenceListMacro = (params: Record<string, string>) => `<ac:structured-macro ac:name="contentbylabel">${Object.entries(params)
+  .map(([key, value]) => confluenceListParameter(key, value)).join('')}</ac:structured-macro>`;
+const confluenceLegacyList = confluenceListMacro({ type: 'page', spaces: '@self', labels: 'release' });
+
+function labelListExport(target: MigrationFixture, instance: string, name: string, pages: LabelListSourcePage[], spaces: string[] = ['42']) {
+  const prop = (key: string, value: string) => `<property name="${key}">${value}</property>`;
+  const object = (kind: string, id: string, value: string) => `<object class="${kind}"><id name="id">${id}</id>${value}</object>`;
+  const link = (key: string, kind: string, id: string) => `<property name="${key}" class="${kind}"><id name="id">${id}</id></property>`;
+  const root = spaces.map(id => object('Space', id, prop('key', `WIKI${id}`) + prop('name', `원본 공간 ${id}`))).join('');
+  const records = pages.map(({ id, title, version = 1, space = '42', kind = 'Page', body }) =>
+    object(kind, id, prop('title', title) + prop('version', String(version)) + link('space', 'Space', space) +
+      prop('creationDate', '2020-03-01T00:00:00Z') + prop('lastModificationDate', `2020-03-0${version + 1}T00:00:00Z`)) +
+    (body === undefined ? '' : object('BodyContent', `8${id}`, prop('body', `<![CDATA[${body}]]>`) + link('content', kind, id)))).join('');
+  const bytes = Buffer.from(`<hibernate-generic>${root}${records}</hibernate-generic>`);
+  return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
+}
+
+test('Confluence label-list XML migrates into a proven project and refreshes exact legacy code after restore', async t => {
+  const initial = await fixture(), f = await fixture();
+  t.after(() => Promise.all([initial.close(), f.close()]));
+  const instance = 'synthetic-label-list-scope';
+  const start = await labelListExport(initial, instance, 'label-list-first', [
+    { id: '100', title: '원본 목록', body: confluenceLegacyList },
+    { id: '200', title: '별도 편집한 목록', body: confluenceLegacyList },
+  ]);
+  const plan = await initial.preview(await initial.configuration(start, 'LISTS'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(!plan.notices.some(notice => notice.code.startsWith('LABEL_LIST_')));
+  const applied = await initial.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await initial.call<Backup>('/export')).data;
+  const docs = backup.documents.filter(doc => doc.projectId === projectId);
+  assert.equal(docs.length, 2);
+  for (const doc of docs) assert.deepEqual(doc.content.content?.[0].attrs, {
+    projectId, labels: ['release'], match: 'any', sort: 'updated', descending: true, limit: 15, title: '',
+    showLabels: true, showSpace: true, excludeCurrent: false,
+  });
+  assert.ok(backup.sourceRecords.some(archive => archive.record.sourceId === '100' && archive.record.text === confluenceLegacyList));
+
+  // Reproduce a prior export in which the unsupported macro remained as an exact code block.
+  backup.schemaVersion = 58;
+  for (const receipt of backup.sourceImports) delete receipt.integrity;
+  for (const record of backup.sourceRecords) delete record.confluencePageFieldHashes;
+  const oldBody = normalizeDocumentContent({ type: 'doc', content: [{ type: 'codeBlock', content: [{ type: 'text', text: confluenceLegacyList }] }] });
+  const original = docs.find(doc => doc.title === '원본 목록')!, edited = docs.find(doc => doc.title === '별도 편집한 목록')!;
+  assert.ok(original && edited);
+  Object.assign(original, oldBody);
+  Object.assign(edited, normalizeDocumentContent({ type: 'doc', content: [
+    ...oldBody.content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀 편집' }] },
+  ] }));
+  for (const revision of backup.revisions.filter(revision => docs.some(doc => doc.id === revision.documentId))) Object.assign(revision, oldBody);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+
+  const modern = confluenceListMacro({ cql: 'space = currentSpace() and label = release AND type = page', sort: 'creation', reverse: 'true' });
+  const next = await labelListExport(f, instance, 'label-list-next', [
+    { id: '100', title: '원본 목록', version: 2, body: modern },
+    { id: '200', title: '별도 편집한 목록', version: 2, body: modern },
+    { id: '300', title: '추가 목록', body: confluenceLegacyList },
+  ]);
+  const config: MigrationConfiguration = { ...await f.configuration(next, 'LISTS'), appendPagesTo: { projectId, refreshExisting: true } };
+  const update = await f.preview(config);
+  assert.equal(update.canApply, true, JSON.stringify(update.notices));
+  assert.equal(update.documentRefresh?.find(row => row.documentId === original.id)?.fields.find(field => field.field === 'content')?.decision, 'apply');
+  assert.equal(update.documentRefresh?.find(row => row.documentId === edited.id)?.fields.find(field => field.field === 'content')?.decision, 'conflict');
+
+  const local = await f.call<DocPage>('/documents', 'POST', { projectId, title: '원본 범위 밖 팀 문서', labels: ['release'] });
+  assert.equal(local.status, 201, JSON.stringify(local.data));
+  const stale = await f.apply(update);
+  assert.equal(stale.status, 409, JSON.stringify(stale.data));
+  const unsafe = await f.preview(config);
+  assert.ok(unsafe.notices.some(notice => notice.code === 'LABEL_LIST_SCOPE_UNRESOLVED'));
+  assert.ok(unsafe.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_BODY_UNAVAILABLE'));
+  assert.equal((await f.call(`/documents/${local.data.id}?expectedVersion=${local.data.version}`, 'DELETE')).status, 200);
+
+  const safe = await f.preview(config);
+  assert.equal(safe.canApply, true, JSON.stringify(safe.notices));
+  const safeApplied = await f.apply(safe);
+  assert.equal(safeApplied.status, 201, JSON.stringify(safeApplied.data));
+  const current = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents;
+  assert.deepEqual(current.find(doc => doc.id === original.id)?.content.content?.[0].attrs, {
+    projectId, labels: ['release'], match: 'all', sort: 'created', descending: false, limit: 15, title: '',
+    showLabels: true, showSpace: true, excludeCurrent: false,
+  });
+  assert.equal(JSON.stringify(current.find(doc => doc.id === edited.id)?.content), JSON.stringify(edited.content));
+  assert.equal(current.find(doc => doc.title === '추가 목록')?.content.content?.[0].type, 'documentLabelList');
+});
+
+test('Confluence label-list scope does not broaden through merged space mapping or other projected content kinds', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-label-list-mixed-spaces';
+  const init = await labelListExport(f, instance, 'mixed-scopes', [
+    { id: '100', title: '공간을 합친 목록', body: confluenceLegacyList },
+    { id: '200', title: '다른 공간의 페이지', space: '43' },
+  ], ['42', '43']);
+  const merged = await f.preview(await f.configuration(init, 'MERGED'));
+  assert.equal(merged.canApply, true, JSON.stringify(merged.notices));
+  assert.ok(merged.notices.some(notice => notice.code === 'LABEL_LIST_SCOPE_UNRESOLVED' && notice.requiresAcknowledgement));
+  const applied = await f.apply(merged);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  const delta = await labelListExport(f, instance, 'existing-mixed-scope', [{ id: '300', title: '기존 혼합 프로젝트에 추가한 목록', body: confluenceLegacyList }]);
+  const append = await f.preview({ ...await f.configuration(delta), appendPagesTo: { projectId } });
+  assert.equal(append.canApply, true, JSON.stringify(append.notices));
+  assert.ok(append.notices.some(notice => notice.code === 'LABEL_LIST_SCOPE_UNRESOLVED'));
+  const appendApplied = await f.apply(append);
+  assert.equal(appendApplied.status, 201, JSON.stringify(appendApplied.data));
+
+  const blog = await labelListExport(f, instance, 'mixed-kinds', [
+    { id: '400', title: '글도 포함된 공간의 목록', space: '44', body: confluenceLegacyList },
+    { id: '500', title: '블로그 글', space: '44', kind: 'BlogPost' },
+  ], ['44']);
+  const mixedKinds = await f.preview(await f.configuration(blog, 'BLOGS'));
+  assert.equal(mixedKinds.canApply, true, JSON.stringify(mixedKinds.notices));
+  assert.ok(mixedKinds.notices.some(notice => notice.code === 'LABEL_LIST_SCOPE_UNRESOLVED'));
+  assert.equal((await f.apply(mixedKinds)).status, 201);
+
+  const content = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents;
+  for (const title of ['공간을 합친 목록', '기존 혼합 프로젝트에 추가한 목록', '글도 포함된 공간의 목록']) {
+    assert.deepEqual(content.find(doc => doc.title === title)?.content.content?.[0],
+      { type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: confluenceLegacyList }] });
+  }
+});
+
 test('Confluence attachment refresh reuses pinned bytes, adds immutable versions and preserves the manual head', async t => {
   const f = await fixture();
   t.after(() => f.close());

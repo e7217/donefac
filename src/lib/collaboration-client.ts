@@ -10,7 +10,9 @@ import {
   type CollaborationServerMessage,
   type CollaborationSession,
 } from '../../shared/collaboration';
-import { documentNodeSchemaVersion, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS } from '../../shared/document-nodes';
+import {
+  DOCUMENT_TOC_DEFAULTS, documentNodeSchemaVersion, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS,
+} from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
@@ -79,6 +81,12 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
           || (attrs.savedViewId != null && !referenceId(attrs.savedViewId)) || !referenceLabel(attrs.label)
           || (node.type === 'issueSummary' && attrs.groupBy !== undefined && !isIssueSummaryGroupBy(attrs.groupBy))) {
           throw new Error('보관한 업무 목록 또는 업무 현황의 대상·이름·집계 기준이 올바르지 않습니다.');
+        }
+      }
+      if (node.type === 'documentToc') {
+        const { minLevel = DOCUMENT_TOC_DEFAULTS.minLevel, maxLevel = DOCUMENT_TOC_DEFAULTS.maxLevel, layout = DOCUMENT_TOC_DEFAULTS.layout } = attrs;
+        if (!isDocumentTocLevel(minLevel) || !isDocumentTocLevel(maxLevel) || minLevel > maxLevel || !isDocumentTocLayout(layout)) {
+          throw new Error('보관한 본문 목차의 제목 단계나 표시 방식이 올바르지 않습니다.');
         }
       }
       if (node.marks !== undefined && !Array.isArray(node.marks)) throw new Error('문서 서식이 올바르지 않습니다.');

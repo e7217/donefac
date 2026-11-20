@@ -110,6 +110,62 @@ test('Confluence table of contents preserves unsupported and malformed settings 
   }
 });
 
+test('Confluence label lists preserve legacy scope, documented defaults and bounded modern CQL', () => {
+  const macro = (name: string, params: Record<string, string>) => `<ac:structured-macro ac:name="${name}">${Object.entries(params)
+    .map(([key, value]) => `<ac:parameter ac:name="${key}">${value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')}</ac:parameter>`).join('')}</ac:structured-macro>`;
+  const legacy = macro('contentbylabel', { type: 'page', spaces: '@self', labels: ' Release,design,release ', operator: 'AND' });
+  const modern = macro('content-by-label', { cql: '(type = "page" AND (label IN ("Release", design) AND space IN ("WIKI"))) order by title DESC',
+    title: '설계 & 기록', max: '500', showSpace: 'false', showLabels: 'false', excerptType: 'none', excludeCurrentPage: 'true' });
+  const calls: (string | null)[] = [];
+  const context: MigrationContentContext = { ...resolver(), resolveLabelListProject: space => {
+    calls.push(space);
+    return space === null || space === 'WIKI' ? 'project-now' : null;
+  } };
+  const result = convertLegacyContent(source('confluence-storage', `${legacy}${modern}`), context);
+  canonical(result);
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(calls, [null, 'WIKI']);
+  assert.deepEqual(nodes(result.content, 'documentLabelList').map(node => ({ ...node.attrs })), [
+    { projectId: 'project-now', labels: ['design', 'Release'], match: 'all', sort: 'updated', descending: true,
+      limit: 15, title: '', showLabels: true, showSpace: true, excludeCurrent: false },
+    { projectId: 'project-now', labels: ['design', 'Release'], match: 'any', sort: 'title', descending: true,
+      limit: 500, title: '설계 & 기록', showLabels: false, showSpace: false, excludeCurrent: true },
+  ]);
+  const original = convertLegacyContent(source('confluence-storage', legacy), { ...context, legacyDocumentLabelList: true });
+  assert.equal(nodes(original.content, 'codeBlock')[0].content?.[0].text, legacy);
+  assert.equal(original.diagnostics[0]?.code, 'LEGACY_LABEL_LIST_REPRESENTATION');
+});
+
+test('Confluence label lists keep uncertain or unsupported filter terms as original code blocks', () => {
+  const param = (name: string, value: string) => `<ac:parameter ac:name="${name}">${value}</ac:parameter>`;
+  const base = param('type', 'page') + param('spaces', '@self') + param('labels', 'release');
+  const wrap = (body: string) => `<ac:structured-macro ac:name="contentbylabel">${body}</ac:structured-macro>`;
+  const convert = (markup: string, project: string | null = 'project-now') => convertLegacyContent(source('confluence-storage', markup), {
+    ...resolver(), resolveLabelListProject: () => project,
+  });
+  const modern = 'type = page AND space = currentSpace() AND label = &quot;release&quot;';
+  for (const body of [param('labels', 'release') + param('type', 'page'), base.replace('@self', '@all'),
+    base.replace('release', '-private'), base.replace('page', 'page,blogpost'), base + param('author', 'user'),
+    base + param('excerpt', 'true'), base + param('max', '501'), base + param('labels', 'another'),
+    base + '<ac:rich-text-body><p>Unexpected</p></ac:rich-text-body>',
+    param('cql', modern), param('cql', `${modern} AND creator = &quot;user&quot; order by title`),
+    param('cql', `${modern} OR label = &quot;other&quot; order by title`),
+    param('cql', `${modern} AND label IN (&quot;other&quot;, &quot;new&quot;) order by title`),
+    param('cql', `${modern} order by title`) + param('sort', 'creation'),
+    param('cql', `${modern} order by title`) + param('excerptType', 'rich content'),
+    param('cql', `${modern} order by title`) + param('showLabels', 'unexpected'),
+  ]) {
+    const markup = wrap(body), result = convert(markup);
+    canonical(result);
+    assert.equal(nodes(result.content, 'documentLabelList').length, 0, markup);
+    assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, markup);
+    assert.equal(result.diagnostics[0]?.code, 'LABEL_LIST_PARAMETERS_UNSUPPORTED');
+  }
+  const scoped = wrap(param('cql', `${modern} order by lastmodified desc`));
+  assert.equal(nodes(convert(scoped).content, 'documentLabelList')[0]?.attrs?.sort, 'updated');
+  assert.equal(convert(scoped, null).diagnostics[0]?.code, 'LABEL_LIST_SCOPE_UNRESOLVED');
+});
+
 test('Confluence callouts preserve types, titles and nested blocks, and status macros remain inline', () => {
   const variants = ['info', 'note', 'warning', 'tip', 'panel'];
   const xml = variants.map(variant => `<ac:structured-macro ac:name="${variant}" ac:macro-id="synthetic-id">

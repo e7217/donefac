@@ -109,6 +109,8 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
       return anchor + '#'.repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1))) + ' ' + inline() + '\n\n';
     }
     case 'hardBreak': return '  \n';
+    case 'documentLabelList':
+      return `> ${documentPlainText(node).replace(/([\\`*_[\]<>])/g, '\\$1')}\n\n`;
     case 'documentToc': {
       const { minLevel, maxLevel, layout } = documentTocOptions(node.attrs);
       const links = [...(headings?.values() ?? [])].filter(entry => entry.level >= minLevel && entry.level <= maxLevel)

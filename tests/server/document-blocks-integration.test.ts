@@ -9,6 +9,7 @@ import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { contentMarkdown,contentText } from '../../src/features/document-utils.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
+import { DOCUMENT_LABEL_LIST_DEFAULTS, MAX_DOCUMENT_LABEL_LISTS, MAX_DOCUMENT_LABEL_LIST_LIMIT } from '../../shared/document-label-list.js';
 import type { ApiKeyCreated,DocPage,DocRevision,DocumentPublicationView,RichContent,SavedView,WorkspaceSnapshot } from '../../shared/types.js';
 import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
 
@@ -21,6 +22,7 @@ const issueList = (projectId: string, savedViewId: string | null, label: string)
 const issueSummary = (projectId: string, savedViewId: string | null, groupBy: string, label = '회의에서 볼 현황'): RichContent => ({
   type:'issueSummary', attrs:{projectId,savedViewId,groupBy,label},
 });
+const labelList = (attrs: Record<string, unknown> = {}): RichContent => ({ type: 'documentLabelList', attrs });
 const details:RichContent={type:'details',content:[{type:'detailsSummary',content:[{type:'text',text:'검토 <기준>',marks:[{type:'bold'}]}]},{type:'detailsContent',content:[p('접혀 있어도 보존할 결정')]}]};
 async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document-integration-'));const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;return{
   base,
@@ -30,6 +32,107 @@ async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document
 type Fixture=Awaited<ReturnType<typeof fixture>>;
 async function make(f:Fixture,title:string,content=body(p('원본')),projectId:string|null='project-neo'){const result=await f.call<DocPage>('/documents','POST',{projectId,title,content});assert.equal(result.status,201,JSON.stringify(result.data));return result.data;}
 const snapshot=async(f:Fixture)=>(await f.call<WorkspaceSnapshot>('/workspace')).data;
+
+test('label list options are canonical, bounded and protected in live and archived document backups', async () => {
+  const f = await fixture();
+  try {
+    const options = { projectId: 'project-neo', labels: ['  Alpha ', 'ALPHA', '베타'], title: ' 배포 문서 ', limit: 75 };
+    const document = await make(f, '팀 문서 인덱스', body(labelList(options)));
+    const path = `/documents/${document.id}`;
+    const canonical = body(labelList({ ...DOCUMENT_LABEL_LIST_DEFAULTS, ...options, labels: ['Alpha', '베타'], title: '배포 문서' }));
+    assert.deepEqual(document.content, canonical);
+    assert.equal(documentContentSchemaVersion(document.content), 9);
+    assert.deepEqual(contentReferences(document.content), []);
+    assert.match(document.plainText, /라벨별 문서.*배포 문서.*Alpha, 베타/u);
+
+    for (const attrs of [
+      { projectId: 'missing-project' }, { projectId: '' }, { labels: null }, { labels: ['유효\n하지 않음'] },
+      { labels: Array.from({ length: 21 }, (_, index) => `label-${index}`) }, { title: '긴'.repeat(161) },
+      { ascending: true }, { sort: 'random' }, { descending: 'true' }, { limit: 1.5 }, { limit: MAX_DOCUMENT_LABEL_LIST_LIMIT + 1 },
+    ]) {
+      const invalid = await f.call('/documents', 'POST', { projectId: options.projectId, title: '잘못된 목록', content: body(labelList(attrs)) });
+      assert.equal(invalid.status, 422, JSON.stringify([attrs, invalid.data]));
+    }
+    const overLimit = body(...Array.from({ length: MAX_DOCUMENT_LABEL_LISTS + 1 }, () => labelList()));
+    assert.equal((await f.call('/documents', 'POST', { title: '목록 블록 한도', content: overLimit })).status, 422);
+
+    const oldWrite = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: document.version, contentSchemaVersion: 8, content: body(p('목록을 알 수 없는 편집기')),
+    });
+    assert.equal(oldWrite.status, 409);
+    assert.equal(oldWrite.data.details.contentSchemaVersion, 9);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: document.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
+    assert.deepEqual(live.data.document.content, canonical);
+
+    const { data: backup } = await f.call<Backup>('/export');
+    assert.equal(backup.schemaVersion, 59);
+    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 58 } });
+    assert.equal(downgraded.status, 400);
+    assert.match(downgraded.data.error, /schemaVersion 59/u);
+    const mislabeled = structuredClone(backup);
+    mislabeled.collabStates.find(state => state.documentId === document.id)!.schemaVersion = 8;
+    assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
+    assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.notEqual(restored.epoch, live.data.epoch);
+    assert.deepEqual(restored.document.content, canonical);
+
+    const archived = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restored.document.version });
+    assert.equal(archived.status, 200);
+    const { data: archivedBackup } = await f.call<Backup>('/export');
+    const oldArchive = await f.call<{ error: string }>('/import', 'POST', { data: { ...archivedBackup, schemaVersion: 58 } });
+    assert.equal(oldArchive.status, 400);
+    assert.match(oldArchive.data.error, /schemaVersion 59/u);
+    assert.equal((await f.call('/import', 'POST', { data: archivedBackup })).status, 200);
+    assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document.content, canonical);
+    const history = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    assert.ok(history.some(revision => documentContentSchemaVersion(revision.content) === 9));
+  } finally { await f.close(); }
+});
+
+test('label list scope follows the whole document across writes, history, and scoped publication snapshots', async () => {
+  const f = await fixture();
+  try {
+    const key = (await f.call<ApiKeyCreated>('/api-keys', 'POST', {
+      name: '라벨 목록 범위 검증', access: 'write', projectIds: ['project-neo'], expiresAt: null,
+    })).data;
+    const nested = (projectId: string | null): RichContent => body({
+      type: 'callout', attrs: { variant: 'info', title: '범위' }, content: [labelList({ projectId, labels: ['공유할 라벨'] })],
+    });
+    const permitted = await f.call<DocPage>('/v1/documents', 'POST', { projectId: 'project-neo', title: '범위 내부', content: nested('project-neo') }, key.token);
+    assert.equal(permitted.status, 201, JSON.stringify(permitted.data));
+    for (const scope of ['project-team', null]) {
+      assert.equal((await f.call('/v1/documents', 'POST', { projectId: 'project-neo', title: '범위 외부', content: nested(scope) }, key.token)).status, 403);
+      assert.equal((await f.call(`/v1/documents/${permitted.data.id}`, 'PATCH', {
+        expectedVersion: permitted.data.version, contentSchemaVersion: 9, content: nested(scope),
+      }, key.token)).status, 403);
+      const document = await make(f, '폴더 안의 다른 범위', nested(scope));
+      const path = `/documents/${document.id}`;
+      assert.equal((await f.call(`/v1${path}`, 'GET', undefined, key.token)).status, 403);
+      assert.equal((await f.call(`/v1${path}`, 'PATCH', { expectedVersion: document.version, title: '접근할 수 없는 제목 수정' }, key.token)).status, 403);
+      const listed = await f.call<DocPage[]>('/v1/documents', 'GET', undefined, key.token);
+      assert.ok(listed.data.some(row => row.id === permitted.data.id));
+      assert.ok(listed.data.every(row => row.id !== document.id));
+      assert.deepEqual((await f.call<DocRevision[]>(`/v1${path}/revisions`, 'GET', undefined, key.token)).data, []);
+
+      const publication = `${path}/publication`;
+      const initial = (await f.call<DocumentPublicationView>(publication)).data;
+      const requested = await f.call<DocumentPublicationView>(publication, 'POST', {
+        action: 'request', expectedVersion: initial.version, workspaceGeneration: initial.workspaceGeneration,
+        expectedDocumentVersion: document.version, reviewerId: 'user-seo',
+      });
+      assert.equal(requested.status, 200, JSON.stringify(requested.data));
+      assert.ok(requested.data.review);
+      const frozen = `${publication}/snapshot?kind=review&revisionId=${requested.data.review.revisionId}`;
+      assert.equal((await f.call(frozen)).status, 200);
+      assert.equal((await f.call(`/v1${frozen}`, 'GET', undefined, key.token)).status, 403);
+    }
+  } finally { await f.close(); }
+});
 
 test('stable heading sections survive protected writes, live state, native backup and trash restore', async () => {
   const f = await fixture();
@@ -111,7 +214,7 @@ test('body contents navigation survives live state and active and archived versi
     assert.equal(edited.status, 200);
     const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: edited.data.version });
     assert.equal(live.status, 200);
-    assert.equal(live.data.schemaVersion, 8);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(live.data.document.content, after);
 
     const { data: backup } = await f.call<Backup>('/export');
@@ -125,8 +228,10 @@ test('body contents navigation survives live state and active and archived versi
     state.schemaVersion = 7;
     assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
     assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
-    assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 54 } })).status, 200);
+    state.schemaVersion = 8;
+    assert.equal((await f.call('/import', 'POST', { data: { ...mislabeled, schemaVersion: 54 } })).status, 200);
     const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.equal(restored.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(restored.document.content, after);
 
     const archived = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restored.document.version });

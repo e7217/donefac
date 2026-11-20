@@ -102,7 +102,6 @@ test('native backup v58 validates active and archived document labels and accept
   const { trashEntryId } = await call<{ trashEntryId: string }>(`/documents/${archived.id}?expectedVersion=${archived.version}`, 'DELETE');
   const backup = await call<Backup>('/export');
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  assert.equal(backup.schemaVersion, 58);
   const activeDocument = (data: Backup) => data.documents.find(row => row.id === live.id)!;
   const archivedDocument = (data: Backup) => data.trashEntries.find(row => row.id === trashEntryId)!.resource;
   assert.deepEqual(activeDocument(backup).labels, ['Active']);
@@ -132,7 +131,7 @@ test('native backup v58 validates active and archived document labels and accept
 
   activeDocument(backup).labels = [' Active ', 'ACTIVE'];
   archivedDocument(backup).labels = [' Archived ', 'ARCHIVED'];
-  await call('/import', 'POST', { data: backup });
+  await call('/import', 'POST', { data: { ...backup, schemaVersion: 58 } });
   await call(`/trash/${trashEntryId}/restore`, 'POST');
   const current = (await call<WorkspaceSnapshot>('/workspace')).documents;
   assert.deepEqual(current.find(row => row.id === live.id)?.labels, ['Active']);

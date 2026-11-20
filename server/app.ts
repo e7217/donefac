@@ -15,7 +15,7 @@ import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticSchedul
 import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
-import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
+import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentLabelListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
@@ -108,6 +108,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 9 && backupVersion < 59) fail('라벨별 문서 목록을 포함한 백업은 schemaVersion 59가 필요합니다.');
   if (version >= 8 && backupVersion < 54) fail('본문 목차를 포함한 백업은 schemaVersion 54가 필요합니다.');
   if (version >= 7 && backupVersion < 49) fail('문서 절 링크는 schemaVersion 49 백업이 필요합니다.');
   if (version >= 6 && backupVersion < 46) fail('안내 상자와 상태 배지는 schemaVersion 46 백업이 필요합니다.');
@@ -636,6 +637,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for (const { after } of refreshedDocuments) store.put('documents', after);
       const firstDocument = value.documents[0];
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
+      validateDocumentLabelListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {checkFields:false,allowArchivedSchema:true}));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       for (const { before, after, fields } of refreshedIssues) {
@@ -1666,6 +1668,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
       { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets, revisionOwner });
     const allImportedContent = [...importedDocuments, ...importedRevisions, ...archivedDocuments.flatMap(entry => [entry.resource, ...entry.revisions])].map(value => value.content);
+    validateDocumentLabelListProjects(allImportedContent, issueBlockTargets.hasProject);
     validateDocumentIssueBlocks(allImportedContent, issueBlockTargets, { allowMissing: true });
     validatePinnedDocumentRevisions(allImportedContent, revisionOwner, { allowMissing: true });
     const importedCollaboration = collaboration.validateImport(data.schemaVersion >= 3 ? data.collabStates : [], importedDocuments, issueBlockTargets, revisionOwner);

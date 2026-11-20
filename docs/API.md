@@ -124,6 +124,8 @@ curl --fail-with-body \
 
 본문 형식 8은 `documentToc` 블록을 지원한다. `attrs`에는 `minLevel`과 `maxLevel`을 1~3의 숫자로, `layout`을 `list` 또는 `flat`으로 지정한다. 기본값은 각각 `1`, `3`, `list`다. 목차의 제목과 링크는 표시할 문서 버전에서 생성한다. 이 블록이 있는 문서의 본문을 교체하는 `PATCH`에는 `contentSchemaVersion: 8`을 보낸다. 자체 백업 형식 54와 문서 JSON 형식 8에 목차 설정을 보존한다.
 
+본문 형식 9의 `documentLabelList`는 `projectId`에 프로젝트 ID 또는 팀 공통을 뜻하는 `null`을 받는다. `labels`는 문서 라벨과 같은 정규화 규칙을 사용하고, 라벨이 비어 있으면 결과가 비어 있다. `match`는 `any` 또는 `all`, `sort`는 `title`, `created`, `updated` 중 하나다. `descending`, `showLabels`, `showSpace`, `excludeCurrent`는 불리언이고 `limit`은 1~500, `title`은 최대 160 UTF-16 코드 단위다. 문서당 최대 30개 블록을 포함할 수 있다. 이 블록이 있는 본문을 교체할 때 `contentSchemaVersion: 9`를 보내며, 자체 백업 형식 59와 문서 JSON 형식 9는 목록 조건을 보존한다. 프로젝트 제한 API 키는 본문과 이력의 목록 대상도 같은 키의 허용 프로젝트에 있어야 한다.
+
 ## 상위 업무에서 하위 업무 만들기
 
 브라우저의 `POST /api/issues/:id/children`에 `{requestId, expectedParentVersion, issue}`를 보낸다. `requestId`는 UUID v4다. `issue`에는 업무 생성과 같은 속성을 보낸다. `projectId`와 `parentId`는 현재 상위 업무에서 정해지며, 함께 보낼 경우 같은 ID여야 한다. 현재 프로젝트의 유형·워크플로·필수 속성을 검사한 뒤 하위 업무와 번호, 상위·하위 업무 변경 기록을 한 트랜잭션에 저장한다.

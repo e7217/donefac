@@ -5,8 +5,10 @@ import {
 } from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
+import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
+import { parseConfluenceLabelList } from './migration-confluence-label-list.js';
 import { confluenceSectionAliases, scanConfluenceSections, type ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // Format references (conversion is local and never requests these URLs):
@@ -25,6 +27,8 @@ export interface MigrationContentContext {
   legacyAnnotations?: boolean;
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
+  legacyDocumentLabelList?: boolean;
+  resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   sectionLinks?: {
     documentId: string;
     resolvePageSection?: (page: MigrationReferenceInput, fragment: string, fromUrl: boolean) => { documentId: string; sectionId: string } | null;
@@ -416,6 +420,7 @@ class Converter {
     const body = node.children.find(value => typeof value !== 'string' && ['ac:rich-text-body', 'ac:plain-text-body'].includes(value.name)) as XmlNode | undefined;
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
     if (name === 'toc' && this.richDocument) return this.tableOfContents(node, params);
+    if ((name === 'contentbylabel' || name === 'content-by-label') && this.richDocument) return this.documentLabelList(node, params);
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
     if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
     if (this.context.legacyAnnotations) {
@@ -466,6 +471,30 @@ class Converter {
     if (name === 'excerpt') { this.warn('EXCERPT_FLATTENED', '발췌문 정의는 본문으로 유지했으며 발췌 범위 의미는 원본 보관 자료에 남습니다.'); return blocks(); }
     if (name === 'anchor' && this.context.legacySectionBaseline) this.warn('ANCHOR_DECLARATION_FLATTENED', '이전 앵커 매크로의 원문 표현을 확인했습니다.');
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
+    return [codeBlock(serializeXml(node))];
+  }
+  private documentLabelList(node: XmlNode, params: Record<string, string>): RichContent[] {
+    if (this.context.legacyDocumentLabelList) {
+      this.warn('LEGACY_LABEL_LIST_REPRESENTATION', '이전 이관의 라벨별 문서 목록 원문 코드 블록을 확인했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    const children = node.children.filter(child => typeof child !== 'string');
+    const malformed = children.length !== Object.keys(params).length || node.children.some(child => {
+      if (typeof child === 'string') return Boolean(child.trim());
+      return child.name !== 'ac:parameter' || !child.attrs['ac:name'] || child.children.some(value => typeof value !== 'string');
+    });
+    const parsed = malformed ? null : parseConfluenceLabelList(params);
+    if (parsed) {
+      const { spaceKey, ...options } = parsed;
+      const projectId = this.context.resolveLabelListProject?.(spaceKey);
+      if (!projectId) {
+        this.warn('LABEL_LIST_SCOPE_UNRESOLVED', '같은 원본 공간에 속한 페이지만 남는 이관 프로젝트를 확인할 수 없어 라벨별 문서 목록을 원문 코드 블록으로 보존했습니다.');
+        return [codeBlock(serializeXml(node))];
+      }
+      const attrs = normalizeDocumentLabelListOptions({ projectId, ...options });
+      if (attrs) return [{ type: 'documentLabelList', attrs: { ...attrs } }];
+    }
+    this.warn('LABEL_LIST_PARAMETERS_UNSUPPORTED', '현재 문서 목록으로 표현할 수 없는 라벨 필터나 표시 설정을 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
   }
   tableOfContents(node: XmlNode, params: Record<string, string>): RichContent[] {

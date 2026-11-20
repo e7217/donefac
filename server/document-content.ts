@@ -1,4 +1,5 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
+import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
   isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
@@ -38,21 +39,22 @@ function referenceLabel(value: unknown): boolean {
   return value === undefined || typeof value === 'string' && value.length <= 300;
 }
 
-function omitUnsetSectionIds(node: RichContent) {
+function canonicalizeNodeAttributes(node: RichContent) {
   if (node.type === 'heading' && node.attrs?.sectionId === undefined) {
     // ProseMirror's toJSON may share the attribute object with its node.
     const attributes: Record<string, unknown> = Object.assign(Object.create(null), node.attrs);
     delete attributes.sectionId;
     node.attrs = attributes;
   }
-  node.content?.forEach(omitUnsetSectionIds);
+  if (node.type === 'documentLabelList') node.attrs = { ...normalizeDocumentLabelListOptions(node.attrs)! };
+  node.content?.forEach(canonicalizeNodeAttributes);
 }
 
 /** Shared canonical shape for manual writes, imported snapshots and live Yjs updates. */
 export function normalizeDocumentContent(value:unknown):{content:RichContent;plainText:string}{
   let serialized:string|undefined;try{serialized=JSON.stringify(value);}catch{invalid('문서 내용이 JSON 형식이 아닙니다.');}
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
-  let count=0, issueBlockCount=0;
+  let count=0, issueBlockCount=0, labelListCount=0;
   const sectionIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
@@ -100,16 +102,29 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
         invalid('본문 목차의 제목 단계나 표시 방식을 확인해 주세요.');
       }
     }
+    if (node.type === 'documentLabelList') {
+      if (++labelListCount > MAX_DOCUMENT_LABEL_LISTS) invalid(`문서에 라벨별 문서 목록은 최대 ${MAX_DOCUMENT_LABEL_LISTS}개까지 넣을 수 있습니다.`);
+      if (!normalizeDocumentLabelListOptions(attributes)) invalid('라벨별 문서 목록의 범위·라벨·표시 조건을 확인해 주세요.');
+    }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
   check(value,0);
-  try{const node=schema.nodeFromJSON(value);if(node.type!==schema.topNodeType)invalid('문서 루트가 올바르지 않습니다.');node.check();const content=node.toJSON() as RichContent;omitUnsetSectionIds(content);return{content,plainText:documentPlainText(content)};}
+  try{const node=schema.nodeFromJSON(value);if(node.type!==schema.topNodeType)invalid('문서 루트가 올바르지 않습니다.');node.check();const content=node.toJSON() as RichContent;canonicalizeNodeAttributes(content);return{content,plainText:documentPlainText(content)};}
   catch(error){if(error instanceof DocumentContentError)throw error;return invalid('지원하지 않는 문서 노드·속성·서식입니다.');}
 }
 
 export interface IssueBlockTargets {
   hasProject(projectId: string): boolean;
   viewProject(viewId: string): string | undefined;
+}
+
+export function validateDocumentLabelListProjects(contents: Iterable<RichContent>, hasProject: (id: string) => boolean): void {
+  const checked = new Set<string>();
+  for (const content of contents) for (const { projectId } of documentLabelLists(content)) {
+    if (projectId === null || checked.has(projectId)) continue;
+    if (!hasProject(projectId)) invalid('라벨별 문서 목록의 프로젝트를 찾을 수 없습니다.', 422, 'REFERENCE_NOT_FOUND');
+    checked.add(projectId);
+  }
 }
 
 const issueBlockKey = ({ type, projectId, savedViewId }: DocumentIssueBlockTarget) => JSON.stringify([type, projectId, savedViewId]);
@@ -171,6 +186,7 @@ export class DocumentContentService{
       hasProject: id => Boolean(this.store.get('projects', id)),
       viewProject: id => this.store.get<SavedView>('saved_views', id)?.projectId,
     };
+    validateDocumentLabelListProjects(edits.map(edit => edit.content), issueBlockTargets.hasProject);
     for (const { id, content } of edits) contents.set(id, content);
     for (const { content, previousContent } of edits) {
       const previous = new Set(contentReferences(previousContent ?? { type: 'doc' })

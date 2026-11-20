@@ -7,13 +7,14 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronRight,
-  Code2, FileCheck2, FileClock, FilePlus2, FileText, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, FileCheck2, FileClock, FilePlus2, Files, FileText, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
+import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
@@ -82,10 +83,16 @@ const draftFromPage = (page: DocPage): Draft => {
   };
 };
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
 
 export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
+  const listDrafts = useRef(new Set<string>());
+  const trackListDraft = useCallback((id: string, dirty: boolean) => {
+    if (dirty) listDrafts.current.add(id);
+    else listDrafts.current.delete(id);
+  }, []);
   const actorRef = useRef(actorId);
   const activeActorRef = useRef(actorId);
   activeActorRef.current = actorId;
@@ -362,7 +369,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       return;
     }
     const sameActor = actorRef.current === actorId;
-    if (old?.id === selectedPage.id && old.dirty && sameActor) return;
+    if (old?.id === selectedPage.id && (old.dirty || listDrafts.current.size) && sameActor) return;
     if (old?.id === selectedPage.id && sameActor && old.expectedVersion > selectedPage.version) return;
     if (liveMode && old?.id === selectedPage.id && sameActor) { receiveLiveDocument(selectedPage); return; }
     if (old && (old.id !== selectedPage.id || !sameActor)) rememberDraft(old);
@@ -402,7 +409,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (draftRef.current?.dirty || commentBodyRef.current.trim() || liveStateRef.current?.pending) { rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = ''; }
+      if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) { rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', handler);
     return () => { window.removeEventListener('beforeunload', handler); rememberDraft(draftRef.current); rememberComment(); };
@@ -421,8 +428,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (savingRef.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
-      } else if (draftRef.current?.dirty || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
-        if (!window.confirm('저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 이동할까요?')) event.preventDefault();
+      } else if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
+        if (!window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 이동할까요?')) event.preventDefault();
         else { rememberDraft(draftRef.current); rememberComment(); }
       }
     };
@@ -566,7 +573,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       return;
     }
     if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return; }
-    if ((draftRef.current?.dirty || commentBodyRef.current.trim() || liveStateRef.current?.pending) && !window.confirm('저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return;
+    if ((draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) &&
+      !window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return;
     rememberDraft(draftRef.current);
     rememberComment();
     onSelectDocument(id);
@@ -584,6 +592,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   async function createDocument(event: React.FormEvent) {
     event.preventDefault();
     if (creating || !newTitle.trim()) return;
+    if (listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
     setCreating(true);
     try {
       const parent = data.documents.find(page => page.id === newParent);
@@ -643,6 +652,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const captured = draftRef.current;
     if (!captured || savingRef.current) return;
     const capturedActor = actorRef.current;
+    if (listDrafts.current.size) { notify('문서 목록 설정을 적용하거나 취소한 후 복구해주세요.', 'error'); return; }
     if (captured.dirty) { notify('현재 편집을 먼저 저장하거나 새 문서로 보관해주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || (sessionRef.current?.enabled && liveStateRef.current?.phase !== 'connected')) { notify('공동 편집을 서버에 동기화한 후 복구해주세요.', 'error'); return; }
     if (!window.confirm(`${documentRevisionLabel(revision)}의 내용으로 복구할까요? 현재 내용은 이력에 남습니다.`)) return;
@@ -690,7 +700,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const capturedActor = actorRef.current;
     if (data.documents.some(page => page.parentId === captured.id)) { notify('하위 문서를 먼저 다른 위치나 휴지통으로 옮겨 주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || commentBusy) { notify('공동 편집과 댓글 전송이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
-    const hasDraft = captured.dirty || Boolean(commentBodyRef.current.trim());
+    const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentBodyRef.current.trim());
     if (!window.confirm(`“${captured.title}” 문서를 휴지통으로 옮길까요?${hasDraft ? ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.' : ''}`)) return;
     savingRef.current = true; setSaving(true);
     try {
@@ -770,7 +780,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function refreshReferences() {
     if (referencesRefreshing) return; setReferencesRefreshing(true);
-    try { await refresh(); notify('참조, 포함 원본과 업무 현황을 새로 불러왔습니다. 작성 중인 내용은 유지됩니다.', 'success'); }
+    try { await refresh(); notify('참조, 포함 원본, 업무 현황과 문서 목록을 새로 불러왔습니다.', 'success'); }
     catch (cause) { notify(cause instanceof Error ? cause.message : '참조를 새로 불러오지 못했습니다.', 'error'); }
     finally { setReferencesRefreshing(false); }
   }
@@ -779,6 +789,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!editor?.isEditable || !draftRef.current) return;
     setReferenceSelection({ kind, editor, bookmark: editor.state.selection.getBookmark(), documentId: draftRef.current.id });
     setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); closeAnnotation();
+  }
+
+  function insertDocumentLabelList() {
+    if (!editor?.isEditable || !selectedPage) return;
+    let count = 0;
+    editor.state.doc.descendants(node => { if (node.type.name === 'documentLabelList') count++; });
+    if (count >= MAX_DOCUMENT_LABEL_LISTS) {
+      notify(`라벨별 문서 목록은 문서당 ${MAX_DOCUMENT_LABEL_LISTS}개까지 넣을 수 있습니다.`, 'error');
+      return;
+    }
+    return editor.chain().focus().insertContent([
+      { type: 'documentLabelList', attrs: { projectId: selectedPage.projectId } }, { type: 'paragraph' },
+    ]).run();
   }
 
   const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind }))[] = [
@@ -793,6 +816,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', action: () => { if (editor) openIssueBlock(editor, 'issueList'); } },
     { label: '업무 현황', search: 'issue summary chart 업무 현황 집계', action: () => { if (editor) openIssueBlock(editor, 'issueSummary'); } },
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
+    { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: insertDocumentLabelList },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
     { label: '본문 목차', search: 'toc table of contents 본문 목차', action: () => insertDocumentToc(editor) },
@@ -922,7 +946,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
-  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument} openIssueBlock={bodyReadOnly ? undefined : openIssueBlock}>
+  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
+    openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onLabelListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading"><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button></div>
     <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || Boolean(issueBlockDialog || documentAction)}>
@@ -1009,6 +1034,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('업무 목록 삽입', <ListFilter size={15} />, () => { if (editor) openIssueBlock(editor, 'issueList'); })}
                 {button('업무 현황 삽입', <ChartBar size={15} />, () => { if (editor) openIssueBlock(editor, 'issueSummary'); })}
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
+                {button('라벨별 문서 목록 삽입', <Files size={15} />, insertDocumentLabelList)}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('문서 버전 포함 삽입', <FileClock size={15} />, () => openReference('documentRevisionInclude'))}
                 {button('본문 목차 삽입', <TableOfContents size={15} />, () => insertDocumentToc(editor))}

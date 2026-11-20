@@ -56,6 +56,7 @@ export interface MigrationPageAppendContext {
   project: Project;
   sourceSpaceId: string;
   sourceSpaceKey?: string;
+  labelListScope?: 'isolated' | 'mixed';
   token: string;
   sectionInventory?: boolean;
   knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string; sectionIds?: string[] }[];
@@ -79,7 +80,7 @@ export interface PreparedMigration {
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
   append?: { projectId: string; token: string; startIssueNumber: number };
-  appendPages?: { projectId: string; token: string; sectionInventory?: boolean };
+  appendPages?: { projectId: string; token: string; sectionInventory?: boolean; labelListInventory?: true };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
   jiraAttachmentOwners?: string[];

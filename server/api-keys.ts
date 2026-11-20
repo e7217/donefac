@@ -5,6 +5,7 @@ import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { listIssueRelations } from './issue-relations.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
+import { documentLabelLists } from '../shared/document-label-list.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -105,10 +106,13 @@ export class ApiKeyService {
   }
   private canReadDocumentBody(key: ApiKeyRecord, content: RichContent): boolean {
     const projects = key.projectIds;
-    return projects === null || documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId));
+    return projects === null || (
+      documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId)) &&
+      documentLabelLists(content).every(({ projectId }) => projectId !== null && projects.includes(projectId))
+    );
   }
   private requireDocumentBody(key: ApiKeyRecord, content: RichContent) {
-    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키에서 허용하지 않은 프로젝트의 업무 현황이 있습니다.');
+    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키의 범위를 벗어난 업무 현황 또는 라벨별 문서 목록이 있습니다.');
   }
   authorizeDocumentBody(request: Request, content: RichContent) {
     const context = this.contexts.get(request);
@@ -154,6 +158,7 @@ export class ApiKeyService {
         this.resource(key, table, reference.id);
       }
       for (const { projectId } of documentIssueBlocks(content)) this.allowedProject(key, projectId);
+      for (const { projectId } of documentLabelLists(content)) this.allowedProject(key, projectId);
     }
   }
 

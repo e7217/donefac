@@ -1,11 +1,12 @@
 import { Node, mergeAttributes } from '@tiptap/core';
+import { DOCUMENT_LABEL_LIST_DEFAULTS, documentLabelListDescription, normalizeDocumentLabelListOptions } from './document-label-list.js';
 import { documentNodes } from './document-references.js';
 import type { ContentReference, RichContent } from './types.js';
 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 8;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 9;
 export type DocumentTocLevel = 1 | 2 | 3;
 export type DocumentTocLayout = 'list' | 'flat';
 export interface DocumentTocOptions {
@@ -34,9 +35,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentLabelList') return 9;
   if (nodeType === 'documentToc') return 8;
   if (nodeType === 'heading' && attrs?.sectionId !== undefined) return 7;
   if (nodeType === 'callout' || nodeType === 'statusBadge') return 6;
@@ -165,6 +167,33 @@ function issueBlockNode(name: 'issueList' | 'issueSummary', label: string) {
 export const IssueList = issueBlockNode('issueList', '업무 목록');
 export const IssueSummary = issueBlockNode('issueSummary', '업무 현황');
 
+export const DocumentLabelList = Node.create({
+  name: 'documentLabelList', group: 'block', atom: true, selectable: true, draggable: true,
+  addAttributes() {
+    return Object.fromEntries(Object.entries(DOCUMENT_LABEL_LIST_DEFAULTS).map(([key, value]) =>
+      [key, { default: value, rendered: false, parseHTML: () => null }]));
+  },
+  parseHTML() {
+    return [{
+      tag: 'div[data-teamspace-node="documentLabelList"][data-document-label-list]',
+      getAttrs: element => {
+        try {
+          return normalizeDocumentLabelListOptions(JSON.parse(element.getAttribute('data-document-label-list') ?? '')) ?? false;
+        } catch {
+          return false;
+        }
+      },
+    }];
+  },
+  renderHTML({ node }) {
+    const options = normalizeDocumentLabelListOptions(node.attrs);
+    return ['div', {
+      'data-teamspace-node': 'documentLabelList',
+      'data-document-label-list': JSON.stringify(options ?? DOCUMENT_LABEL_LIST_DEFAULTS),
+    }, '라벨별 문서'];
+  },
+});
+
 function tocLevelAttribute(key: 'minLevel' | 'maxLevel', attribute: string) {
   return {
     default: DOCUMENT_TOC_DEFAULTS[key],
@@ -285,7 +314,7 @@ export const StatusBadge = Node.create({
 });
 
 export function documentNodeExtensions() {
-  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc];
+  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList];
 }
 
 export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {
@@ -320,6 +349,10 @@ export function documentPlainText(node: RichContent): string {
   if (node.type === 'text') return node.text || '';
   if (node.type === 'hardBreak') return '\n';
   if (node.type === 'statusBadge') return typeof node.attrs?.label === 'string' ? node.attrs.label : '';
+  if (node.type === 'documentLabelList') {
+    const options = normalizeDocumentLabelListOptions(node.attrs);
+    return options ? `[라벨별 문서 · ${documentLabelListDescription(options)}]` : '[라벨별 문서]';
+  }
   if (referenceNodes.has(node.type)) {
     const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');
     const label = String(node.attrs?.label || id);
