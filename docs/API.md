@@ -61,6 +61,8 @@ curl --fail-with-body \
 
 브라우저의 `POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
 
+기존 차단 관계에서 연결할 때는 `POST /api/issues/:issueId/relations/:relationId/schedule-dependency`에 `{expectedVersion,predecessorId,successorId,type,lagDays}`를 보낸다. `expectedVersion`은 조회한 업무 관계의 버전이다. 관계에 속한 두 업무가 같은 프로젝트에 있어야 한다. 직접 만든 `blocks` 관계는 차단하는 업무를 선행으로 사용하며, 이관된 `Blocks`, `Is Blocked By`, `Blocked By`는 요청에서 방향을 선택한다. 원래 관계와 업무 날짜를 보존한 채 일정 연결을 추가한다. 새 연결이면 `201`, 같은 방향·유형·간격이 이미 저장돼 있으면 같은 연결과 `200`을 반환한다.
+
 `PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?,reverse?}`를 보내 연결 유형과 간격을 바꾼다. `reverse: true`는 같은 연결 ID에서 선행 업무와 후행 업무를 서로 바꾼다. 반대 방향이 순환을 만들면 변경을 거절한다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
 
 ## 일정 여유 분석

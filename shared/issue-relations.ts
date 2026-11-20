@@ -1,6 +1,7 @@
 import type { IssueRelation, IssueRelationDirection, IssueRelationType } from './types.js';
 
 export type TeamspaceIssueRelation = IssueRelation & { origin: 'teamspace'; type: IssueRelationType };
+export type IssueRelationScheduleMode = 'fixed-direction' | 'choose-direction';
 
 export function isIssueRelationType(value: unknown): value is IssueRelationType {
   return value === 'related' || value === 'blocks' || value === 'duplicates';
@@ -18,6 +19,13 @@ export function issueRelationEndpoints(issueId: string, otherIssueId: string, ty
 
 export function isTeamspaceIssueRelation(value: IssueRelation): value is TeamspaceIssueRelation {
   return value.origin === 'teamspace' && isIssueRelationType(value.type);
+}
+
+export function issueRelationScheduleMode(relation: IssueRelation): IssueRelationScheduleMode | null {
+  if (isTeamspaceIssueRelation(relation)) return relation.type === 'blocks' ? 'fixed-direction' : null;
+  if (relation.origin !== undefined) return null;
+  const label = relation.type.trim().replace(/\s+/gu, ' ').toLowerCase();
+  return label === 'blocks' || label === 'is blocked by' || label === 'blocked by' ? 'choose-direction' : null;
 }
 
 export function isRelationId(value: unknown): value is string {

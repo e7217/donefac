@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Link2, Pencil, Plus, RefreshCw, Unlink2 } from 'lucide-react';
+import { Link2, Pencil, Plus, RefreshCw, SquareChartGantt, Unlink2 } from 'lucide-react';
+import { issueRelationScheduleMode, type IssueRelationScheduleMode } from '../../shared/issue-relations';
 import type { FeatureProps, Issue, IssueRelation, IssueRelationDirection, IssueRelationType } from '../../shared/types';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import './issue-relations.css';
@@ -22,6 +23,7 @@ type Draft = { original?: IssueRelation; otherIssueId: string; choice: Choice; q
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   issueId: string;
   disabled: boolean;
+  onReviewSchedule: (opener: HTMLButtonElement, relation: IssueRelation, mode: IssueRelationScheduleMode, reload: () => Promise<void>) => void;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
 };
 
@@ -48,7 +50,7 @@ export function IssueRelations(props: Props) {
   return <RelationList key={props.issueId} {...props} />;
 }
 
-function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onDraftChange }: Props) {
+function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onReviewSchedule, onDraftChange }: Props) {
   const editHeading = useId(), removeHeading = useId();
   const [relations, setRelations] = useState<IssueRelation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,6 +64,7 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onD
   const pendingRef = useRef(false);
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
+  const returnFocus = useRef<HTMLButtonElement | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const otherSelect = useRef<HTMLSelectElement>(null);
   const typeSelect = useRef<HTMLSelectElement>(null);
@@ -69,8 +72,14 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onD
 
   const path = `/issues/${encodeURIComponent(issueId)}/relations`;
   const issueById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
+  const currentIssue = issueById.get(issueId);
   const projectNames = useMemo(() => new Map(data.projects.map(project => [project.id, project.name])), [data.projects]);
   const otherIssues = useMemo(() => data.issues.filter(issue => issue.id !== issueId), [data.issues, issueId]);
+  const scheduledIssueIds = useMemo(() => new Set(data.dependencies.flatMap(dependency => {
+    if (dependency.predecessorId === issueId) return [dependency.successorId];
+    if (dependency.successorId === issueId) return [dependency.predecessorId];
+    return [];
+  })), [data.dependencies, issueId]);
   const terms = draft?.query.trim().toLocaleLowerCase().split(/\s+/u) ?? [];
   const matches = draft && !draft.original
     ? otherIssues.filter(issue => {
@@ -129,11 +138,17 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onD
     return () => onDraftChange(false, false, discard);
   }, [edited, busy, discard, onDraftChange]);
 
-  function closeAction(restoreFocus = true) {
-    const target = opener.current;
+  useLayoutEffect(() => {
+    const target = returnFocus.current;
+    if (!target || busy || disabled || draft || unlinkTarget) return;
+    returnFocus.current = null;
+    (target.isConnected && !target.disabled ? target : addButton.current)?.focus({ preventScroll: true });
+  }, [busy, disabled, draft, unlinkTarget]);
+
+  function closeAction() {
+    returnFocus.current = opener.current ?? addButton.current;
     opener.current = null;
     discard();
-    if (restoreFocus) requestAnimationFrame(() => (target?.isConnected ? target : addButton.current)?.focus({ preventScroll: true }));
   }
 
   function editRelation(button: HTMLButtonElement, original?: IssueRelation) {
@@ -273,6 +288,8 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onD
       {relations.slice(activeOffset, activeOffset + PAGE_SIZE).map((relation, index) => {
         const targetId = otherId(relation, issueId);
         const other = issueById.get(targetId);
+        const scheduleMode = currentIssue && other && other.id !== issueId && currentIssue.projectId === other.projectId
+          ? issueRelationScheduleMode(relation) : null;
         const local = relation.origin === 'teamspace';
         const label = local ? CHOICES[choiceFor(relation, issueId)].label : relation.type;
         const labelId = `${editHeading}-${activeOffset + index}`;
@@ -291,6 +308,14 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onD
               disabled={controlsDisabled || actionsOpen} onClick={event => editRelation(event.currentTarget, relation)}><Pencil size={15} aria-hidden="true" /></button>
             <button className="issue-icon-button" type="button" aria-label={`${other.key} 관계 해제`} aria-describedby={labelId} title="관계 해제"
               disabled={controlsDisabled || actionsOpen} onClick={event => confirmUnlink(event.currentTarget, relation)}><Unlink2 size={15} aria-hidden="true" /></button>
+          </div>}
+          {scheduleMode && other && <div className="issue-relations-schedule">
+            {scheduledIssueIds.has(other.id) ? <span>일정 연결됨</span> :
+              <button className="btn btn-ghost" type="button" aria-label={`${other.key} 일정 연결 검토`} aria-describedby={labelId}
+                disabled={controlsDisabled || actionsOpen || loading}
+                onClick={event => onReviewSchedule(event.currentTarget, relation, scheduleMode, load)}>
+                <SquareChartGantt size={14} aria-hidden="true" />일정 연결 검토
+              </button>}
           </div>}
         </li>;
       })}

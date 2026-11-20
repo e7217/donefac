@@ -107,6 +107,17 @@
   min-height: 36px;
 }
 
+.issue-relations-schedule {
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: #546d5e;
+}
+
+.issue-relations-schedule .btn {
+  min-height: 36px;
+  padding: 4px 8px;
+}
+
 .issue-relations-pager {
   margin-top: 8px;
 }
@@ -117,6 +128,10 @@
   }
 
   .issue-relations-label {
+    grid-column: 1 / -1;
+  }
+
+  .issue-relations-schedule {
     grid-column: 1 / -1;
   }
 }

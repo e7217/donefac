@@ -64,12 +64,12 @@ import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '.
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
-import { hasDuplicateTeamspaceIssueRelations, isTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationScheduleMode } from '../shared/issue-relations.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -280,6 +280,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       seen.add(id);
       for(const successor of successors.get(id)??[])todo.push(successor);
     }
+  };
+  const saveNewDependency = (req: Request, dependency: Dependency, current?: Dependency[]) => {
+    validateDependency(dependency, current);
+    store.put('dependencies', dependency);
+    activity(req, 'issue', dependency.successorId, '선행 업무 연결', get<Issue>('issues', dependency.predecessorId).key);
+    return dependency;
   };
   const scheduleWarnings = (issues: Issue[], dependencies=store.all<Dependency>('dependencies')) => {
     const map=new Map(issues.map(i=>[i.id,i])); const warnings:string[]=[];const mathCache=new Map<string,ReturnType<typeof createCalendarMath>>();
@@ -1303,6 +1309,40 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     issueRelations.remove(req.params.id,req.params.relationId,req.query.expectedVersion,relationAudit(req));
     res.json({ok:true});
   });
+  app.post('/api/issues/:issueId/relations/:relationId/schedule-dependency', (req, res) => {
+    const input = req.body;
+    const { expectedVersion, predecessorId, successorId, type, lagDays } = input;
+    if (Object.keys(input).some(key => !['expectedVersion', 'predecessorId', 'successorId', 'type', 'lagDays', 'actorId'].includes(key)) ||
+        !isRelationId(predecessorId) || !isRelationId(successorId) || !isDependencyType(type) || !isDependencyLag(lagDays)) {
+      return fail('일정 연결의 선행·후행 업무, 연결 유형과 근무일 간격을 확인해 주세요.');
+    }
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) return fail('업무 관계의 expectedVersion이 필요합니다.');
+    actor(req);
+    const { issueId, relationId } = req.params;
+    const result = store.transaction(() => {
+      const relation = store.get<IssueRelation>('issue_relations', relationId);
+      if (!relation || (relation.sourceIssueId !== issueId && relation.targetIssueId !== issueId)) {
+        return fail('업무 관계를 찾을 수 없습니다.', 404);
+      }
+      checkVersion(relation, expectedVersion);
+      const mode = issueRelationScheduleMode(relation);
+      if (!mode) return fail('차단 관계에서 일정 연결을 추가할 수 있습니다.');
+      const forward = predecessorId === relation.sourceIssueId && successorId === relation.targetIssueId;
+      const backward = predecessorId === relation.targetIssueId && successorId === relation.sourceIssueId;
+      if (!forward && !(mode === 'choose-direction' && backward)) {
+        return fail('현재 차단 관계에 해당하는 선행·후행 업무를 선택해 주세요.');
+      }
+      const current = store.all<Dependency>('dependencies');
+      const existing = current.find(dependency => dependency.predecessorId === predecessorId && dependency.successorId === successorId);
+      if (existing?.type === type && existing.lagDays === lagDays) {
+        validateDependency(existing, current);
+        return { dependency: existing, created: false };
+      }
+      const dependency = saveNewDependency(req, { id: uid(), predecessorId, successorId, type, lagDays, version: 1 }, current);
+      return { dependency, created: true };
+    });
+    res.status(result.created ? 201 : 200).json(result.dependency);
+  });
   app.delete('/api/attachments/:id',(req,res)=>{
     const expected=req.query.expectedVersionId===undefined?undefined:expectedAttachmentVersion(req.query.expectedVersionId);
     const trashItemId=store.transaction(()=>{
@@ -1320,11 +1360,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const input=req.body??{};
     const dependency:Dependency={id:uid(),predecessorId:input.predecessorId,successorId:input.successorId,
       type:input.type===undefined?'FS':input.type,lagDays:input.lagDays??0,version:1};
-    store.transaction(()=>{
-      validateDependency(dependency);
-      store.put('dependencies',dependency);
-      activity(req,'issue',dependency.successorId,'선행 업무 연결',get<Issue>('issues',dependency.predecessorId).key);
-    });
+    store.transaction(() => saveNewDependency(req, dependency));
     res.status(201).json(dependency);
   });
   app.patch('/api/dependencies/:id',(req,res)=>{

@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Issue, IssueRelation, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Dependency, Issue, IssueRelation, WorkspaceSnapshot } from '../../shared/types.js';
 
 const actor = 'user-seo';
 const otherActor = 'user-min';
@@ -19,6 +19,9 @@ const pathFor = (issueId: string) => `/issues/${issueId}/relations`;
 const child = (issueId: string, relationId: string) => `${pathFor(issueId)}/${relationId}`;
 const erase = (issueId: string, relation: IssueRelation) => `${child(issueId, relation.id)}?expectedVersion=${relation.version}`;
 const add = (otherIssueId: string, type = 'related', direction = 'outgoing') => ({ otherIssueId, type, direction });
+const schedulePath = (issueId: string, relation: IssueRelation) => `${child(issueId, relation.id)}/schedule-dependency`;
+const scheduleBody = (relation: IssueRelation) => ({ expectedVersion: relation.version, predecessorId: relation.sourceIssueId,
+  successorId: relation.targetIssueId, type: 'SS', lagDays: 2 });
 type Backup = WorkspaceSnapshot & {
   schemaVersion: number;
   issueRelations: IssueRelation[];
@@ -218,4 +221,82 @@ test('restore preserves legacy labels and advances active and archived team link
   await f.call(erase(b.id, afterImport), { method: 'DELETE' }, 409);
   await f.call(erase(b.id, restored), { method: 'DELETE' });
   assert.deepEqual(await f.call(pathFor(a.id)), [migrated]);
+});
+
+test('schedule creation from a native blocking relation verifies its member, direction and version and is atomic and idempotent', async t => {
+  const f = await fixture(t);
+  const a = await f.create('일정 변환 선행 업무');
+  const b = await f.create('일정 변환 후행 업무');
+  const c = await f.create('일정 변환의 관계 외 업무');
+  const relation = await f.call<IssueRelation>(pathFor(b.id), { method: 'POST', body: add(a.id, 'blocks', 'incoming') }, 201);
+  const linked = await f.call<IssueRelation>(pathFor(a.id), { method: 'POST', body: add(c.id) }, 201);
+  const initial = await f.call<WorkspaceSnapshot>('/workspace');
+  const body = scheduleBody(relation);
+  const createFrom = (issueId: string, input: unknown = body) => f.request<Dependency>(schedulePath(issueId, relation), { method: 'POST', body: input });
+  await f.call(schedulePath(c.id, relation), { method: 'POST', body }, 404);
+  await f.call(schedulePath(a.id, linked), { method: 'POST', body: scheduleBody(linked) }, 400);
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, predecessorId: b.id, successorId: a.id } }, 400);
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, successorId: c.id } }, 400);
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, expectedVersion: 0 } }, 400);
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, type: 'other' } }, 400);
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, lagDays: 3_651 } }, 400);
+
+  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER reject_schedule_relation_activity BEFORE INSERT ON activities
+      WHEN json_extract(NEW.json, '$.action')='선행 업무 연결'
+      BEGIN SELECT RAISE(ABORT, 'synthetic schedule relation activity failure'); END`);
+    await f.call(schedulePath(b.id, relation), { method: 'POST', body }, 500);
+    assert.deepEqual(await f.call('/workspace'), initial);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS reject_schedule_relation_activity');
+    db.close();
+  }
+
+  const saved = await Promise.all([createFrom(a.id), createFrom(b.id)]);
+  assert.deepEqual(saved.map(result => result.status).sort(), [200, 201]);
+  const dependency = saved[0].data;
+  assert.deepEqual(saved[1].data, dependency);
+  assert.deepEqual(dependency, { id: dependency.id, predecessorId: a.id, successorId: b.id, type: 'SS', lagDays: 2, version: 1 });
+  await f.call(schedulePath(a.id, relation), { method: 'POST', body: { ...body, lagDays: 3 } }, 409);
+  await f.call('/dependencies', { method: 'POST', body: { predecessorId: a.id, successorId: b.id, type: 'SS', lagDays: 2 } }, 409);
+  assert.deepEqual(await f.call(pathFor(b.id)), [relation]);
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.issues, initial.issues);
+  assert.equal(after.dependencies.length, initial.dependencies.length + 1);
+  assert.equal(after.activities.length, initial.activities.length + 1);
+  assert.equal(after.activities.filter(event => event.action === '선행 업무 연결' && event.resourceId === b.id).length, 1);
+
+  const changed = await f.call<IssueRelation>(child(a.id, relation.id), { method: 'PATCH', body: {
+    expectedVersion: relation.version, type: 'related', direction: 'outgoing',
+  } });
+  const conflict = await f.call<{ details: { currentVersion: number } }>(schedulePath(a.id, relation), { method: 'POST', body }, 409);
+  assert.equal(conflict.details.currentVersion, changed.version);
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).dependencies.find(edge => edge.id === dependency.id), dependency);
+});
+
+test('legacy blocking labels let the actor choose either direction without replacing the source and still guard cycles and project scope', async t => {
+  const f = await fixture(t);
+  const a = await f.create('이관한 차단 업무 A');
+  const b = await f.create('이관한 차단 업무 B');
+  const outsider = await f.create('다른 프로젝트의 차단 업무', secondary);
+  const legacy: IssueRelation = { id: randomUUID(), sourceIssueId: a.id, targetIssueId: b.id,
+    type: '  Is  bLoCkEd   By  ', version: 1, createdAt: new Date().toISOString() };
+  const backup = await f.call<Backup>('/export');
+  await f.call('/import', { method: 'POST', body: { data: { ...backup, schemaVersion: 50, issueRelations: [legacy] } } });
+  const original = await f.call<WorkspaceSnapshot>('/workspace');
+  const chosen = { ...scheduleBody(legacy), predecessorId: b.id, successorId: a.id, type: 'SF', lagDays: -2 };
+  const dependency = await f.call<Dependency>(schedulePath(b.id, legacy), { method: 'POST', body: chosen }, 201);
+  assert.deepEqual(dependency, { id: dependency.id, predecessorId: b.id, successorId: a.id, type: 'SF', lagDays: -2, version: 1 });
+  assert.deepEqual(await f.call(pathFor(a.id)), [legacy]);
+  assert.deepEqual(await f.call(schedulePath(a.id, legacy), { method: 'POST', body: chosen }), dependency);
+  assert.match((await f.call<{ error: string }>(schedulePath(a.id, legacy), { method: 'POST', body: scheduleBody(legacy) }, 400)).error, /순환/);
+
+  const cross = await f.call<IssueRelation>(pathFor(a.id), { method: 'POST', body: add(outsider.id, 'blocks') }, 201);
+  assert.match((await f.call<{ error: string }>(schedulePath(a.id, cross), { method: 'POST', body: scheduleBody(cross) }, 400)).error, /같은 프로젝트/);
+  const publicKey = await f.key('차단 일정 공개 API 확인', [primary], 'write');
+  await f.call(`/v1${schedulePath(a.id, legacy)}`, { method: 'POST', body: chosen, headers: publicKey }, 403);
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.issues, original.issues);
+  assert.deepEqual(after.dependencies, [...original.dependencies, dependency]);
 });

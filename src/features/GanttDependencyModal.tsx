@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Link2, X } from 'lucide-react';
+import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import type { Dependency, DependencyType, Issue } from '../../shared/types';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
 import { errorMessage } from './schedule-utils';
@@ -10,12 +11,14 @@ import './issue-schedule-relations.css';
 export type DependencyInput = Pick<Dependency, 'predecessorId' | 'successorId' | 'type' | 'lagDays'>;
 export type DependencyPrefill = { predecessorId: string; successorId: string; type?: DependencyType };
 export type RelatedIssueDirection = 'predecessor' | 'successor';
+export type DependencyRelationReview = { sourceIssueId: string; targetIssueId: string; mode: IssueRelationScheduleMode };
 
 type Props = {
   issues: Issue[];
   dependency?: Dependency;
   prefill?: DependencyPrefill;
   anchor?: { issueId: string; otherRole: RelatedIssueDirection };
+  relationReview?: DependencyRelationReview;
   staleMessage?: string;
   onClose: () => void;
   onSubmit: (input: DependencyInput) => Promise<void>;
@@ -23,10 +26,17 @@ type Props = {
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
 };
 
-export function GanttDependencyModal({ issues, dependency, prefill, anchor, staleMessage, onClose, onSubmit, busy, onDraftChange }: Props) {
+function relationIssueText(issue: Issue | undefined) {
+  return issue ? `${issue.key} · ${issue.title}` : '업무를 찾을 수 없습니다.';
+}
+
+export function GanttDependencyModal({ issues, dependency, prefill, anchor, relationReview, staleMessage, onClose, onSubmit, busy, onDraftChange }: Props) {
   const id = useId();
-  const initialPredecessor = dependency?.predecessorId ?? prefill?.predecessorId ?? (anchor?.otherRole === 'successor' ? anchor.issueId : '');
-  const initialSuccessor = dependency?.successorId ?? prefill?.successorId ?? (anchor?.otherRole === 'predecessor' ? anchor.issueId : '');
+  const fixedRelation = relationReview?.mode === 'fixed-direction' ? relationReview : undefined;
+  const initialPredecessor = relationReview ? (fixedRelation?.sourceIssueId ?? '') :
+    dependency?.predecessorId ?? prefill?.predecessorId ?? (anchor?.otherRole === 'successor' ? anchor.issueId : '');
+  const initialSuccessor = relationReview ? (fixedRelation?.targetIssueId ?? '') :
+    dependency?.successorId ?? prefill?.successorId ?? (anchor?.otherRole === 'predecessor' ? anchor.issueId : '');
   const initialType = (dependency ? dependency.type : prefill?.type) ?? 'FS';
   const initialLag = String(dependency?.lagDays ?? 0);
   const [predecessorId, setPredecessorId] = useState(initialPredecessor);
@@ -38,30 +48,35 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, stal
   const dialog = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const predecessorSelect = useRef<HTMLSelectElement>(null);
+  const relationDirectionSelect = useRef<HTMLSelectElement>(null);
   const typeSelect = useRef<HTMLSelectElement>(null);
   const editing = Boolean(dependency);
-  const reviewingSelection = Boolean(dependency || prefill);
+  const reviewingSelection = Boolean(dependency || prefill || relationReview);
+  const chooseRelationDirection = relationReview?.mode === 'choose-direction';
   const dirty = predecessorId !== initialPredecessor || successorId !== initialSuccessor || type !== initialType || lag !== initialLag;
   const lagDays = lag.trim() === '' ? NaN : Number(lag);
   const endpoints = DEPENDENCY_ENDPOINTS[type];
   const predecessor = issues.find(issue => issue.id === predecessorId);
   const successor = issues.find(issue => issue.id === successorId);
   const ready = Boolean(predecessor && successor && predecessor.id !== successor.id && predecessor.projectId === successor.projectId && isDependencyLag(lagDays));
+  const relationSource = relationReview && issues.find(issue => issue.id === relationReview.sourceIssueId);
+  const relationTarget = relationReview && issues.find(issue => issue.id === relationReview.targetIssueId);
+  const relationDirection = predecessorId === relationReview?.sourceIssueId ? 'source-first' : predecessorId === relationReview?.targetIssueId ? 'target-first' : '';
   const anchoredIssue = anchor && issues.find(issue => issue.id === anchor.issueId);
   const otherIsSuccessor = Boolean(anchor && predecessorId === anchor.issueId);
   const otherIssueId = otherIsSuccessor ? successorId : predecessorId;
   const otherIssue = otherIsSuccessor ? successor : predecessor;
   const terms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
-  const candidates = anchoredIssue && !editing ? issues.filter(issue => {
+  const searchForIssue = Boolean(anchor && !editing && !relationReview);
+  const candidates = searchForIssue && anchoredIssue ? issues.filter(issue => {
     if (issue.id === anchoredIssue.id || issue.projectId !== anchoredIssue.projectId) return false;
     const haystack = `${issue.key} ${issue.title}`.toLocaleLowerCase();
     return terms.every(term => haystack.includes(term));
   }) : [];
-  const searchForIssue = Boolean(anchor && !editing);
-
   useEffect(() => {
-    (searchForIssue ? searchInput : reviewingSelection ? typeSelect : predecessorSelect).current?.focus({ preventScroll: true });
-  }, [reviewingSelection, searchForIssue]);
+    const focus = chooseRelationDirection ? relationDirectionSelect : searchForIssue ? searchInput : reviewingSelection ? typeSelect : predecessorSelect;
+    focus.current?.focus({ preventScroll: true });
+  }, [chooseRelationDirection, reviewingSelection, searchForIssue]);
   useEffect(() => { if (busy) dialog.current?.focus({ preventScroll: true }); }, [busy]);
   useEffect(() => {
     onDraftChange('dependency', dirty, busy);
@@ -97,15 +112,49 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, stal
     }
   }
 
+  function pickRelationDirection(direction: string) {
+    if (!relationReview) return;
+    const { sourceIssueId, targetIssueId } = relationReview;
+    switch (direction) {
+      case 'source-first':
+        setPredecessorId(sourceIssueId);
+        setSuccessorId(targetIssueId);
+        break;
+      case 'target-first':
+        setPredecessorId(targetIssueId);
+        setSuccessorId(sourceIssueId);
+        break;
+      default:
+        setPredecessorId('');
+        setSuccessorId('');
+    }
+  }
+
   return <div className="issue-modal-overlay">
     <section ref={dialog} className="gantt-link-modal" role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} tabIndex={-1} onKeyDown={handleKeys}>
       <form onSubmit={submit}>
         <header>
-          <h2 id={`${id}-title`}>{editing ? '업무 연결 수정' : '선행·후행 업무 연결'}</h2>
+          <h2 id={`${id}-title`}>{relationReview ? '관계에서 일정 연결' : editing ? '업무 연결 수정' : '선행·후행 업무 연결'}</h2>
           <button className="issue-icon-button" type="button" disabled={busy} onClick={onClose} aria-label="업무 연결 닫기"><X size={20} /></button>
         </header>
         <div className="gantt-link-fields">
-          {anchor ? <>
+          {relationReview ? <>
+            {chooseRelationDirection && <label className="issue-form-label issue-dependent-search">일정 연결 방향
+              <select ref={relationDirectionSelect} className="field" aria-label="일정 연결 방향" value={relationDirection}
+                disabled={busy || !relationSource || !relationTarget} required onChange={event => pickRelationDirection(event.target.value)}>
+                <option value="">선행 업무를 선택하세요</option>
+                <option value="source-first">{relationSource?.key ?? '목록에 없는 업무'} 선행 → {relationTarget?.key ?? '목록에 없는 업무'} 후행</option>
+                <option value="target-first">{relationTarget?.key ?? '목록에 없는 업무'} 선행 → {relationSource?.key ?? '목록에 없는 업무'} 후행</option>
+              </select>
+            </label>}
+            {relationDirection ? <>
+              <div className="issue-dependent-context"><span>선행 업무</span><strong>{relationIssueText(predecessor)}</strong></div>
+              <div className="issue-dependent-context"><span>후행 업무</span><strong>{relationIssueText(successor)}</strong></div>
+            </> : <div className="issue-dependent-context issue-dependent-search">
+              <span>관계에 연결된 업무</span><strong>{relationIssueText(relationSource)}</strong><strong>{relationIssueText(relationTarget)}</strong>
+            </div>}
+            <p className="gantt-link-help">간트에서 저장한 연결을 확인하고 시작일과 종료일을 조정할 수 있습니다.</p>
+          </> : anchor ? <>
             <div className="issue-dependent-context"><span>현재 업무</span><strong>{anchoredIssue?.key} · {anchoredIssue?.title}</strong></div>
             <label className="issue-form-label">연결 방향
               <select className="field" aria-label="연결 방향" value={otherIsSuccessor ? 'successor' : 'predecessor'} disabled={busy} onChange={event => {

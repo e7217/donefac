@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import { PRIORITY, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -10,6 +10,7 @@ import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { findIssueDocumentReferences } from '../../shared/document-references';
+import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
@@ -29,7 +30,10 @@ import './issues.css';
 import './issue-decision-source.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
-type IssueDependencyEditor = { otherRole: RelatedIssueDirection; dependency?: Dependency };
+type RelationScheduleReview = { relation: IssueRelation; mode: IssueRelationScheduleMode; reload: () => Promise<void> };
+type IssueDependencyEditor =
+  | { otherRole: RelatedIssueDirection; dependency?: Dependency; review?: never }
+  | { otherRole?: never; dependency?: never; review: RelationScheduleReview };
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
 type IssuePanelProps = FeatureProps & {
   issueId: string;
@@ -87,8 +91,9 @@ function IssuePanelContent(props: IssuePanelProps) {
   const trackDependencyDraft = useCallback((_id: string, dirty: boolean) => { dependencyDraftRef.current = dirty; }, []);
   const closeDependencyEditor = useCallback(() => {
     const opener = dependencyOpener.current;
+    dependencyOpener.current = null;
     setDependencyEditor(null);
-    requestAnimationFrame(() => (opener?.isConnected ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
+    requestAnimationFrame(() => (opener?.isConnected && !opener.disabled ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
   }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
   const [documentId, setDocumentId] = useState('');
@@ -256,6 +261,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const dependencies = data.dependencies.filter(d => d.predecessorId === issueId || d.successorId === issueId);
   const hasOtherIssueInProject = data.issues.some(value => value.projectId === issue.projectId && value.id !== issueId);
   const editingDependency = dependencyEditor?.dependency;
+  const relationScheduleReview = dependencyEditor?.review;
   const latestDependency = editingDependency && dependencies.find(value => value.id === editingDependency.id);
   const staleDependencyMessage = editingDependency && (!latestDependency
     ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
@@ -319,6 +325,11 @@ function IssuePanelContent(props: IssuePanelProps) {
     dependencyOpener.current = opener;
     setDependencyEditor({ otherRole, dependency });
   }
+  function openRelationScheduleReview(opener: HTMLButtonElement, relation: IssueRelation, mode: IssueRelationScheduleMode, reload: () => Promise<void>) {
+    if (savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return;
+    dependencyOpener.current = opener;
+    setDependencyEditor({ review: { relation, mode, reload } });
+  }
   async function changeDependency(change: () => Promise<unknown>, message: string) {
     if (dependencyBusyRef.current || savingRef.current) return false;
     dependencyBusyRef.current = true;
@@ -341,7 +352,18 @@ function IssuePanelContent(props: IssuePanelProps) {
     }
   }
   async function saveDependency(input: DependencyInput) {
-    const changed = await changeDependency(() => {
+    const changed = await changeDependency(async () => {
+      if (relationScheduleReview) {
+        const { relation, reload } = relationScheduleReview;
+        try {
+          await post(`/issues/${encodeURIComponent(issueId)}/relations/${encodeURIComponent(relation.id)}/schedule-dependency`,
+            { ...input, expectedVersion: relation.version });
+        } catch (err) {
+          if (err instanceof ApiError && (err.status === 409 || err.status === 404)) void reload();
+          throw err;
+        }
+        return;
+      }
       if (!editingDependency) return post('/dependencies', input);
       const { type, lagDays } = input;
       const reverse = input.predecessorId !== editingDependency.predecessorId;
@@ -467,7 +489,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         </button>)}
       </section>
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
-        disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} />
+        disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
         {linkedDocuments.map(link => {
@@ -525,7 +547,10 @@ function IssuePanelContent(props: IssuePanelProps) {
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
-      anchor={{ issueId, otherRole: dependencyEditor.otherRole }} staleMessage={staleDependencyMessage} busy={dependencyBusy}
+      anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}
+      relationReview={relationScheduleReview && { sourceIssueId: relationScheduleReview.relation.sourceIssueId,
+        targetIssueId: relationScheduleReview.relation.targetIssueId, mode: relationScheduleReview.mode }}
+      staleMessage={staleDependencyMessage} busy={dependencyBusy}
       onClose={closeDependencyEditor} onSubmit={saveDependency} onDraftChange={trackDependencyDraft} />}
   </>;
 }

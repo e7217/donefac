@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import type { Issue, IssueRelation, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, IssueRelation, WorkspaceSnapshot } from '../../shared/types';
 
 async function snapshot(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
@@ -58,6 +58,7 @@ test('360px 티켓에서 다른 프로젝트의 업무 관계를 편집하고 �
     await expect(create).toHaveCount(0);
     await expect(add).toBeFocused();
     await expect(relations.getByText('이 업무가 차단됨', { exact: true })).toBeVisible();
+    await expect(relations.getByRole('button', { name: `${target.key} 일정 연결 검토`, exact: true })).toHaveCount(0);
 
     const reader = await context.newPage();
     try {
@@ -120,6 +121,114 @@ test('360px 티켓에서 다른 프로젝트의 업무 관계를 편집하고 �
   } finally {
     for (const value of created.reverse()) {
       const removed = await request.delete(`/api/issues/${value.id}`);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+  }
+});
+
+test('같은 프로젝트 차단 관계에서 동시 방향 변경을 확인하고 최신 방향으로 일정 연결을 저장한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project] } = await snapshot(request);
+  const prefix = `일정 연결 검토 ${randomUUID().slice(0, 8)}`;
+  const created: Issue[] = [];
+
+  try {
+    const fixtures = [
+      { title: `${prefix} 확인 작업`, startDate: '2026-11-23', endDate: '2026-11-25' },
+      { title: `${prefix} 적용 작업`, startDate: '2026-11-26', endDate: '2026-11-27' },
+    ];
+    for (const fixture of fixtures) {
+      const response = await request.post('/api/issues', { data: { projectId: project.id, ...fixture } });
+      expect(response.status(), await response.text()).toBe(201);
+      created.push(await response.json() as Issue);
+    }
+    const [source, target] = created;
+    const path = `/api/issues/${source.id}/relations`;
+    const createdRelation = await request.post(path, { data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' } });
+    expect(createdRelation.status(), await createdRelation.text()).toBe(201);
+    const relation = await createdRelation.json() as IssueRelation;
+    const dependencyPath = `${path}/${relation.id}/schedule-dependency`;
+    const linkedDependencies = async () => (await snapshot(request)).dependencies.filter(value =>
+      created.some(issue => [value.predecessorId, value.successorId].includes(issue.id)));
+    const nextWrite = () => page.waitForResponse(response =>
+      new URL(response.url()).pathname === dependencyPath && response.request().method() === 'POST');
+
+    await page.goto(`/#/${project.id}/issues?issue=${source.id}`);
+    const panel = page.getByRole('dialog', { name: source.title, exact: true });
+    const title = panel.getByRole('textbox', { name: '제목', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const relations = panel.getByRole('region', { name: '업무 관계', exact: true });
+    const trigger = relations.getByRole('button', { name: `${target.key} 일정 연결 검토`, exact: true });
+    await expect(title).toHaveValue(source.title, { timeout: 30_000 });
+    await title.fill('저장하지 않은 티켓 제목');
+    await comment.fill('보내지 않은 연결 검토 메모');
+    await trigger.click();
+
+    const editor = page.getByRole('dialog', { name: '관계에서 일정 연결', exact: true });
+    const type = editor.getByRole('combobox', { name: '연결 유형', exact: true });
+    const lag = editor.getByRole('spinbutton', { name: '추가 간격 근무일', exact: true });
+    const save = editor.getByRole('button', { name: '업무 연결', exact: true });
+    const endpoint = (role: string) => editor.locator('.issue-dependent-context').filter({ hasText: role });
+    await expect(type).toBeFocused();
+    await expect(editor.getByRole('combobox', { name: '일정 연결 방향', exact: true })).toHaveCount(0);
+    await expect(endpoint('선행 업무')).toContainText(source.key);
+    await expect(endpoint('후행 업무')).toContainText(target.key);
+    await expect(type).toHaveValue('FS');
+    await expect(lag).toHaveValue('0');
+    await type.selectOption('FF');
+    await lag.fill('-2');
+
+    const reversed = await request.patch(`${path}/${relation.id}`, { data: {
+      expectedVersion: relation.version, type: 'blocks', direction: 'incoming',
+    } });
+    expect(reversed.status(), await reversed.text()).toBe(200);
+    const latest = await reversed.json() as IssueRelation;
+    expect(latest).toMatchObject({ id: relation.id, sourceIssueId: target.id, targetIssueId: source.id });
+    expect(latest.version).toBeGreaterThan(relation.version);
+    const rejecting = nextWrite();
+    await save.click();
+    const rejected = await rejecting;
+    expect(rejected.status()).toBe(409);
+    expect(rejected.request().postDataJSON()).toMatchObject({
+      expectedVersion: relation.version, predecessorId: source.id, successorId: target.id, type: 'FF', lagDays: -2,
+    });
+    await expect(editor.getByRole('alert')).toContainText('다른 작업자가 변경했습니다.');
+    await expect(type).toHaveValue('FF');
+    await expect(lag).toHaveValue('-2');
+    expect(await linkedDependencies()).toEqual([]);
+
+    await editor.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(relations.getByText('이 업무가 차단됨', { exact: true })).toBeVisible();
+    await trigger.click();
+    await expect(endpoint('선행 업무')).toContainText(target.key);
+    await expect(endpoint('후행 업무')).toContainText(source.key);
+    await expect(type).toHaveValue('FS');
+    await expect(lag).toHaveValue('0');
+    await type.selectOption('SS');
+    await lag.fill('1');
+    const saving = nextWrite();
+    await save.click();
+    const saved = await saving;
+    expect(saved.status(), await saved.text()).toBe(201);
+    expect(saved.request().postDataJSON()).toMatchObject({
+      expectedVersion: latest.version, predecessorId: target.id, successorId: source.id, type: 'SS', lagDays: 1,
+    });
+    const dependency = await saved.json() as Dependency;
+    await expect(editor).toHaveCount(0);
+    await expect(relations.getByText('일정 연결됨', { exact: true })).toBeVisible();
+    await expect(panel.getByRole('button', { name: '선행 업무 추가', exact: true })).toBeFocused();
+    await expect(title).toHaveValue('저장하지 않은 티켓 제목');
+    await expect(comment).toHaveValue('보내지 않은 연결 검토 메모');
+    expect(await linkedDependencies()).toEqual([dependency]);
+    const after = await snapshot(request);
+    for (const original of created) expect(after.issues.find(value => value.id === original.id)).toEqual(original);
+  } finally {
+    for (const issue of created.reverse()) {
+      const removed = await request.delete(`/api/issues/${issue.id}`);
       if (removed.ok()) {
         const { trashEntryId } = await removed.json() as { trashEntryId: string };
         await request.delete(`/api/trash/${trashEntryId}`);
