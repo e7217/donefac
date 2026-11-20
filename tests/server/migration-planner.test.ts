@@ -49,6 +49,110 @@ test('source issue links remain typed relations and document links do not become
   const source=jira(),wiki=confluence();source.dataset.records.push(record('relation','remote',{title:'문서 연결',metadata:{url:'https://wiki.test/pages/viewpage.action?pageId=10'},references:[{kind:'issue',sourceId:'1',relation:'source'},{kind:'page',sourceId:'10',relation:'externalDocument'}]}));wiki.dataset.records.find(row=>row.id==='page:10')!.text='<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>';const request=input([source,wiki]);request.configuration.sourceBaseUrls.wiki='https://wiki.test';const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true);assert.equal(plan.issueRelations.length,1);assert.equal(plan.issueRelations[0].type,'Blocks');assert.equal(plan.resourceLinks.length,1);assert.ok(!Object.hasOwn(plan,'dependencies'));
 });
 
+test('migration origins use each package base and the original key or current page ID', () => {
+  const issues = jira();
+  const firstIssue = issues.dataset.records.find(row => row.id === 'issue:1')!;
+  firstIssue.metadata.key = 'old-1';
+  firstIssue.metadata.originalUrl = 'https://other.test/browse/OLD-1';
+  const wiki = confluence();
+  const firstPage = wiki.dataset.records.find(row => row.id === 'page:10')!;
+  firstPage.metadata.originalUrl = 'https://other.test/pages/viewpage.action?pageId=10';
+  firstPage.text = '<p><a href="https://wiki.test/%77iki-b/pages/viewpage.action?pageId=10">다른 원본 문서</a></p>';
+  const wikiB = pkg('wiki-b', 'confluence', [record('project', 's', { title: '별도 공간' }), page('10', { title: '별도 문서', authorId: null })]);
+  const request = input([issues, wiki, wikiB]);
+  request.configuration.sourceBaseUrls = {
+    jira: ' https://JIRA.test:443/tools/jira/ ',
+    wiki: 'https://wiki.test/wiki-a///',
+    'wiki-b': 'https://wiki.test/%77iki-b/',
+  };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.deepEqual(plan.preview.configuration.sourceBaseUrls, {
+    jira: 'https://jira.test/tools/jira', wiki: 'https://wiki.test/wiki-a', 'wiki-b': 'https://wiki.test/wiki-b',
+  });
+  assert.equal(request.configuration.sourceBaseUrls['wiki-b'], 'https://wiki.test/%77iki-b/');
+  const issue = plan.issues.find(value => value.key === 'NEW-1')!;
+  const document = plan.documents.find(value => value.title === '문서 10')!;
+  const secondDocument = plan.documents.find(value => value.title === '별도 문서')!;
+  assert.deepEqual(contentReferences(document.content).map(reference => reference.id), [secondDocument.id]);
+  assert.deepEqual(plan.atlassianLinks, [
+    { targetType: 'issue', targetId: issue.id, product: 'jira', url: 'https://jira.test/tools/jira/browse/OLD-1' },
+    { targetType: 'issue', targetId: plan.issues[1].id, product: 'jira', url: 'https://jira.test/tools/jira/browse/OLD-2' },
+    { targetType: 'document', targetId: document.id, product: 'confluence', url: 'https://wiki.test/wiki-a/pages/viewpage.action?pageId=10' },
+    { targetType: 'document', targetId: secondDocument.id, product: 'confluence', url: 'https://wiki.test/wiki-b/pages/viewpage.action?pageId=10' },
+  ]);
+  assert.equal(plan.preview.counts.atlassianLinks, 4);
+  assert.equal(plan.preview.counts.unlinkedAtlassianRecords, 0);
+  assert.deepEqual(plan.sourceImport.counts, plan.preview.counts);
+  assert.deepEqual(plan.preview.samples.map(sample => sample.sourceUrl), plan.atlassianLinks.map(link => link.url));
+});
+
+test('only migrated primary rows count toward aggregated unavailable origin notices', () => {
+  const issues = jira();
+  issues.dataset.records.push(issue('MIS-9', { metadata: { key: '', originalUrl: 'https://jira.test/browse/MIS-9' } }));
+  const wiki = confluence();
+  wiki.dataset.records.push(
+    page('11'),
+    page('bad-page-id', { metadata: { sourceClass: 'Page' } }),
+    page('13', { metadata: { sourceClass: 'BlogPost' } }),
+  );
+  const withoutBase = pkg('missing-base', 'confluence', [record('project', 's', { title: '원본 공간' }), page('30', { authorId: null })]);
+  const request = input([issues, wiki, withoutBase]);
+  request.configuration.excludedRecords = ['wiki/page:11'];
+  request.configuration.sourceBaseUrls.jira = 'https://jira.test';
+  request.configuration.sourceBaseUrls.wiki = 'https://wiki.test';
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.preview.counts.atlassianLinks, 3);
+  assert.equal(plan.preview.counts.unlinkedAtlassianRecords, 4);
+  assert.ok(!plan.atlassianLinks.some(link => link.url.includes('MIS-9') || link.url.includes('pageId=11') || link.url.includes('pageId=13')));
+  assert.equal(plan.preview.samples.find(sample => sample.recordId === 'jira/issue:MIS-9')?.sourceUrl, undefined);
+  const skipped = plan.preview.notices.filter(notice => notice.code.startsWith('SOURCE_LINK_'));
+  assert.deepEqual(skipped.map(({ code, severity, recordId, requiresAcknowledgement }) => ({ code, severity, recordId, requiresAcknowledgement })), [
+    { code: 'SOURCE_LINK_LOCATOR_UNAVAILABLE', severity: 'warning', recordId: 'jira/issue:MIS-9', requiresAcknowledgement: false },
+    { code: 'SOURCE_LINK_LOCATOR_UNAVAILABLE', severity: 'warning', recordId: 'wiki/page:bad-page-id', requiresAcknowledgement: false },
+    { code: 'SOURCE_LINK_BASE_MISSING', severity: 'info', recordId: 'missing-base/page:30', requiresAcknowledgement: false },
+  ]);
+  assert.match(skipped[1].message, /wiki\.zip.*2개/u);
+});
+
+test('invalid, item-level and unknown-package bases are blocked and absent from the generated plan', () => {
+  const request = input([jira(), confluence()]);
+  const invalid = [
+    'https://user:sensitive-value@jira.test/jira',
+    'https://jira.test/jira?sensitive-value',
+    'https://jira.test/jira#sensitive-value',
+    'https://jira.test/jira?',
+    'https://jira.test/jira#',
+    'https://jira.test/jira%2fsensitive-value',
+    'https://jira.test/jira/browse/OLD-1',
+    `https://jira.test/jira/${'a'.repeat(2048)}`,
+    'ftp://jira.test/jira',
+  ];
+  for (const base of invalid) {
+    request.configuration.sourceBaseUrls.jira = base;
+    const plan = buildMigrationPlan(request);
+    assert.equal(plan.preview.canApply, false, base);
+    assert.ok(notices(plan).has('SOURCE_BASE_URL_INVALID'), base);
+    assert.equal(plan.preview.configuration.sourceBaseUrls.jira, null);
+    assert.equal(plan.sourceImport.configuration.sourceBaseUrls.jira, null);
+    assert.equal(plan.preview.counts.atlassianLinks, 0);
+    assert.equal(plan.preview.counts.unlinkedAtlassianRecords, 0);
+    assert.ok(!JSON.stringify(plan).includes(base));
+  }
+  request.configuration.sourceBaseUrls = {
+    jira: 'https://jira.test',
+    wiki: 'https://wiki.test/wiki/spaces/TEAM/pages/10/Document',
+    'unselected-sensitive-id': 'https://other.test/sensitive-value',
+  };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, false);
+  assert.ok(notices(plan).has('SOURCE_BASE_URL_INVALID'));
+  assert.ok(notices(plan).has('SOURCE_BASE_URL_UNKNOWN_PACKAGE'));
+  assert.deepEqual(plan.preview.configuration.sourceBaseUrls, { jira: 'https://jira.test', wiki: null });
+  assert.ok(!JSON.stringify(plan).includes('sensitive'));
+});
+
 test('project collisions, invalid field casts, parent/include cycles and unsafe file metadata block rather than silently drop',()=>{
   const request=input([jira()]);request.existingProjectKeys=['NEW'];let plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,false);assert.ok(notices(plan).has('PROJECT_KEY_CONFLICT'));request.existingProjectKeys=[];const row=request.packages[0].dataset.records.find(row=>row.id==='issue:1')!;(row.metadata.fields as Record<string,unknown>).number='not a number';plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,false);assert.ok(notices(plan).has('FIELD_VALUE_INVALID'));
   const source=confluence();source.dataset.records.find(row=>row.id==='page:10')!.text='<ac:structured-macro ac:name="include"><ac:parameter ac:name="page"><ri:page ri:content-id="20"/></ac:parameter></ac:structured-macro>';source.dataset.records.push(page('20',{text:'<ac:structured-macro ac:name="include"><ac:parameter ac:name="page"><ri:page ri:content-id="10"/></ac:parameter></ac:structured-macro>'}));plan=buildMigrationPlan(input([source]));assert.equal(plan.preview.canApply,false);assert.ok(notices(plan).has('DOCUMENT_INCLUDE_CYCLE'));source.dataset.records.find(row=>row.id==='page:10')!.text='<p>본문</p>';source.dataset.records.find(row=>row.id==='page:20')!.text='<p>본문</p>';source.dataset.records.find(row=>row.id==='page:10')!.parentId='20';source.dataset.records.find(row=>row.id==='page:20')!.parentId='10';plan=buildMigrationPlan(input([source]));assert.equal(plan.preview.canApply,false);assert.ok(notices(plan).has('DOCUMENT_PARENT_CYCLE'));

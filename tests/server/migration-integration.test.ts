@@ -3,23 +3,27 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import fileSystem from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
 
-async function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
+async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
+  const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string'); const base = `http://127.0.0.1:${address.port}/api`, db = new DatabaseSync(join(dir, 'teamspace.sqlite')); db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
   async function call<T = unknown>(path: string, method = 'GET', body?: unknown, actor = 'user-seo') { const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; }
   async function upload(bytes: Buffer, filename: string, product = 'auto') { const params = new URLSearchParams({ filename, product, instanceKey: `synthetic-${randomUUID()}` }); const response = await fetch(`${base}/legacy-import/packages?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(bytes) }); const data = await response.json() as LegacyPackageSummary; assert.equal(response.status, 201, JSON.stringify(data)); return data; }
-  async function configuration(pkg: LegacyPackageSummary, key = `MIG${randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase()}`) {
-    const result = await call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`); assert.equal(result.status, 200);
+  async function configuration(packages: LegacyPackageSummary | LegacyPackageSummary[], key = `MIG${randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase()}`) {
+    const params = new URLSearchParams((Array.isArray(packages) ? packages : [packages]).map(pkg => ['packageId', pkg.id]));
+    const result = await call<MigrationOptions>(`/migrations/options?${params}`); assert.equal(result.status, 200);
     const config = result.data.defaultConfiguration; config.projects = config.projects.map(value => ({ ...value, key, name: 'Synthetic unified migration' })); config.datePolicy = 'import-time'; for (const identity of result.data.identities) config.users[identity.id] = 'user-jun'; return config;
   }
   async function preview(configuration: MigrationConfiguration) { const result = await call<MigrationPreview>('/migrations/preview', 'POST', { configuration }); assert.equal(result.status, 201, JSON.stringify(result.data)); return result.data; }
@@ -59,7 +63,12 @@ test('actual HTTP worker merges source containers into a new project, enforces r
     const conflictConfig = structuredClone(config); conflictConfig.projects = conflictConfig.projects.map(value => ({ ...value, key: 'CONFLICT' })); const conflict = await f.preview(conflictConfig); assert.equal(conflict.canApply, true);
     assert.equal((await f.call('/projects', 'POST', { key: 'CONFLICT', name: 'Synthetic competing project' })).status, 201); assert.equal((await f.apply(conflict)).status, 409);
     const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    // A stored preview from before original-link planning can still apply when no source bases were selected.
+    f.db.prepare(`UPDATE migration_previews SET json=json_remove(json,'$.atlassianLinks',
+      '$.preview.counts.atlassianLinks','$.preview.counts.unlinkedAtlassianRecords',
+      '$.sourceImport.counts.atlassianLinks','$.sourceImport.counts.unlinkedAtlassianRecords') WHERE id=?`).run(plan.id);
     const applied = await f.apply(plan, { actorId: 'user-min', projects: [{ id: 'client-forged-project' }], issues: [{ id: 'client-forged-issue', title: 'forged' }] }); assert.equal(applied.status, 201, JSON.stringify(applied.data)); assert.equal(applied.data.duplicate, false); assert.equal(applied.data.import.actorId, 'user-seo'); assert.deepEqual(applied.data.import.notices, plan.notices);
+    assert.equal(applied.data.import.counts.atlassianLinks, undefined);
     const after = (await f.call<WorkspaceSnapshot>('/workspace')).data, imported = after.issues.filter(value => applied.data.import.projectIds.includes(value.projectId)); assert.equal(after.projects.length, before.projects.length + 1); assert.equal(imported.length, 2); assert.ok(imported.every(value => /^[a-f\d-]{36}$/.test(value.id) && !value.id.startsWith('client-'))); assert.ok(!after.projects.some(value => value.id === 'client-forged-project'));
     const receipt = (await f.call<SourceImport[]>('/source-imports')).data[0]; assert.deepEqual(receipt.notices, plan.notices); const originals = (await f.call<SourceRecordPage>(`/source-imports/${plan.id}/records?kind=issue`)).data; assert.equal(originals.total, 2); assert.deepEqual(originals.records.map(value => value.record.sourceId).sort(), ['100', '200']);
     const duplicate = await f.apply(plan); assert.equal(duplicate.status, 200); assert.equal(duplicate.data.duplicate, true); assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.length, after.issues.length);
@@ -67,16 +76,130 @@ test('actual HTTP worker merges source containers into a new project, enforces r
   } finally { await f.close(); }
 });
 
+test('mixed migration creates only reviewed original Jira and Confluence links without contacting their servers', async t => {
+  const upstreamRequests: string[] = [];
+  const upstream = createServer((request, response) => {
+    upstreamRequests.push(`${request.method} ${request.url}`);
+    response.writeHead(404).end();
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>(resolve => upstream.close(() => resolve()));
+  });
+  const sourceOrigin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+  const jiraBase = `${sourceOrigin}/jira-app`;
+  const wikiBase = `${sourceOrigin}/services/wiki`;
+  const f = await fixture({ NODE_ENV: 'test', TEAMSPACE_JIRA_BASE_URL: jiraBase, TEAMSPACE_CONFLUENCE_BASE_URL: wikiBase });
+  t.after(() => f.close());
+
+  const headers = 'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type';
+  const issueRow = (id: string, key: string, title: string) =>
+    `${id},${key},OLD,${title},2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task`;
+  const issueTitle = 'Linked original issue';
+  const missingKeyTitle = 'Unlinked issue with missing key';
+  const missingBaseTitle = 'Unlinked issue with an unconfigured source';
+  const excludedTitle = 'Excluded issue with valid origin';
+  const pageTitle = 'Synthetic versioned page';
+  const jira = await f.upload(Buffer.from([headers, issueRow('100', 'old-7', issueTitle),
+    issueRow('101', '', missingKeyTitle), issueRow('102', 'OLD-9', excludedTitle)].join('\r\n')), 'linked-origin.csv', 'jira');
+  const unconfigured = await f.upload(Buffer.from([headers, issueRow('100', 'old-7', missingBaseTitle)].join('\r\n')), 'unconfigured-origin.csv', 'jira');
+  const confluenceArchive = await f.upload(confluence().bytes, 'linked-origin.zip', 'confluence');
+  const config = await f.configuration([jira, unconfigured, confluenceArchive], 'ORIGINS');
+  for (const type of Object.keys(config.issueTypes)) config.issueTypes[type] = '작업';
+  config.sourceBaseUrls[jira.id] = `${jiraBase}/`;
+  config.sourceBaseUrls[confluenceArchive.id] = wikiBase;
+  config.excludedRecords = [`${jira.id}/issue:102`];
+
+  const jiraUrl = `${jiraBase}/browse/OLD-7`;
+  const wikiUrl = `${wikiBase}/pages/viewpage.action?pageId=100`;
+  const readStoredLinks = async (targetType: AtlassianLinkTarget, targetId: string) => {
+    const result = await f.call<AtlassianLink[]>(`/atlassian-links?${new URLSearchParams({ targetType, targetId })}`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return result.data;
+  };
+  const countStoredLinks = () => f.db.prepare('SELECT COUNT(*) AS total FROM atlassian_links').get()?.total;
+
+  const stale = await f.preview(config);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  f.db.prepare(`UPDATE migration_previews SET json=json_remove(json,'$.atlassianLinks',
+    '$.preview.counts.atlassianLinks','$.preview.counts.unlinkedAtlassianRecords',
+    '$.sourceImport.counts.atlassianLinks','$.sourceImport.counts.unlinkedAtlassianRecords') WHERE id=?`).run(stale.id);
+  const rejected = await f.apply(stale);
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+  assert.match(JSON.stringify(rejected.data), /미리보기/);
+  assert.deepEqual((await f.call('/source-imports')).data, []);
+  assert.equal(countStoredLinks(), 0);
+
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.atlassianLinks, 2);
+  assert.equal(plan.counts.unlinkedAtlassianRecords, 2);
+  assert.ok(plan.notices.some(notice => notice.code === 'SOURCE_LINK_LOCATOR_UNAVAILABLE' && notice.recordId === `${jira.id}/issue:101`));
+  assert.ok(plan.notices.some(notice => notice.code === 'SOURCE_LINK_BASE_MISSING' && notice.message.includes(unconfigured.filename)));
+  assert.equal(plan.samples.find(sample => sample.title === issueTitle)?.sourceUrl, jiraUrl);
+  assert.equal(plan.samples.find(sample => sample.title === pageTitle)?.sourceUrl, wikiUrl);
+  assert.ok(!plan.samples.find(sample => sample.title === missingKeyTitle)?.sourceUrl);
+  assert.ok(!plan.samples.find(sample => sample.title === missingBaseTitle)?.sourceUrl);
+  assert.ok(!plan.samples.some(sample => sample.title === excludedTitle));
+  assert.equal(countStoredLinks(), 0);
+  assert.deepEqual(upstreamRequests, []);
+
+  const applied = await f.apply(plan, { atlassianLinks: [{ url: `${sourceOrigin}/forged` }] });
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  assert.equal(receipt.counts.atlassianLinks, 2);
+  assert.equal(receipt.counts.unlinkedAtlassianRecords, 2);
+  assert.deepEqual(receipt.notices, plan.notices);
+  const current = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const issue = current.issues.find(item => item.title === issueTitle);
+  const document = current.documents.find(item => item.title === pageTitle);
+  const missingKey = current.issues.find(item => item.title === missingKeyTitle);
+  const missingBase = current.issues.find(item => item.title === missingBaseTitle);
+  assert.ok(issue && document && missingKey && missingBase);
+  assert.notEqual(issue.key, 'OLD-7');
+  assert.ok(!current.issues.some(item => item.title === excludedTitle));
+  const excluded = (await f.call<SourceRecordPage>(`/source-imports/${receipt.id}/records?kind=issue`)).data.records.find(item => item.record.title === excludedTitle);
+  assert.ok(excluded);
+  assert.equal(excluded.targetId, null);
+  const canonicalJira = await readStoredLinks('issue', issue.id);
+  const canonicalWiki = await readStoredLinks('document', document.id);
+  assert.deepEqual(canonicalJira.map(({ product, url }) => ({ product, url })), [{ product: 'jira', url: jiraUrl }]);
+  assert.deepEqual(canonicalWiki.map(({ product, url }) => ({ product, url })), [{ product: 'confluence', url: wikiUrl }]);
+  assert.deepEqual(await readStoredLinks('issue', missingKey.id), []);
+  assert.deepEqual(await readStoredLinks('issue', missingBase.id), []);
+
+  const repeated = await f.apply(plan);
+  assert.equal(repeated.status, 200);
+  assert.deepEqual(repeated.data, { import: receipt, duplicate: true });
+  assert.deepEqual(await readStoredLinks('issue', issue.id), canonicalJira);
+  assert.deepEqual(await readStoredLinks('document', document.id), canonicalWiki);
+  const backup = (await f.call<{ schemaVersion: number; atlassianLinks: AtlassianLink[] }>('/export')).data;
+  assert.equal(backup.schemaVersion, 27);
+  assert.equal(backup.atlassianLinks.length, 2);
+  assert.deepEqual(new Set(backup.atlassianLinks.map(link => link.url)), new Set([jiraUrl, wikiUrl]));
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  assert.deepEqual(await readStoredLinks('issue', issue.id), canonicalJira);
+  assert.deepEqual(await readStoredLinks('document', document.id), canonicalWiki);
+  assert.deepEqual((await f.call<SourceImport[]>('/source-imports')).data[0].counts, receipt.counts);
+  assert.deepEqual(upstreamRequests, []);
+});
+
 test('actual ZIP attachment versions survive native9 exact downloads and migration audit/save/install failures roll back database and files', async t => {
   const f = await fixture(), binary = confluence(); try {
-    const pkg = await f.upload(binary.bytes, 'confluence.zip', 'confluence'), config = await f.configuration(pkg), plan = await f.preview(config); assert.equal(plan.canApply, true, JSON.stringify(plan.notices)); assert.equal(plan.counts.attachmentVersions, 2);
+    const pkg = await f.upload(binary.bytes, 'confluence.zip', 'confluence'), config = await f.configuration(pkg);
+    config.sourceBaseUrls[pkg.id] = 'https://archive.example.test/wiki';
+    const plan = await f.preview(config); assert.equal(plan.canApply, true, JSON.stringify(plan.notices)); assert.equal(plan.counts.attachmentVersions, 2); assert.equal(plan.counts.atlassianLinks, 1);
     const existingBytes = Buffer.from('unrelated existing fixture file'), upload = await fetch(`${f.base}/attachments?resourceType=issue&resourceId=issue-2&filename=existing.bin`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: existingBytes }); assert.equal(upload.status, 201); const existing = await upload.json() as Attachment;
     const before = (await f.call<WorkspaceSnapshot>('/workspace')).data, names = readdirSync(join(f.dir, 'uploads')).sort();
-    const unchanged = async () => { assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before); assert.deepEqual((await f.call('/source-imports')).data, []); assert.deepEqual(readdirSync(join(f.dir, 'uploads')).sort(), names); assert.deepEqual(readFileSync(join(f.dir, 'uploads', existing.id)), existingBytes); assert.ok(!readdirSync(f.dir).some(value => value.startsWith('.append-'))); };
+    const unchanged = async () => { assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before); assert.deepEqual((await f.call('/source-imports')).data, []); assert.equal(f.db.prepare('SELECT COUNT(*) AS total FROM atlassian_links').get()?.total, 0); assert.deepEqual(readdirSync(join(f.dir, 'uploads')).sort(), names); assert.deepEqual(readFileSync(join(f.dir, 'uploads', existing.id)), existingBytes); assert.ok(!readdirSync(f.dir).some(value => value.startsWith('.append-'))); };
     f.db.exec("CREATE TRIGGER synthetic_migration_audit BEFORE INSERT ON activities WHEN json_extract(NEW.json,'$.action')='원본 이관 적용' BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END;");
     assert.equal((await f.apply(plan)).status, 500); f.db.exec('DROP TRIGGER synthetic_migration_audit'); await unchanged();
     f.db.exec("CREATE TRIGGER synthetic_migration_save BEFORE INSERT ON documents WHEN json_extract(NEW.json,'$.title')='Synthetic versioned page' BEGIN SELECT RAISE(ABORT,'synthetic save failure'); END;");
     assert.equal((await f.apply(plan)).status, 500); f.db.exec('DROP TRIGGER synthetic_migration_save'); await unchanged();
+    f.db.exec("CREATE TRIGGER synthetic_migration_link BEFORE INSERT ON atlassian_links BEGIN SELECT RAISE(ABORT,'synthetic link failure'); END;");
+    assert.equal((await f.apply(plan)).status, 500); f.db.exec('DROP TRIGGER synthetic_migration_link'); await unchanged();
     const stage = AttachmentAppend.prototype.stage;
     const installedFailure = t.mock.method(AttachmentAppend.prototype, 'stage', function (this: AttachmentAppend, id: string, files: AppendedFile[]) { const result = stage.call(this, id, files); return { ...result, install() { result.install(); throw new Error('synthetic failure after install'); } }; });
     assert.equal((await f.apply(plan)).status, 500); installedFailure.mock.restore(); await unchanged();

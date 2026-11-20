@@ -370,6 +370,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for (const revision of value.revisions) store.put('revisions', revision);
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);
+      for (const link of value.atlassianLinks??[]) atlassianLinks.create(link);
       const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
       for (const issue of value.issues) {
         const number = Number(issue.key.split('-').at(-1));

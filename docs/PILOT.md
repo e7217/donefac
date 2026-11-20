@@ -97,6 +97,10 @@ npm run test:pilot
 
 별도 파일럿 데이터 경로에서 **워크스페이스 설정 → 기존 도구 원본 분석**으로 Jira·Confluence 내보내기 파일을 분석한다. **실제 데이터 이관**에서 프로젝트와 팀원·상태 매핑, 변환 미리보기, 확인 항목을 검토한 뒤 적용한다.
 
+**원본 주소와 제외 항목**에는 패키지별로 Jira·Confluence의 기본 주소를 선택해서 입력할 수 있다. `https://jira.example.test/jira`나 `https://wiki.example.test/confluence`처럼 서비스 경로까지 포함한다. Teamspace 이관 미리보기에는 원래 Jira 업무 키로 만든 `/browse/OLD-1` 주소와 Confluence 페이지 ID로 만든 `/pages/viewpage.action?pageId=100` 주소를 견본으로 표시한다. [Atlassian의 Jira와 Confluence 주소 형식](https://support.atlassian.com/migration/docs/supported-products-and-types-of-links/)
+
+미리보기에서 **원본 링크 생성**과 **원본 링크 미생성** 건수를 확인한다. 자동 연결은 Jira 업무와 Confluence 일반 페이지를 대상으로 한다. 기본 주소가 비어 있거나 원본 키·페이지 ID를 사용할 수 없는 새 항목은 미생성 건수에 집계한다. 적용하면 업무 상세나 문서 **연결** 탭의 **기존 도구 연결**에서 주소를 열 수 있다. 원본 정보 조회에는 별도의 서버 설정을 사용한다. [원본 조회 설정](#jiraconfluence-원본-조회)
+
 완료한 영수증의 **이관 결과 대조 → 전체 이관 검증**에서 대상이 없는 객체, 파일 누락·불일치, 원본 보관과 의도적 제외를 확인한다. **검증 결과 JSON 내보내기**로 당시 결과를 저장하고, 별도 경로 복원 뒤 영수증에서 다시 검증해 비교한다. 문서 본문·매크로·작성자 매핑은 목록의 대상과 보존 원본을 열어 함께 검토한다.
 
 ## 20명 동시 사용 리허설

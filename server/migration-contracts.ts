@@ -1,4 +1,5 @@
 import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
+import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
 export interface MigrationPlanningInput {
@@ -13,4 +14,5 @@ export interface PreparedMigration {
   issues:Issue[];documents:DocPage[];comments:Comment[];revisions:DocRevision[];worklogs:WorklogEntry[];
   attachments:Attachment[];attachmentVersions:AttachmentVersion[];fileCopies:MigrationFileCopy[];
   resourceLinks:ResourceLink[];issueRelations:IssueRelation[];
+  atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
 }

@@ -19,6 +19,69 @@ async function preview(page: Page, settings: Locator) { const response = page.wa
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
 
+test('360px 이관 원본 주소를 검토하고 영수증 집계와 저장된 연결을 확인한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const unique = suffix();
+  const originalKey = `ORI${unique}`, targetKey = `LNK${unique}`;
+  const filename = `migration-origin-${unique}.csv`, title = `원본 연결 ${unique}`;
+  const pkg = await upload(request, filename, jira(originalKey, title), `migration-origin-${unique}`);
+  const base = `https://jira.example.test/${'team-context-'.repeat(12)}jira`;
+  const sourceUrl = `${base}/browse/${originalKey}-1`;
+  try {
+    const { settings } = await open(page, request);
+    await selectPackage(settings, filename);
+    await settings.getByLabel(`새 프로젝트 키 원본 프로젝트 ${originalKey}`, { exact: true }).fill(targetKey);
+    await settings.getByText('원본 주소와 제외 항목', { exact: true }).click();
+    const baseInput = settings.getByLabel(`원본 주소 ${filename}`, { exact: true });
+    await expect(baseInput).toHaveAttribute('placeholder', 'https://jira.example.test/jira');
+
+    const invalid = `${base}?token=sample`;
+    await baseInput.fill(invalid);
+    const blocked = await preview(page, settings);
+    expect(blocked.canApply).toBe(false);
+    expect(blocked.configuration.sourceBaseUrls[pkg.id]).toBeNull();
+    await expect(baseInput).toHaveValue(invalid);
+    await expect(settings.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+
+    await baseInput.fill(`${base}/`);
+    const ready = await preview(page, settings);
+    expect(ready.canApply, JSON.stringify(ready.notices)).toBe(true);
+    expect(ready.samples.find(sample => sample.title === title)?.sourceUrl).toBe(sourceUrl);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(review.getByText('원본 링크 생성 1', { exact: true })).toBeVisible();
+    await expect(review.getByText('원본 링크 미생성 0', { exact: true })).toBeVisible();
+    await review.getByText('변환된 내용 견본', { exact: true }).click();
+    const example = review.getByText(sourceUrl, { exact: true });
+    await expect(example).toBeVisible();
+    const exampleSize = await example.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(exampleSize.scrollWidth).toBeLessThanOrEqual(exampleSize.width);
+
+    await acknowledge(settings, ready);
+    const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${ready.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await settings.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const response = await applied;
+    expect(response.ok(), await response.text()).toBe(true);
+    const { import: receipt } = await response.json() as MigrationApplyResult;
+    const receiptCounts = settings.getByRole('region', { name: '이관 당시 원본 링크 집계', exact: true });
+    await expect(receiptCounts.getByText('원본 링크 생성 1', { exact: true })).toBeVisible();
+    await expect(receiptCounts.getByText('원본 링크 미생성 0', { exact: true })).toBeVisible();
+    await expect(settings.getByText('실제 이관 적용 중…', { exact: true })).toHaveCount(0);
+
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const issue = snapshot.issues.find(item => item.projectId === receipt.projectIds[0] && item.title === title)!;
+    expect(issue.key).toBe(`${targetKey}-1`);
+    await page.goto(`/#/${issue.projectId}/issues?issue=${issue.id}`);
+    const linkPanel = page.getByRole('dialog', { name: title, exact: true }).getByRole('region', { name: '기존 도구 연결', exact: true });
+    const savedLink = linkPanel.getByRole('link', { name: '원본 열기', exact: true });
+    await expect(savedLink).toHaveAttribute('href', sourceUrl);
+    await expect(savedLink).toHaveAttribute('rel', 'noopener noreferrer');
+  } finally {
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('Jira 매핑·진단 검토 후 실제 이관하고 409·408·대기 중 탐색을 안전하게 처리한다', async ({ page, request }) => {
   test.setTimeout(100_000);
   const unique = suffix(), originalKey = `OLD${unique}`, key = `NEW${unique}`, filename = `migration-${unique}.csv`, title = `실제 이관 업무 ${unique}`;

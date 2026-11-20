@@ -12,7 +12,8 @@ import './migration-apply.css';
 const PAGE_SIZE = 50;
 const categoryLabels: Record<StatusCategory, string> = { backlog: '백로그', todo: '할 일', in_progress: '진행 중', review: '검토', done: '완료', cancelled: '취소' };
 const fieldLabels: Record<CustomFieldKind | 'archive', string> = { archive: '원본 보관만', text: '텍스트', number: '숫자', date: '날짜', select: '단일 선택', multi_select: '여러 선택', checkbox: '체크박스', user: '사용자', url: 'URL' };
-const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계' };
+const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinkedAtlassianRecords: '원본 링크 미생성' };
+const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels };
 const errorText = (error: unknown) => error instanceof Error ? error.message : '요청을 완료하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 const sameIds = (a: string[], b: string[]) => [...a].sort().join('\n') === [...b].sort().join('\n');
@@ -49,12 +50,23 @@ function ActorMigration(props: FeatureProps) {
   }
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
   const canApply = Boolean(preview?.canApply && matching && !expired && !preview.notices.some(item => item.severity === 'error') && preview.requiredAcknowledgements.every(code => acknowledgements.includes(code)));
-  async function createPreview() { if (!configuration || !matching) return; await execute('미리보기 생성 중…', async () => { const result = await post<MigrationPreview>('/migrations/preview', { configuration }); if (active.current) { setPreview(result); setConfiguration(structuredClone(result.configuration)); setAcknowledgements([]); setClock(Date.now()); } }); }
+  async function createPreview() {
+    if (!configuration || !matching) return;
+    await execute('미리보기 생성 중…', async () => {
+      const result = await post<MigrationPreview>('/migrations/preview', { configuration });
+      if (!active.current) return;
+      setPreview(result);
+      if (result.canApply) setConfiguration(structuredClone(result.configuration));
+      setAcknowledgements([]);
+      setClock(Date.now());
+    });
+  }
   async function apply() {
     if (!preview || !canApply || busyRef.current || !window.confirm('검토한 미리보기대로 새 프로젝트와 업무·문서를 실제 생성할까요? 적용 결과는 이관 영수증으로 보관됩니다.')) return;
     await execute('실제 이관 적용 중…', async () => { const result = await post<MigrationApplyResult>(`/migrations/previews/${encodeURIComponent(preview.id)}/apply`, { expectedVersion: preview.version, acknowledgements }); if (!active.current) return; setImports(previous => [result.import, ...previous.filter(item => item.id !== result.import.id)]); setSelectedImport(result.import.id); reset(); notify(result.duplicate ? '이미 완료한 이관 영수증을 열었습니다.' : '이관을 완료했습니다. 새 프로젝트와 원본 기록을 확인하세요.'); try { await props.refresh(); } catch { notify('이관은 완료했습니다. 프로젝트 목록 새로고침을 다시 시도하세요.', 'error'); } await load(); });
   }
   const receipt = imports.find(item => item.id === selectedImport);
+  const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
   return <section className="card migration-apply" aria-label="실제 데이터 이관">
     <header className="migration-heading"><div><h2><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 새 프로젝트로 가져옵니다. 매핑과 검토를 마친 뒤 직접 적용합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">기존 프로젝트에 덮어쓰지 않습니다. 원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>
@@ -73,15 +85,30 @@ function ActorMigration(props: FeatureProps) {
         <MappingSection title="상태 매핑"><Paged title="상태 매핑" items={options.statuses} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`상태 매핑 ${item.label}`} value={configuration.statuses[item.id] || 'todo'} onChange={event => mapValue('statuses', item.id, event.target.value as StatusCategory)}>{Object.entries(categoryLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
         <MappingSection title="업무 유형 매핑"><Paged title="업무 유형 매핑" items={options.issueTypes} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`유형 매핑 ${item.label}`} value={configuration.issueTypes[item.id] ?? ''} onChange={event => mapValue('issueTypes', item.id, event.target.value || null)}><option value="">원본 유형을 새 유형으로 생성</option>{ISSUE_TYPES.map(type => <option value={type} key={type}>{type}</option>)}</select></MappingRow>} /></MappingSection>
         <MappingSection title="사용자 정의 속성 매핑"><p>원본 보관만 선택한 속성도 원본 기록에 남습니다. 변환할 값이 선택한 속성 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
-        <MappingSection title="원본 주소와 제외 항목"><p>원본 주소는 문서 내부 링크의 출처를 확인하는 데 사용합니다. 외부 서버에 접속하지 않습니다. 제외한 항목은 미리보기에서 관련 항목 영향을 확인하세요.</p><Paged title="원본 주소" items={options.packages} label={item => item.filename} render={item => <MappingRow label={item.filename} detail={item.source.instanceKey}><input className="field" aria-label={`원본 주소 ${item.filename}`} type="url" placeholder="https://wiki.example.test" value={configuration.sourceBaseUrls[item.id] || ''} maxLength={4000} onChange={event => mapValue('sourceBaseUrls', item.id, event.target.value || null)} /></MappingRow>} /><Exclusions key={configuration.packageIds.join('|')} packageIds={configuration.packageIds} packages={options.packages} excluded={configuration.excludedRecords} onChange={excludedRecords => change({ ...configuration, excludedRecords })} /></MappingSection>
+        <MappingSection title="원본 주소와 제외 항목">
+          <p>패키지별 원본 사이트 주소를 입력할 수 있습니다. 별도 설치 경로가 있는 서버는 그 경로까지 입력하세요.</p>
+          <p>Jira의 원본 업무 키와 Confluence의 현재 페이지 ID를 사용합니다. 생성된 링크는 이관한 업무와 문서의 <strong>기존 도구 연결</strong>에서 확인할 수 있습니다. 이 주소는 문서 본문 링크의 출처를 확인할 때도 사용합니다.</p>
+          <Paged title="원본 주소" items={options.packages} label={item => item.filename} render={item => <MappingRow label={item.filename} detail={item.source.instanceKey}>
+            <label>원본 사이트 주소 (선택)
+              <input className="field" aria-label={`원본 주소 ${item.filename}`} type="url" spellCheck={false}
+                placeholder={item.source.product === 'jira' ? 'https://jira.example.test/jira' : 'https://wiki.example.test/confluence'}
+                value={configuration.sourceBaseUrls[item.id] || ''} maxLength={4000} onChange={event => mapValue('sourceBaseUrls', item.id, event.target.value || null)} />
+            </label>
+          </MappingRow>} />
+          <Exclusions key={configuration.packageIds.join('|')} packageIds={configuration.packageIds} packages={options.packages} excluded={configuration.excludedRecords} onChange={excludedRecords => change({ ...configuration, excludedRecords })} />
+        </MappingSection>
         <button className="btn btn-primary" disabled={!matching || !configuration.projects.length} onClick={() => void createPreview()}><FileCheck2 size={17} />적용 전 미리보기 만들기</button>
       </div>}
     </fieldset>
     {preview && <section className="migration-review" aria-label="이관 적용 미리보기"><header><div><h3>{preview.canApply ? '검토 후 적용할 수 있습니다' : '적용을 막는 항목을 해결하세요'}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div><button className="btn btn-ghost" disabled={Boolean(pending)} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button></header>
-      <div className="migration-counts">{Object.entries(preview.counts).map(([name, count]) => <span key={name}>{countLabels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>
+      <MigrationCounts entries={Object.entries(preview.counts)} />
       <Paged title="생성할 프로젝트" items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · 업무 {item.issueCount} · 문서 {item.documentCount}</p>} />
       <Paged title="이관 검토 진단" items={preview.notices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}><strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}</div>} />
-      <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample"><strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong><pre>{item.plainText.slice(0, 2000)}</pre>{item.plainText.length > 2000 && <small>견본은 2,000자까지 표시합니다. 원본 기록에는 전체 원문을 보존합니다.</small>}</div>} /></MappingSection>
+      <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
+        <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
+        {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
+        <pre>{item.plainText.slice(0, 2000)}</pre>{item.plainText.length > 2000 && <small>견본은 2,000자까지 표시합니다. 원본 기록에는 전체 원문을 보존합니다.</small>}
+      </div>} /></MappingSection>
       {expired && <p className="migration-error" role="alert">이 미리보기가 만료되었습니다. 매핑을 유지한 채 새 미리보기를 만드세요.</p>}
       <fieldset disabled={Boolean(pending)} className="migration-fieldset"><div className="migration-acknowledgements" aria-label="이관 필수 확인">{preview.requiredAcknowledgements.map(code => <label key={code}><input type="checkbox" aria-label={`이관 확인 ${code}`} checked={acknowledgements.includes(code)} onChange={event => setAcknowledgements(previous => event.target.checked ? [...previous, code] : previous.filter(value => value !== code))} /><span>{preview.notices.find(item => item.code === code)?.message || code}<small>{code}</small></span></label>)}</div><button className="btn btn-primary" disabled={!canApply} onClick={() => void apply()}><CheckCircle2 size={17} />검토한 이관 실제 적용</button></fieldset>
     </section>}
@@ -89,6 +116,10 @@ function ActorMigration(props: FeatureProps) {
       {receipt && <div aria-label="이관 영수증 상세">
         <h4>원본 기록과 생성 프로젝트</h4>
         <p>이관 실행자 {data.users.find(user => user.id === receipt.actorId)?.name || receipt.actorId} · 제외한 원본 {receipt.counts.excludedRecords ?? receipt.configuration.excludedRecords.length}개</p>
+        {receiptLinkCounts.length > 0 && <section className="migration-origin-summary" aria-label="이관 당시 원본 링크 집계">
+          <MigrationCounts entries={receiptLinkCounts} />
+          <small>이관 완료 시점의 집계입니다. 현재 링크는 업무와 문서의 기존 도구 연결에서 확인할 수 있습니다.</small>
+        </section>}
         <Paged title="생성한 프로젝트 열기" items={receipt.projectIds} label={id => data.projects.find(item => item.id === id)?.name || id} render={id => <a className="btn migration-project-link" href={`#/${encodeURIComponent(id)}/overview`} aria-disabled={Boolean(pending)} onClick={event => { if (busyRef.current) event.preventDefault(); }}>{data.projects.find(item => item.id === id)?.name || id} 프로젝트 열기</a>} />
         <MigrationReconciliation key={`${receipt.id}:${receipt.version}`} sourceImportId={receipt.id} {...props} />
         <MappingSection title="검토한 이관 진단">{receipt.notices ? <><p>적용 당시 검토한 진단 {receipt.notices.length}건입니다. 제외·변환하지 않은 항목의 사유도 이 시점의 기록으로 보존합니다.</p><Paged title="영수증 이관 진단" items={receipt.notices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}><strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}</div>} /></> : <p>이전 버전에서 만든 영수증이라 검토 진단이 별도로 저장되지 않았습니다. 원본 기록과 이관 설정을 확인하세요.</p>}</MappingSection>
@@ -98,6 +129,7 @@ function ActorMigration(props: FeatureProps) {
   </section>;
 }
 
+function MigrationCounts({ entries }: { entries: [string, number][] }) { return <div className="migration-counts">{entries.map(([name, count]) => <span key={name}>{countLabels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>; }
 function MappingRow({ label, detail, children }: { label: string; detail: string; children: ReactNode }) { return <div className="migration-mapping-row"><div><strong>{label}</strong><small>{detail}</small></div>{children}</div>; }
 function MappingSection({ title, children }: { title: string; children: ReactNode }) { const [open, setOpen] = useState(false); return <details className="migration-advanced" onToggle={event => setOpen(event.currentTarget.open)}><summary>{title}</summary>{open && <div>{children}</div>}</details>; }
 function Paged<T>({ title, items, label, render }: { title: string; items: T[]; label: (item: T) => string; render: (item: T) => ReactNode }) {

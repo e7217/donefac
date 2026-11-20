@@ -142,14 +142,21 @@ async function applyPilotSourceMigration(url, actorId) {
   const options = await (await call(url, `/migrations/options?${query}`, {headers})).json();
   const migration = options.defaultConfiguration;
   migration.projects = migration.projects.map(project => ({...project, key: 'PILOTIMP', name: '파일럿 합성 이관'}));
+  migration.sourceBaseUrls = {
+    [jiraPackage.id]: 'https://jira.example.test/jira',
+    [wikiPackage.id]: 'https://wiki.example.test/confluence',
+  };
   const preview = await (await call(url, '/migrations/preview', {
     method: 'POST', status: 201, headers, body: {configuration: migration},
   })).json();
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.equal(preview.counts.atlassianLinks, 3);
+  assert.equal(preview.counts.unlinkedAtlassianRecords, 0);
   const {import: receipt} = await (await call(url, `/migrations/previews/${preview.id}/apply`, {
     method: 'POST', status: 201, headers,
     body: {expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements},
   })).json();
+  assert.deepEqual(receipt.counts, preview.counts);
   return {receipt, versions, packages: [{summary: jiraPackage, bytes: jira}, {summary: wikiPackage, bytes: confluence}]};
 }
 
@@ -160,14 +167,26 @@ async function verifyPilotSourceMigration(url, migration) {
   const base = `/source-imports/${receipt.id}/reconciliation`;
   const workspace = await (await call(url, '/workspace')).json();
   const issue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 원본 업무');
+  const otherIssue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 두 번째 업무');
   const document = workspace.documents.find(item => item.projectId === projectId);
   const workflow = workspace.workflows.find(item => item.projectId === projectId);
   const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
-  assert.ok(issue && nextStatus && nextStatus !== issue.status);
+  assert.ok(issue && otherIssue && nextStatus && nextStatus !== issue.status);
   assert.equal(document?.title, '파일럿 원본 설계 문서');
   assert.ok(document.plainText.includes('이관 뒤 검토할 설계 내용'));
   assert.ok(document.content.content.some(node => node.type === 'issueReference' && node.attrs.issueId === issue.id));
   assert.ok(workspace.resourceLinks.some(link => link.issueId === issue.id && link.documentId === document.id));
+  const originalLinks = [];
+  for (const [targetType, targetId, originalUrl] of [
+    ['issue', issue.id, 'https://jira.example.test/jira/browse/OLD-1'],
+    ['issue', otherIssue.id, 'https://jira.example.test/jira/browse/OLD-2'],
+    ['document', document.id, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=100'],
+  ]) {
+    const query = new URLSearchParams({targetType, targetId});
+    const links = await (await call(url, `/atlassian-links?${query}`)).json();
+    assert.deepEqual(links.map(link => link.url), [originalUrl]);
+    originalLinks.push(links[0]);
+  }
   const reconciliation = await (await call(url, `${base}?kind=issue`)).json();
   assert.equal(reconciliation.rows.find(row => row.sourceKey === 'OLD-1')?.target?.id, issue.id);
   const audit = await (await call(url, `${base}/audit?expectedVersion=${receipt.version}`)).json();
@@ -185,7 +204,7 @@ async function verifyPilotSourceMigration(url, migration) {
     const download = await call(url, `/attachment-versions/${checked.fileId}/download`);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
   }
-  return {issue, document, nextStatus, recordCounts: audit.recordCounts, attachments: audit.attachments};
+  return {issue, document, nextStatus, originalLinks, recordCounts: audit.recordCounts, attachments: audit.attachments};
 }
 
 async function browser(url, teamFixture) {

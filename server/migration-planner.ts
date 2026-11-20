@@ -10,6 +10,7 @@ import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migrat
 import type { MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationPackage,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
+import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -65,7 +66,8 @@ interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:strin
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
 class Planner{
   options:MigrationOptions;result:PreparedMigration;entries:Entry[]=[];entryByKey=new Map<string,Entry>();bindings=new Map<string,Binding>();excluded=new Set<string>();projectsByContainer=new Map<string,Project>();schemas=new Map<string,ProjectIssueSchema>();workflows=new Map<string,ProjectWorkflow>();notices:MigrationNotice[]=[];noticeKeys=new Set<string>();timezoneValid=true;archiveIds=new Map<string,string>();ownerCache=new Map<string,Entry|null>();indexes=new Map<string,Map<string,LegacyRecord>>();issueById=new Map<string,Issue>();documentById=new Map<string,PreparedMigration['documents'][number]>();primaryById=new Map<string,Entry>();referenceIndex=new Map<string,Entry[]>();resolutionCache=new Map<string,{id:string;label:string;url?:string}|null>();fieldOptions=new Map<string,Map<string,MigrationOptions['fields'][number]>>();sourceOptions=new Map<string,Map<string,LegacyRecord[]>>();
-  constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
+  originBases = new Map<string, MigrationOriginBase>();
+  constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
   sourceEntry(entry:Entry,kind:string,id:string){return this.entryByKey.get(`${entry.pkg.summary.id}/${kind}:${id}`);}
@@ -78,7 +80,58 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createFiles();this.convertDocuments();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  initializeOriginBases(): void {
+    const suppliedBases = this.configuration.sourceBaseUrls;
+    const packages = this.input.packages;
+    const packageIds = new Set(packages.map(pkg => pkg.summary.id));
+    if (Object.keys(suppliedBases).some(id => !packageIds.has(id))) {
+      this.notice('SOURCE_BASE_URL_UNKNOWN_PACKAGE', '원본 기준 주소는 선택한 패키지별로 지정해 주세요.', 'error');
+    }
+    this.configuration.sourceBaseUrls = Object.fromEntries(packages.map(({ summary, dataset }) => {
+      const value = Object.hasOwn(suppliedBases, summary.id) ? suppliedBases[summary.id] : null;
+      if (value == null) return [summary.id, null];
+      const base = parseMigrationOriginBase(dataset.source.product, value);
+      if (!base) {
+        this.notice('SOURCE_BASE_URL_INVALID', `${summary.filename}의 원본 기준 주소를 확인해 주세요. HTTP(S) 서버 주소와 서비스 경로만 입력해 주세요.`, 'error');
+        return [summary.id, null];
+      }
+      this.originBases.set(summary.id, base);
+      return [summary.id, `${base.origin}${base.contextPath}`];
+    }));
+  }
+  createOriginLinks(): void {
+    const missingBases = new Map<string, { firstEntry: Entry; count: number }>();
+    const unavailableLocators = new Map<string, { firstEntry: Entry; count: number }>();
+    for (const [targetId, entry] of this.primaryById) {
+      const { summary, dataset } = entry.pkg;
+      const base = this.originBases.get(summary.id);
+      if (!base) {
+        const match = missingBases.get(summary.id);
+        if (match) match.count++;
+        else missingBases.set(summary.id, { firstEntry: entry, count: 1 });
+        continue;
+      }
+      const product = dataset.source.product;
+      const url = migrationOriginLink(base, product, entry.row);
+      if (!url) {
+        const match = unavailableLocators.get(summary.id);
+        if (match) match.count++;
+        else unavailableLocators.set(summary.id, { firstEntry: entry, count: 1 });
+        continue;
+      }
+      const targetType = entry.row.kind === 'issue' ? 'issue' : 'document';
+      this.result.atlassianLinks.push({ targetType, targetId, product, url });
+    }
+    for (const { summary } of this.input.packages) {
+      const missing = missingBases.get(summary.id);
+      if (missing) this.notice('SOURCE_LINK_BASE_MISSING', `${summary.filename}의 원본 기준 주소가 비어 있어 ${missing.count}개 항목을 연결 없이 이관합니다.`, 'info', missing.firstEntry);
+      const unavailable = unavailableLocators.get(summary.id);
+      if (unavailable) {
+        this.notice('SOURCE_LINK_LOCATOR_UNAVAILABLE', `${summary.filename}에서 열 수 있는 원본 업무·페이지 주소를 확인하지 못한 ${unavailable.count}개 항목을 연결 없이 이관합니다.`, 'warning', unavailable.firstEntry);
+      }
+    }
+  }
   ownerEntry(entry:Entry):Entry|null{
     if(this.ownerCache.has(entry.key))return this.ownerCache.get(entry.key)!;const pending=[entry],seen=new Set<string>();let owner:Entry|null=null;
     for(let cursor=0;cursor<pending.length&&!owner;cursor++){const current=pending[cursor];if(seen.has(current.key))continue;seen.add(current.key);if(current.row.kind==='issue'||current.row.kind==='page'){owner=current;break;}const currentId=string(current.row.metadata.currentVersionId);if(currentId){const candidate=this.sourceEntry(current,current.row.kind==='revision'?'page':current.row.kind,currentId)||this.sourceEntry(current,'revision',currentId);if(candidate)pending.push(candidate);}for(const reference of current.row.references)if(['container-content','current-version','body-owner','attachedTo','commentOn','historyOf','worklogOf','source'].includes(reference.relation)){const candidate=this.sourceEntry(current,reference.kind,reference.sourceId);if(candidate)pending.push(candidate);}if(current.row.containerId)for(const kind of ['issue','page','revision','comment','attachment']){const candidate=this.sourceEntry(current,kind,current.row.containerId);if(candidate)pending.push(candidate);}}
@@ -91,7 +144,7 @@ class Planner{
     if(!Array.isArray(config.packageIds)||new Set(config.packageIds).size!==config.packageIds.length||config.packageIds.length!==this.input.packages.length||this.input.packages.some(pkg=>!config.packageIds.includes(pkg.summary.id)))this.notice('PACKAGE_SELECTION_INVALID','선택한 패키지 목록과 이관 구성이 일치하지 않습니다.','error');
     try{if(!config.timezone)throw new Error();new Intl.DateTimeFormat('en',{timeZone:config.timezone}).format(0);}catch{this.timezoneValid=false;this.notice('TIMEZONE_INVALID','유효한 원본 IANA 시간대를 지정해 주세요.','error');}
     if(!['block','import-time'].includes(config.datePolicy))this.notice('DATE_POLICY_INVALID','날짜 처리 방식을 확인해 주세요.','error');
-    for(const pkg of this.input.packages){const base=config.sourceBaseUrls[pkg.summary.id];if(base!==null&&base!==undefined){try{const url=new URL(base);if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)throw new Error();}catch{this.notice('SOURCE_BASE_URL_INVALID','원본 기본 주소는 인증 정보 없는 http(s) 주소여야 합니다.','error');}}}
+    this.initializeOriginBases();
     for(const key of config.excludedRecords||[]){if(!this.entryByKey.has(key))this.notice('EXCLUSION_INVALID','제외 대상 원본 객체를 찾을 수 없습니다.','error');else this.excluded.add(key);}
     const explicitCount=this.excluded.size,children=new Map<string,string[]>();
     for(const entry of this.entries){this.archiveIds.set(entry.key,randomUUID());const row=entry.row,parents:string[]=[];if(row.parentId)parents.push(`${entry.pkg.summary.id}/${row.kind==='issue'?'issue':row.kind==='page'?'page':row.kind}:${row.parentId}`);if(row.kind==='issue'||row.kind==='page')parents.push(`${entry.pkg.summary.id}/project:${entry.container}`);else{const owner=this.ownerEntry(entry);if(owner&&owner!==entry)parents.push(owner.key);const current=string(row.metadata.currentVersionId);if(current)parents.push(`${entry.pkg.summary.id}/${row.kind==='revision'?'page':row.kind}:${current}`);}for(const parent of parents){const values=children.get(parent)||[];values.push(entry.key);children.set(parent,values);}}
@@ -179,7 +232,7 @@ class Planner{
   resolveUncached(entry:Entry,request:MigrationReferenceInput):{id:string;label:string;url?:string}|null{
     let requestedId=request.sourceId||'',requestedUrl:URL|null=null;const requestedTitle=request.title||'';if(request.url){try{const url=new URL(request.url);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return null;requestedUrl=url;requestedId=requestedId||url.searchParams.get('pageId')||url.pathname.match(/\/browse\/([^/]+)$/)?.[1]||url.pathname.match(/\/pages\/(\d+)/)?.[1]||'';}catch{return null;}}
     let candidates=(this.referenceIndex.get(JSON.stringify([request.kind,requestedId?'id':'title',requestedId||requestedTitle]))||[]).filter(candidate=>!this.excluded.has(candidate.key)&&this.bindings.has(candidate.key));
-    if(requestedUrl)candidates=candidates.filter(candidate=>{try{const base=new URL(this.configuration.sourceBaseUrls[candidate.pkg.summary.id]||''),path=base.pathname.replace(/\/+$/,'');return base.origin===requestedUrl!.origin&&(!path||requestedUrl!.pathname===path||requestedUrl!.pathname.startsWith(`${path}/`));}catch{return false;}});
+    if(requestedUrl)candidates=candidates.filter(candidate=>{const base=this.originBases.get(candidate.pkg.summary.id);return base!==undefined&&isWithinMigrationOrigin(requestedUrl!,base);});
     if(requestedId)candidates=candidates.filter(candidate=>candidate.row.sourceId===requestedId||request.kind==='issue'&&candidate.row.metadata.key===requestedId);else if(requestedTitle)candidates=candidates.filter(candidate=>candidate.row.title===requestedTitle);else return null;
     if(request.spaceKey)candidates=candidates.filter(candidate=>{const project=this.sourceEntry(candidate,'project',candidate.container)?.row;return[project?.metadata.spaceKey,project?.metadata.key,project?.metadata.pkey].some(key=>key===request.spaceKey);});
     if(request.kind==='attachment'&&!requestedId){const owner=this.ownerEntry(entry);candidates=candidates.filter(candidate=>this.ownerEntry(candidate)?.key===owner?.key);const currents=new Set(this.result.attachments.map(attachment=>attachment.id));candidates=candidates.filter(candidate=>currents.has(this.bindings.get(candidate.key)!.id));}
@@ -259,11 +312,26 @@ class Planner{
   }
   finish():PreparedMigration{
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
+    const atlassianLinks = this.result.atlassianLinks.length;
+    Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
     const sourceWorklogs = this.entries.filter(entry=>entry.pkg.dataset.source.product==='jira'&&isJiraWorklog(entry.row)).length;
     if (sourceWorklogs) Object.assign(counts,{worklogs:this.result.worklogs.length,archivedWorklogs:sourceWorklogs-this.result.worklogs.length});
     if(Object.entries(counts).filter(([key])=>['issues','documents','comments','revisions','attachmentVersions','resourceLinks','issueRelations','worklogs'].includes(key)).reduce((sum,[,value])=>sum+value,0)>MAX_RECORDS)this.notice('CANONICAL_RECORD_LIMIT','생성할 현재 객체·이력·파일 버전 합계가100000개를 넘습니다.','error');
     this.result.preview.projects=this.result.projects.map(project=>({id:project.id,key:project.key,name:project.name,issueCount:this.result.issues.filter(issue=>issue.projectId===project.id).length,documentCount:this.result.documents.filter(document=>document.projectId===project.id).length}));
-    for(const entry of this.entries){if(this.result.preview.samples.length>=12)break;const binding=this.bindings.get(entry.key);if(binding?.type==='issue'){const issue=this.issueById.get(binding.id)!;this.result.preview.samples.push({recordId:entry.key,targetType:'issue',title:issue.title,plainText:issue.description.slice(0,3000)+(issue.description.length>3000?'\n[미리보기 일부만 표시]':'')});}else if(binding?.type==='document'){const document=this.documentById.get(binding.id)!;this.result.preview.samples.push({recordId:entry.key,targetType:'document',title:document.title,plainText:document.plainText.slice(0,3000)+(document.plainText.length>3000?'\n[미리보기 일부만 표시]':'')});}}
+    const origins = new Map(this.result.atlassianLinks.map(link => [link.targetId, link.url]));
+    for (const entry of this.entries) {
+      if (this.result.preview.samples.length >= 12) break;
+      const binding = this.bindings.get(entry.key);
+      if (binding?.type !== 'issue' && binding?.type !== 'document') continue;
+      const item = binding.type === 'issue' ? this.issueById.get(binding.id)! : this.documentById.get(binding.id)!;
+      const plainText = 'description' in item ? item.description : item.plainText;
+      const sourceUrl = origins.get(binding.id);
+      this.result.preview.samples.push({
+        recordId: entry.key, targetType: binding.type, title: item.title,
+        plainText: plainText.slice(0, 3000) + (plainText.length > 3000 ? '\n[미리보기 일부만 표시]' : ''),
+        ...(sourceUrl ? { sourceUrl } : {}),
+      });
+    }
     this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=this.result.projects.map(project=>project.id);this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
   }
 }

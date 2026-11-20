@@ -153,7 +153,7 @@ export interface MigrationPreview {
   id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
   projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
-  samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent}[];
+  samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string}[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
