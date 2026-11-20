@@ -21,6 +21,7 @@ const privateConfluenceComment = 'synthetic-private-confluence-comment';
 const privateRevision = 'synthetic-private-historical-document-body';
 const privateWorklog = 'synthetic-private-worklog-note';
 const privateOldStatus = 'synthetic-private-previous-status';
+const privateOtherStatus = 'synthetic-private-other-status';
 const jiraAuthor = 'synthetic-jira-author-key';
 const privateJiraDisplayName = 'Migration fixture Jira author';
 const confluenceAuthor = 'synthetic-confluence-author-key';
@@ -45,6 +46,8 @@ function fixturePackages() {
       <ChangeGroup id="320" issue="100" author="audit-jira-user" created="2020-03-02T09:15:00+0900"/>
       <ChangeItem id="321" group="320" fieldtype="jira" field="status" oldvalue="2" oldstring="${privateOldStatus}" newvalue="1" newstring="Open"/>
       <ChangeItem id="322" group="320" fieldtype="jira" field="summary" oldstring="Earlier title" newstring="${privateTitle}"/>
+      <ChangeGroup id="323" issue="101" created="18/Mar/20 10:20 AM"/>
+      <ChangeItem id="324" group="323" fieldtype="jira" field="status" oldvalue="2" oldstring="${privateOtherStatus}" newvalue="1" newstring="Open"/>
       <Action id="400" issue="100" author="audit-jira-user" type="comment" created="${date}" body="${privateJiraComment}"/>
       <Worklog id="500" issue="100" author="audit-jira-user" startdate="${date}" timeworked="91" created="${date}" updated="${date}" body="${privateWorklog}"/>
       <FileAttachment id="700" issue="100" filename="original.bin" filesize="${attachment.length}" created="${date}"/>
@@ -117,13 +120,19 @@ async function json(base, path, { method = 'GET', body, actor, status = 200 } = 
   return result;
 }
 
+function jiraFindingsPath(receipt, finding, fingerprint) {
+  const query = new URLSearchParams({ expectedVersion: String(receipt.version), finding });
+  if (fingerprint) query.set('expectedFingerprint', fingerprint);
+  return `/source-imports/${receipt.id}/reconciliation/jira-status-findings?${query}`;
+}
+
 async function readReport(root, answer) {
   const match = /검증 결과 (verification-[a-z\d]+\/report\.json) \(/i.exec(answer.stdout);
   assert.ok(match, answer.stdout + answer.stderr);
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
-    privateRevision, privateWorklog, privateOldStatus, jiraAuthor, privateJiraDisplayName, confluenceAuthor, confluenceGroup, originalFrom,
+    privateRevision, privateWorklog, privateOldStatus, privateOtherStatus, jiraAuthor, privateJiraDisplayName, confluenceAuthor, confluenceGroup, originalFrom,
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
@@ -171,7 +180,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(pendingEvidence.restore, null);
 
   const review = launch(['review', root], env);
-  let importedIssueId, importedStatusHistory;
+  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding;
   try {
     const base = await waitForReview(review);
     assert.equal((await fetch(base, { signal: AbortSignal.timeout(10_000) })).status, 200);
@@ -205,7 +214,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.equal(preview.counts.jiraSprints, 1);
     assert.equal(preview.counts.jiraSprintLinks, 1);
     assert.ok(preview.requiredAcknowledgements.includes('SOURCE_CONFLUENCE_SPACE_PERMISSION_REVIEW'));
-    await json(base, `/migrations/previews/${preview.id}/apply`, { method: 'POST', actor, status: 201,
+    const applied = await json(base, `/migrations/previews/${preview.id}/apply`, { method: 'POST', actor, status: 201,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
     const imported = await json(base, '/workspace');
     const issue = imported.issues.find(value => value.title === privateTitle);
@@ -241,6 +250,18 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     ]);
     importedIssueId = issue.id;
     importedStatusHistory = statusHistory;
+    importedReceipt = applied.import;
+    importedRelated = related;
+    importedFinding = await json(base, jiraFindingsPath(importedReceipt, 'unresolved-time'));
+    assert.match(importedFinding.fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(importedFinding.total, 1);
+    assert.equal(importedFinding.totalChanges, 1);
+    const [row] = importedFinding.rows;
+    assert.deepEqual(row, { sourceRecordId: row.sourceRecordId, sourceId: '323', sourceIssueId: '101', sourceInstance: `${originalFrom}-jira`,
+      changeCount: 1, reason: null });
+    const archive = await json(base, `/source-imports/${importedReceipt.id}/records/${row.sourceRecordId}`);
+    assert.equal(archive.record.sourceId, '323');
+    assert.equal(archive.record.containerId, '101');
   } finally {
     review.child.kill('SIGINT');
     const stopped = await review.exited;
@@ -271,11 +292,11 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   const { jiraStatusHistory } = receipt;
   assert.match(jiraStatusHistory.projected.sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(jiraStatusHistory, {
-    sourceChanges: 1, projected: { count: 1, sha256: jiraStatusHistory.projected.sha256 }, duplicate: 0, excluded: 0,
-    restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0,
+    sourceChanges: 2, projected: { count: 2, sha256: jiraStatusHistory.projected.sha256 }, duplicate: 0, excluded: 0,
+    restricted: 0, unavailable: 0, unresolvedTime: 1, unresolvedAuthor: 1,
   });
   assert.deepEqual(report.restore.evidence.receipts[0].jiraStatusHistory, jiraStatusHistory);
-  assert.equal(report.source.evidence.checks.receiptsWithJiraHistoryReview, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithJiraHistoryReview, 1);
   assert.equal(report.source.evidence.workspace.counts.issues, 2);
   assert.equal(report.source.evidence.workspace.counts.documents, 1);
   assert.equal(report.source.evidence.workspace.counts.planningItems, 2);
@@ -287,6 +308,13 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   const restored = await startRehearsalPilot(join(attempt, 'restored'));
   try {
     assert.deepEqual(await json(restored.url, `/issues/${importedIssueId}/jira-status-history`), importedStatusHistory);
+    const stablePage = jiraFindingsPath(importedReceipt, 'unresolved-time', importedFinding.fingerprint);
+    assert.deepEqual(await json(restored.url, stablePage), importedFinding);
+    await json(restored.url, `/issues/${importedRelated.id}?expectedVersion=${importedRelated.version}`, { method: 'DELETE' });
+    await json(restored.url, stablePage, { status: 409 });
+    const unavailable = await json(restored.url, jiraFindingsPath(importedReceipt, 'unavailable'));
+    assert.equal(unavailable.totalChanges, 1);
+    assert.deepEqual(unavailable.rows, [{ ...importedFinding.rows[0], reason: 'issue-in-trash' }]);
   } finally {
     await restored.close();
   }

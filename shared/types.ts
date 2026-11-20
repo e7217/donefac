@@ -364,6 +364,26 @@ export interface SourceReconciliationJiraStatusHistory {
   unresolvedTime: number;
   unresolvedAuthor: number;
 }
+export type SourceReconciliationJiraFinding = 'unavailable' | 'restricted' | 'excluded' | 'unresolved-time' | 'unresolved-author';
+export interface SourceReconciliationJiraStatusFinding {
+  sourceRecordId: string;
+  sourceId: string;
+  sourceInstance: string;
+  sourceIssueId: string | null;
+  changeCount: number;
+  reason: 'issue-in-trash' | 'issue-unavailable' | 'ownership-unverified' | null;
+}
+export interface SourceReconciliationJiraStatusFindingsPage {
+  importId: string;
+  receiptVersion: number;
+  finding: SourceReconciliationJiraFinding;
+  rows: SourceReconciliationJiraStatusFinding[];
+  total: number;
+  totalChanges: number;
+  offset: number;
+  limit: number;
+  fingerprint: string;
+}
 export interface SourceReconciliationAudit {
   importId: string;
   receiptVersion: number;

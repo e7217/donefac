@@ -2,7 +2,11 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
-import type { SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationJiraStatusHistory, SourceReconciliationStatus } from '../../shared/types';
+import type {
+  SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
+  SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusFindingsPage,
+  SourceReconciliationJiraStatusHistory, SourceReconciliationStatus,
+} from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
@@ -31,9 +35,27 @@ const jiraHistoryLabels = {
   restricted: '표시 제한',
   unavailable: '표시 대상 확인 필요',
 };
+const jiraFindingLabels: Record<SourceReconciliationJiraFinding, string> = {
+  unavailable: jiraHistoryLabels.unavailable,
+  restricted: jiraHistoryLabels.restricted,
+  excluded: jiraHistoryLabels.excluded,
+  'unresolved-time': '시각 미확인',
+  'unresolved-author': '작성자 미확인',
+};
+const jiraUnavailableLabels: Record<NonNullable<SourceReconciliationJiraStatusFinding['reason']>, string> = {
+  'issue-in-trash': '대상 업무가 휴지통에 있습니다.',
+  'issue-unavailable': '현재 대상 업무를 찾을 수 없습니다.',
+  'ownership-unverified': '원본 변경의 업무 연결을 확인할 수 없습니다.',
+};
 
 type Filter = 'all' | 'findings' | SourceReconciliationAuditStatus;
 type AuditState = { kind: 'idle' | 'pending' | 'cancelled' } | { kind: 'complete'; result: SourceReconciliationAudit } | { kind: 'error'; message: string };
+type AuditDetail = {
+  openId: string | null;
+  content: ReactNode;
+  onToggle: (id: string, trigger: HTMLButtonElement) => void;
+  onClose: () => void;
+};
 
 type AuditProps = {
   base: string;
@@ -41,16 +63,11 @@ type AuditProps = {
   canStart: boolean;
   recordLabels: Record<SourceReconciliationStatus, string>;
   onStale: () => void;
-  onReviewJiraHistory: () => void;
-  detail: {
-    openId: string | null;
-    content: ReactNode;
-    onToggle: (id: string, trigger: HTMLButtonElement) => void;
-    onClose: () => void;
-  };
+  detail: AuditDetail;
+  jiraDetail: AuditDetail;
 };
 
-export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, onStale, onReviewJiraHistory, detail }: AuditProps) {
+export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, onStale, detail, jiraDetail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -72,6 +89,7 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
     const abort = new AbortController();
     request.current = abort;
     detail.onClose();
+    jiraDetail.onClose();
     setState({ kind: 'pending' });
     try {
       const next = await api<SourceReconciliationAudit>(`${base}/reconciliation/audit?expectedVersion=${receiptVersion}`, { signal: abort.signal, cache: 'no-store' });
@@ -128,8 +146,8 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       {report && <>
         <p className="migration-audit-completed" role="status">원본 연결과 첨부 검증을 마쳤습니다.</p>
         <ReceiptIntegrity integrity={report.integrity} />
-        {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory}
-          integrity={report.integrity.status} onReviewHistory={onReviewJiraHistory} />}
+        {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
+          base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
         <h5>원본 객체 상태</h5>
         <AuditCounts label="원본 검증 건수" labels={recordLabels} counts={report.recordCounts} />
         <h5>첨부 검증 결과</h5>
@@ -183,13 +201,29 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
   </div>;
 }
 
-function JiraStatusHistoryAudit({ history, integrity, onReviewHistory }: {
+function JiraStatusHistoryAudit({ history, integrity, base, receiptVersion, detail }: {
   history: SourceReconciliationJiraStatusHistory;
   integrity: SourceReconciliationIntegrity['status'];
-  onReviewHistory: () => void;
+  base: string;
+  receiptVersion: number;
+  detail: AuditDetail;
 }) {
+  const [open, setOpen] = useState(false);
+  const reviewButton = useRef<HTMLButtonElement | null>(null);
+  const findingsId = useId();
   const { sourceChanges, projected, duplicate, excluded, restricted, unavailable, unresolvedTime, unresolvedAuthor } = history;
   const needsReview = integrity !== 'verified' || [restricted, unavailable, unresolvedTime, unresolvedAuthor].some(value => value > 0);
+  const reviewedCounts: Record<SourceReconciliationJiraFinding, number> = {
+    unavailable, restricted, excluded, 'unresolved-time': unresolvedTime, 'unresolved-author': unresolvedAuthor,
+  };
+  const initialFinding = (Object.keys(jiraFindingLabels) as SourceReconciliationJiraFinding[]).find(finding => reviewedCounts[finding] > 0);
+
+  function close() {
+    detail.onClose();
+    setOpen(false);
+    requestAnimationFrame(() => reviewButton.current?.focus());
+  }
+
   return <section className="migration-audit-integrity" aria-label="Jira 상태 변경 검증">
     <div className="migration-audit-integrity-heading">
       <h5>Jira 상태 변경 검증</h5>
@@ -201,10 +235,108 @@ function JiraStatusHistoryAudit({ history, integrity, onReviewHistory }: {
         counts={{ sourceChanges, projected: projected.count, duplicate, excluded, restricted, unavailable }} />
       : <p>보존 원본에서 확인한 상태 변경은 0건입니다. Jira 내보내기에 변경 이력이 포함되어 있는지 확인해 주세요.</p>}
     {(unresolvedTime > 0 || unresolvedAuthor > 0) && <p>현재 표시된 변경 중 시각 미확인 {count(unresolvedTime)} · 작성자 미확인 {count(unresolvedAuthor)}</p>}
-    {unavailable > 0 && <div>
-      <p>표시되지 않은 변경의 보존 원본과 연결된 업무를 확인해 주세요.</p>
-      <button type="button" className="btn btn-ghost" onClick={onReviewHistory}>원본 변경 이력 대조 열기</button>
-    </div>}
+    {initialFinding && <button ref={reviewButton} type="button" className="btn btn-ghost" aria-expanded={open}
+      aria-controls={open ? findingsId : undefined} onClick={() => open ? close() : setOpen(true)}>{open ? '확인할 Jira 변경 접기' : '확인할 Jira 변경 열기'}</button>}
+    {open && initialFinding && <JiraStatusHistoryFindings id={findingsId} base={base} receiptVersion={receiptVersion}
+      initialFinding={initialFinding} reviewedCounts={reviewedCounts} detail={detail} onClose={close} />}
+  </section>;
+}
+
+type JiraFindingQuery = { finding: SourceReconciliationJiraFinding; offset: number; expectedFingerprint?: string };
+type JiraFindingsLoad = { query: JiraFindingQuery } & ({ data: SourceReconciliationJiraStatusFindingsPage } | { error: string; stale: boolean });
+
+function JiraStatusHistoryFindings({ id, base, receiptVersion, initialFinding, reviewedCounts, detail, onClose }: {
+  id: string;
+  base: string;
+  receiptVersion: number;
+  initialFinding: SourceReconciliationJiraFinding;
+  reviewedCounts: Record<SourceReconciliationJiraFinding, number>;
+  detail: AuditDetail;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState<JiraFindingQuery>({ finding: initialFinding, offset: 0 });
+  const [loaded, setLoaded] = useState<JiraFindingsLoad | null>(null);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const headingId = useId();
+  const response = loaded?.query === query ? loaded : null;
+  const page = response && 'data' in response ? response.data : null;
+  const error = response && 'error' in response ? response : null;
+
+  useEffect(() => { heading.current?.focus(); }, []);
+  useEffect(() => {
+    const abort = new AbortController();
+    const params = new URLSearchParams({ expectedVersion: String(receiptVersion), finding: query.finding, offset: String(query.offset), limit: String(PAGE_SIZE) });
+    if (query.expectedFingerprint) params.set('expectedFingerprint', query.expectedFingerprint);
+    void api<SourceReconciliationJiraStatusFindingsPage>(`${base}/reconciliation/jira-status-findings?${params}`, { signal: abort.signal, cache: 'no-store' })
+      .then(data => { if (!abort.signal.aborted) setLoaded({ query, data }); })
+      .catch(cause => {
+        if (abort.signal.aborted) return;
+        const stale = cause instanceof ApiError && cause.status === 409;
+        const message = stale ? 'Jira 변경 목록이 바뀌었습니다. 다시 조회하거나 전체 이관 검증을 다시 실행해 주세요.'
+          : cause instanceof Error ? cause.message : 'Jira 변경 목록을 불러오지 못했습니다.';
+        setLoaded({ query, error: message, stale });
+      });
+    return () => abort.abort();
+  }, [base, receiptVersion, query]);
+
+  function load(next: JiraFindingQuery) {
+    detail.onClose();
+    setQuery(next);
+  }
+  function paginate(offset: number, fingerprint: string) {
+    heading.current?.focus();
+    load({ finding: query.finding, offset, expectedFingerprint: fingerprint });
+  }
+
+  return <section id={id} className="migration-jira-findings" aria-labelledby={headingId}>
+    <div className="migration-audit-heading">
+      <h6 id={headingId} ref={heading} tabIndex={-1}>확인할 Jira 변경</h6>
+      <button type="button" className="btn btn-ghost" onClick={onClose}>확인 목록 닫기</button>
+    </div>
+    <label className="migration-audit-filter">확인할 Jira 변경 유형
+      <select className="field" value={query.finding} onChange={event => load({ finding: event.target.value as SourceReconciliationJiraFinding, offset: 0 })}>
+        {Object.entries(jiraFindingLabels).map(([finding, label]) => <option key={finding} value={finding}>{label}</option>)}
+      </select>
+    </label>
+    {!response && <p role="status" className="migration-pending"><Loader2 size={15} className="spin" aria-hidden="true" />Jira 변경 목록을 불러오는 중…</p>}
+    {error && <>
+      <p role="alert" className="migration-error">{error.error}</p>
+      <button type="button" className="btn btn-ghost" onClick={() => {
+        heading.current?.focus();
+        load(error.stale ? { finding: query.finding, offset: 0 } : { ...query });
+      }}>{error.stale ? '처음부터 다시 조회' : 'Jira 변경 다시 조회'}</button>
+    </>}
+    {page && <>
+      {page.totalChanges !== reviewedCounts[page.finding] && <p>전체 검증 시점과 현재의 변경 건수가 다릅니다. 전체 검증을 다시 실행해 비교할 수 있습니다.</p>}
+      <p role="status">{jiraFindingLabels[page.finding]} {page.totalChanges.toLocaleString('ko-KR')}건 · 원본 {count(page.total)}</p>
+      {page.rows.length > 0 ? <>
+        <ul className="migration-reconciliation-list" aria-label="Jira 변경 원본 목록">
+          {page.rows.map(row => <li key={row.sourceRecordId} className="migration-reconciliation-row">
+            <div className="migration-reconciliation-source">
+              <small>Jira · {row.sourceInstance}</small>
+              <strong>원본 변경 {row.sourceId}</strong>
+              {row.sourceIssueId && <small>원본 업무 {row.sourceIssueId}</small>}
+              <button type="button" className="btn btn-ghost" aria-label={`Jira 변경 원본 ${row.sourceInstance} / ${row.sourceId} 열기`}
+                aria-expanded={detail.openId === row.sourceRecordId} onClick={event => detail.onToggle(row.sourceRecordId, event.currentTarget)}>
+                <FileSearch size={15} aria-hidden="true" />보존 원본 보기
+              </button>
+            </div>
+            <div className="migration-reconciliation-target">
+              <small>변경 {row.changeCount.toLocaleString('ko-KR')}건</small>
+              {row.reason && <small>{jiraUnavailableLabels[row.reason]}</small>}
+            </div>
+            {detail.openId === row.sourceRecordId && <div className="migration-reconciliation-record">{detail.content}</div>}
+          </li>)}
+        </ul>
+        {page.total > page.limit && <div className="migration-pagination">
+          <span role="status">{page.offset + 1}–{page.offset + page.rows.length} / {count(page.total)}</span>
+          <button type="button" className="btn btn-ghost" aria-label="Jira 변경 이전 페이지" disabled={!page.offset}
+            onClick={() => paginate(Math.max(0, page.offset - page.limit), page.fingerprint)}>이전</button>
+          <button type="button" className="btn btn-ghost" aria-label="Jira 변경 다음 페이지" disabled={page.offset + page.limit >= page.total}
+            onClick={() => paginate(page.offset + page.limit, page.fingerprint)}>다음</button>
+        </div>}
+      </> : <p>선택한 유형에 해당하는 원본 변경이 없습니다.</p>}
+    </>}
   </section>;
 }
 

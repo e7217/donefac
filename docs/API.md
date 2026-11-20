@@ -494,6 +494,10 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서 확인한 상태 변경 수 `sourceChanges`를 반환한다. 이 값은 활성 티켓에 표시되는 `projected.count`, 다른 원본 기록과 겹치는 `duplicate`, 명시적 제외 `excluded`, 접근 제한 `restricted`, 현재 업무 연결을 확인할 수 없는 `unavailable`의 합이다. `unresolvedTime`과 `unresolvedAuthor`는 표시된 항목에서 시각과 작성자를 확정하지 못한 건수다. `projected.sha256`으로 티켓 연결 및 표시 내용의 복원 전후 일치를 대조한다. Confluence만 있는 영수증에서는 `jiraStatusHistory`가 `null`이다. 집계 범위는 이관 영수증에 저장된 원본이다.
 
+브라우저의 `GET /api/source-imports/:id/reconciliation/jira-status-findings`에는 `expectedVersion`과 `finding`을 지정한다. 선택값은 `unavailable`, `restricted`, `excluded`, `unresolved-time`, `unresolved-author`다. `offset`은 0~1,000,000이며 기본값은 0이다. `limit`은 1~100이며 기본값은 30이다. `total`은 원본 변경 그룹 수, `totalChanges`는 해당 조건에 맞는 개별 변경 수다. 각 행의 `sourceRecordId`로 같은 영수증에서 원문을 열 수 있다. `sourceInstance`, `sourceId`, `sourceIssueId`는 원본 인스턴스와 보관된 변경 그룹·업무 식별자다. `changeCount`는 그 행의 조건 일치 건수다. `unavailable` 행은 휴지통, 저장된 연결 대상 없음, 현재 업무 연결 근거 부족을 `reason`으로 구분한다.
+
+다음 페이지에서 첫 요청의 `fingerprint`를 `expectedFingerprint`로 보내면 같은 조건과 목록을 대조한다. 영수증 버전이나 목록이 달라지면 `409`를 반환한다. 상태·작성자·시각의 상세는 개별 원본 기록으로 확인한다.
+
 서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 

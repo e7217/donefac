@@ -36,6 +36,8 @@
 .migration-audit-integrity-packages li { min-width: 0; padding: .55rem; border: 1px solid #dde7e3; border-radius: .35rem; background: #f8fbfa; }
 .migration-audit-integrity details { margin-top: .65rem; }
 .migration-audit-integrity summary { cursor: pointer; font-weight: 600; }
+.migration-jira-findings { border-top: 1px solid #d5e3df; margin-top: .65rem; padding-top: .65rem; }
+.migration-jira-findings h6 { margin: .15rem 0; font-size: .875rem; }
 
 @media (max-width: 640px) {
   .migration-audit { padding: .6rem; }

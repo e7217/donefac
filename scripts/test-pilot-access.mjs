@@ -209,6 +209,12 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'GET', '/api/workspace', 401, { headers: bearer });
   await call(anonymous, 'GET', webhookStatusPath, 401, { headers: bearer });
   await call(anonymous, 'GET', '/api/v1/integrations/gitlab/webhook-status', 403, { headers: bearer });
+
+  const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
+  await call(anonymous, 'GET', `/api${findings}`, 401);
+  await call(anonymous, 'GET', `/api${findings}`, 401, { headers: bearer });
+  await call(anonymous, 'GET', `/api/v1${findings}`, 403, { headers: bearer });
+  await call(session, 'GET', `/api${findings}`, 404);
 }
 
 async function verifyBrowser(origin) {

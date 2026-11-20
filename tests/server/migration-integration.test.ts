@@ -2348,6 +2348,7 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     const untouchedWorkspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
     const clean = await fullAudit();
     assert.equal(clean.jiraStatusHistory, null);
+    assert.equal((await f.call(`${auditPath}/jira-status-findings?expectedVersion=${receipt.version}&finding=unavailable`)).status, 404);
     const cleanOlder = clean.attachments.find(row => row.sourceRecordId === older.sourceRecordId);
     assert.deepEqual(clean.recordCounts, initial.counts);
     assert.deepEqual(clean.attachmentCounts, { verified: 3, missing: 0, corrupt: 0, unbound: 1, excluded: 1, unreadable: 0 });

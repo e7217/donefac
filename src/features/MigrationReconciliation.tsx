@@ -26,7 +26,7 @@ type Filters = { status: SourceReconciliationStatus | ''; kind: LegacyRecordKind
 type PageLoad = { filters: Filters; data: SourceReconciliationPage } | { filters: Filters; error: string };
 type Destination = NonNullable<SourceReconciliationTarget['owner']>;
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'openDocument' | 'refresh' | 'notify'> & { sourceImportId: string };
-type RecordArea = 'list' | 'audit';
+type RecordArea = 'list' | 'audit' | 'jira-audit';
 type RecordLoad = { sourceRecordId: string; area: RecordArea } & ({ pending: true } | { archive: SourceRecordArchive } | { error: string });
 
 export function MigrationReconciliation(props: Props) {
@@ -49,13 +49,13 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
   const [record, setRecord] = useState<RecordLoad | null>(null);
   const recordRequest = useRef<AbortController | null>(null);
   const recordButton = useRef<HTMLButtonElement | null>(null);
-  const kindFilter = useRef<HTMLSelectElement | null>(null);
   const headingId = useId();
   const base = `/source-imports/${encodeURIComponent(sourceImportId)}`;
   const result = load?.filters === filters && 'data' in load ? load.data : null;
   const error = load?.filters === filters && 'error' in load ? load.error : null;
   const loading = load?.filters !== filters;
   const auditRecord = record?.area === 'audit' ? record : null;
+  const jiraRecord = record?.area === 'jira-audit' ? record : null;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -96,11 +96,6 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     event.preventDefault();
     updateFilters({ q: searchDraft.trim(), offset: 0 });
   }
-  function reviewJiraHistory() {
-    setSearchDraft('');
-    updateFilters({ kind: 'history', status: '', q: '', offset: 0 });
-    kindFilter.current?.focus();
-  }
   async function openRecord(sourceRecordId: string, area: RecordArea, trigger: HTMLButtonElement) {
     recordRequest.current?.abort();
     const abort = new AbortController();
@@ -113,6 +108,10 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     } catch (cause) {
       if (!abort.signal.aborted) setRecord({ sourceRecordId, area, error: cause instanceof Error ? cause.message : '보존 원본을 불러오지 못했습니다.' });
     }
+  }
+  function toggleAuditRecord(sourceRecordId: string, area: Exclude<RecordArea, 'list'>, trigger: HTMLButtonElement) {
+    if (record?.area === area && record.sourceRecordId === sourceRecordId) closeRecord();
+    else void openRecord(sourceRecordId, area, trigger);
   }
 
   return <section className="migration-reconciliation" aria-labelledby={headingId}>
@@ -127,14 +126,17 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
     </header>
 
     <MigrationReceiptAudit key={`${base}:${receiptVersion ?? ''}`} base={base} receiptVersion={receiptVersion}
-      canStart={Boolean(result)} recordLabels={statusLabels} onStale={() => updateFilters()} onReviewJiraHistory={reviewJiraHistory} detail={{
+      canStart={Boolean(result)} recordLabels={statusLabels} onStale={() => updateFilters()}
+      detail={{
         openId: auditRecord?.sourceRecordId ?? null,
-        onToggle: (sourceRecordId, trigger) => {
-          if (auditRecord?.sourceRecordId === sourceRecordId) closeRecord();
-          else void openRecord(sourceRecordId, 'audit', trigger);
-        },
+        onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'audit', trigger),
         onClose: () => { if (auditRecord) closeRecord(); },
         content: auditRecord && <ReconciliationRecordDetail state={auditRecord} onClose={() => closeRecord(true)} />,
+      }} jiraDetail={{
+        openId: jiraRecord?.sourceRecordId ?? null,
+        onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'jira-audit', trigger),
+        onClose: () => { if (jiraRecord) closeRecord(); },
+        content: jiraRecord && <ReconciliationRecordDetail state={jiraRecord} onClose={() => closeRecord(true)} />,
       }} />
 
     {result && <dl className="migration-reconciliation-counts" aria-label="전체 원본 대조 건수">
@@ -151,7 +153,7 @@ function ReconciliationPanel({ sourceImportId, data, openIssue, openDocument, re
         </select>
       </label>
       <label>대조 원본 종류
-        <select ref={kindFilter} className="field" aria-label="대조 원본 종류" value={filters.kind} onChange={event => updateFilters({ kind: event.target.value as Filters['kind'], offset: 0 })}>
+        <select className="field" aria-label="대조 원본 종류" value={filters.kind} onChange={event => updateFilters({ kind: event.target.value as Filters['kind'], offset: 0 })}>
           <option value="">전체 종류</option>
           {Object.entries(sourceRecordKindLabels).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
         </select>

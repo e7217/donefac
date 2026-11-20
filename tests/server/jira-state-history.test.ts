@@ -8,13 +8,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { ApiKeyCreated, JiraIssueStatusHistoryPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
-  MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
+  MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFindingsPage,
+  SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const created = '2025-01-01T00:00:00Z';
 const project = { id: '4100', key: 'JIRA', name: '원본 프로젝트' };
 const actor = { key: 'actor-jira', displayName: '원본 작성자' };
 const historicalTitle = '이력이 있는 업무';
+const sourceInstance = 'synthetic-jira-status-history';
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-jira-history-'));
@@ -38,11 +40,13 @@ async function fixture(t: TestContext) {
     });
     const raw = await response.text();
     assert.equal(response.status, expected, `${method} ${route}: ${raw}`);
-    if (route.endsWith('/jira-status-history') && !route.startsWith('/v1/')) assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    if (!route.startsWith('/v1/') && /\/jira-status-(history|findings)(\?|$)/.test(route)) {
+      assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    }
     return JSON.parse(raw) as T;
   }
   async function options(filename: string, bytes: Buffer) {
-    const query = new URLSearchParams({ filename, product: 'jira', instanceKey: 'synthetic-jira-status-history' });
+    const query = new URLSearchParams({ filename, product: 'jira', instanceKey: sourceInstance });
     const response = await fetch(`${origin}/legacy-import/packages?${query}`, {
       method: 'POST', headers: { 'X-Actor-Id': 'user-seo', 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(bytes),
     });
@@ -122,6 +126,9 @@ test('Jira status history reads preserved source transitions across initial migr
   const page = (query = '') => f.call<JiraIssueStatusHistoryPage>(history + query);
   const auditPath = ({ id, version }: SourceImport) => `/source-imports/${id}/reconciliation/audit?expectedVersion=${version}`;
   const audit = (source: SourceImport) => f.call<SourceReconciliationAudit>(auditPath(source));
+  const findingsPath = `/source-imports/${receipt.id}/reconciliation/jira-status-findings`;
+  const findings = (finding: SourceReconciliationJiraFinding, options = '') => f.call<SourceReconciliationJiraStatusFindingsPage>(
+    `${findingsPath}?expectedVersion=${receipt.version}&finding=${finding}${options}`);
 
   const first = await page('?limit=1');
   assert.deepEqual({ total: first.total, offset: first.offset, limit: first.limit }, { total: 2, offset: 0, limit: 1 });
@@ -151,6 +158,36 @@ test('Jira status history reads preserved source transitions across initial migr
     excluded: 3, restricted: 0, unavailable: 0, unresolvedTime: 1, unresolvedAuthor: 0,
   });
 
+  const excludedPage = await findings('excluded', '&limit=2');
+  assert.deepEqual({ ...excludedPage, rows: excludedPage.rows.length }, {
+    importId: receipt.id, receiptVersion: receipt.version, finding: 'excluded', rows: 2, total: 3, totalChanges: 3,
+    offset: 0, limit: 2, fingerprint: excludedPage.fingerprint,
+  });
+  assert.match(excludedPage.fingerprint, /^[a-f0-9]{64}$/);
+  const excludedRemainder = await findings('excluded', `&offset=2&limit=2&expectedFingerprint=${excludedPage.fingerprint}`);
+  assert.equal(excludedRemainder.fingerprint, excludedPage.fingerprint);
+  const excluded = [...excludedPage.rows, ...excludedRemainder.rows];
+  assert.deepEqual(new Set(excluded.map(row => row.sourceId)), new Set(['503', '505', '506']));
+  for (const row of excluded) {
+    const archived = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${row.sourceRecordId}`);
+    assert.equal(archived.record.sourceId, row.sourceId);
+    assert.deepEqual(row, { sourceRecordId: archived.id, sourceId: archived.record.sourceId, sourceInstance, sourceIssueId: '4401', changeCount: 1, reason: null });
+  }
+  const unknownTime = await findings('unresolved-time');
+  assert.equal(unknownTime.limit, 30);
+  assert.equal(unknownTime.totalChanges, initialSummary.unresolvedTime);
+  assert.deepEqual(unknownTime.rows, [{ sourceRecordId: unresolved.sourceRecordId, sourceId: '502', sourceInstance,
+    sourceIssueId: '4401', changeCount: 1, reason: null }]);
+  for (const query of [
+    `?expectedVersion=${receipt.version}`,
+    '?finding=excluded',
+    `?expectedVersion=${receipt.version}&finding=duplicate`,
+    ...['&limit=101', '&limit=0', '&offset=-1', '&offset=1000001', '&finding=restricted', '&expectedFingerprint=bad', '&extra=1']
+      .map(invalid => `?expectedVersion=${receipt.version}&finding=excluded${invalid}`),
+  ]) await f.call(findingsPath + query, 'GET', undefined, 400);
+  await f.call(`${findingsPath}?expectedVersion=${receipt.version + 1}&finding=excluded`, 'GET', undefined, 409);
+  await f.call(`${findingsPath}?expectedVersion=${receipt.version}&finding=excluded&expectedFingerprint=${'0'.repeat(64)}`, 'GET', undefined, 409);
+
   // Older receipts could still carry an owner link before scoped history filtering was introduced.
   const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
   try {
@@ -169,6 +206,12 @@ test('Jira status history reads preserved source transitions across initial migr
     const restricted = (await audit(receipt)).jiraStatusHistory;
     assert.deepEqual(restricted, { ...initialSummary, excluded: 2, restricted: 1 });
     assert.doesNotMatch(JSON.stringify(restricted), /원본 작성자|보관된 상태 이름|동일 그룹의 제한|시각 보류|18\/Jan\/25/);
+    const restrictedFindings = await findings('restricted');
+    assert.equal(restrictedFindings.totalChanges, restricted.restricted);
+    assert.deepEqual(restrictedFindings.rows.map(({ sourceId, changeCount, reason }) => ({ sourceId, changeCount, reason })), [
+      { sourceId: '506', changeCount: 1, reason: null },
+    ]);
+    assert.doesNotMatch(JSON.stringify(restrictedFindings), /원본 작성자|동일 그룹의 제한|같은 그룹의 제한된 항목/);
     db.prepare('UPDATE source_imports SET json=? WHERE id=?').run(receiptRow.json, receipt.id);
     const restoreExclusion = db.prepare(`UPDATE source_records SET owner_type=NULL,owner_id=NULL,json=json_set(json,'$.ownerType',NULL,'$.ownerId',NULL,'$.excluded',json('true'))
       WHERE import_id=? AND kind='history' AND source_id=?`);
@@ -182,13 +225,39 @@ test('Jira status history reads preserved source transitions across initial migr
     const withoutAuthor = (await audit(receipt)).jiraStatusHistory;
     assert.equal(withoutAuthor?.unresolvedAuthor, 2);
     assert.notEqual(withoutAuthor?.projected.sha256, initialSummary.projected.sha256);
+    const missingAuthor = await findings('unresolved-author');
+    assert.equal(missingAuthor.totalChanges, withoutAuthor.unresolvedAuthor);
+    assert.deepEqual(new Set(missingAuthor.rows.map(row => row.sourceId)), new Set(['501', '502']));
     db.prepare('UPDATE source_records SET json=? WHERE id=?').run(identity.json, identity.id);
+    assert.equal((await findings('unresolved-author')).totalChanges, 0);
+
+    const unresolvedArchive = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${unresolved.sourceRecordId}`);
+    db.prepare("UPDATE source_records SET json=json_insert(json,'$.record.metadata.items[#]',json(?)) WHERE id=?")
+      .run(JSON.stringify(restStatus('3', '추가 검토', '2', '업무 조정')), unresolvedArchive.id);
+    const combinedGroup = await findings('unresolved-time');
+    assert.equal(combinedGroup.total, 1);
+    assert.equal(combinedGroup.totalChanges, 2);
+    assert.deepEqual(combinedGroup.rows, [{ ...unknownTime.rows[0], changeCount: 2 }]);
+    assert.notEqual(combinedGroup.fingerprint, unknownTime.fingerprint);
+    db.prepare('UPDATE source_records SET json=? WHERE id=?').run(JSON.stringify(unresolvedArchive), unresolvedArchive.id);
+
+    // A live issue in the archived owner column still needs original alias proof.
+    const updateOriginal = db.prepare('UPDATE source_records SET json=? WHERE id=?');
+    updateOriginal.run(JSON.stringify({ ...original, record: { ...original.record,
+      references: original.record.references.map(reference => reference.relation === 'historyOf' ? { ...reference, sourceId: 'unknown-issue' } : reference),
+    } }), original.id);
+    const unverifiedOwner = await findings('unavailable');
+    assert.equal(unverifiedOwner.totalChanges, 1);
+    assert.deepEqual(unverifiedOwner.rows, [{ sourceRecordId: original.id, sourceId: '501', sourceInstance, sourceIssueId: '4401', changeCount: 1,
+      reason: 'ownership-unverified' }]);
+    updateOriginal.run(JSON.stringify(original), original.id);
   } finally {
     db.close();
   }
 
   const api = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: 'migration history test', projectIds: [projectId], access: 'read', expiresAt: null }, 201);
   await f.call(`/v1${history}`, 'GET', undefined, 403, { Authorization: `Bearer ${api.token}` });
+  await f.call(`/v1${findingsPath}?expectedVersion=${receipt.version}&finding=unavailable`, 'GET', undefined, 403, { Authorization: `Bearer ${api.token}` });
   const deleted = await f.call<{ trashEntryId: string }>(`/issues/${issue.id}`, 'DELETE', { expectedVersion: issue.version });
   await f.call(history, 'GET', undefined, 404);
   const trashedSummary = (await audit(receipt)).jiraStatusHistory;
@@ -197,7 +266,15 @@ test('Jira status history reads preserved source transitions across initial migr
     ...initialSummary, projected: { count: 0, sha256: trashedSummary.projected.sha256 }, unavailable: 2, unresolvedTime: 0,
   });
   assert.notEqual(trashedSummary.projected.sha256, initialSummary.projected.sha256);
+  const trashedFindings = await findings('unavailable', '&limit=1');
+  assert.equal(trashedFindings.total, 2);
+  assert.equal(trashedFindings.totalChanges, trashedSummary.unavailable);
+  assert.equal(trashedFindings.rows[0]?.reason, 'issue-in-trash');
+  assert.doesNotMatch(JSON.stringify(trashedFindings), /원본 작성자|보관된 상태 이름|2025-01-03/);
   await f.call(`/trash/${deleted.trashEntryId}/restore`, 'POST', {});
+  await f.call(`${findingsPath}?expectedVersion=${receipt.version}&finding=unavailable&offset=1&limit=1&expectedFingerprint=${trashedFindings.fingerprint}`,
+    'GET', undefined, 409);
+  assert.equal((await findings('unavailable')).total, 0);
   assert.deepEqual(await page('?limit=1'), first);
   assert.deepEqual((await audit(receipt)).jiraStatusHistory, initialSummary);
 
@@ -268,6 +345,14 @@ test('Jira status history reads preserved source transitions across initial migr
   const backup = await f.call('/export');
   await f.call('/import', 'POST', { data: backup });
   const receipts = await f.call<SourceImport[]>('/source-imports');
-  assert.deepEqual((await audit(receipts.find(value => value.id === receipt.id)!)).jiraStatusHistory, initialSummary);
+  const restoredReceipt = receipts.find(value => value.id === receipt.id)!;
+  assert.deepEqual((await audit(restoredReceipt)).jiraStatusHistory, initialSummary);
   assert.deepEqual((await audit(receipts.find(value => value.id === append.id)!)).jiraStatusHistory, appendedSummary);
+  const currentIssue = (await workspace()).issues.find(value => value.id === issue.id)!;
+  const removed = await f.call<{ trashEntryId: string }>(`/issues/${issue.id}`, 'DELETE', { expectedVersion: currentIssue.version });
+  await f.call(`/trash/${removed.trashEntryId}`, 'DELETE');
+  const unavailable = await f.call<SourceReconciliationJiraStatusFindingsPage>(
+    `${findingsPath}?expectedVersion=${restoredReceipt.version}&finding=unavailable`);
+  assert.equal(unavailable.totalChanges, 2);
+  assert.deepEqual(unavailable.rows.map(row => row.reason), ['issue-unavailable', 'issue-unavailable']);
 });

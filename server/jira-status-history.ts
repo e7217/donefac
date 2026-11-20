@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { Issue, JiraIssueStatusHistoryEntry, JiraIssueStatusHistoryPage, SourceImport, SourceReconciliationJiraStatusHistory,
-  SourceRecordArchive } from '../shared/types.js';
+import type { Issue, JiraIssueStatusHistoryEntry, JiraIssueStatusHistoryPage, SourceImport, SourceReconciliationJiraFinding,
+  SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusHistory, SourceRecordArchive } from '../shared/types.js';
 import { countJiraStatusTransitions, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraStatusHistoryOwnerAliases,
   jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
@@ -35,6 +35,27 @@ interface TimelineEvent {
   position: number;
 }
 type HistoryIssue = Pick<Issue, 'id' | 'projectId'>;
+type ResolveSourceProof = (archive: SourceRecordArchive) => SourceProof | null;
+type ArchiveCategory = 'excluded' | 'restricted' | 'candidate';
+type FindingReason = SourceReconciliationJiraStatusFinding['reason'];
+interface ReceiptHistoryRow extends ArchiveRow {
+  archiveId: string;
+  ownerType: string | null;
+  ownerId: string | null;
+  sourceId: string;
+  sourceInstance: string;
+  boundIssueId: string | null;
+  issueId: string | null;
+  projectId: string | null;
+  trashIssueId: string | null;
+  trashProjectId: string | null;
+}
+interface ReceiptHistoryVisitor {
+  archive: (row: SourceReconciliationJiraStatusFinding, category: ArchiveCategory) => void;
+  projected?: (issueId: string, events: TimelineEvent[], withAuthor: (event: TimelineEvent) => JiraIssueStatusHistoryEntry) => void;
+  duplicate?: (sourceRecordId: string) => void;
+  resolveUnavailableReasons?: boolean;
+}
 
 const originalGroupId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
 
@@ -133,7 +154,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
     return { ...entry, originalAuthorName: authors.get(authorKey) ?? null };
   }
 
-  function project(issue: HistoryIssue, add: (event: TimelineEvent) => void, duplicate?: (archive: SourceRecordArchive) => void) {
+  function prepareOwner(issue: HistoryIssue): ResolveSourceProof | null {
     const bindingRows = issueBindings.all(issue.id) as { instance: string; alias: string }[];
     const aliases = new Map<string, Set<string>>();
     for (const { instance, alias } of bindingRows) {
@@ -141,22 +162,16 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
       instanceAliases.add(alias);
       aliases.set(instance, instanceAliases);
     }
-    if (!aliases.size) return;
+    if (!aliases.size) return null;
 
     const proven = new Map<string, SourceProof | null>();
-    const seen = new Set<string>();
-    for (const candidate of candidates.iterate(issue.id, issue.id, issue.projectId) as unknown as Iterable<HistoryCandidate>) {
-      const archive = readArchive(candidate.json);
-      if (!archive || archive.id !== candidate.archiveId || archive.sourceImportId !== candidate.importId ||
-          archive.ownerType !== candidate.ownerType || archive.ownerId !== candidate.ownerId ||
-          archive.source.instanceKey !== candidate.sourceInstance || archive.excluded || archive.targetType || archive.targetId) continue;
+    return (archive: SourceRecordArchive): SourceProof | null => {
+      if (archive.excluded || archive.targetType || archive.targetId) return null;
       const { record, source, sourceImportId, packageSha256 } = archive;
       const fallback = archive.ownerId === null;
       const ownerAliases = jiraStatusHistoryOwnerAliases(record);
       const instanceAliases = aliases.get(source.instanceKey);
-      if (!instanceAliases || !ownerAliases?.every(alias => instanceAliases.has(alias))) continue;
-      const transitions = jiraStatusTransitions(record);
-      if (!transitions.length) continue;
+      if (!instanceAliases || !ownerAliases?.every(alias => instanceAliases.has(alias))) return null;
 
       const proofKey = JSON.stringify([sourceImportId, source.instanceKey, source.format, packageSha256, fallback]);
       if (!proven.has(proofKey)) {
@@ -185,7 +200,24 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
         proven.set(proofKey, proof);
       }
       const proof = proven.get(proofKey);
-      if (!proof || proof.excluded.has(`${proof.stagingId}/${record.id}`)) continue;
+      return proof && !proof.excluded.has(`${proof.stagingId}/${record.id}`) ? proof : null;
+    };
+  }
+
+  function project(issue: HistoryIssue, add: (event: TimelineEvent) => void, duplicate?: (archive: SourceRecordArchive) => void) {
+    const owner = prepareOwner(issue);
+    if (!owner) return;
+    const seen = new Set<string>();
+    for (const candidate of candidates.iterate(issue.id, issue.id, issue.projectId) as unknown as Iterable<HistoryCandidate>) {
+      const archive = readArchive(candidate.json);
+      if (!archive || archive.id !== candidate.archiveId || archive.sourceImportId !== candidate.importId ||
+          archive.ownerType !== candidate.ownerType || archive.ownerId !== candidate.ownerId ||
+          archive.source.instanceKey !== candidate.sourceInstance) continue;
+      const { record, source, sourceImportId, packageSha256 } = archive;
+      const transitions = jiraStatusTransitions(record);
+      if (!transitions.length) continue;
+      const proof = owner(archive);
+      if (!proof) continue;
 
       const date = historicalDate(archive, proof);
       const stable = record.metadata.syntheticId !== true && originalGroupId.test(record.sourceId);
@@ -209,7 +241,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
     }
   }
 
-  return { project, withAuthor };
+  return { project, withAuthor, prepareOwner };
 }
 
 export function jiraIssueStatusHistory(store: Store, issue: Issue, offset: number, limit: number): JiraIssueStatusHistoryPage {
@@ -220,58 +252,135 @@ export function jiraIssueStatusHistory(store: Store, issue: Issue, offset: numbe
   return { entries: events.slice(offset, offset + limit).map(timeline.withAuthor), total: events.length, offset, limit };
 }
 
-export function auditJiraStatusHistory(store: Store, receipt: SourceImport): SourceReconciliationJiraStatusHistory {
+function inspectReceiptHistory(store: Store, receipt: SourceImport, visitor: ReceiptHistoryVisitor): void {
   // Find only issues reached by recognized status changes in this receipt. Their timeline may use earlier receipts for deduplication.
-  const rows = store.db.prepare(`SELECT history.id AS archiveId,history.json,issue.id AS issueId,issue.project_id AS projectId
+  const ownerId = `CASE WHEN history.owner_type='issue' THEN history.owner_id ELSE binding.target_id END`;
+  const withTrash = visitor.resolveUnavailableReasons === true;
+  const rows = store.db.prepare(`SELECT history.id AS archiveId,history.json,history.owner_type AS ownerType,
+    history.owner_id AS ownerId,history.source_id AS sourceId,history.source_instance AS sourceInstance,
+    ${ownerId} AS boundIssueId,issue.id AS issueId,issue.project_id AS projectId,
+    ${withTrash ? 'trash.resource_id AS trashIssueId,trash.project_id AS trashProjectId' : 'NULL AS trashIssueId,NULL AS trashProjectId'}
     FROM source_records AS history
     LEFT JOIN source_bindings AS binding ON history.owner_type IS NULL AND history.owner_id IS NULL AND
       binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue' AND binding.source_instance=history.source_instance AND
       binding.source_alias=CASE WHEN json_valid(history.json) THEN json_extract(history.json,'$.record.containerId') END
-    LEFT JOIN issues AS issue ON issue.id=CASE WHEN history.owner_type='issue' THEN history.owner_id ELSE binding.target_id END
-      AND (history.owner_type='issue' OR issue.project_id=?)
+    LEFT JOIN issues AS issue ON issue.id=${ownerId}
+    ${withTrash ? `LEFT JOIN trash_entries AS trash ON trash.resource_type='issue' AND trash.resource_id=${ownerId}` : ''}
     WHERE history.import_id=? AND history.product='jira' AND history.kind='history'
       AND CASE WHEN json_valid(history.json) THEN json_type(history.json,'$.record.metadata.items')='array' ELSE 0 END`);
-  const stats = { sourceChanges: 0, duplicate: 0, excluded: 0, restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0 };
+  const appendProjectId = receipt.configuration.appendTo?.projectId;
   const issueProjects = new Map<string, string>();
   const candidateIds = new Set<string>();
   const { excluded } = receiptContext(receipt);
-  for (const row of rows.iterate(receipt.configuration.appendTo?.projectId ?? null, receipt.id) as unknown as
-      Iterable<ArchiveRow & { archiveId: string; issueId: string | null; projectId: string | null }>) {
+  const timeline = visitor.projected || visitor.duplicate || withTrash ? prepareTimeline(store, receipt) : null;
+  const archiveOwners = new Map<string, ResolveSourceProof | null>();
+
+  function missingReason(row: ReceiptHistoryRow, archive: SourceRecordArchive, identityMatches: boolean): FindingReason {
+    const projectId = row.ownerType === 'issue' ? archive.targetProjectId : appendProjectId;
+    if (row.issueId || !timeline || !row.boundIssueId || !projectId || !receipt.projectIds.includes(projectId) ||
+        (row.trashIssueId && row.trashProjectId !== projectId) ||
+        !identityMatches || archive.ownerId !== row.ownerId || archive.ownerType !== row.ownerType) {
+      return 'ownership-unverified';
+    }
+    const key = JSON.stringify([row.boundIssueId, projectId]);
+    if (!archiveOwners.has(key)) archiveOwners.set(key, timeline.prepareOwner({ id: row.boundIssueId, projectId }));
+    if (!archiveOwners.get(key)?.(archive)) return 'ownership-unverified';
+    return row.trashIssueId ? 'issue-in-trash' : 'issue-unavailable';
+  }
+
+  for (const row of rows.iterate(receipt.id) as unknown as Iterable<ReceiptHistoryRow>) {
     const archive = readArchive(row.json);
     if (!archive) continue;
-    const count = countJiraStatusTransitions(archive.record);
-    if (!count) continue;
-    stats.sourceChanges += count;
+    const changeCount = countJiraStatusTransitions(archive.record);
+    if (!changeCount) continue;
     const sourcePackage = receiptPackage(archive, receipt);
-    if (archive.excluded || (sourcePackage && excluded.has(`${sourcePackage.stagingId}/${archive.record.id}`))) stats.excluded += count;
-    else if (isRestrictedJiraStatusHistory(archive.record)) stats.restricted += count;
-    else if (row.issueId && row.projectId && archive.id === row.archiveId && archive.sourceImportId === receipt.id) {
+    const category = archive.excluded || (sourcePackage && excluded.has(`${sourcePackage.stagingId}/${archive.record.id}`))
+      ? 'excluded' : isRestrictedJiraStatusHistory(archive.record) ? 'restricted' : 'candidate';
+    const identityMatches = archive.id === row.archiveId && archive.sourceImportId === receipt.id &&
+      archive.record.sourceId === row.sourceId && archive.source.instanceKey === row.sourceInstance;
+    visitor.archive({ sourceRecordId: row.archiveId, sourceId: row.sourceId, sourceInstance: row.sourceInstance,
+      sourceIssueId: identityMatches ? originalText(archive.record.containerId, 500) : null,
+      changeCount, reason: withTrash && category === 'candidate' ? missingReason(row, archive, identityMatches) : null }, category);
+    if (timeline && category === 'candidate' && row.issueId && row.projectId && (row.ownerType === 'issue' || row.projectId === appendProjectId) &&
+        archive.id === row.archiveId && archive.sourceImportId === receipt.id) {
       issueProjects.set(row.issueId, row.projectId);
       candidateIds.add(row.archiveId);
     }
   }
 
+  if (!timeline) return;
+  for (const [id, projectId] of [...issueProjects].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+    const events: TimelineEvent[] = [];
+    timeline.project({ id, projectId }, event => {
+      if (event.entry.sourceImportId === receipt.id && candidateIds.has(event.entry.sourceRecordId)) events.push(event);
+    }, archive => {
+      if (archive.sourceImportId === receipt.id && candidateIds.has(archive.id)) visitor.duplicate?.(archive.id);
+    });
+    visitor.projected?.(id, events, timeline.withAuthor);
+  }
+}
+
+export function auditJiraStatusHistory(store: Store, receipt: SourceImport): SourceReconciliationJiraStatusHistory {
+  const stats = { sourceChanges: 0, duplicate: 0, excluded: 0, restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0 };
   const hash = createHash('sha256');
   let projected = 0;
-  if (issueProjects.size) {
-    const timeline = prepareTimeline(store, receipt);
-    for (const id of [...issueProjects.keys()].sort()) {
-      const events: TimelineEvent[] = [];
-      timeline.project({ id, projectId: issueProjects.get(id)! }, event => {
-        if (event.entry.sourceImportId === receipt.id && candidateIds.has(event.entry.sourceRecordId)) events.push(event);
-      }, archive => {
-        if (archive.sourceImportId === receipt.id && candidateIds.has(archive.id)) stats.duplicate++;
-      });
+  inspectReceiptHistory(store, receipt, {
+    archive({ changeCount }, category) {
+      stats.sourceChanges += changeCount;
+      if (category !== 'candidate') stats[category] += changeCount;
+    },
+    duplicate() { stats.duplicate++; },
+    projected(id, events, withAuthor) {
       for (const event of events.sort(timelineOrder)) {
-        const entry = timeline.withAuthor(event);
+        const entry = withAuthor(event);
         hash.update(JSON.stringify([id, entry.id, entry.sourceImportId, entry.sourceRecordId, entry.from.id, entry.from.label,
           entry.to.id, entry.to.label, entry.changedAt, entry.originalChangedAt, entry.originalAuthorName])).update('\n');
         projected++;
         if (entry.changedAt === null) stats.unresolvedTime++;
         if (entry.originalAuthorName === null) stats.unresolvedAuthor++;
       }
-    }
-  }
+    },
+  });
   stats.unavailable = stats.sourceChanges - projected - stats.duplicate - stats.excluded - stats.restricted;
   return { ...stats, projected: { count: projected, sha256: hash.digest('hex') } };
+}
+
+export function jiraStatusHistoryFindings(
+  store: Store, receipt: SourceImport, finding: SourceReconciliationJiraFinding, offset: number, limit: number,
+): { rows: SourceReconciliationJiraStatusFinding[]; total: number; totalChanges: number; fingerprint: string } {
+  const selected = new Map<string, SourceReconciliationJiraStatusFinding>();
+  const unresolved = finding === 'unresolved-time' || finding === 'unresolved-author';
+  const unavailable = finding === 'unavailable';
+  function updateCount(sourceRecordId: string, delta: number): void {
+    const row = selected.get(sourceRecordId);
+    if (row) row.changeCount += delta;
+  }
+
+  inspectReceiptHistory(store, receipt, {
+    archive(row, category) {
+      if (category === finding || (category === 'candidate' && (unavailable || unresolved))) {
+        selected.set(row.sourceRecordId, unresolved ? { ...row, changeCount: 0 } : row);
+      }
+    },
+    resolveUnavailableReasons: unavailable,
+    duplicate: unavailable ? id => updateCount(id, -1) : undefined,
+    projected: unavailable || unresolved ? (_issueId, events, withAuthor) => {
+      for (const event of events) {
+        if (unavailable) updateCount(event.entry.sourceRecordId, -1);
+        else if (finding === 'unresolved-time' ? event.entry.changedAt === null : withAuthor(event).originalAuthorName === null) {
+          updateCount(event.entry.sourceRecordId, 1);
+        }
+      }
+    } : undefined,
+  });
+
+  const rows = [...selected.values()].filter(row => row.changeCount > 0)
+    .sort((left, right) => left.sourceRecordId < right.sourceRecordId ? -1 : left.sourceRecordId > right.sourceRecordId ? 1 : 0);
+  const hash = createHash('sha256').update(JSON.stringify([receipt.id, finding])).update('\n');
+  let totalChanges = 0;
+  for (const row of rows) {
+    totalChanges += row.changeCount;
+    hash.update(JSON.stringify([row.sourceRecordId, row.sourceId, row.sourceInstance, row.sourceIssueId, row.changeCount, row.reason])).update('\n');
+  }
+  return { rows: rows.slice(offset, offset + limit), total: rows.length, totalChanges, fingerprint: hash.digest('hex') };
 }

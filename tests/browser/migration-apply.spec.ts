@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -1443,9 +1443,15 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const unique = suffix(), filename = `jira-history-audit-${unique}.zip`;
+  const sourceInstance = `jira-history-audit-${unique}`;
   const author = `보고서에 넣지 않는 작성자 ${unique}`;
   const state = `보고서에 넣지 않는 원본 상태 ${unique}`;
   const created = '2025-01-01T00:00:00Z';
+  const additionalChanges = Array.from({ length: 20 }, (_, index) => {
+    const group = 600 + index;
+    return `<ChangeGroup id="${group}" issue="4403" created="18/Jan/25 10:20 AM"/>
+      <ChangeItem id="${group + 1000}" group="${group}" field="status" fieldtype="jira" oldvalue="2" oldstring="In Progress" newvalue="1" newstring="Open"/>`;
+  }).join('');
   const xml = `<entity-engine-xml version="9.12">
     <ApplicationUser id="10" userKey="actor-jira" lowerUserName="jira-user"/>
     <User id="11" userName="jira-user" displayName="${author}" active="1"/>
@@ -1453,14 +1459,16 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
     <Status id="1" pname="Open"/><Status id="2" pname="In Progress"/><IssueType id="3" pname="Task"/>
     <Issue id="4401" project="4100" number="1" summary="표시되는 변경의 업무" status="1" issuetype="3" created="${created}" updated="${created}"/>
     <Issue id="4402" project="4100" number="2" summary="휴지통으로 이동할 업무" status="1" issuetype="3" created="${created}" updated="${created}"/>
+    <Issue id="4403" project="4100" number="3" summary="페이지 조회 중 이동할 업무" status="1" issuetype="3" created="${created}" updated="${created}"/>
     <ChangeGroup id="501" issue="4401" author="jira-user" created="2025-01-03T13:20:00Z"/>
     <ChangeGroup id="502" issue="4401" created="18/Jan/25 10:20 AM"/>
     <ChangeGroup id="503" issue="4402" author="jira-user" created="2025-01-03T13:20:00Z"/>
     <ChangeItem id="1501" group="501" field="status" fieldtype="jira" oldvalue="1" oldstring="${state}" newvalue="2" newstring="In Progress"/>
     <ChangeItem id="1502" group="502" field="status" fieldtype="jira" oldvalue="2" oldstring="In Progress" newvalue="1" newstring="Open"/>
     <ChangeItem id="1503" group="503" field="status" fieldtype="jira" oldvalue="1" oldstring="Open" newvalue="2" newstring="In Progress"/>
+    ${additionalChanges}
   </entity-engine-xml>`;
-  const pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `jira-history-audit-${unique}`);
+  const pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), sourceInstance);
   try {
     const { import: receipt } = await importIntoProject(request, pkg, `HA${unique}`, '상태 변경 검증 프로젝트');
     const { settings, workspace } = await open(page, request);
@@ -1482,8 +1490,21 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
     await expect(reconciliation.getByText('조건에 맞는 원본이 없습니다.')).toBeVisible();
 
     const auditPath = `/api/source-imports/${receipt.id}/reconciliation/audit`;
+    const findingsPath = `/api/source-imports/${receipt.id}/reconciliation/jira-status-findings`;
+    const sourcePath = `/api/source-imports/${receipt.id}/records/`;
+    const rawRequests: string[] = [];
+    const findingRequests: URLSearchParams[] = [];
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (url.pathname.startsWith(sourcePath)) rawRequests.push(url.pathname);
+      if (url.pathname === findingsPath) findingRequests.push(url.searchParams);
+    });
     const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
     const panel = reconciliation.getByRole('region', { name: 'Jira 상태 변경 검증', exact: true });
+    const openFindings = panel.getByRole('button', { name: '확인할 Jira 변경 열기', exact: true });
+    const findings = panel.getByRole('region', { name: '확인할 Jira 변경', exact: true });
+    const findingType = findings.getByRole('combobox', { name: '확인할 Jira 변경 유형', exact: true });
+    const rows = findings.getByRole('list', { name: 'Jira 변경 원본 목록', exact: true }).getByRole('listitem');
     async function inspect() {
       const ready = page.waitForResponse(value => new URL(value.url()).pathname === auditPath);
       await run.click();
@@ -1492,16 +1513,23 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
       await expect(panel).toBeVisible();
       return await response.json() as SourceReconciliationAudit;
     }
+    async function find(action: () => Promise<unknown>, expected = 200) {
+      const ready = page.waitForResponse(value => new URL(value.url()).pathname === findingsPath);
+      await action();
+      const response = await ready;
+      expect(response.status(), await response.text()).toBe(expected);
+      return response;
+    }
 
     const inspected = await inspect();
     expect(inspected.jiraStatusHistory).toMatchObject({
-      sourceChanges: 3, projected: { count: 2 }, unavailable: 1, unresolvedTime: 1, unresolvedAuthor: 1,
+      sourceChanges: 23, projected: { count: 22 }, unavailable: 1, unresolvedTime: 21, unresolvedAuthor: 21,
     });
     const counts = panel.getByLabel('Jira 상태 변경 건수', { exact: true });
-    await expect(counts.getByText('보존 원본의 변경', { exact: true }).locator('..').locator('dd')).toHaveText('3');
-    await expect(counts.getByText('현재 업무에 표시', { exact: true }).locator('..').locator('dd')).toHaveText('2');
+    await expect(counts.getByText('보존 원본의 변경', { exact: true }).locator('..').locator('dd')).toHaveText('23');
+    await expect(counts.getByText('현재 업무에 표시', { exact: true }).locator('..').locator('dd')).toHaveText('22');
     await expect(counts.getByText('표시 대상 확인 필요', { exact: true }).locator('..').locator('dd')).toHaveText('1');
-    await expect(panel).toContainText('시각 미확인 1개 · 작성자 미확인 1개');
+    await expect(panel).toContainText('시각 미확인 21개 · 작성자 미확인 21개');
     await expect(panel).not.toContainText(author);
     await expect(panel).not.toContainText(state);
     const box = await panel.boundingBox();
@@ -1510,23 +1538,70 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
     expect(box!.x + box!.width).toBeLessThanOrEqual(361);
     expect(await panel.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(Math.ceil(box!.width));
 
-    await panel.getByRole('button', { name: '원본 변경 이력 대조 열기', exact: true }).click();
-    await expect(kind).toHaveValue('history');
-    await expect(kind).toBeFocused();
-    await expect(status).toHaveValue('');
-    await expect(search).toHaveValue('');
-    await expect(reconciliation.getByRole('list', { name: '이관 결과 대조 목록', exact: true }).getByRole('listitem')).toHaveCount(3);
-    await expect(panel).toBeVisible();
+    expect(findingRequests).toHaveLength(0);
+    expect(rawRequests).toHaveLength(0);
+    const unavailable = await (await find(() => openFindings.click())).json() as SourceReconciliationJiraStatusFindingsPage;
+    await expect(findings.getByRole('heading', { name: '확인할 Jira 변경', exact: true })).toBeFocused();
+    await expect(findingType).toHaveValue('unavailable');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText(sourceInstance);
+    await expect(rows.first()).toContainText('원본 업무 4402');
+    await expect(rows.first()).toContainText('대상 업무가 휴지통에 있습니다.');
+    await expect(kind).toHaveValue('issue');
+    await expect(status).toHaveValue('linked');
+    await expect(search).toHaveValue('필터에 걸리지 않는 변경');
+    expect(rawRequests).toHaveLength(0);
+    const openSource = findings.getByRole('button', { name: `Jira 변경 원본 ${sourceInstance} / 503 열기`, exact: true });
+    await openSource.click();
+    await expect(rows.first().getByRole('region', { name: '보존한 원본 기록 상세', exact: true })).toBeVisible();
+    expect(rawRequests).toEqual([`${sourcePath}${unavailable.rows[0].sourceRecordId}`]);
+    expect(await findings.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(Math.ceil((await findings.boundingBox())!.width));
+    await rows.first().getByRole('button', { name: '원본 이관 기록 상세 닫기', exact: true }).click();
+    await expect(openSource).toBeFocused();
+
+    const first = await (await find(() => findingType.selectOption('unresolved-time'))).json() as SourceReconciliationJiraStatusFindingsPage;
+    expect(first.total).toBe(21);
+    await expect(rows).toHaveCount(20);
+    const next = findings.getByRole('button', { name: 'Jira 변경 다음 페이지', exact: true });
+    const previous = findings.getByRole('button', { name: 'Jira 변경 이전 페이지', exact: true });
+    const second = await (await find(() => next.click())).json() as SourceReconciliationJiraStatusFindingsPage;
+    await expect(rows).toHaveCount(1);
+    expect(findingRequests.at(-1)?.get('expectedFingerprint')).toBe(first.fingerprint);
+    expect(first.rows.map(row => row.sourceRecordId)).not.toContain(second.rows[0].sourceRecordId);
+    await find(() => previous.click());
+    await expect(rows).toHaveCount(20);
+
+    const pageChangeIssue = workspace.issues.find(item => item.projectId === receipt.projectIds[0] && item.title === '페이지 조회 중 이동할 업무')!;
+    const pageChangeDeletion = await request.delete(`/api/issues/${pageChangeIssue.id}?expectedVersion=${pageChangeIssue.version}`);
+    expect(pageChangeDeletion.ok(), await pageChangeDeletion.text()).toBe(true);
+    const { trashEntryId: pageChangeTrashId } = await pageChangeDeletion.json() as { trashEntryId: string };
+    await find(() => next.click(), 409);
+    await expect(findings.getByRole('alert')).toContainText('Jira 변경 목록이 바뀌었습니다.');
+    await find(() => findings.getByRole('button', { name: '처음부터 다시 조회', exact: true }).click());
+    expect(findingRequests.at(-1)?.has('expectedFingerprint')).toBe(false);
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText('원본 변경 502');
+    await find(() => findingType.selectOption('unresolved-author'));
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText('원본 변경 502');
+    expect(rawRequests).toHaveLength(1);
+    await findings.getByRole('button', { name: '확인 목록 닫기', exact: true }).click();
+    await expect(openFindings).toBeFocused();
 
     const restoration = await request.post(`/api/trash/${trashEntryId}/restore`);
     expect(restoration.ok(), await restoration.text()).toBe(true);
+    const pageChangeRestoration = await request.post(`/api/trash/${pageChangeTrashId}/restore`);
+    expect(pageChangeRestoration.ok(), await pageChangeRestoration.text()).toBe(true);
     const restored = await inspect();
     expect(restored.integrity.status).toBe('verified');
     expect(restored.jiraStatusHistory).toMatchObject({
-      sourceChanges: 3, projected: { count: 3 }, unavailable: 0, unresolvedTime: 1, unresolvedAuthor: 1,
+      sourceChanges: 23, projected: { count: 23 }, unavailable: 0, unresolvedTime: 21, unresolvedAuthor: 21,
     });
     await expect(panel.getByText('확인 필요', { exact: true })).toBeVisible();
-    await expect(panel.getByRole('button', { name: '원본 변경 이력 대조 열기', exact: true })).toHaveCount(0);
+    await find(() => openFindings.click());
+    await expect(findingType).toHaveValue('unresolved-time');
+    await find(() => findingType.selectOption('unavailable'));
+    await expect(findings).toContainText('선택한 유형에 해당하는 원본 변경이 없습니다.');
 
     await page.route(url => url.pathname === auditPath, route => route.fulfill({ json: {
       ...inspected, integrity: { ...inspected.integrity, status: 'mismatch' },
@@ -1544,7 +1619,7 @@ test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원
     } }), { times: 1 });
     await inspect();
     await expect(panel).toContainText('Jira 내보내기에 변경 이력이 포함되어 있는지 확인해 주세요.');
-    await expect(panel.getByRole('button', { name: '원본 변경 이력 대조 열기', exact: true })).toHaveCount(0);
+    await expect(openFindings).toHaveCount(0);
   } finally {
     await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
