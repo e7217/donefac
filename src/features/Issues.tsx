@@ -10,6 +10,7 @@ import { CustomFieldSummary, IssueTypeName } from './CustomFields';
 import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
+import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
@@ -230,7 +231,12 @@ export function Issues(props: FeatureProps) {
     move={(source, placement, opener) => void moveIssue(source, placement, { opener })} />;
 
   return <div className="issues-feature">
-    <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div><button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button></div>
+    <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
+      <div className="issue-heading-actions">
+        {data.projects.some(project => project.id === projectId) && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
+        <button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button>
+      </div>
+    </div>
     <div className="issue-toolbar">
       <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} onClick={() => setView('board')}><Columns3 size={16} /> 보드</button></div>
       <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} onChange={e => setQuery(e.target.value)} /></div>

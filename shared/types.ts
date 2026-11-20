@@ -412,7 +412,7 @@ export interface TrashRestoreResult {
 }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const TEAM_NOTIFICATION_KINDS = [
-  'issue-assigned', 'issue-comment', 'issue-status-changed', 'document-comment', 'document-updated', 'document-review-requested',
+  'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', 'document-created', 'document-comment', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn',
 ] as const;
 export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];
@@ -433,7 +433,12 @@ export interface TeamNotificationPage {
   nextCursor: string | null;
   unreadCount: number;
 }
-export type NotificationSubscriptionTarget = 'issue' | 'document';
+export type NotificationSubscriptionTarget = 'issue' | 'document' | 'project' | 'space';
+export const COMMON_DOCUMENT_NOTIFICATION_SPACE_ID = 'common';
+export const PROJECT_DOCUMENT_NOTIFICATION_SPACE_PREFIX = 'project:';
+export function documentNotificationSpaceId(projectId: string | null): string {
+  return projectId === null ? COMMON_DOCUMENT_NOTIFICATION_SPACE_ID : `${PROJECT_DOCUMENT_NOTIFICATION_SPACE_PREFIX}${projectId}`;
+}
 export interface NotificationSubscription {
   userId: string;
   targetType: NotificationSubscriptionTarget;

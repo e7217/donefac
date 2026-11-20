@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
@@ -19,7 +20,7 @@ const other = 'user-yun';
 const privateComment = '내용이 알림에 포함되면 안 되는 댓글';
 const privateNote = '내용이 알림에 포함되면 안 되는 검토 메모';
 type Backup = WorkspaceSnapshot & { schemaVersion: number; teamNotifications: TeamNotification[]; notificationSubscriptions: NotificationSubscription[] };
-const subscriptionPath = (targetType: NotificationSubscriptionTarget, targetId: string) => `/notifications/subscriptions/${targetType}/${targetId}`;
+const subscriptionPath = (targetType: NotificationSubscriptionTarget, targetId: string) => `/notifications/subscriptions/${targetType}/${encodeURIComponent(targetId)}`;
 
 async function open(dataDir: string) {
   const app = createApp({ dataDir, outboundWorker: false });
@@ -55,9 +56,10 @@ async function fixture(t: TestContext) {
   return {
     call,
     get base() { return runtime!.base; },
-    async restart() {
+    async restart(whileOffline?: (dataDir: string) => void) {
       await runtime!.close();
       runtime = undefined;
+      whileOffline?.(dataDir);
       runtime = await open(dataDir);
     },
   };
@@ -126,6 +128,8 @@ test('issue assignment and comments notify their committed recipients without du
 
 test('public writes notify under the API key owner while recipient inbox access stays on the browser API', async t => {
   const f = await fixture(t);
+  const projectWatchPath = subscriptionPath('project', 'project-neo');
+  await checkSubscription(f, projectWatchPath, collaborator, true);
   const { token } = await expectStatus(f.call<ApiKeyCreated>('/api-keys', 'POST', {
     name: '합성 알림 자동화 키', access: 'write', projectIds: ['project-neo'],
   }), 201);
@@ -137,15 +141,17 @@ test('public writes notify under the API key owner while recipient inbox access 
   assert.equal(response.status, 201, JSON.stringify(created));
   const page = await inbox(f, reviewer);
   assert.deepEqual(page.items.map(item => [item.targetId, item.actorId]), [[created.id, editor]]);
+  assert.deepEqual((await inbox(f, collaborator)).items.map(item => [item.targetId, item.kind, item.actorId]), [[created.id, 'issue-created', editor]]);
 
   const disabled = await fetch(f.base + '/v1/notifications', { headers });
   assert.equal(disabled.status, 403);
   await disabled.text();
-  const watchPath = f.base + '/v1' + subscriptionPath('issue', created.id);
-  for (const method of ['GET', 'PUT']) {
-    const response = await fetch(watchPath, { method, headers, body: method === 'PUT' ? '{"subscribed":true}' : undefined });
-    assert.equal(response.status, 403);
-    await response.text();
+  for (const path of [subscriptionPath('issue', created.id), projectWatchPath, subscriptionPath('space', 'common')]) {
+    for (const method of ['GET', 'PUT']) {
+      const response = await fetch(f.base + '/v1' + path, { method, headers, body: method === 'PUT' ? '{"subscribed":true}' : undefined });
+      assert.equal(response.status, 403);
+      await response.text();
+    }
   }
 });
 
@@ -228,7 +234,119 @@ test('individual ticket subscriptions are idempotent and deliver committed comme
   assert.equal((await inbox(f, reviewer)).unreadCount, 3);
 });
 
-test('subscriptions survive restart, trash and version 25 backup; invalid replacements roll back', async t => {
+test('project subscriptions cover new issues, status changes and comments only in the selected project', async t => {
+  const f = await fixture(t);
+  await issue(f, editor, '구독 시작 전에 등록한 업무');
+  const projectPath = subscriptionPath('project', 'project-neo');
+  const otherProjectPath = subscriptionPath('project', 'project-team');
+  const missingProjectPath = subscriptionPath('project', 'missing-project');
+  await expectStatus(f.call(missingProjectPath, 'GET', undefined, reviewer), 404);
+  await expectStatus(f.call(missingProjectPath, 'PUT', { subscribed: true }, reviewer), 404);
+  assert.deepEqual(await checkSubscription(f, projectPath, reviewer), { subscribed: false });
+  for (const watcher of [reviewer, editor]) await checkSubscription(f, projectPath, watcher, true);
+  assert.deepEqual(await checkSubscription(f, projectPath, reviewer, true), { subscribed: true });
+  assert.equal((await inbox(f, reviewer)).unreadCount, 0);
+  await checkSubscription(f, otherProjectPath, other, true);
+  assert.deepEqual(await checkSubscription(f, projectPath, other), { subscribed: false });
+
+  const ticket = await issue(f, editor, '프로젝트에 새로 등록한 업무', [collaborator]);
+  const assigned = await issue(f, reviewer, '프로젝트 구독자가 담당하는 업무');
+  const otherTicket = await expectStatus(f.call<Issue>('/issues', 'POST', { projectId: 'project-team', title: '다른 프로젝트의 새 업무' }), 201);
+  assert.deepEqual((await inbox(f, reviewer)).items.map(item => [item.targetId, item.kind]), [
+    [assigned.id, 'issue-assigned'],
+    [ticket.id, 'issue-created'],
+  ]);
+  const otherInbox = await inbox(f, other);
+  assert.deepEqual(otherInbox.items.map(item => [item.targetId, item.projectId, item.kind]), [[otherTicket.id, 'project-team', 'issue-created']]);
+  assert.equal((await inbox(f, editor)).unreadCount, 0);
+  assert.equal((await inbox(f, collaborator)).unreadCount, 0);
+
+  const watchTicket = subscriptionPath('issue', ticket.id);
+  for (const watcher of [reviewer, collaborator]) await checkSubscription(f, watchTicket, watcher, true);
+  const changed = await expectStatus(f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: ticket.version, status: 'in_progress' }));
+  await expectStatus(f.call(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: ticket.version, status: 'todo' }), 409);
+  await expectStatus(f.call(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: changed.version, status: 'in_progress' }));
+  await comment(f, 'issue', ticket.id, editor);
+  const receivedKinds = async (watcher: string) => (await inbox(f, watcher)).items.filter(item => item.targetId === ticket.id).map(item => item.kind);
+  assert.deepEqual(await receivedKinds(reviewer), ['issue-comment', 'issue-status-changed', 'issue-created']);
+  assert.deepEqual(await receivedKinds(collaborator), ['issue-comment', 'issue-status-changed']);
+  assert.deepEqual(await inbox(f, other), otherInbox);
+  assert.equal((await inbox(f, editor)).unreadCount, 0);
+
+  await checkSubscription(f, projectPath, reviewer, false);
+  const later = await issue(f, editor, '프로젝트 구독을 해제한 뒤 만든 업무');
+  assert.equal((await inbox(f, reviewer)).items.some(item => item.targetId === later.id), false);
+  await comment(f, 'issue', ticket.id, editor);
+  assert.deepEqual(await receivedKinds(reviewer), ['issue-comment', 'issue-comment', 'issue-status-changed', 'issue-created']);
+  await checkSubscription(f, watchTicket, reviewer, false);
+  const before = await inbox(f, reviewer);
+  await comment(f, 'issue', ticket.id, editor);
+  assert.deepEqual(await inbox(f, reviewer), before);
+});
+
+test('document spaces deliver creation, edit, comment and publication with independent project and common subscriptions', async t => {
+  const f = await fixture(t);
+  const newDocument = (title: string, projectId: string | null) =>
+    expectStatus(f.call<DocPage>('/documents', 'POST', { title, projectId }), 201);
+  await newDocument('구독 시작 전에 등록한 공통 문서', null);
+  const projectSpace = subscriptionPath('space', 'project:project-neo');
+  const otherSpace = subscriptionPath('space', 'project:project-team');
+  const commonSpace = subscriptionPath('space', 'common');
+  await expectStatus(f.call(subscriptionPath('space', 'project:'), 'GET', undefined, reviewer), 400);
+  await expectStatus(f.call(subscriptionPath('space', 'project-neo'), 'GET', undefined, reviewer), 400);
+  await expectStatus(f.call(subscriptionPath('space', 'project:missing-project'), 'GET', undefined, reviewer), 404);
+  await expectStatus(f.call(`/notifications/subscriptions/unknown/common`, 'GET', undefined, reviewer), 400);
+  await checkSubscription(f, projectSpace, reviewer, true);
+  await checkSubscription(f, projectSpace, editor, true);
+  await checkSubscription(f, otherSpace, collaborator, true);
+  await checkSubscription(f, commonSpace, other, true);
+  await checkSubscription(f, commonSpace, editor, true);
+  await checkSubscription(f, subscriptionPath('project', 'project-team'), reviewer, true);
+  assert.deepEqual(await checkSubscription(f, commonSpace, reviewer), { subscribed: false });
+  assert.equal((await inbox(f, other)).unreadCount, 0);
+
+  const projectDoc = await newDocument('프로젝트 공간의 새 문서', 'project-neo');
+  const commonDoc = await newDocument('공통 공간의 새 문서', null);
+  const otherDoc = await newDocument('다른 프로젝트 공간의 새 문서', 'project-team');
+  const received = async (watcher: string) => (await inbox(f, watcher)).items.map(item => [item.targetId, item.projectId, item.kind]);
+  assert.deepEqual(await received(reviewer), [[projectDoc.id, 'project-neo', 'document-created']]);
+  assert.deepEqual(await received(other), [[commonDoc.id, null, 'document-created']]);
+  assert.deepEqual(await received(collaborator), [[otherDoc.id, 'project-team', 'document-created']]);
+  assert.equal((await inbox(f, editor)).unreadCount, 0);
+
+  async function updateCommentAndPublish(doc: DocPage, watcher: string) {
+    await checkSubscription(f, subscriptionPath('document', doc.id), watcher, true);
+    const updated = await expectStatus(f.call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, title: `${doc.title} 수정` }));
+    await comment(f, 'document', doc.id, editor);
+    const path = `/documents/${doc.id}/publication`;
+    const initial = await expectStatus(f.call<DocumentPublicationView>(path));
+    const requested = await expectStatus(f.call<DocumentPublicationView>(path, 'POST', {
+      action: 'request', expectedVersion: initial.version, workspaceGeneration: initial.workspaceGeneration,
+      expectedDocumentVersion: updated.version, reviewerId: collaborator,
+    }));
+    await expectStatus(f.call(path, 'POST', { action: 'publish', expectedVersion: requested.version, workspaceGeneration: requested.workspaceGeneration }, collaborator));
+    return updated;
+  }
+
+  const editedProject = await updateCommentAndPublish(projectDoc, reviewer);
+  await updateCommentAndPublish(commonDoc, other);
+  const kinds = ['document-published', 'document-comment', 'document-updated', 'document-created'];
+  assert.deepEqual(await received(reviewer), kinds.map(kind => [projectDoc.id, 'project-neo', kind]));
+  assert.deepEqual(await received(other), kinds.map(kind => [commonDoc.id, null, kind]));
+  assert.equal(JSON.stringify(await inbox(f, other)).includes(privateComment), false);
+
+  await checkSubscription(f, subscriptionPath('document', projectDoc.id), reviewer, false);
+  await expectStatus(f.call(`/documents/${projectDoc.id}`, 'PATCH', { expectedVersion: editedProject.version, projectId: 'project-team' }));
+  assert.deepEqual(await received(reviewer), kinds.map(kind => [projectDoc.id, 'project-neo', kind]));
+  assert.deepEqual((await received(collaborator))[0], [projectDoc.id, 'project-team', 'document-updated']);
+
+  await checkSubscription(f, commonSpace, other, false);
+  await newDocument('공통 공간 구독을 해제한 뒤 만든 문서', null);
+  await comment(f, 'document', commonDoc.id, editor);
+  assert.deepEqual(await received(other), ['document-comment', ...kinds].map(kind => [commonDoc.id, null, kind]));
+});
+
+test('individual subscriptions survive restart, trash and native backup; invalid replacements roll back', async t => {
   const f = await fixture(t);
   const ticket = await issue(f, editor, '휴지통 구독 업무');
   const document = await expectStatus(f.call<DocPage>('/documents', 'POST', { title: '복원할 구독 문서' }), 201);
@@ -238,7 +356,7 @@ test('subscriptions survive restart, trash and version 25 backup; invalid replac
   const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
   await expectStatus(f.call(issuePath, 'GET', undefined, other), 404);
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 28);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.notificationSubscriptions, [
     { userId: reviewer, targetType: 'document', targetId: document.id },
     { userId: other, targetType: 'issue', targetId: ticket.id },
@@ -266,6 +384,110 @@ test('subscriptions survive restart, trash and version 25 backup; invalid replac
   delete old.notificationSubscriptions;
   await expectStatus(f.call('/import', 'POST', { data: old }));
   assert.deepEqual(await checkSubscription(f, documentPath, reviewer), { subscribed: false });
+});
+
+test('native backup restores scope subscriptions and their events while older backups retain individual subscriptions', async t => {
+  const f = await fixture(t);
+  const original = await issue(f, editor, '범위 구독 백업 이전의 업무');
+  const originalTicket = subscriptionPath('issue', original.id);
+  await checkSubscription(f, originalTicket, other, true);
+  const previous = { ...await expectStatus(f.call<Backup>('/export')), schemaVersion: 28 };
+  const projectPath = subscriptionPath('project', 'project-neo');
+  const commonPath = subscriptionPath('space', 'common');
+  const projectSpacePath = subscriptionPath('space', 'project:project-neo');
+  await checkSubscription(f, projectPath, reviewer, true);
+  await checkSubscription(f, commonPath, collaborator, true);
+  await checkSubscription(f, projectSpacePath, other, true);
+  const created = await issue(f, editor, '구독으로 알림을 받은 새 업무');
+  const common = await expectStatus(f.call<DocPage>('/documents', 'POST', { title: '구독으로 알림을 받은 공통 문서' }), 201);
+  const oldInbox = await inbox(f, reviewer);
+  const projectEvent = oldInbox.items.find(item => item.targetId === created.id);
+  assert.equal(projectEvent?.kind, 'issue-created');
+  const commonEvent = (await inbox(f, collaborator)).items.find(item => item.targetId === common.id);
+  assert.equal(commonEvent?.kind, 'document-created');
+  const backup = await expectStatus(f.call<Backup>('/export'));
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.deepEqual(backup.notificationSubscriptions, [
+    { userId: other, targetType: 'issue', targetId: original.id },
+    { userId: reviewer, targetType: 'project', targetId: 'project-neo' },
+    { userId: collaborator, targetType: 'space', targetId: 'common' },
+    { userId: other, targetType: 'space', targetId: 'project:project-neo' },
+  ]);
+
+  await f.restart();
+  await expectStatus(f.call('/import', 'POST', { data: { ...previous, notificationSubscriptions: backup.notificationSubscriptions } }), 400);
+  await expectStatus(f.call('/import', 'POST', { data: { ...previous, teamNotifications: backup.teamNotifications } }), 400);
+  for (const invalid of [
+    { userId: reviewer, targetType: 'project', targetId: 'missing-project' },
+    { userId: reviewer, targetType: 'space', targetId: 'project-neo' },
+    { userId: reviewer, targetType: 'space', targetId: 'project:missing-project' },
+    { userId: reviewer, targetType: 'unknown', targetId: 'common' },
+  ]) {
+    await expectStatus(f.call('/import', 'POST', { data: { ...backup, notificationSubscriptions: [invalid] } }), 400);
+  }
+  assert.deepEqual(await inbox(f, reviewer), oldInbox);
+  assert.deepEqual((await expectStatus(f.call<Backup>('/export'))).notificationSubscriptions, backup.notificationSubscriptions);
+
+  await checkSubscription(f, projectPath, reviewer, false);
+  await checkSubscription(f, commonPath, collaborator, false);
+  await checkSubscription(f, projectSpacePath, other, false);
+  await expectStatus(f.call('/import', 'POST', { data: backup }));
+  assert.deepEqual(await checkSubscription(f, projectPath, reviewer), { subscribed: true });
+  assert.deepEqual(await checkSubscription(f, commonPath, collaborator), { subscribed: true });
+  assert.deepEqual(await checkSubscription(f, projectSpacePath, other), { subscribed: true });
+  assert.deepEqual((await inbox(f, reviewer)).items, [projectEvent]);
+  assert.deepEqual((await inbox(f, collaborator)).items, [commonEvent]);
+
+  await expectStatus(f.call('/import', 'POST', { data: previous }));
+  assert.deepEqual(await checkSubscription(f, originalTicket, other), { subscribed: true });
+  assert.deepEqual(await checkSubscription(f, projectPath, reviewer), { subscribed: false });
+  assert.deepEqual(await checkSubscription(f, commonPath, collaborator), { subscribed: false });
+  assert.deepEqual(await checkSubscription(f, projectSpacePath, other), { subscribed: false });
+  assert.equal((await inbox(f, reviewer)).unreadCount, 0);
+});
+
+test('opening a physical database with the legacy notification subscription table keeps active and archived subscriptions', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, editor, '기존 DB에 구독한 업무');
+  const doc = await expectStatus(f.call<DocPage>('/documents', 'POST', { title: '기존 DB에 구독한 보관 문서' }), 201);
+  const ticketPath = subscriptionPath('issue', ticket.id);
+  const documentPath = subscriptionPath('document', doc.id);
+  const projectPath = subscriptionPath('project', 'project-neo');
+  const spacePath = subscriptionPath('space', 'common');
+  await checkSubscription(f, ticketPath, reviewer, true);
+  await checkSubscription(f, documentPath, other, true);
+  const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/documents/${doc.id}`, 'DELETE'));
+
+  await f.restart(dataDir => {
+    const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+    try {
+      db.exec(`
+        BEGIN;
+        ALTER TABLE notification_subscriptions RENAME TO newer_subscriptions;
+        CREATE TABLE notification_subscriptions (
+          target_type TEXT NOT NULL CHECK(target_type IN ('issue','document')),
+          target_id TEXT NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          PRIMARY KEY(target_type,target_id,user_id)
+        );
+        INSERT INTO notification_subscriptions SELECT target_type,target_id,user_id FROM newer_subscriptions;
+        DROP TABLE newer_subscriptions;
+        CREATE INDEX notification_subscriptions_user ON notification_subscriptions(user_id);
+        COMMIT;
+      `);
+    } finally { db.close(); }
+  });
+  assert.deepEqual(await checkSubscription(f, ticketPath, reviewer), { subscribed: true });
+  await checkSubscription(f, projectPath, reviewer, true);
+  await checkSubscription(f, spacePath, collaborator, true);
+  await expectStatus(f.call(documentPath, 'GET', undefined, other), 404);
+  await expectStatus(f.call(`/trash/${archived.trashEntryId}/restore`, 'POST'));
+  assert.deepEqual(await checkSubscription(f, documentPath, other), { subscribed: true });
+  assert.equal((await inbox(f, collaborator)).unreadCount, 0);
+  await comment(f, 'document', doc.id, editor);
+  for (const watcher of [other, collaborator]) {
+    assert.deepEqual((await inbox(f, watcher)).items.map(item => [item.targetId, item.kind]), [[doc.id, 'document-comment']]);
+  }
 });
 
 test('recipient-scoped pagination and read actions keep newer notifications unread', async t => {

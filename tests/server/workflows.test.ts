@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { Issue, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dataDir?: string, seed = true) {
@@ -72,7 +73,7 @@ test('current backup roundtrips custom workflows; legacy1/2 receive defaults; in
     const configured = (await source.request<ProjectWorkflow>('/projects/project-neo/workflow')).data;
     assert.equal((await source.request('/projects/project-neo/workflow', 'PATCH', { ...configured, expectedVersion: configured.version, fieldRules: [{ issueType: '*', statusId: 'verified_custom', requiredFields: ['description', 'estimate'] }] })).status, 200);
     const exported = (await source.request<WorkspaceSnapshot & { schemaVersion: number; [key: string]: unknown }>('/export')).data;
-    assert.equal(exported.schemaVersion, 28); assert.equal(exported.workflows?.length, 2);
+    assert.equal(exported.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION); assert.equal(exported.workflows?.length, 2);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
     const imported = (await target.request<WorkspaceSnapshot>('/workspace')).data;
     assert.equal(imported.workflows?.[0].statuses.some(status => status.id === 'verified_custom'), true);

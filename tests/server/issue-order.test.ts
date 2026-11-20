@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Issue, Project, ProjectIssueOrder, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; issueOrders: ProjectIssueOrder[]; reportingLedger: ReportingLedgerData };
@@ -167,7 +168,7 @@ test('schema 23 validates the complete project order and restore invalidates ear
     const first = await f.api.move(initial, b, a, 'before');
     assert.equal(first.status, 200, JSON.stringify(first.data));
     const exported = await f.api.read<Backup>('/export');
-    assert.equal(exported.schemaVersion, 28);
+    assert.equal(exported.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.deepEqual(exported.issueOrders.find(order => order.projectId === projectId)?.issueIds, first.data.order.issueIds);
     const second = await f.api.move(first.data.order, a, b, 'before');
     assert.equal(second.status, 200, JSON.stringify(second.data));

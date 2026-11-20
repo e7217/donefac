@@ -19,7 +19,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
-import type { Comment, DocPage, DocRevision, DocumentPublicationTarget, FeatureProps, RichContent } from '../../shared/types';
+import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
@@ -687,10 +687,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         <div className="docs-tree-content">
-          <div className="docs-tree-group"><span>{currentProject?.name || '프로젝트 문서'}</span><button aria-label="프로젝트 문서 추가" onClick={() => openNew()}><Plus size={14} /></button></div>
+          <div className="docs-tree-group"><span>{currentProject?.name || '프로젝트 문서'}</span>
+            <div className="docs-tree-group-actions">
+              {currentProject && <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(currentProject.id)} notify={notify} />}
+              <button type="button" className="docs-tree-group-add" aria-label="프로젝트 문서 추가" onClick={() => openNew()}><Plus size={14} /></button>
+            </div>
+          </div>
           {tree(visible.filter(page => page.projectId !== null))}
           {!visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">{search ? '검색 결과가 없어요.' : '첫 문서를 작성해보세요.'}</p>}
-          <div className="docs-tree-group docs-tree-common"><span>팀 공통 문서</span><button aria-label="팀 공통 문서 추가" onClick={() => { openNew(); setNewProject(''); }}><Plus size={14} /></button></div>
+          <div className="docs-tree-group docs-tree-common"><span>팀 공통 문서</span>
+            <div className="docs-tree-group-actions">
+              <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(null)} notify={notify} />
+              <button type="button" className="docs-tree-group-add" aria-label="팀 공통 문서 추가" onClick={() => { openNew(); setNewProject(''); }}><Plus size={14} /></button>
+            </div>
+          </div>
           {tree(visible.filter(page => page.projectId === null))}
           {!visible.some(page => page.projectId === null) && <p className="docs-tree-empty">함께 참고하는 지식을 모아보세요.</p>}
         </div>

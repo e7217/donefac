@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AtlassianLink, AtlassianLinkPreview } from '../../shared/atlassian-links.js';
 import type { ApiKeyCreated, DocPage, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
@@ -133,7 +134,7 @@ test('external links suffice without remote setup and survive trash and native b
   await call(targetRoute('issue',issue.id),'GET',undefined,404);
   await call(previewRoute(jira.id),'GET',undefined,404);
   const backup = await call<Export>('/export');
-  assert.equal(backup.schemaVersion,28);
+  assert.equal(backup.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(new Set(backup.atlassianLinks.map(link=>link.id)),new Set([jira.id,confluence.id]));
 
   const damaged = {...backup,atlassianLinks:backup.atlassianLinks.map(link=>link.id===jira.id?{...link,targetId:'missing-issue'}:link)};

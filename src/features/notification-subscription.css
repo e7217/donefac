@@ -11,6 +11,25 @@
   background: #edf6f3;
 }
 
+.issue-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.issue-heading-actions > button {
+  flex-shrink: 0;
+}
+
+@media (max-width: 700px) {
+  .issue-heading-actions > .btn {
+    padding: 8px;
+    font-size: 10px;
+  }
+}
+
 .issue-panel-header .issue-panel-breadcrumb {
   min-width: 0;
 }

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { contentReferences, documentPlainText } from '../../shared/document-nodes.js';
 import type { Issue, Project, ProjectReport, ReportingLedgerData, ReportQuery, ReportSnapshot, ReportSnapshotSummary, DocRevision, WorkspaceSnapshot } from '../../shared/types.js';
 
@@ -130,7 +131,7 @@ test('schema10 restores immutable snapshots and closed historical coverage with 
     let issue = await createIssue(f, p.id, '백업할 합성 업무'); issue = await change(f, issue, { status: 'done' });
     const snapshot = await capture(f, q), backupResponse = await f.call<Backup>('/export'); assert.equal(backupResponse.status, 200);
     const backup = backupResponse.data;
-    assert.equal(backup.schemaVersion, 28); assert.ok(backup.reportingLedger.coverage.every(value => value.endedAt !== null));
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION); assert.ok(backup.reportingLedger.coverage.every(value => value.endedAt !== null));
     assert.deepEqual(backup.reportSnapshots.find(value => value.id === snapshot.id), snapshot);
     const historicalEvents = structuredClone(backup.reportingLedger.events);
     issue = await change(f, issue, { title: '백업 후 변경', status: 'in_progress' });

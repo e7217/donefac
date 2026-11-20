@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { AttachmentAppend } from '../../server/attachment-append.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { hash } from '../../server/attachments.js';
 import { createApp } from '../../server/app.js';
 import type { Attachment, AttachmentHead, AttachmentVersion, DocPage, WorkspaceSnapshot } from '../../shared/types.js';
@@ -195,7 +196,7 @@ test('native backup carries exact immutable version bytes and rejects invalid hi
   assert.deepEqual(history.slice(0, 2).map(version => version.localRevision), [3, 2]);
 
   const backup = await read<Backup>(f.json('/export'));
-  assert.equal(backup.schemaVersion, 28);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.equal(backup.attachments.length, 1);
   assert.equal(backup.attachments[0].id, first.id);
   assert.equal(backup.attachments[0].filename, 'first.txt');

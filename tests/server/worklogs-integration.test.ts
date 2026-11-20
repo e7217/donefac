@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, Issue, Project, ProjectWorklogReport, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 
 interface WorklogList { entries: WorklogEntry[]; totalMinutes: number; totalEntries: number }
@@ -124,7 +125,7 @@ test('native schema11 retains canonical entries and deletion tombstones, raises 
     assert.equal((await f.call(`/issues/${historicalTarget.id}`, 'DELETE', { expectedVersion: historicalTarget.version })).status, 200);
     const edited = await f.call<WorklogEntry>(endpoint(target.id, live.entry.id), 'PATCH', { expectedVersion: 1, workDate: '2026-11-20', minutes: 90, note: '백업할 합성 기록' }); assert.equal(edited.status, 200);
     assert.equal((await f.call(endpoint(target.id, removed.entry.id), 'DELETE', { expectedVersion: 1 })).status, 200);
-    const exported = await f.call<WorklogBackup>('/export'); assert.equal(exported.status, 200); assert.equal(exported.data.schemaVersion, 28); assert.equal(exported.data.worklogs.length, 3);
+    const exported = await f.call<WorklogBackup>('/export'); assert.equal(exported.status, 200); assert.equal(exported.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION); assert.equal(exported.data.worklogs.length, 3);
     const tombstone = exported.data.worklogs.find(value => value.id === removed.entry.id)!; assert.ok(tombstone.deletedAt); assert.equal(tombstone.note, ''); assert.match(tombstone.createHash, /^[a-f\d]{64}$/);
     assert.equal(exported.data.worklogs.find(value => value.id === historical.entry.id)?.issueTitle, historicalTarget.title);
     const later = await f.call<WorklogEntry>(endpoint(target.id, live.entry.id), 'PATCH', { expectedVersion: edited.data.version, workDate: '2026-11-21', minutes: 120, note: '백업 후 수정' }); assert.equal(later.status, 200);

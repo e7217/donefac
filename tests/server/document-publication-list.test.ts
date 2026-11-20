@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, DocPage, DocumentPublicationView, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Tab = 'assigned' | 'requested' | 'published';
@@ -291,7 +292,7 @@ test('native restore keeps pinned list metadata and refreshed document versions,
     const beforePublished = await list(f, 'user-seo', { tab: 'published' });
     const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
     assert.equal(backup.status, 200);
-    assert.equal(backup.data.schemaVersion, 28);
+    assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
     const afterAssigned = await list(f, 'user-seo');
     const afterPublished = await list(f, 'user-seo', { tab: 'published' });

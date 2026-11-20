@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bell, BellRing, RefreshCw } from 'lucide-react';
+import { documentNotificationSpaceId } from '../../shared/types';
 import type { FeatureProps, NotificationSubscriptionState, NotificationSubscriptionTarget } from '../../shared/types';
 import { api } from '../lib/api';
 import './notification-subscription.css';
@@ -103,12 +104,18 @@ function SubscriptionButton({ actorId, targetType, targetId, notify }: Props) {
     }
   }
 
-  const targetName = targetType === 'issue' ? '업무' : '문서';
+  const targetNames: Record<NotificationSubscriptionTarget, string> = {
+    issue: '업무',
+    document: '문서',
+    project: '프로젝트 업무',
+    space: targetId === documentNotificationSpaceId(null) ? '팀 공통 문서' : '문서 공간',
+  };
+  const targetName = targetNames[targetType];
   const label = `${targetName} 구독${loadFailed ? ' 다시 불러오기' : subscribed ? ' 해제' : ''}`;
   const Icon = loadFailed ? RefreshCw : subscribed ? BellRing : Bell;
   const busy = writing || (subscribed === null && !loadFailed);
   return <button type="button" className={`btn btn-ghost notification-subscription-button${subscribed ? ' is-subscribed' : ''}`}
-    disabled={busy} aria-busy={busy} onClick={() => void toggle()}>
-    <Icon size={14} aria-hidden="true" /> {label}
+    disabled={busy} aria-label={label} aria-busy={busy} title={targetType === 'space' ? label : undefined} onClick={() => void toggle()}>
+    <Icon size={14} aria-hidden="true" /> <span>{label}</span>
   </button>;
 }

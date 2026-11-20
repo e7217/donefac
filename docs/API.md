@@ -423,3 +423,16 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 `offset`은 기본 0이며 한 페이지에 최대 30개를 반환한다. `total`은 현재 조건의 일치 수이고 `pendingAssigned`는 범위·탭·검색 조건과 독립적인 전체 배정 대기 건수다. 각 행은 문서·프로젝트·저장본 ID와 버전·고정 제목, 상태, 요청자·검토자, 상태 시각을 포함한다. 최신 상태 시각순으로 정렬하며 같은 시각은 문서 ID 순이다. 본문과 메모는 문서별 검토·발행 경로에서 조회한다.
 
 `GET /api/document-publications/count`는 현재 작업자의 전체 `pendingAssigned`만 반환한다. 목록과 건수는 브라우저 경로에서 제공한다. 자동화 키는 문서별 `/api/v1/documents/:id/publication` 경로를 사용한다.
+
+## 알림 구독
+
+브라우저의 `GET /api/notifications/subscriptions/:targetType/:targetId`는 `X-Actor-Id`로 선택한 작업자의 `{ "subscribed": true }` 또는 `{ "subscribed": false }`를 반환한다. 같은 경로의 `PUT`에 `subscribed` 불리언을 보내 구독 상태를 지정한다.
+
+| `targetType` | `targetId` | 알림 대상 |
+| --- | --- | --- |
+| `issue` | 업무 ID | 해당 업무의 상태 변경과 댓글 |
+| `document` | 문서 ID | 해당 문서의 저장·버전 복구·발행·댓글 |
+| `project` | 프로젝트 ID | 해당 프로젝트의 새 업무·상태 변경·댓글 |
+| `space` | `project:<프로젝트 ID>` 또는 `common` | 지정 문서 공간의 새 문서·저장·버전 복구·발행·댓글 |
+
+`targetId`는 URL 경로 한 구간으로 인코딩한다. 공동 편집의 저장 알림은 버전 기록을 만들 때 발송한다. 개별 구독과 프로젝트·공간 구독이 겹치면 같은 변경에 알림 한 건을 저장한다. 자체 백업 형식 29는 범위 구독과 `issue-created`·`document-created`를 보존한다.

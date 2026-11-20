@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import type {
   ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentPublicationView,
@@ -184,7 +185,7 @@ test('native schema 24 retains live and trashed GitLab branches and rejects malf
   assert.deepEqual(afterBranchDeletion.gitlabLinks.find(link => link.issueId === archived.id), deleted);
   const entry = await archive(f, 'issue', restoredIssue);
   const backup = await f.call<GitlabBackup>('/export');
-  assert.equal(backup.schemaVersion, 28);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const liveLink = backup.gitlabLinks.find(link => link.issueId === live.id && link.kind === 'branch')!;
   const archiveRow = backup.trashEntries.find(row => row.id === entry.id)!;
   const archivedLink = archiveRow.gitlabLinks.find(link => link.issueId === archived.id && link.kind === 'branch')!;
@@ -268,7 +269,7 @@ test('schema 28 preserves GitLab observations for the first authenticated deleti
   assert.equal(sampled.sourceSha, sampledHead);
   assert.equal(sampled.branchObservationSource, 'sync');
   const liveBackup = await f.call<GitlabBackup>('/export');
-  assert.equal(liveBackup.schemaVersion, 28);
+  assert.equal(liveBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(liveBackup.gitlabLinks.find(link => link.id === sampled.id), sampled);
   const unsupportedLive = await f.call<{error: string}>('/import', 'POST', { data: { ...liveBackup, schemaVersion: 27 } }, 400);
   assert.match(unsupportedLive.error, /28/);
@@ -276,7 +277,7 @@ test('schema 28 preserves GitLab observations for the first authenticated deleti
 
   const entry = await archive(f, 'issue', issue);
   const backup = await f.call<GitlabBackup>('/export');
-  assert.equal(backup.schemaVersion, 28);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(!backup.gitlabLinks.some(link => link.id === sampled.id));
   assert.deepEqual(branchInTrash(backup, entry), sampled);
   const archived = await workspace(f);
@@ -554,7 +555,7 @@ test('native schema 17 retains invisible archived bytes, rejects damage, and can
   const fileIds = [original.id, latest.currentVersionId].sort();
   assert.deepEqual(readdirSync(path).sort(), fileIds);
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 28);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.equal(backup.trashEntries?.length, 1);
   assert.ok(!backup.documents.some(value => value.id === doc.id));
   assert.ok(!backup.attachments.some(value => value.id === original.id));

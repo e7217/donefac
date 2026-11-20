@@ -10,6 +10,7 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import * as Y from 'yjs';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import type {
   ApiKeyCreated,
@@ -330,7 +331,7 @@ test('native14 preserves publication snapshots, rejects invalid/older references
     const backupResponse = await f.call<Backup>('/export');
     assert.equal(backupResponse.status, 200);
     const backup = backupResponse.data;
-    assert.equal(backup.schemaVersion, 28);
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.deepEqual(backup.documentPublications, [{ documentId: state.documentId, version: state.version, review: state.review, published: state.published }]);
     assert.deepEqual(backup.revisions.find(value => value.id === reviewSnapshot.id), reviewSnapshot);
     assert.deepEqual(backup.revisions.find(value => value.id === publishedSnapshot.id), publishedSnapshot);

@@ -11,9 +11,18 @@
 .docs-tree-search input,.docs-issue-search input { outline:none; border:0; min-width:0; width:100%; background:transparent; font-size:11px; color:#43516b; }
 .docs-tree-search input::placeholder,.docs-issue-search input::placeholder { color:#9da6b5; }
 .docs-tree-content { overflow-y:auto; flex:1; padding-bottom:20px; }
-.docs-tree-group { display:flex; align-items:center; justify-content:space-between; font-size:10px; font-weight:600; letter-spacing:.2px; padding:8px 17px; color:#939caf; }
+.docs-tree-group { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:10px; font-weight:600; letter-spacing:.2px; padding:8px 17px; color:#939caf; }
 .docs-tree-group>span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.docs-tree-group button { padding:2px; background:none; border:0; color:#98a2b3; cursor:pointer; }
+.docs-tree-group-actions { display:flex; align-items:center; gap:4px; flex-shrink:0; }
+.docs-tree-group-add { display:grid; place-items:center; width:24px; height:28px; padding:2px; background:none; border:0; color:#98a2b3; cursor:pointer; }
+.docs-tree-group .notification-subscription-button { min-height:28px; padding:3px 5px; gap:3px; font-size:10px; }
+@media (min-width:561px) and (max-width:800px) {
+  .docs-tree-group .notification-subscription-button { width:28px; justify-content:center; }
+  .docs-tree-group .notification-subscription-button>span { display:none; }
+}
+@media (max-width:560px) {
+  .docs-tree-group .notification-subscription-button { min-height:44px; }
+}
 .docs-tree-common { margin-top:24px; }
 .docs-tree-row { display:flex; align-items:center; min-height:36px; padding-right:8px; margin:2px 7px; border-radius:6px; position:relative; color:#6a758b; }
 .docs-tree-row:hover { background:#f0f3f9; }

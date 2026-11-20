@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, CustomFieldDefinition, CustomFieldValue, Issue, IssueFieldFilter, IssueFieldRule, Project, ProjectIssueSchema, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number };
@@ -126,7 +127,7 @@ test('native13 preserves typed shared views, rejects malformed or older-header l
     assert.equal((await f.call('/v1/issues/query', 'POST', { projectId: 'project-team', fieldFilter: condition }, key.data.token)).status, 403);
     assert.equal((await f.call('/v1/issues', 'POST', { projectId: f.project.id, title: '읽기 키의 금지된 쓰기' }, key.data.token)).status, 403);
     assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, beforeQuery);
-    const backup = (await f.call<Backup>('/export')).data; assert.equal(backup.schemaVersion, 28); assert.deepEqual(backup.savedViews!.find(value => value.id === view.id)?.filters.fieldFilter, condition);
+    const backup = (await f.call<Backup>('/export')).data; assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION); assert.deepEqual(backup.savedViews!.find(value => value.id === view.id)?.filters.fieldFilter, condition);
     const edited = await f.call<SavedView>(`/views/${view.id}`, 'PATCH', { expectedVersion: view.version, name: '백업 후 임시 편집', filters: basicFilters }); assert.equal(edited.status, 200);
     const beforeRestore = (await f.call<WorkspaceSnapshot>('/workspace')).data;
     const malformed = structuredClone(backup); malformed.savedViews!.find(value => value.id === view.id)!.filters.fieldFilter!.rules[0].value = '0';
