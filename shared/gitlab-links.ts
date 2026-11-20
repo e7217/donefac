@@ -1,3 +1,5 @@
+import { isJiraIssueKey } from './atlassian-links.js';
+
 export function gitlabObjectSha(value: unknown): string | null {
   return typeof value === 'string' && /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value) ? value.toLowerCase() : null;
 }
@@ -11,6 +13,7 @@ export function isGitlabBranchName(value: unknown): value is string {
 export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
+  if (Object.hasOwn(link, 'originalJiraKey') && !isJiraIssueKey(link.originalJiraKey)) return false;
   if (Object.hasOwn(link, 'branchObservationSource') &&
       (link.kind !== 'branch' || link.branchObservationSource !== 'sync' || link.state !== 'active')) return false;
   if (link.kind !== 'branch') {

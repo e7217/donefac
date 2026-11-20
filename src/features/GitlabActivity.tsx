@@ -122,6 +122,7 @@ function ActivityRow({ link, issueContext }: { link: GitlabLink; issueContext?: 
         : <div className="gitlab-activity-target">{titleContent}</div>}
       {link.kind === 'branch' && sha && <span className="gitlab-activity-detail">{deleted ? '삭제 전 HEAD' : '확인한 HEAD'} <code title={sha}>{sha.slice(0, 8)}</code></span>}
       {link.kind === 'commit' && branch && <span className="gitlab-activity-detail">{branch}</span>}
+      {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
     <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>

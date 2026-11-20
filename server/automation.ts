@@ -8,7 +8,7 @@ import type { Store } from './store.js';
 
 export class AutomationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomationError(status,message,details);}
-type Connection=Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'>;
+type Connection=Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'|'jiraRoutes'>;
 type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
 type PreparedChange={outcome:AutomationOutcome;next?:Issue;afterStatusChange?:AfterStatusChange};
 export interface AutomationHooks{
@@ -66,8 +66,19 @@ export class AutomationService{
   /** Caller updates its connection and owns the surrounding transaction. */
   onConnectionChanged(previous:Pick<Connection,'baseUrl'|'projectIds'>&Partial<Connection>,next:Pick<Connection,'baseUrl'|'projectIds'>&Partial<Connection>):number{
     const lostAuthentication=(previous.webhookSecretConfigured||previous.signingTokenConfigured)&&!(next.webhookSecretConfigured||next.signingTokenConfigured);
-    if(!lostAuthentication&&normalizeBase(previous.baseUrl)===normalizeBase(next.baseUrl)&&JSON.stringify([...previous.projectIds].sort((a,b)=>a-b))===JSON.stringify([...next.projectIds].sort((a,b)=>a-b)))return 0;
-    const timestamp=new Date().toISOString(),rules=this.all();for(const rule of rules)this.put({...rule,enabled:false,enabledAt:null,version:rule.version+1,updatedAt:timestamp});return rules.length;
+    const connectionChanged = lostAuthentication || normalizeBase(previous.baseUrl) !== normalizeBase(next.baseUrl)
+      || JSON.stringify([...previous.projectIds].sort((a,b)=>a-b)) !== JSON.stringify([...next.projectIds].sort((a,b)=>a-b));
+    const oldRoutes = new Map((previous.jiraRoutes ?? []).map(route => [route.repositoryId, route]));
+    const newRoutes = new Map((next.jiraRoutes ?? []).map(route => [route.repositoryId, route]));
+    const changedRoutes = [...new Set([...oldRoutes.keys(), ...newRoutes.keys()])].filter(id => {
+      const before = oldRoutes.get(id), after = newRoutes.get(id);
+      return before?.projectId !== after?.projectId || before?.jiraInstanceKey !== after?.jiraInstanceKey;
+    });
+    if (!connectionChanged && !changedRoutes.length) return 0;
+    const rules = this.all().filter(rule => connectionChanged || rule.enabled && rule.gitlabProjectIds.some(id => changedRoutes.includes(id)));
+    const timestamp = new Date().toISOString();
+    for (const rule of rules) this.put({...rule, enabled: false, enabledAt: null, version: rule.version + 1, updatedAt: timestamp});
+    return rules.length;
   }
   private matchReason(rule:AutomationRule,issue:Issue,event:Pick<AutomationEvent,'trigger'|'gitlabProjectId'|'branch'>):string|null{
     if(issue.projectId!==rule.projectId)return'규칙과 다른 팀 프로젝트의 업무입니다.';

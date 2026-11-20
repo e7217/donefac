@@ -26,6 +26,7 @@ import { AutomationService, AutomationError } from './automation.js';
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError } from './gitlab-integration.js';
+import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
@@ -390,6 +391,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     processEvent:event=>automation.processEvent(event),
     onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next),
     findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
+    jiraSources:()=>gitlabJiraSources(store),
+    jiraOriginalKeys:route=>gitlabJiraOriginalKeys(store,route),
   });
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
@@ -1140,6 +1143,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.branchObservationSource==='sync')))) {
       fail('GitLab 수동 조회로 확인한 브랜치 연결에는 schemaVersion 28 백업이 필요합니다.');
     }
+    if (data.schemaVersion < 35 && (data.gitlabLinks.some((link:GitlabLink) => link.originalJiraKey !== undefined) ||
+        importedTrash.some(entry => entry.gitlabLinks.some(link => link.originalJiraKey !== undefined)))) {
+      fail('GitLab 연결의 Jira 원본 키를 포함한 백업은 schemaVersion 35가 필요합니다.');
+    }
     const importedDependencies=data.dependencies as Dependency[];
     const archivedDependencies=importedTrash.flatMap(entry=>entry.dependencies);
     if(data.schemaVersion<21&&(importedDependencies.some(value=>value.type!=='FS')||archivedDependencies.some(value=>value.type!=='FS'))){
@@ -1261,7 +1268,6 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentFollowUp.clearForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
-      gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
@@ -1310,6 +1316,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const project of data.projects)store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(project.id,nextNumbers.get(project.id)||1);
       collaboration.replaceImported(importedCollaboration);
       sourcePreservation.replaceImported(liveSources,previousImports);
+      gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       trash.replaceImported(importedTrash);
       trashItems.replaceImported(importedTrashItems);
       timeReservations.replaceRestored(importedReservations);

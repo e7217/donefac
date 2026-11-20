@@ -288,7 +288,7 @@ test('schema and workflow preserve referenced selectors, reject new bad conditio
 
     const backup = await f.call<Backup>('/export');
     assert.equal(backup.status, 200);
-    assert.equal(backup.data.schemaVersion, 34);
+    assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
     const invalid = structuredClone(backup.data);
     invalid.workflows!.find(value => value.projectId === conditionalProject)!.statuses = originalWorkflow.statuses;

@@ -1,6 +1,6 @@
 import { createHash,createHmac,timingSafeEqual } from 'node:crypto';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabLink,GitlabSettings,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncResult,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncResult,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
@@ -10,7 +10,7 @@ import type { Store } from './store.js';
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new GitlabIntegrationError(status,message,details);}
 type Obj=Record<string,unknown>;
-type RawSettings={baseUrl:string;projectIds:number[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
+type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string};
 type BranchCursor={id:string;pipelineId:number};
 type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string};
@@ -18,13 +18,20 @@ type Hooks={
   processEvent:(event:AutomationEvent)=>AutomationRun[];
   onConnectionChanged:(previous:GitlabSettings,next:GitlabSettings)=>number;
   findArchivedBranchLink?:(cursorId:string)=>GitlabLink|undefined;
+  jiraSources?:()=>GitlabJiraSource[];
+  jiraOriginalKeys?:(route:GitlabJiraRoute)=>Map<string,JiraKeyBinding|null>;
 };
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
-type SyncConnection={baseUrl:string;projectIds:number[];token:string|null;version:number};
+type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number};
 type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
-type IssueMatch=Pick<Issue,'id'|'key'|'title'>;
+type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'>;
+type JiraKeyBinding={issueId:string;originalJiraKey:string};
+type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
+type KeyReader=(...values:unknown[])=>string[];
+type TicketMatcher={match:(keys:string[],inherited?:TicketMatch[])=>TicketMatch[];inherit:(link:GitlabLink)=>TicketMatch|undefined;ambiguousKeys:Set<string>};
 const PREVIEW_CANDIDATE_LIMIT=100;
+const AMBIGUOUS_KEY_LIMIT=20;
 const GITLAB_PUSH_COMMIT_LIMIT=20;
 const now=()=>new Date().toISOString();
 const record=(value:unknown):Obj=>value&&typeof value==='object'&&!Array.isArray(value)?value as Obj:{};
@@ -35,6 +42,22 @@ function baseUrl(value:unknown):string{if(typeof value!=='string')fail('GitLab �
 function projectIds(value:unknown):number[]{
   if(!Array.isArray(value)||value.length>100||value.some(id=>!Number.isSafeInteger(id)||id<1)||new Set(value).size!==value.length)fail('저장소 ID는 중복되지 않은 양의 정수 목록이어야 합니다.');
   return [...value].sort((a,b)=>a-b);
+}
+function jiraSourceId(source:Pick<GitlabJiraSource,'projectId'|'jiraInstanceKey'>):string {
+  return JSON.stringify([source.projectId,source.jiraInstanceKey]);
+}
+function parseJiraRoutes(value:unknown,allowed:number[],sources:GitlabJiraSource[]):GitlabJiraRoute[]{
+  if(!Array.isArray(value)||value.length>100)fail('GitLab 저장소별 Jira 원본 경로를 확인해 주세요.');
+  const selected=new Set<number>(),sourceIds=new Set(sources.map(jiraSourceId));
+  return value.map(raw=>{
+    const input=record(raw),{repositoryId,projectId,jiraInstanceKey}=input;
+    if(Object.keys(input).length!==3||typeof repositoryId!=='number'||!allowed.includes(repositoryId)||selected.has(repositoryId)||
+       typeof projectId!=='string'||typeof jiraInstanceKey!=='string'||!sourceIds.has(jiraSourceId({projectId,jiraInstanceKey}))){
+      fail('허용된 저장소마다 현재 이관된 프로젝트와 Jira 원본 조합을 한 번만 선택해 주세요.');
+    }
+    selected.add(repositoryId);
+    return {repositoryId,projectId,jiraInstanceKey};
+  }).sort((a,b)=>a.repositoryId-b.repositoryId);
 }
 function credential(value:unknown):string{
   if(typeof value!=='string'||value.length>2000||/[\r\n]/.test(value))fail('인증 값을 확인해 주세요.');
@@ -49,15 +72,18 @@ function assertSettingsVersion(expectedVersion:unknown, currentVersion:number):v
 }
 function occurredAt(value:unknown):string|null{if(typeof value!=='string'||value.length>100)return null;const candidate=/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC$/.test(value)?value.replace(' ','T').replace(' UTC','Z'):value;if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(candidate)||!isCalendarDate(candidate.slice(0,10))||Number(candidate.slice(11,13))>23||Number(candidate.slice(14,16))>59||Number(candidate.slice(17,19))>59)return null;const time=Date.parse(candidate);return Number.isFinite(time)&&time<=Date.now()?new Date(time).toISOString():null;}
 function keys(...values:unknown[]):string[]{return[...new Set(values.flatMap(value=>(typeof value==='string'?value:'').match(/\b[A-Z][A-Z0-9]{1,11}-\d+\b/g)||[]))];}
+function routedKeys(...values:unknown[]):string[]{
+  return [...new Set(values.flatMap(value=>(typeof value==='string'?value:'').match(/\b[A-Za-z][A-Za-z0-9_]{0,127}-\d+\b/g)||[]).map(key=>key.toUpperCase()))];
+}
 function constantEqual(a:string,b:string):boolean{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);}
 function signingKey(value:string):Buffer{if(!value.startsWith('whsec_'))fail('서명 토큰은 whsec_ 형식이어야 합니다.');const encoded=value.slice(6),key=Buffer.from(encoded,'base64');if(key.length!==32||key.toString('base64')!==encoded)fail('서명 토큰은 32바이트 Base64 whsec_ 형식이어야 합니다.');return key;}
 function validWebUrl(value:unknown):string{if(typeof value!=='string'||value.length>4000)return'';try{const url=new URL(value);return['http:','https:'].includes(url.protocol)&&!url.username&&!url.password?url.toString():'';}catch{return'';}}
 
-function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[]){
+function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readKeys:KeyReader=keys){
   const id=objectId(object);
   const title=string(object.title)||string(object.name)||string(object.ref)||string(object.message)||`${kind} #${id}`;
   return {
-    id,title:title.slice(0,500),matchedKeys:[...new Set([...keys(title,object.description,object.source_branch,object.ref),...explicitKeys])],
+    id,title:title.slice(0,500),matchedKeys:[...new Set([...readKeys(title,object.description,object.source_branch,object.ref),...explicitKeys])],
     webUrl:validWebUrl(object.web_url||object.url),iid:kind==='commit'?0:Number(object.iid||object.id)||0,
     state:string(object.state)||string(object.status)||'unknown',incomingTime:occurredAt(object.updated_at||object.finished_at||object.created_at),
     sourceBranch:bound(object.source_branch||object.ref,512),sourceSha:bound(object.sha||record(object.last_commit).id,128),
@@ -68,9 +94,52 @@ type ProjectReadPlan={
   projectId:number;mergeRequests:LinkDraft[];pipelines:LinkDraft[];
   history?:{branches:LinkDraft[];commits:LinkDraft[];limits:GitlabHistoryLimits};
 };
-function linkForIssue(instance:string,projectId:number,kind:GitlabLink['kind'],issueId:string,draft:LinkDraft):GitlabLink{
+function linkForIssue(instance:string,projectId:number,kind:GitlabLink['kind'],match:TicketMatch,draft:LinkDraft):GitlabLink{
   const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha }=draft;
-  return {id:`gitlab:${instance}:${projectId}:${kind}:${id}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{})};
+  const {issue:{id:issueId},originalJiraKey}=match;
+  return {id:`gitlab:${instance}:${projectId}:${kind}:${id}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{}),...(originalJiraKey?{originalJiraKey}:{})};
+}
+function retainOriginalJiraKey(link:GitlabLink,existing?:GitlabLink):GitlabLink{
+  return !link.originalJiraKey&&existing?.originalJiraKey?{...link,originalJiraKey:existing.originalJiraKey}:link;
+}
+
+function makeTicketMatcher(issues:IssueMatch[],route:GitlabJiraRoute|undefined,originals:Map<string,JiraKeyBinding|null>):TicketMatcher{
+  const scoped=route?issues.filter(issue=>issue.projectId===route.projectId):issues;
+  const byId=new Map(scoped.map(issue=>[issue.id,issue]));
+  const byKey=new Map(scoped.map(issue=>[route?issue.key.toUpperCase():issue.key,issue]));
+  const ambiguousKeys=new Set<string>();
+
+  function fromKey(key:string):TicketMatch|undefined{
+    const normalized=route?key.toUpperCase():key;
+    const current=byKey.get(normalized),alias=originals.get(normalized);
+    if(alias===null||current&&alias&&current.id!==alias.issueId){
+      if(ambiguousKeys.size<AMBIGUOUS_KEY_LIMIT)ambiguousKeys.add(normalized);
+      return;
+    }
+    const issue=current??(alias?byId.get(alias.issueId):undefined);
+    return issue?{issue,...(alias?{originalJiraKey:alias.originalJiraKey}:{})}:undefined;
+  }
+
+  return {
+    match(keys,inherited=[]){
+      const matches=new Map<string,TicketMatch>();
+      for(const candidate of [...keys.map(fromKey),...inherited]){
+        if(!candidate)continue;
+        const previous=matches.get(candidate.issue.id);
+        if(!previous||!previous.originalJiraKey&&candidate.originalJiraKey)matches.set(candidate.issue.id,candidate);
+      }
+      return [...matches.values()];
+    },
+    inherit(link){
+      const issue=byId.get(link.issueId);
+      if(!issue)return;
+      if(!link.originalJiraKey)return {issue};
+      const alias=originals.get(link.originalJiraKey.toUpperCase());
+      if(alias?.issueId!==issue.id||fromKey(link.originalJiraKey)?.issue.id!==issue.id)return;
+      return {issue,originalJiraKey:alias.originalJiraKey};
+    },
+    ambiguousKeys,
+  };
 }
 function keepNewerLink(existing:GitlabLink,draft:LinkDraft):boolean{
   return !draft.incomingTime||Date.parse(existing.updatedAt)>=Date.parse(draft.incomingTime);
@@ -100,27 +169,28 @@ function safePreviewValue(value:string,token:string|null):string{
   return token?value.replaceAll(token,'[숨김]'):value;
 }
 
-function repositoryBranchDraft(object:Obj, repository:URL):LinkDraft{
+function repositoryBranchDraft(object:Obj, repository:URL, readKeys:KeyReader):LinkDraft{
   const branch=object.name, sha=gitlabObjectSha(record(object.commit).id);
   if(!isGitlabBranchName(branch)||!sha||/^0+$/.test(sha))return readLink('branch',{},[]);
   const draft=readLink('branch',{
     id:branchObjectId(branch),title:branch,source_branch:branch,sha,state:'active',web_url:gitlabPushLinkUrl(repository,'tree',branch),
-  },[]);
+  },[],readKeys);
   return {...draft,title:branch,iid:0};
 }
 
-function repositoryCommitDraft(object:Obj, repository:URL):LinkDraft{
+function repositoryCommitDraft(object:Obj, repository:URL, readKeys:KeyReader):LinkDraft{
   const sha=gitlabObjectSha(object.id);
   if(!sha||/^0+$/.test(sha))return readLink('commit',{},[]);
   return readLink('commit',{
     id:sha,sha,title:object.title,message:object.message,state:'committed',
     updated_at:object.committed_date,web_url:gitlabPushLinkUrl(repository,'commit',sha),
-  },keys(object.title,object.message));
+  },readKeys(object.title,object.message),readKeys);
 }
 
 async function readProjectPlan(connection:SyncConnection,projectId:number,options:ReadOptions):Promise<ProjectReadPlan>{
   const scan=await readGitlabSyncProject(connection,projectId,options);
-  const mergeRequests=scan.mergeRequests.map(object=>readLink('merge_request',object,[]));
+  const readKeys=connection.jiraRoutes?.some(route=>route.repositoryId===projectId)?routedKeys:keys;
+  const mergeRequests=scan.mergeRequests.map(object=>readLink('merge_request',object,[],readKeys));
   const keysByHead=new Map<string,Set<string>>();
   for(const mr of mergeRequests){
     const head=branchHead(mr.sourceBranch,mr.sourceSha);
@@ -131,14 +201,14 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
   }
   const pipelines=scan.pipelines.map(object=>{
     const head=branchHead(object.ref,object.sha);
-    return readLink('pipeline',object,head?[...(keysByHead.get(head)??[])]:[]);
+    return readLink('pipeline',object,head?[...(keysByHead.get(head)??[])]:[],readKeys);
   });
   if(!scan.history)return {projectId,mergeRequests,pipelines};
   const repository=gitlabRepositoryUrl(connection.baseUrl,scan.history.project);
   if(!repository)throw new GitlabReadError('project','invalid-response');
   const {branches,commits,branchesLimited,commitsLimited}=scan.history;
   return {projectId,mergeRequests,pipelines,history:{
-    branches:branches.map(object=>repositoryBranchDraft(object,repository)),commits:commits.map(object=>repositoryCommitDraft(object,repository)),
+    branches:branches.map(object=>repositoryBranchDraft(object,repository,readKeys)),commits:commits.map(object=>repositoryCommitDraft(object,repository,readKeys)),
     limits:{branches:branchesLimited,commits:commitsLimited},
   }};
 }
@@ -148,15 +218,23 @@ export class GitlabIntegrationService{
   // Branch list snapshots have no revision number for reconciling overlapping manual scans.
   private historySyncActive=false;
   constructor(private readonly store:Store,private readonly hooks:Hooks){store.db.exec('CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);');}
-  private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
-  private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError};}
+  private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
+  private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{})};}
   settings():GitlabSettings{return this.public(this.raw());}
+  private jiraSources():GitlabJiraSource[]{return this.hooks.jiraSources?.()??[];}
+  private submittedJiraRoutes(input:Obj,old:RawSettings,address:string,repositories:number[]):GitlabJiraRoute[]{
+    if(Object.hasOwn(input,'jiraRoutes'))return parseJiraRoutes(input.jiraRoutes,repositories,this.jiraSources());
+    return address===old.baseUrl?(old.jiraRoutes??[]).filter(route=>repositories.includes(route.repositoryId)):[];
+  }
   private instance(raw:Pick<RawSettings,'baseUrl'>=this.raw()):string{return createHash('sha256').update(raw.baseUrl).digest('hex').slice(0,12);}
   configure(value:unknown,afterSave?:(settings:GitlabSettings)=>void):GitlabSettings{return this.store.transaction(()=>{
     const input=record(value),old=this.raw();assertSettingsVersion(input.expectedVersion,old.version);const next={...old};
     if('baseUrl'in input)next.baseUrl=baseUrl(input.baseUrl);
     if(next.baseUrl!==old.baseUrl){next.token=null;next.lastSyncAt=null;next.lastError=null;}
     if('projectIds'in input)next.projectIds=projectIds(input.projectIds);
+    const jiraRoutes=this.submittedJiraRoutes(input,old,next.baseUrl,next.projectIds);
+    if(jiraRoutes.length)next.jiraRoutes=jiraRoutes;
+    else delete next.jiraRoutes;
     for(const field of ['token','webhookSecret','signingToken'] as const)if(field in input){const value=credential(input[field]);if(value&&field==='signingToken')signingKey(value);next[field]=value?this.store.seal(value):null;}
     next.version=old.version+1;this.store.setSetting('gitlab',next);this.hooks.onConnectionChanged(this.public(old),this.public(next));afterSave?.(this.public(next));return this.public(next);
   });}
@@ -171,6 +249,11 @@ export class GitlabIntegrationService{
     }
     for (const observed of observations.values()) this.store.put('gitlab_push_cursors', observed);
     const raw = this.raw();
+    if(raw.jiraRoutes?.length){
+      const sources=new Set(this.jiraSources().map(jiraSourceId));
+      raw.jiraRoutes=raw.jiraRoutes.filter(route=>raw.projectIds.includes(route.repositoryId)&&sources.has(jiraSourceId(route)));
+      if(!raw.jiraRoutes.length)delete raw.jiraRoutes;
+    }
     this.store.setSetting('gitlab', { ...raw, version: raw.version + 1 });
   }
   private authenticate(req:Request,raw:RawSettings):void{
@@ -185,24 +268,36 @@ export class GitlabIntegrationService{
     if(!raw.webhookSecret){if(raw.signingToken)fail('Webhook 서명이 필요합니다.',401);fail('Webhook 인증이 설정되지 않았습니다.',503);}
     if(!constantEqual(this.store.unseal(raw.webhookSecret),req.header('X-Gitlab-Token')||''))fail('Webhook 인증에 실패했습니다.',401);
   }
-  private inheritedKeys(projectId:number,branch:string,sha:string,instance:string):string[]{
-    if(!branch||!sha)return[];const issueIds=new Set(this.store.all<GitlabLink>('gitlab_links').filter(link=>link.kind==='merge_request'&&link.projectId===projectId&&link.id.startsWith(`gitlab:${instance}:`)&&link.sourceBranch===branch&&link.sourceSha===sha).map(link=>link.issueId));return this.store.all<Issue>('issues').filter(issue=>issueIds.has(issue.id)).map(issue=>issue.key);
+  private ticketMatcher(issues:IssueMatch[],route?:GitlabJiraRoute):TicketMatcher{
+    return makeTicketMatcher(issues,route,route?this.hooks.jiraOriginalKeys?.(route)??new Map():new Map());
   }
-  private upsert(raw:RawSettings,projectId:number,kind:GitlabLink['kind'],object:Obj,explicitKeys:string[]=[],preserveExisting=false):{linked:number;issueIds:string[]}{
-    const draft=readLink(kind,object,explicitKeys);if(!draft.id)return{linked:0,issueIds:[]};
-    const matched=new Set(draft.matchedKeys),issueIds=this.store.all<Issue>('issues').filter(issue=>matched.has(issue.key)).map(issue=>issue.id);
-    if(!draft.webUrl)return{linked:0,issueIds};
-    const instance=this.instance(raw);let linked=0;
-    for(const issueId of issueIds){const link=linkForIssue(instance,projectId,kind,issueId,draft);if(preserveExisting&&this.store.get('gitlab_links',link.id))continue;this.store.put('gitlab_links',link);linked++;}
-    return{linked,issueIds};
+  private inheritedMatches(projectId:number,branch:string,sha:string,instance:string,matcher:TicketMatcher):TicketMatch[]{
+    if(!branch||!sha)return[];
+    return this.store.all<GitlabLink>('gitlab_links').flatMap(link=>{
+      if(link.kind!=='merge_request'||link.projectId!==projectId||!link.id.startsWith(`gitlab:${instance}:`)||link.sourceBranch!==branch||link.sourceSha!==sha)return[];
+      const match=matcher.inherit(link);
+      return match?[match]:[];
+    });
   }
-  private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, issueIds: string[]): number {
+  private upsert(instance:string,projectId:number,kind:GitlabLink['kind'],draft:LinkDraft,matches:TicketMatch[],preserveExisting:boolean):number{
+    if(!draft.webUrl)return 0;
+    let linked=0;
+    for(const match of matches){
+      const link=linkForIssue(instance,projectId,kind,match,draft);
+      const existing=this.store.get<GitlabLink>('gitlab_links',link.id);
+      if(preserveExisting&&existing)continue;
+      this.store.put('gitlab_links',retainOriginalJiraKey(link,existing));
+      linked++;
+    }
+    return linked;
+  }
+  private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, matches: TicketMatch[]): number {
     const id = pushCursorId(instance, projectId, head.branch);
     let previous = this.store.get<PushObservation>('gitlab_push_cursors', id);
     let snapshotUrl: string | undefined;
     if (!previous) {
       // Native backups contain branch links without transient webhook cursors.
-      const persisted = issueIds.flatMap(issueId => {
+      const persisted = matches.flatMap(({issue:{id:issueId}}) => {
         const prior = this.store.get<GitlabLink>('gitlab_links', `${id}:${issueId}`);
         if (prior?.branchObservationSource === 'sync') snapshotUrl ??= prior.webUrl;
         const observed = prior && pushObservationFromLink(prior);
@@ -210,9 +305,9 @@ export class GitlabIntegrationService{
       });
       previous = persisted.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
     }
-    const archived = !previous && !issueIds.length ? this.hooks.findArchivedBranchLink?.(id) : undefined;
+    const archived = !previous && !matches.length ? this.hooks.findArchivedBranchLink?.(id) : undefined;
     if (archived) previous = pushObservationFromLink(archived) ?? undefined;
-    if (!previous && !issueIds.length && !archived) return 0;
+    if (!previous && !matches.length && !archived) return 0;
     const lastHead = previous?.state === 'deleted' ? '0'.repeat(previous.sourceSha.length) : previous?.sourceSha;
     const sameHead = lastHead === head.after;
     if (lastHead !== undefined && !sameHead && lastHead !== head.before) return 0;
@@ -225,11 +320,12 @@ export class GitlabIntegrationService{
     };
     this.store.put('gitlab_push_cursors', observation);
     let linked = 0;
-    for (const issueId of issueIds) {
-      const link: GitlabLink = { ...observation, id: `${id}:${issueId}`, issueId, projectId, iid: 0, kind: 'branch', title: head.branch, sourceBranch: head.branch };
+    for (const {issue:{id:issueId},originalJiraKey} of matches) {
+      const link: GitlabLink = { ...observation, id: `${id}:${issueId}`, issueId, projectId, iid: 0, kind: 'branch', title: head.branch, sourceBranch: head.branch, ...(originalJiraKey?{originalJiraKey}:{}) };
       const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
-      if (existing?.state === link.state && !existing.branchObservationSource && existing.sourceSha === link.sourceSha && existing.webUrl === link.webUrl) continue;
-      this.store.put('gitlab_links', link);
+      const next=retainOriginalJiraKey(link,existing);
+      if (existing?.state === next.state && !existing.branchObservationSource && existing.sourceSha === next.sourceSha && existing.webUrl === next.webUrl && existing.originalJiraKey === next.originalJiraKey) continue;
+      this.store.put('gitlab_links', next);
       linked++;
     }
     return linked;
@@ -253,18 +349,16 @@ export class GitlabIntegrationService{
   }
   private recordPush(raw: RawSettings, instance: string, projectId: number, kind: string, body: Obj, project: Obj): number {
     const head = kind === 'push' ? readGitlabHeadPush(body) : null;
-    const branchKeys = head ? keys(head.branch) : [];
+    const route=raw.jiraRoutes?.find(candidate=>candidate.repositoryId===projectId);
+    const readKeys=route?routedKeys:keys;
+    const branchKeys = head ? readKeys(head.branch) : [];
     const commits = Array.isArray(body.commits) ? body.commits : [];
     if (!branchKeys.length && !commits.length) return 0;
 
     const repository = gitlabRepositoryUrl(raw.baseUrl, project);
-    const issues = this.syncIssues();
-    const targets = (matched: string[]) => matched.flatMap(key => {
-      const issue = issues.get(key);
-      return issue ? [issue.id] : [];
-    });
-    const branchIssueIds = targets(branchKeys);
-    let linked = head ? this.observeBranch(raw.baseUrl, instance, projectId, head, repository, branchIssueIds) : 0;
+    const matcher=this.ticketMatcher(this.syncIssues(),route);
+    const branchMatches=matcher.match(branchKeys);
+    let linked = head ? this.observeBranch(raw.baseUrl, instance, projectId, head, repository, branchMatches) : 0;
     if (head?.deleted) return linked;
 
     for (const item of (head ? commits.slice(-GITLAB_PUSH_COMMIT_LIMIT) : commits)) {
@@ -272,9 +366,9 @@ export class GitlabIntegrationService{
       const sha = gitlabObjectSha(commit.id);
       if (sha && /^0+$/.test(sha)) continue;
       if (head && (!sha || sha.length !== head.after.length)) continue;
-      const explicitKeys = keys(commit.title, commit.message, commit.description);
-      const issueIds = explicitKeys.length ? targets(explicitKeys) : branchIssueIds;
-      if (!issueIds.length) continue;
+      const explicitKeys = readKeys(commit.title, commit.message, commit.description);
+      const matches = explicitKeys.length ? matcher.match(explicitKeys) : branchMatches;
+      if (!matches.length) continue;
 
       const suppliedUrl = commit.web_url || commit.url;
       const canonicalUrl = repository && sha && gitlabPushLinkUrl(repository, 'commit', sha);
@@ -285,14 +379,15 @@ export class GitlabIntegrationService{
         state: 'committed', updated_at: commit.timestamp, source_branch: head?.branch, sha,
       }, []);
       if (!draft.id) continue;
-      for (const issueId of issueIds) {
-        const link = linkForIssue(instance, projectId, 'commit', issueId, draft);
+      for (const match of matches) {
+        const link = linkForIssue(instance, projectId, 'commit', match, draft);
         const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
         if (existing) {
           const shaToAdd = existing.sourceSha ? undefined : link.sourceSha;
           const branchToAdd = existing.sourceBranch ? undefined : link.sourceBranch;
-          if (!shaToAdd && !branchToAdd) continue;
-          this.store.put('gitlab_links', { ...existing, ...(shaToAdd ? { sourceSha: shaToAdd } : {}), ...(branchToAdd ? { sourceBranch: branchToAdd } : {}) });
+          const aliasToAdd = existing.originalJiraKey ? undefined : link.originalJiraKey;
+          if (!shaToAdd && !branchToAdd && !aliasToAdd) continue;
+          this.store.put('gitlab_links', { ...existing, ...(shaToAdd ? { sourceSha: shaToAdd } : {}), ...(branchToAdd ? { sourceBranch: branchToAdd } : {}), ...(aliasToAdd ? { originalJiraKey: aliasToAdd } : {}) });
         } else this.store.put('gitlab_links', link);
         linked++;
       }
@@ -316,20 +411,25 @@ export class GitlabIntegrationService{
       const objectDisposition=disposition;
       if(id&&(disposition==='fresh'||!prior))this.store.put('gitlab_object_cursors',{id:cursorId,occurredAt:time,state,receivedAt:now()} satisfies ObjectCursor);
       if(kind==='pipeline'&&branch){const numericId=Number(id),branchId=`${instance}:${projectId}:${branch}`,latest=this.store.get<BranchCursor>('gitlab_branch_cursors',branchId);if(Number.isSafeInteger(numericId)&&numericId>0){if(latest&&numericId<latest.pipelineId){disposition='stale';reason='이 브랜치에 더 최근에 생성된 파이프라인이 있어 이전 결과를 적용하지 않았습니다.';}else if(objectDisposition==='fresh'&&time&&(!latest||numericId>latest.pipelineId))this.store.put('gitlab_branch_cursors',{id:branchId,pipelineId:numericId} satisfies BranchCursor);}else{disposition='unverified';reason='파이프라인 순서를 확인할 수 없습니다.';}}
-      const mergeRequest=record(body.merge_request),extra=keys(mergeRequest.title,mergeRequest.description,mergeRequest.source_branch,record(body.commit).message,...(Array.isArray(body.commits)?body.commits.map(commit=>record(commit).message):[]));
-      if(kind==='pipeline')extra.push(...this.inheritedKeys(projectId,branch,sha,instance));
+      const route=raw.jiraRoutes?.find(candidate=>candidate.repositoryId===projectId),readKeys=route?routedKeys:keys;
+      const issues=this.syncIssues(),matcher=this.ticketMatcher(issues,route);
+      const mergeRequest=record(body.merge_request),extra=readKeys(mergeRequest.title,mergeRequest.description,mergeRequest.source_branch,record(body.commit).message,...(Array.isArray(body.commits)?body.commits.map(commit=>record(commit).message):[]));
+      const inherited=kind==='pipeline'?this.inheritedMatches(projectId,branch,sha,instance,matcher):[];
       const object={...attributes,...(time?{updated_at:time}:{}),...(branch?{source_branch:branch}:{}),...(sha?{sha}:{}),web_url:attributes.web_url||attributes.url||(kind==='pipeline'&&project.web_url?`${project.web_url}/-/pipelines/${id}`:'')};
-      let linked=0;let issueIds:string[]=[];
-      if(objectDisposition==='fresh'||objectDisposition==='unverified'){const result=this.upsert(raw,projectId,kind,object,extra,objectDisposition==='unverified');linked=result.linked;issueIds=result.issueIds;}
-      else{const matched=new Set(keys(attributes.title,attributes.description,branch,attributes.ref,...extra));issueIds=this.store.all<Issue>('issues').filter(issue=>matched.has(issue.key)).map(issue=>issue.id);}
+      const draft=readLink(kind,object,extra,readKeys),canUpsert=objectDisposition==='fresh'||objectDisposition==='unverified';
+      const direct=canUpsert?draft.matchedKeys:readKeys(attributes.title,attributes.description,branch,attributes.ref,...extra);
+      const byMatchId=new Map((id?matcher.match(direct,inherited):[]).map(match=>[match.issue.id,match]));
+      const matches=issues.flatMap(issue=>{const match=byMatchId.get(issue.id);return match?[match]:[];});
+      const linked=canUpsert?this.upsert(instance,projectId,kind,draft,matches,objectDisposition==='unverified'):0;
+      const issueIds=matches.map(match=>match.issue.id);
       const action=string(attributes.action),trigger=kind==='merge_request'?({open:'merge_request.opened',reopen:'merge_request.opened',merge:'merge_request.merged',close:'merge_request.closed'} as Record<string,AutomationEvent['trigger']>)[action]:({success:'pipeline.succeeded',failed:'pipeline.failed'} as Record<string,AutomationEvent['trigger']>)[state];
       const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
       return{ok:true,duplicate:false,linked,runs};
     });
   }
   private visitProjectLinks(
-    instance:string,plan:ProjectReadPlan,startedAt:number,issues:Map<string,IssueMatch>,
-    visit:(link:GitlabLink,issue:IssueMatch,action:GitlabSyncPreviewCandidate['action'],kind:SyncKind,objectId:string)=>void,
+    instance:string,plan:ProjectReadPlan,startedAt:number,matcher:TicketMatcher,
+    visit:(link:GitlabLink,match:TicketMatch,action:GitlabSyncPreviewCandidate['action'],kind:SyncKind,objectId:string)=>void,
   ):GitlabSyncPreviewCounts{
     const {projectId,mergeRequests,pipelines,history}=plan;
     const counts={...emptyCounts(Boolean(history)),mergeRequests:mergeRequests.length,pipelines:pipelines.length,
@@ -340,9 +440,11 @@ export class GitlabIntegrationService{
     const seenHistory=new Set<string>();
     for(const [kind,drafts] of [['branch',history?.branches??[]],['commit',history?.commits??[]],['merge_request',mergeRequests],['pipeline',pipelines]] as const)for(const draft of drafts){
       if(!draft.id||!draft.webUrl){counts.skipped++;continue;}
+      let observation:PushObservation|undefined;
       if(kind==='branch'||kind==='commit'){
         const identity=`${kind}:${draft.id}`;
-        if(seenHistory.has(identity)||kind==='branch'&&this.store.get('gitlab_push_cursors',`gitlab:${instance}:${projectId}:branch:${draft.id}`)){
+        if(kind==='branch')observation=this.store.get<PushObservation>('gitlab_push_cursors',`gitlab:${instance}:${projectId}:branch:${draft.id}`);
+        if(seenHistory.has(identity)||observation&&(observation.state!=='active'||observation.sourceSha!==draft.sourceSha)){
           counts.skipped++;continue;
         }
         seenHistory.add(identity);
@@ -352,27 +454,44 @@ export class GitlabIntegrationService{
           counts.skipped++;continue;
         }
       }
-      const matched=draft.matchedKeys.flatMap(key=>{const issue=issues.get(key);return issue?[issue]:[];});
+      const targets=matcher.match(draft.matchedKeys);
+      // A sampled branch can add a scoped Jira link to the exact authenticated head without replacing that observation.
+      const matched=observation?targets.filter(target=>target.originalJiraKey):targets;
+      if(observation&&!matched.length){counts.skipped++;continue;}
       if(!matched.length){counts.unmatched++;continue;}
       counts.matched++;
-      for(const issue of matched){
-        const link=linkForIssue(instance,projectId,kind,issue.id,draft);
-        if(kind==='branch')link.branchObservationSource='sync';
+      for(const match of matched){
+        const link=linkForIssue(instance,projectId,kind,match,draft);
+        if(observation){
+          const {state,sourceSha,webUrl,updatedAt}=observation;
+          Object.assign(link,{state,sourceSha,webUrl,updatedAt});
+        }else if(kind==='branch')link.branchObservationSource='sync';
         const existing=planned.get(link.id)??this.store.get<GitlabLink>('gitlab_links',link.id);
-        const currentEnough=existing&&(kind==='branch'
-          ? existing.branchObservationSource!=='sync'||existing.sourceSha===link.sourceSha&&existing.webUrl===link.webUrl
-          : kind==='commit'||keepNewerLink(existing,draft));
-        const action=!existing?'create':currentEnough?'unchanged':'update';
+        let currentEnough=false;
+        if(existing){
+          if(observation){
+            currentEnough=!existing.branchObservationSource&&existing.state===link.state&&existing.sourceSha===link.sourceSha&&
+              existing.webUrl===link.webUrl&&existing.updatedAt===link.updatedAt;
+          }else if(kind==='branch'){
+            currentEnough=existing.branchObservationSource!=='sync'||existing.sourceSha===link.sourceSha&&existing.webUrl===link.webUrl;
+          }else currentEnough=kind==='commit'||keepNewerLink(existing,draft);
+        }
+        let action:GitlabSyncPreviewCandidate['action']=existing?'update':'create';
+        let next=retainOriginalJiraKey(link,existing);
+        if(currentEnough&&existing){
+          if(!existing.originalJiraKey&&link.originalJiraKey)next={...existing,originalJiraKey:link.originalJiraKey};
+          else{next=existing;action='unchanged';}
+        }
         counts[action]++;
-        if(action!=='unchanged')planned.set(link.id,link);
-        visit(action==='unchanged'&&existing?existing:link,issue,action,kind,draft.id);
+        if(action!=='unchanged')planned.set(link.id,next);
+        visit(next,match,action,kind,draft.id);
       }
     }
     return counts;
   }
 
-  private syncIssues():Map<string,IssueMatch>{
-    return new Map(this.store.all<Issue>('issues').map(({id,key,title})=>[key,{id,key,title}]));
+  private syncIssues():IssueMatch[]{
+    return this.store.all<Issue>('issues').map(({id,key,title,projectId})=>({id,key,title,projectId}));
   }
 
   private currentForSync(version:number):RawSettings{
@@ -383,14 +502,15 @@ export class GitlabIntegrationService{
 
   async previewSync(value:unknown, signal?:AbortSignal):Promise<GitlabSyncPreview>{
     const input=record(value),saved=this.raw(),startedAt=Date.now();
-    if(Object.keys(input).some(key=>!['expectedVersion','baseUrl','projectIds','token','includeHistory'].includes(key)))fail('지원하지 않는 GitLab 미리보기 요청입니다.');
+    if(Object.keys(input).some(key=>!['expectedVersion','baseUrl','projectIds','token','includeHistory','jiraRoutes'].includes(key)))fail('지원하지 않는 GitLab 미리보기 요청입니다.');
     assertSettingsVersion(input.expectedVersion,saved.version);
     const includeHistory=historyRequested(input);
     const address='baseUrl'in input?baseUrl(input.baseUrl):saved.baseUrl;
     const repositories='projectIds'in input?projectIds(input.projectIds):saved.projectIds;
     if(!address||!repositories.length)fail('GitLab 주소와 저장소 ID를 입력해 주세요.');
+    const jiraRoutes=this.submittedJiraRoutes(input,saved,address,repositories);
     const token='token'in input?credential(input.token):address===saved.baseUrl&&saved.token?this.store.unseal(saved.token):null;
-    const connection={baseUrl:address,projectIds:repositories,token,version:saved.version};
+    const connection={baseUrl:address,projectIds:repositories,jiraRoutes,token,version:saved.version};
     const reads:({projectId:number;plan:ProjectReadPlan}|{projectId:number;error:GitlabReadError})[]=[];
     for(const projectId of repositories){
       signal?.throwIfAborted();
@@ -403,14 +523,15 @@ export class GitlabIntegrationService{
     const outcomes:GitlabSyncPreview['repositories']=reads.map(read=>{
       const {projectId}=read;
       if('error'in read){const {stage,httpStatus,message}=read.error;return {projectId,status:'error',counts:emptyCounts(includeHistory),error:{stage,httpStatus,message}};}
-      const projectCounts=this.visitProjectLinks(instance,read.plan,startedAt,issues,(link,issue,action,kind,objectId)=>{
+      const matcher=this.ticketMatcher(issues,jiraRoutes.find(route=>route.repositoryId===projectId));
+      const projectCounts=this.visitProjectLinks(instance,read.plan,startedAt,matcher,(link,{issue,originalJiraKey},action,kind,objectId)=>{
         if(candidates.length<PREVIEW_CANDIDATE_LIMIT)candidates.push({
           projectId,kind,objectId:safePreviewValue(objectId,token),title:safePreviewValue(link.title,token),state:safePreviewValue(link.state.slice(0,100),token),
-          issueId:issue.id,issueKey:issue.key,issueTitle:issue.title,action,
+          issueId:issue.id,issueKey:issue.key,issueTitle:issue.title,action,...(originalJiraKey?{originalJiraKey:safePreviewValue(originalJiraKey,token)}:{}),
         });
       });
       for(const key of Object.keys(counts) as (keyof GitlabSyncPreviewCounts)[])counts[key]=(counts[key]??0)+(projectCounts[key]??0);
-      return {projectId,status:'ok',counts:projectCounts,error:null,...(read.plan.history?{historyLimits:read.plan.history.limits}:{})};
+      return {projectId,status:'ok',counts:projectCounts,error:null,...(read.plan.history?{historyLimits:read.plan.history.limits}:{}),...(matcher.ambiguousKeys.size?{ambiguousKeys:[...matcher.ambiguousKeys].map(key=>safePreviewValue(key,token))}:{})};
     });
     return {settingsVersion:saved.version,baseUrl:address,projectIds:repositories,repositories:outcomes,counts,candidates,
       candidatesTruncated:counts.create+counts.update+counts.unchanged>candidates.length};
@@ -433,7 +554,8 @@ export class GitlabIntegrationService{
       this.store.transaction(()=>{
         const current=this.currentForSync(captured.version),instance=this.instance(current),issues=this.syncIssues();
         for(const plan of plans){
-          const counts=this.visitProjectLinks(instance,plan,startedAt,issues,(link,_issue,action)=>{if(action!=='unchanged')this.store.put('gitlab_links',link);});
+          const matcher=this.ticketMatcher(issues,current.jiraRoutes?.find(route=>route.repositoryId===plan.projectId));
+          const counts=this.visitProjectLinks(instance,plan,startedAt,matcher,(link,_match,action)=>{if(action!=='unchanged')this.store.put('gitlab_links',link);});
           scanned+=counts.mergeRequests+counts.pipelines+(counts.branches??0)+(counts.commits??0);
           linked+=counts.create+counts.update;
           if(plan.history){
@@ -459,6 +581,7 @@ export class GitlabIntegrationService{
   }
   registerRoutes(app:Express,hooks:RouteHooks):void{
     app.get('/api/integrations/gitlab',(_req,res)=>res.json(this.settings()));
+    app.get('/api/integrations/gitlab/jira-sources',(_req,res)=>res.set('Cache-Control','no-store').json(this.jiraSources()));
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));
     app.post('/api/integrations/gitlab/sync-preview',async(req,res)=>{

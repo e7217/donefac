@@ -200,8 +200,9 @@ curl --fail-with-body \
 
 | 요청 | 동작 |
 | --- | --- |
-| `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전 |
-| `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명 변경 |
+| `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전·저장한 `jiraRoutes` |
+| `GET /api/integrations/gitlab/jira-sources` | Jira 원본 키를 보관한 `{projectId, jiraInstanceKey}` 목록 |
+| `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명과 `jiraRoutes` 변경 |
 | `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인 및 선택한 저장소 이력의 티켓 연결 후보 확인 |
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
@@ -213,7 +214,7 @@ curl --fail-with-body \
 
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
 
-**연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`을 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
+**연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`, `jiraRoutes`를 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 
@@ -222,6 +223,14 @@ curl --fail-with-body \
 트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`다. MR의 update/approval 이벤트와 push는 상태 자동화를 실행하지 않는다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 다른 규칙으로 넘어가거나 연쇄 실행하지 않는다. 이미 도착 상태이면 업무 버전은 바꾸지 않는다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
 
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
+
+### 이관한 Jira 키로 연결
+
+`jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Teamspace 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Teamspace 키로 연결한다.
+
+매핑한 저장소는 지정한 프로젝트의 현재 키와 지정한 Jira 원본의 이관 키를 대소문자 구분 없이 찾는다. Jira 키를 사용하면 연결 후보와 저장 링크에 `originalJiraKey`를 기록한다. 한 객체가 동일 티켓의 현재 키와 원래 키를 함께 포함하면 링크를 한 건 저장한다. 서로 다른 티켓을 가리키는 키는 보류하고 미리보기의 저장소별 `ambiguousKeys`에 최대 20개를 표시한다.
+
+수동 동기화는 개발 활동 링크만 저장한다. 인증된 MR·파이프라인 이벤트는 활성 규칙의 기존 전이·필수 입력·시각 검증을 거친다. 매핑을 바꾸면 해당 저장소에 연결된 활성 자동화 규칙을 비활성화한다. 저장한 링크의 원래 키는 자체 백업 형식 35와 물리 백업에 들어간다. 연결 설정의 매핑은 서버에 저장되며 물리 백업에 포함된다. 자체 백업을 가져오면 복원한 데이터에 원본 프로젝트가 있는 매핑을 유지한다.
 
 ### MR 생성 전 브랜치·커밋
 
@@ -232,6 +241,8 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 브랜치가 이어지는 변경은 이전 SHA와 다음 SHA로 확인한다. 중간 이벤트가 빠지면 마지막으로 이어진 브랜치 상태를 유지하고, 이미 받은 커밋은 이력에 남긴다. 삭제된 브랜치는 마지막 확인 SHA와 `deleted` 상태를 보존한다. 자체 백업 형식 24는 활성 티켓과 휴지통의 브랜치 관측을 보존한다.
 
 수동 조회로 확인한 브랜치 링크는 `branchObservationSource: 'sync'`를 포함한다. 자체 백업 형식 28에서 활성 티켓과 휴지통의 수동 조회 출처를 보존한다. 이후 인증된 푸시가 같은 브랜치를 갱신하면 링크 ID를 유지한 채 웹훅 관측을 사용한다. 브랜치 삭제는 인증된 푸시에서 확인한다. 수동 동기화는 개발 활동 링크만 저장한다.
+
+이관 키를 연결할 때 이미 인증된 활성 브랜치가 있으면 조회한 브랜치의 SHA와 정확히 일치할 때 해당 관측을 사용한다. SHA가 다르거나 푸시가 브랜치 삭제를 기록한 경우에는 그 조회로 링크를 추가하지 않는다.
 
 `GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
 

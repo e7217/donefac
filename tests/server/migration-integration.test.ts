@@ -8,11 +8,11 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -32,6 +32,321 @@ async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
   return { dir, base, db, call, upload, configuration, preview, apply, async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); service.close(); db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 const csv = Buffer.from('Issue id,Issue key,Project key,Summary,Description,Reporter,Created,Updated,Status,Issue Type,Comment\r\n100,OLD-1,OLD,Synthetic imported issue one,"h2. 원본 설명",original.author,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task,"2020-01-03T00:00:00Z;original.author;보존한 댓글"\r\n200,OTHER-1,OTHER,Synthetic imported issue two,두번째 설명,original.author,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task,\r\n');
+
+function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title: string, status: string]>): Buffer {
+  const header = 'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type';
+  const lines = rows.map(([id, key, title, status]) => `${id},${key},${key.split('-')[0]},${title},2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,${status},Task`);
+  return Buffer.from([header, ...lines].join('\r\n'));
+}
+
+type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+const gitlabPath = '/integrations/gitlab';
+const historicAt = '2020-01-02T00:00:00.000Z';
+const syntheticSecret = 'migration-gitlab-synthetic-secret';
+const historicalBranch = 'feature/repository-history';
+const historicalHash = 'a'.repeat(40);
+
+async function importJiraForGitlab(f: MigrationFixture, projectKey: string, rows: Parameters<typeof jiraGitlabCsv>[0]) {
+  const original = await f.upload(jiraGitlabCsv(rows), `${projectKey}-history.csv`, 'jira');
+  const preview = await f.preview(await f.configuration(original, projectKey));
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  const response = await f.apply(preview);
+  assert.equal(response.status, 201, JSON.stringify(response.data));
+  const [projectId] = response.data.import.projectIds;
+  assert.ok(projectId);
+  const current = await f.call<WorkspaceSnapshot>('/workspace');
+  const issues = current.data.issues.filter(issue => issue.projectId === projectId).sort((left, right) => left.key.localeCompare(right.key));
+  assert.equal(issues.length, rows.length);
+  return { projectId, jiraInstanceKey: original.source.instanceKey, issues };
+}
+
+async function localGitlab(t: TestContext, respond: (path: string, base: string) => unknown) {
+  let base = '';
+  const reads: { path: string; method: string | undefined }[] = [];
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? '/', base).pathname;
+    reads.push({ path, method: request.method });
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify(respond(path, base)));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/forge`;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+  return { base, reads };
+}
+
+function gitlabMr(base: string, projectId: number, iid: number, title: string, branch = historicalBranch, sha = historicalHash, date = historicAt) {
+  return { id: iid, iid, title, state: 'merged', source_branch: branch, last_commit: { id: sha }, updated_at: date, web_url: `${base}/team/repo-${projectId}/-/merge_requests/${iid}` };
+}
+
+async function gitlabHook(f: MigrationFixture, body: unknown, secret = syntheticSecret, id = randomUUID()) {
+  const result = await fetch(`${f.base}${gitlabPath}/webhook`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Gitlab-Token': secret, 'webhook-id': id }, body: JSON.stringify(body),
+  });
+  return { status: result.status, data: await result.json() as { linked: number; duplicate: boolean; runs: AutomationRun[] } };
+}
+
+async function enableMigrationGitlabRule(f: MigrationFixture, projectId: string, repositoryId: number, from: string, to: string) {
+  const reply = await f.call<AutomationRule>('/automation-rules', 'POST', {
+    projectId, name: `저장소 ${repositoryId} 병합 후 완료`, trigger: 'merge_request.merged', enabled: true,
+    gitlabProjectIds: [repositoryId], branchPattern: 'feature/*', issueTypes: [], fromStatuses: [from], toStatusId: to,
+    actorId: 'user-seo', priority: 100,
+  });
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+  return reply.data;
+}
+
+test('explicit repository routes match imported Jira keys only for their selected source and preserve GitLab live event policy', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const baseline = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(baseline.status, 200);
+  const originA = await importJiraForGitlab(f, 'MOVA', [
+    ['RAWALI-9', 'OLD-1', '첫 번째 원본의 티켓', 'Open'], ['200', 'ALPHA-8', '첫 번째 원본의 완료 상태', 'Closed'],
+  ]);
+  const originB = await importJiraForGitlab(f, 'MOVB', [
+    ['100', 'OLD-1', '두 번째 원본의 티켓', 'Open'], ['200', 'BETA-9', '다른 인스턴스에만 있는 티켓', 'Closed'],
+  ]);
+  const [targetA] = originA.issues;
+  const [targetB] = originB.issues;
+  assert.notEqual(targetA.key, 'OLD-1');
+  assert.notEqual(targetB.key, 'OLD-1');
+  assert.notEqual(originA.jiraInstanceKey, originB.jiraInstanceKey);
+  const destinations = [originA, originB].map(({ projectId, jiraInstanceKey }) => ({ projectId, jiraInstanceKey }));
+  const available = await f.call<typeof destinations>(`${gitlabPath}/jira-sources`);
+  assert.equal(available.status, 200, JSON.stringify(available.data));
+  assert.deepEqual(new Set(available.data.map(value => JSON.stringify([value.projectId, value.jiraInstanceKey]))),
+    new Set(destinations.map(value => JSON.stringify([value.projectId, value.jiraInstanceKey]))));
+
+  const namedBranch = 'feature/OLD-1-history';
+  const commitHash = 'c'.repeat(40);
+  let restBranchHash = historicalHash;
+  const upstream = await localGitlab(t, (path, base) => {
+    const [, repo, endpoint] = /^\/forge\/api\/v4\/projects\/(42|43)(?:\/(.*))?$/.exec(path) ?? [];
+    const repoId = Number(repo);
+    if (!endpoint) return { id: repoId, path_with_namespace: `team/repo-${repo}`, web_url: `${base}/team/repo-${repo}` };
+    if (endpoint === 'merge_requests') return [
+      gitlabMr(base, repoId, 101, 'OLD-1 원래 키로 연 MR'),
+      ...(repoId === 42 ? [
+        gitlabMr(base, repoId, 102, `OLD-1 ${targetA.key} 같은 티켓을 두 번 언급`, 'feature/dual-reference', 'd'.repeat(40)),
+        gitlabMr(base, repoId, 103, 'NEO-1 범위 밖 현재 키', 'feature/outside', 'e'.repeat(40)),
+        gitlabMr(base, repoId, 104, 'BETA-9 다른 원본 키', 'feature/other-origin', 'f'.repeat(40)),
+        gitlabMr(base, repoId, 105, 'RAWALI-9 원본 키가 아닌 원본 객체 ID', 'feature/raw-id', 'b'.repeat(40)),
+      ] : [gitlabMr(base, repoId, 201, 'NEO-1 매핑 없는 저장소의 현재 키', 'feature/current-ticket', 'd'.repeat(40))]),
+    ];
+    if (endpoint === 'pipelines') return [
+      { id: 301, ref: historicalBranch, sha: historicalHash, status: 'success', updated_at: historicAt, web_url: `${base}/team/repo-${repo}/-/pipelines/301` },
+      { id: 302, ref: historicalBranch, sha: '5'.repeat(40), status: 'success', updated_at: historicAt, web_url: `${base}/team/repo-${repo}/-/pipelines/302` },
+    ];
+    if (endpoint === 'repository/branches') return [{ name: namedBranch, commit: { id: restBranchHash } }];
+    if (endpoint === 'repository/commits') return [{ id: commitHash, title: '이전 커밋', message: 'OLD-1 원본 Jira 참조', committed_date: historicAt }];
+    return [];
+  });
+
+  const empty = await f.call<GitlabSettings>(gitlabPath);
+  const config = await f.call<GitlabSettings>(gitlabPath, 'PATCH', {
+    expectedVersion: empty.data.version, baseUrl: upstream.base, projectIds: [42, 43], webhookSecret: syntheticSecret,
+  });
+  assert.equal(config.status, 200, JSON.stringify(config.data));
+  const selected = [{ repositoryId: 42, ...destinations[0] }];
+  const wrongOrigin = [{ repositoryId: 42, projectId: originA.projectId, jiraInstanceKey: originB.jiraInstanceKey }];
+  const denied = await f.call(gitlabPath, 'PATCH', { expectedVersion: config.data.version, jiraRoutes: wrongOrigin });
+  assert.equal(denied.status, 400, JSON.stringify(denied.data));
+  const unauthorized = await f.call(gitlabPath, 'PATCH', { expectedVersion: config.data.version, jiraRoutes: [{ ...selected[0], repositoryId: 99 }] });
+  assert.equal(unauthorized.status, 400, JSON.stringify(unauthorized.data));
+  assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data, config.data);
+
+  const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const previewRequest = { expectedVersion: config.data.version, includeHistory: true };
+  const unmapped = await f.call<GitlabSyncPreview>(`${gitlabPath}/sync-preview`, 'POST', previewRequest);
+  assert.equal(unmapped.status, 200, JSON.stringify(unmapped.data));
+  assert.ok(!unmapped.data.candidates.some(item => item.kind === 'merge_request' && item.objectId === '101'));
+  const preview = await f.call<GitlabSyncPreview>(`${gitlabPath}/sync-preview`, 'POST', { ...previewRequest, jiraRoutes: selected });
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  const candidates = preview.data.candidates;
+  const mapped = candidates.filter(candidate => candidate.projectId === 42);
+  assert.equal(mapped.length, 5);
+  assert.ok(mapped.every(candidate => candidate.issueId === targetA.id && candidate.issueKey === targetA.key && candidate.action === 'create'));
+  assert.deepEqual(mapped.map(({ kind }) => kind).sort(), ['branch', 'commit', 'merge_request', 'merge_request', 'pipeline']);
+  assert.deepEqual(mapped.filter(item => item.kind === 'merge_request').map(item => item.objectId).sort(), ['101', '102']);
+  assert.equal(mapped.find(item => item.kind === 'merge_request' && item.objectId === '101')?.originalJiraKey, 'OLD-1');
+  assert.equal(mapped.find(item => item.kind === 'pipeline')?.objectId, '301');
+  assert.equal(mapped.find(item => item.kind === 'pipeline')?.originalJiraKey, 'OLD-1');
+  assert.deepEqual(candidates.filter(candidate => candidate.projectId === 43).map(item => [item.kind, item.issueKey]), [['merge_request', 'NEO-1']]);
+  assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data, config.data);
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before);
+
+  const saved = await f.call<GitlabSettings>(gitlabPath, 'PATCH', { expectedVersion: config.data.version, jiraRoutes: selected });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.deepEqual(saved.data.jiraRoutes, selected);
+  const workflow = (await f.call<ProjectWorkflow>(`/projects/${originA.projectId}/workflow`)).data;
+  const completed = workflow.statuses.find(status => status.category === 'done');
+  assert.ok(completed);
+  const aliasAutomation = await enableMigrationGitlabRule(f, originA.projectId, 42, targetA.status, completed.id);
+  const unrelated = await enableMigrationGitlabRule(f, 'project-neo', 43, 'in_progress', 'done');
+
+  const sync = await f.call<GitlabSyncResult>(`${gitlabPath}/sync`, 'POST', { includeHistory: true });
+  assert.equal(sync.status, 200, JSON.stringify(sync.data));
+  assert.equal(sync.data.linked, candidates.length);
+  const afterSync = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  assert.deepEqual(afterSync.issues, before.issues);
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
+  assert.equal(afterSync.gitlabLinks.filter(link => link.projectId === 42 && link.issueId === targetA.id).length, 5);
+  assert.ok(afterSync.gitlabLinks.filter(link => ['branch', 'commit', 'pipeline'].includes(link.kind)).every(link =>
+    link.projectId === 42 && link.issueId === targetA.id && link.originalJiraKey === 'OLD-1'));
+  assert.ok(upstream.reads.length > 0 && upstream.reads.every(request => request.method === 'GET'));
+
+  function readIssue(id: string) { return f.call<WorkspaceSnapshot>('/workspace').then(snapshot => snapshot.data.issues.find(issue => issue.id === id)); }
+  const liveBranch = 'feature/live-event';
+  const liveHash = 'b'.repeat(40);
+  const fresh = (projectId: number, iid: number) => ({
+    object_kind: 'merge_request', project: { id: projectId },
+    object_attributes: { ...gitlabMr(upstream.base, projectId, iid, 'OLD-1 인증 웹훅', liveBranch, liveHash, new Date().toISOString()), action: 'merge' },
+  });
+  assert.equal((await gitlabHook(f, fresh(42, 401), 'incorrect-token')).status, 401);
+  assert.equal((await gitlabHook(f, fresh(99, 401))).status, 403);
+  const wrongRepo = await gitlabHook(f, fresh(43, 401));
+  assert.equal(wrongRepo.status, 200, JSON.stringify(wrongRepo.data));
+  assert.equal(wrongRepo.data.linked, 0);
+  assert.deepEqual(wrongRepo.data.runs, []);
+  assert.deepEqual(await readIssue(targetA.id), targetA);
+  const eventId = randomUUID();
+  const event = fresh(42, 401);
+  const live = await gitlabHook(f, event, syntheticSecret, eventId);
+  assert.equal(live.status, 200, JSON.stringify(live.data));
+  assert.equal(live.data.linked, 1);
+  assert.deepEqual(live.data.runs.map(run => [run.issueId, run.ruleId, run.outcome]), [[targetA.id, aliasAutomation.id, 'changed']]);
+  assert.equal((await readIssue(targetA.id))?.status, completed.id);
+  assert.equal((await readIssue(targetA.id))?.version, targetA.version + 1);
+  assert.deepEqual(await readIssue(targetB.id), targetB);
+  assert.equal((await gitlabHook(f, event, syntheticSecret, eventId)).data.duplicate, true);
+
+  const pipeline = (id: number, sha: string) => ({
+    object_kind: 'pipeline', project: { id: 42, web_url: `${upstream.base}/team/repo-42` },
+    object_attributes: { id, sha, ref: liveBranch, status: 'success', finished_at: new Date().toISOString() },
+  });
+  assert.equal((await gitlabHook(f, pipeline(501, '8'.repeat(40)))).data.linked, 0);
+  assert.equal((await gitlabHook(f, pipeline(502, liveHash))).data.linked, 1);
+  const push = (branch: string, before: string, after: string, commits: { id: string; title: string; message: string }[] = []) => gitlabHook(f, {
+    object_kind: 'push', project: { id: 42, web_url: `${upstream.base}/team/repo-42`, path_with_namespace: 'team/repo-42' },
+    ref: `refs/heads/${branch}`, before, after, commits,
+  });
+  const pushed = await push('feature/OLD-1-live', '0'.repeat(40), '1'.repeat(40), [
+    { id: '1'.repeat(40), title: '일반 커밋', message: '브랜치의 원래 키를 물려받음' },
+  ]);
+  assert.equal(pushed.status, 200, JSON.stringify(pushed.data));
+  assert.equal(pushed.data.linked, 2);
+  assert.deepEqual(pushed.data.runs, []);
+  const liveLinks = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
+  assert.ok(liveLinks.some(link => link.iid === 502 && link.kind === 'pipeline' && link.issueId === targetA.id && link.originalJiraKey === 'OLD-1'));
+  assert.equal(liveLinks.filter(link => link.sourceBranch === 'feature/OLD-1-live' && link.issueId === targetA.id && link.originalJiraKey === 'OLD-1').length, 2);
+  const observed = await push(namedBranch, '0'.repeat(40), historicalHash);
+  assert.equal(observed.status, 200, JSON.stringify(observed.data));
+  assert.equal(observed.data.linked, 1);
+  const earlierBranch = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks.find(link => link.kind === 'branch' && link.sourceBranch === namedBranch && link.issueId === targetA.id);
+  assert.ok(earlierBranch?.sourceSha === historicalHash && earlierBranch.branchObservationSource === undefined);
+
+  const otherRoute = [{ repositoryId: 42, ...destinations[1] }];
+  const remapped = await f.call<GitlabSettings>(gitlabPath, 'PATCH', { expectedVersion: saved.data.version, jiraRoutes: otherRoute });
+  assert.equal(remapped.status, 200, JSON.stringify(remapped.data));
+  const rules = (await f.call<AutomationRule[]>('/automation-rules')).data;
+  assert.equal(rules.find(rule => rule.id === aliasAutomation.id)?.enabled, false);
+  assert.equal(rules.find(rule => rule.id === unrelated.id)?.enabled, true);
+  const inheritedBeforeRemap = await gitlabHook(f, pipeline(503, liveHash));
+  assert.equal(inheritedBeforeRemap.status, 200, JSON.stringify(inheritedBeforeRemap.data));
+  assert.equal(inheritedBeforeRemap.data.linked, 0, 'A stored MR from the previous route cannot choose a target after remapping.');
+
+  async function branchCandidates() {
+    const reply = await f.call<GitlabSyncPreview>(`${gitlabPath}/sync-preview`, 'POST', { expectedVersion: remapped.data.version, includeHistory: true });
+    assert.equal(reply.status, 200, JSON.stringify(reply.data));
+    return reply.data.candidates.filter(link => link.kind === 'branch');
+  }
+  restBranchHash = '9'.repeat(40);
+  assert.deepEqual(await branchCandidates(), [], 'A disconnected snapshot cannot override an authenticated branch observation.');
+  restBranchHash = historicalHash;
+  assert.deepEqual((await branchCandidates()).map(candidate => [candidate.issueId, candidate.originalJiraKey, candidate.action]), [[targetB.id, 'OLD-1', 'create']]);
+  const reassociate = await f.call<GitlabSyncResult>(`${gitlabPath}/sync`, 'POST', { includeHistory: true });
+  assert.equal(reassociate.status, 200, JSON.stringify(reassociate.data));
+  const laterBranch = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks.find(link => link.kind === 'branch' && link.sourceBranch === namedBranch && link.issueId === targetB.id);
+  assert.ok(laterBranch);
+  assert.equal(laterBranch.sourceSha, earlierBranch.sourceSha);
+  assert.equal(laterBranch.updatedAt, earlierBranch.updatedAt);
+  assert.equal(laterBranch.webUrl, earlierBranch.webUrl);
+  assert.equal(laterBranch.state, 'active');
+  assert.equal(laterBranch.branchObservationSource, undefined);
+  assert.equal(laterBranch.originalJiraKey, 'OLD-1');
+  const deleted = await push(namedBranch, historicalHash, '0'.repeat(40));
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+  assert.deepEqual(await branchCandidates(), [], 'A deleted authenticated branch cannot be re-created from the old snapshot.');
+
+  const newest = await gitlabHook(f, fresh(42, 601));
+  assert.equal(newest.status, 200, JSON.stringify(newest.data));
+  assert.equal(newest.data.linked, 1);
+  assert.deepEqual(newest.data.runs, []);
+  assert.deepEqual(await readIssue(targetB.id), targetB);
+
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(backup.status, 200);
+  assert.equal(backup.data.schemaVersion, 35);
+  assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
+  assert.equal(Object.hasOwn(backup.data, 'jiraRoutes'), false, 'The mapping is local GitLab connection configuration.');
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 34 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+  assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data.jiraRoutes, otherRoute);
+  const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
+  assert.deepEqual(restored, backup.data.gitlabLinks);
+  const legacy = structuredClone(backup.data);
+  legacy.schemaVersion = 34;
+  for (const link of legacy.gitlabLinks) delete link.originalJiraKey;
+  assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks, legacy.gitlabLinks);
+
+  assert.equal((await f.call('/import', 'POST', { data: baseline.data })).status, 200);
+  const reset = (await f.call<GitlabSettings>(gitlabPath)).data;
+  assert.deepEqual(reset.jiraRoutes ?? [], []);
+  assert.deepEqual(reset.projectIds, [42, 43]);
+  assert.equal(reset.webhookSecretConfigured, true);
+});
+
+test('repositories skip colliding Jira and current keys for distinct tickets while matching other unambiguous tokens', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const origin = await importJiraForGitlab(f, 'OLD', [
+    ['200', 'OTHER-1', '현재 키가 충돌하는 티켓', 'Open'], ['100', 'OLD-1', '이전 키가 충돌하는 티켓', 'Open'],
+  ]);
+  const [current, renamed] = origin.issues;
+  assert.equal(current.key, 'OLD-1');
+  assert.equal(renamed.key, 'OLD-2');
+  const upstream = await localGitlab(t, (path, base) => path.endsWith('/merge_requests') ? [
+    gitlabMr(base, 42, 901, 'OLD-1 키 충돌'), gitlabMr(base, 42, 902, 'OLD-1 OLD-2 다른 키는 연결', 'feature/another-token', 'b'.repeat(40)),
+  ] : []);
+  const base = (await f.call<GitlabSettings>(gitlabPath)).data;
+  const config = await f.call<GitlabSettings>(gitlabPath, 'PATCH', {
+    expectedVersion: base.version, baseUrl: upstream.base, projectIds: [42], webhookSecret: syntheticSecret,
+    jiraRoutes: [{ repositoryId: 42, projectId: origin.projectId, jiraInstanceKey: origin.jiraInstanceKey }],
+  });
+  assert.equal(config.status, 200, JSON.stringify(config.data));
+  const preview = await f.call<GitlabSyncPreview>(`${gitlabPath}/sync-preview`, 'POST', { expectedVersion: config.data.version });
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  assert.deepEqual(preview.data.repositories[0].ambiguousKeys, ['OLD-1']);
+  assert.deepEqual(preview.data.candidates.map(candidate => [candidate.objectId, candidate.issueId, candidate.originalJiraKey]), [['902', renamed.id, undefined]]);
+  const sync = await f.call<GitlabSyncResult>(`${gitlabPath}/sync`, 'POST', {});
+  assert.equal(sync.status, 200, JSON.stringify(sync.data));
+  assert.equal(sync.data.linked, 1);
+  const live = await gitlabHook(f, { object_kind: 'merge_request', project: { id: 42 }, object_attributes: {
+    ...gitlabMr(upstream.base, 42, 903, 'OLD-1 인증된 충돌', 'feature/collision', historicalHash, new Date().toISOString()), action: 'merge',
+  } });
+  assert.equal(live.status, 200, JSON.stringify(live.data));
+  assert.equal(live.data.linked, 0);
+  assert.deepEqual(live.data.runs, []);
+  const links = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
+  assert.deepEqual(links.map(link => [link.iid, link.issueId]), [[902, renamed.id]]);
+});
+
 function confluence(withAuditFixtures = false) {
   const first = Buffer.from('첫 버전\r\n\x00바이너리'), latest = Buffer.from('두 번째 버전😀\r\n원본');
   const prop = (name: string, text: string) => `<property name="${name}">${text}</property>`, ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`, object = (type: string, id: string, text: string) => `<object class="${type}"><id name="id">${id}</id>${text}</object>`;

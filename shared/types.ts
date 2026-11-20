@@ -583,8 +583,10 @@ export interface NotificationSubscription {
   targetId: string;
 }
 export interface NotificationSubscriptionState { subscribed: boolean }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' }
-export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string }
+export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
+export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
+export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[] }
 export interface GitlabSyncPreviewCounts {
   mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;
   create: number; update: number; unchanged: number;
@@ -592,7 +594,7 @@ export interface GitlabSyncPreviewCounts {
 }
 export interface GitlabSyncPreviewCandidate {
   projectId: number; kind: GitlabLink['kind']; objectId: string; title: string; state: string;
-  issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged';
+  issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged'; originalJiraKey?: string;
 }
 export interface GitlabHistoryLimits { branches: boolean; commits: boolean }
 export interface GitlabSyncResult {
@@ -604,7 +606,7 @@ export interface GitlabSyncPreview {
   repositories: {
     projectId: number; status: 'ok' | 'error'; counts: GitlabSyncPreviewCounts;
     error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits'; httpStatus: number | null; message: string } | null;
-    historyLimits?: GitlabHistoryLimits;
+    historyLimits?: GitlabHistoryLimits; ambiguousKeys?: string[];
   }[];
   counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
 }

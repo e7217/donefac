@@ -346,7 +346,12 @@ const gitlab = createServer((request, response) => {
     return;
   }
   authenticatedReads++;
-  response.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
+  const rows = request.url.startsWith('/api/v4/projects/42/merge_requests?') ? [{
+    id: 530, iid: 12, title: 'OLD-1 파일럿 원본 업무', source_branch: 'feature/OLD-1',
+    web_url: `http://${request.headers.host}/platform/pilot/-/merge_requests/12`,
+    state: 'merged', updated_at: '2020-01-02T01:02:00Z',
+  }] : [];
+  response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(rows));
 });
 
 async function teamSnapshot(url, fixture, evidence) {
@@ -593,9 +598,17 @@ async function runStandardPilot() {
   gitlab.listen(0,'127.0.0.1');
   await once(gitlab,'listening');
   const settings = await (await call(pilot.url,'/integrations/gitlab')).json();
+  const jiraRoutes = [{repositoryId:42,projectId:sourceAudit.issue.projectId,jiraInstanceKey:'pilot-jira'}];
+  const gitlabLinksPath = `/issues/${sourceAudit.issue.id}/gitlab-links?kind=merge_request`;
   await call(pilot.url,'/integrations/gitlab',{
-    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken},
+    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:`http://127.0.0.1:${gitlab.address().port}`,projectIds:[42],token:syntheticToken,jiraRoutes},
   });
+  const firstSync = await (await call(pilot.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
+  assert.equal(firstSync.linked,1);
+  const gitlabActivity = await (await call(pilot.url,gitlabLinksPath)).json();
+  assert.deepEqual(gitlabActivity.links.map(link => [link.issueId, link.originalJiraKey]), [[sourceAudit.issue.id, 'OLD-1']]);
+  const afterGitlabSync = await (await call(pilot.url,'/workspace')).json();
+  assert.equal(afterGitlabSync.issues.find(item => item.id === sourceAudit.issue.id)?.status,sourceAudit.issue.status);
   const trashedIssue = await (await call(pilot.url,`/issues/${issue.id}?expectedVersion=${issue.version}`,{method:'DELETE'})).json();
   await call(pilot.url,`/attachments/${attachment.id}/content`,{status:404});
   assert.deepEqual(await (await call(pilot.url,calendarPath)).json(),[]);
@@ -700,15 +713,19 @@ async function runStandardPilot() {
   }
   const restoredAudit = await verifyPilotSourceMigration(copy.url, migration);
   assert.deepEqual(restoredAudit, sourceAudit, 'Migrated items, source rows, worklogs, links and file audit must agree across physical restore.');
+  const restoredGitlab = await (await call(copy.url,'/integrations/gitlab')).json();
+  assert.deepEqual(restoredGitlab.jiraRoutes,jiraRoutes);
+  assert.deepEqual(await (await call(copy.url,gitlabLinksPath)).json(),gitlabActivity);
   const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {
     method: 'PATCH', body: {expectedVersion: restoredAudit.issue.version, status: restoredAudit.nextStatus},
   })).json();
   assert.equal(updatedMigratedIssue.status, restoredAudit.nextStatus);
   assert.equal(updatedMigratedIssue.version, restoredAudit.issue.version + 1);
-  await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}});
-  assert.equal(authenticatedReads,2);
+  const restoredSync = await (await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
+  assert.equal(restoredSync.linked,0);
+  assert.equal(authenticatedReads,4);
   await stop(copy);
-  console.log('Pilot rehearsal passed: browser workflows, Jira administrator backup and Confluence space migration, single-writer lock, cold copy, integrity rejection, conditional ticket fields, assignment rules and history, time reservations and individual trash restore.');
+  console.log('Pilot rehearsal passed for browser workflows, Jira administrator backup and Confluence space migration, GitLab activity linked by migrated Jira keys, cold backup integrity, ticket form conditions, automation history, time reservations and individual trash restore.');
 }
 
 process.on('SIGINT', onInterrupt);
