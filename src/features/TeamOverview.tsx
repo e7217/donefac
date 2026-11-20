@@ -3,9 +3,11 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { ArrowUpRight, CalendarClock, CalendarDays, ChevronRight, ClipboardCheck, GitBranch, RefreshCw, SquareChartGantt } from 'lucide-react';
 import { DEFAULT_RESERVATION_TIME_ZONE, reservationDayRange, reservationLocalDateTime } from '../../shared/time-reservations';
-import type {
-  DocumentPublicationTarget, FeatureProps, TeamOverviewCounts, TeamOverviewFilters, TeamOverviewPage, TeamOverviewResult,
+import {
+  PRIORITY, TEAM_OVERVIEW_ISSUE_METRICS, type DocumentPublicationTarget, type FeatureProps, type TeamOverviewDeadline,
+  type TeamOverviewFilters, type TeamOverviewIssueMetric, type TeamOverviewIssueQueueItem, type TeamOverviewPage, type TeamOverviewResult,
 } from '../../shared/types';
+import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { api } from '../lib/api';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl } from './GitlabActivity';
 import './team-overview.css';
@@ -15,16 +17,17 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue'> & {
   onFiltersChange: (filters: TeamOverviewFilters) => void;
   openPublication: (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string) => void | Promise<void>;
   openProject: (projectId: string, destination: 'overview' | 'gantt' | 'development') => void;
+  onOpenIssueSchedule: (issueId: string, endpoint: ScheduleDependencyEndpoint) => boolean;
 };
 type SectionKey = 'deadlines' | 'reviews' | 'gitlab' | 'reservations';
 type Offsets = Partial<Record<SectionKey, number>>;
 type LoadResult = { requestKey: string; data: TeamOverviewResult | null; error: string };
 
-const metricLabels: [keyof TeamOverviewCounts, string][] = [
-  ['open', '열린 업무'], ['overdue', '마감 초과'], ['dueSoon', '오늘부터 7일 이내'],
-  ['unscheduled', '일정 미정'], ['unassigned', '미배정'],
-];
-const timingLabels = { overdue: '마감 초과', today: '오늘 마감', soon: '7일 이내' };
+const metricLabels = {
+  open: '열린 업무', overdue: '마감 초과', dueSoon: '오늘부터 7일 이내', unscheduled: '일정 미정', unassigned: '미배정',
+} satisfies Record<TeamOverviewIssueMetric, string>;
+const timingLabels = { overdue: '마감 초과', today: '오늘 마감', soon: '7일 이내', later: '마감 예정' };
+const issueSectionId = 'team-overview-issue-results';
 const offsetKeys = { deadlines: 'deadlineOffset', reviews: 'reviewOffset', gitlab: 'gitlabOffset', reservations: 'reservationOffset' } as const;
 const formatCount = (count: number) => count.toLocaleString('ko-KR');
 const todayInSeoul = () => reservationLocalDateTime(new Date().toISOString()).slice(0, 10);
@@ -33,7 +36,8 @@ function localTime(instant: string, zone: string): string {
   return reservationLocalDateTime(instant, zone).replace('T', ' ');
 }
 
-function Section<T>({ title, icon, page, busy, empty, onPage, renderItem }: {
+function Section<T>({ id, title, icon, page, busy, empty, onPage, renderItem }: {
+  id?: string;
   title: string;
   icon: ReactNode;
   page: TeamOverviewPage<T>;
@@ -44,7 +48,7 @@ function Section<T>({ title, icon, page, busy, empty, onPage, renderItem }: {
 }) {
   const headingId = useId();
   const hasNext = page.offset + page.limit < page.total;
-  return <section className="card team-overview-section" aria-labelledby={headingId} aria-busy={busy}>
+  return <section id={id} className="card team-overview-section" aria-labelledby={headingId} aria-busy={busy}>
     <header className="team-overview-section-heading">
       <h2 id={headingId}>{icon}{title}</h2><span>{formatCount(page.total)}건</span>
     </header>
@@ -74,20 +78,22 @@ export function TeamOverview(props: Props) {
 
     <div className="card team-overview-filters">
       <label>프로젝트<select className="field" aria-label="프로젝트 필터" value={filters.projectId}
-        onChange={event => onFiltersChange({ ...filters, projectId: event.target.value })}>
+        onChange={event => onFiltersChange({ ...filters, projectId: event.target.value, issueOffset: undefined })}>
         <option value="">전체 프로젝트</option>
         {data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
       </select></label>
       <label>팀원<select className="field" aria-label="팀원 필터" value={filters.memberId}
-        onChange={event => onFiltersChange({ ...filters, memberId: event.target.value })}>
+        onChange={event => onFiltersChange({ ...filters, memberId: event.target.value, issueOffset: undefined })}>
         <option value="">전체 팀원</option>
         {data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
       </select></label>
       <label>기준일<input className="field" type="date" value={date} min="0001-01-01" max="9999-12-30"
-        onChange={event => { if (event.target.value && event.target.validity.valid) onFiltersChange({ ...filters, date: event.target.value }); }} /></label>
+        onChange={event => {
+          if (event.target.value && event.target.validity.valid) onFiltersChange({ ...filters, date: event.target.value, issueOffset: undefined });
+        }} /></label>
       {filters.date && <button className="btn btn-ghost team-overview-today" type="button" onClick={() => {
         setToday(todayInSeoul());
-        onFiltersChange({ ...filters, date: '' });
+        onFiltersChange({ ...filters, date: '', issueOffset: undefined });
       }}>오늘</button>}
       {filters.memberId && <p className="team-overview-scope-note">업무와 GitLab은 담당·협력, 문서는 검토자, 시간 배정은 배정된 팀원을 기준으로 조회합니다.</p>}
     </div>
@@ -96,7 +102,7 @@ export function TeamOverview(props: Props) {
   </div>;
 }
 
-function OverviewContent({ data, filters, openIssue, openPublication, openProject, refreshVersion, onDefaultDate }: Props & {
+function OverviewContent({ data, filters, openIssue, openPublication, openProject, onFiltersChange, onOpenIssueSchedule, refreshVersion, onDefaultDate }: Props & {
   refreshVersion: number;
   onDefaultDate: (date: string) => void;
 }) {
@@ -109,6 +115,11 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
   if (filters.projectId) query.set('projectId', filters.projectId);
   if (filters.memberId) query.set('memberId', filters.memberId);
   if (filters.date) query.set('date', filters.date);
+  const issueMetric = filters.issueMetric;
+  if (issueMetric) {
+    query.set('issueMetric', issueMetric);
+    if (filters.issueOffset) query.set('issueOffset', String(filters.issueOffset));
+  }
   for (const section of Object.keys(offsetKeys) as SectionKey[]) {
     const offset = offsets[section];
     if (offset) query.set(offsetKeys[section], String(offset));
@@ -140,6 +151,7 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
   }, []);
 
   const result = loaded?.data;
+  const queue = result?.issueQueue?.metric === issueMetric ? result?.issueQueue : undefined;
   const zone = result?.timeZone ?? DEFAULT_RESERVATION_TIME_ZONE;
   useEffect(() => {
     if (filters.date || !result?.date || result.date !== todayInSeoul()) return;
@@ -152,6 +164,39 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
   const projectName = (id: string | null) => id === null ? '팀 공통 문서' : projectNames.get(id) ?? '프로젝트';
   const memberName = (id: string | null) => id === null ? '미배정' : memberNames.get(id) ?? '팀원';
 
+  function issueRow(issue: TeamOverviewDeadline | TeamOverviewIssueQueueItem) {
+    const isQueueItem = 'startDate' in issue;
+    const missingStart = isQueueItem && !issue.startDate;
+    const missingEnd = isQueueItem && !issue.endDate;
+    const missingLabel = missingStart && missingEnd ? '시작일·종료일 미정' : missingStart ? '시작일 미정' : missingEnd ? '종료일 미정' : null;
+    const endpoint = missingStart ? 'startDate' : missingEnd ? 'endDate' : null;
+    const action = missingStart ? '시작일 입력' : '종료일 입력';
+    return <li key={issue.id} className={isQueueItem ? 'team-overview-queue-row' : undefined}>
+      <button type="button" className="team-overview-row-button" onClick={() => openIssue(issue.id)}>
+        <span className="team-overview-row-main">
+          <strong><span className="issue-key">{issue.key}</span> {issue.title}</strong>
+          <span className="team-overview-row-detail">{projectName(issue.projectId)} · {memberName(issue.assigneeId)} · <span className="status-dot"
+            style={{ background: issue.statusColor }} aria-hidden="true" />{issue.statusLabel}
+            {isQueueItem && ` · ${PRIORITY[issue.priority]}`}
+          </span>
+        </span>
+        <span className="team-overview-row-side" data-timing={issue.timing ?? undefined}>
+          {issue.deadline && issue.timing
+            ? <><span>{timingLabels[issue.timing]} · {issue.deadlineSource === 'dueDate' ? '목표 마감일' : '계획 종료일'}</span>
+                <time dateTime={issue.deadline}>{issue.deadline}</time></>
+            : <span>마감일 미정</span>}
+          {missingLabel && <span>{missingLabel}</span>}
+        </span>
+        <ChevronRight size={15} aria-hidden="true" />
+      </button>
+      {endpoint && <div className="team-overview-queue-actions">
+        <button type="button" className="btn" aria-label={`${issue.key} ${action}`} onClick={() => onOpenIssueSchedule(issue.id, endpoint)}>
+          <SquareChartGantt size={15} aria-hidden="true" />{action}
+        </button>
+      </div>}
+    </li>;
+  }
+
   return <>
     {!result && busy && <p className="card team-overview-message" role="status">팀 개요를 불러오는 중입니다.</p>}
     {loaded?.error && !busy && <div className="card team-overview-message team-overview-error">
@@ -159,29 +204,27 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
       <button className="btn" type="button" onClick={() => setRevision(value => value + 1)}>다시 불러오기</button>
     </div>}
     {result && <>
-      <dl className="team-overview-metrics" aria-label="업무 현황" aria-busy={busy}>
-        {metricLabels.map(([key, label]) => <div className="card team-overview-metric" key={key} data-metric={key}>
-          <dt>{label}</dt><dd>{formatCount(result.totals[key])}<span>건</span></dd>
-        </div>)}
-      </dl>
+      <div className="team-overview-metrics" role="group" aria-label="업무 현황" aria-busy={busy}>
+        {TEAM_OVERVIEW_ISSUE_METRICS.map(metric => <button className="card team-overview-metric" type="button" key={metric}
+          data-metric={metric} aria-label={metricLabels[metric]} aria-pressed={metric === issueMetric} aria-controls={issueSectionId}
+          aria-describedby={`team-overview-metric-${metric}`} onClick={() => onFiltersChange({
+            ...filters, issueMetric: metric === issueMetric ? undefined : metric, issueOffset: undefined,
+          })}>
+          <span className="team-overview-metric-label">{metricLabels[metric]}</span>
+          <span id={`team-overview-metric-${metric}`} className="team-overview-metric-value">{formatCount(result.totals[metric])}<span>건</span></span>
+        </button>)}
+      </div>
 
       <div className="team-overview-grid">
-        <Section title="마감 확인" icon={<CalendarDays size={18} aria-hidden="true" />} page={result.deadlines}
-          busy={busy} onPage={offset => pageTo('deadlines', offset)} empty="마감이 지났거나 7일 이내인 열린 업무가 없습니다."
-          renderItem={issue => <li key={issue.id}>
-            <button type="button" className="team-overview-row-button" onClick={() => openIssue(issue.id)}>
-              <span className="team-overview-row-main">
-                <strong><span className="issue-key">{issue.key}</span> {issue.title}</strong>
-                <span className="team-overview-row-detail">{projectName(issue.projectId)} · {memberName(issue.assigneeId)} · <span className="status-dot"
-                  style={{ background: issue.statusColor }} aria-hidden="true" />{issue.statusLabel}</span>
-              </span>
-              <span className="team-overview-row-side" data-timing={issue.timing}>
-                <span>{timingLabels[issue.timing]} · {issue.deadlineSource === 'dueDate' ? '목표 마감일' : '계획 종료일'}</span>
-                <time dateTime={issue.deadline}>{issue.deadline}</time>
-              </span>
-              <ChevronRight size={15} aria-hidden="true" />
-            </button>
-          </li>} />
+        {issueMetric
+          ? <Section id={issueSectionId} title={metricLabels[issueMetric]} icon={<CalendarDays size={18} aria-hidden="true" />}
+              page={queue ?? { items: [], total: 0, offset: 0, limit: 10 }} busy={busy}
+              onPage={offset => onFiltersChange({ ...filters, issueOffset: offset || undefined })}
+              empty={busy ? '업무 목록을 불러오는 중입니다.' : loaded?.error ? '업무 목록을 불러오지 못했습니다.' : '조건에 맞는 열린 업무가 없습니다.'}
+              renderItem={issueRow} />
+          : <Section id={issueSectionId} title="마감 확인" icon={<CalendarDays size={18} aria-hidden="true" />} page={result.deadlines}
+              busy={busy} onPage={offset => pageTo('deadlines', offset)} empty="마감이 지났거나 7일 이내인 열린 업무가 없습니다."
+              renderItem={issueRow} />}
 
         <Section title="검토 대기 문서" icon={<ClipboardCheck size={18} aria-hidden="true" />} page={result.reviews}
           busy={busy} onPage={offset => pageTo('reviews', offset)} empty="검토를 기다리는 문서가 없습니다."

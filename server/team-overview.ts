@@ -3,7 +3,8 @@ import { calendarDate, calendarDay, isCalendarDate, MIN_CALENDAR_DATE } from '..
 import { DEFAULT_RESERVATION_TIME_ZONE, reservationDayRange, reservationLocalDateTime } from '../shared/time-reservations.js';
 import { issueDeadline, myWorkMembership } from '../shared/my-work.js';
 import {
-  PRIORITY, type Issue, type Priority, type TeamOverviewCounts, type TeamOverviewDeadline, type TeamOverviewGitlabActivity,
+  isTeamOverviewIssueMetric, PRIORITY, TEAM_OVERVIEW_ISSUE_METRICS, type Issue, type Priority, type TeamOverviewCounts,
+  type TeamOverviewDeadline, type TeamOverviewGitlabActivity, type TeamOverviewIssueMetric, type TeamOverviewIssueQueueItem,
   type TeamOverviewPage, type TeamOverviewProject, type TeamOverviewResult, type WorkspaceSnapshot,
 } from '../shared/types.js';
 import { projectWorkflow, statusMeta } from '../shared/workflow-helpers.js';
@@ -13,8 +14,8 @@ import type { TimeReservationService } from './time-reservations.js';
 
 const PAGE_SIZE = 10;
 const MAX_OFFSET = 1_000_000;
-const PAGE_PARAMETERS = ['deadlineOffset', 'reviewOffset', 'gitlabOffset', 'reservationOffset'] as const;
-const QUERY_PARAMETERS = new Set<string>(['projectId', 'memberId', 'date', ...PAGE_PARAMETERS]);
+const PAGE_PARAMETERS = ['deadlineOffset', 'reviewOffset', 'gitlabOffset', 'reservationOffset', 'issueOffset'] as const;
+const QUERY_PARAMETERS = new Set<string>(['projectId', 'memberId', 'date', 'issueMetric', ...PAGE_PARAMETERS]);
 const priorityOrder = Object.keys(PRIORITY) as Priority[];
 const issueKeys = new Intl.Collator('ko', { numeric: true });
 const timestampFormat = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -30,6 +31,8 @@ type Selection = {
   reviewOffset: number;
   gitlabOffset: number;
   reservationOffset: number;
+  issueMetric?: TeamOverviewIssueMetric;
+  issueOffset: number;
 };
 
 class TeamOverviewError extends Error {
@@ -60,10 +63,16 @@ function readSelection(query: Record<string, unknown>): Selection {
   if (!isCalendarDate(date)) throw new TeamOverviewError(400, '기준 날짜는 유효한 YYYY-MM-DD 형식이어야 합니다.');
   const dayRange = reservationDayRange(date);
   if (!dayRange) throw new TeamOverviewError(400, '서울 시간에서 조회할 수 있는 기준 날짜를 선택해 주세요.');
+  const issueMetric = query.issueMetric;
+  if ((issueMetric !== undefined && !isTeamOverviewIssueMetric(issueMetric)) ||
+    (issueMetric === undefined && query.issueOffset !== undefined)) {
+    throw new TeamOverviewError(400, '업무 현황 조건을 확인해 주세요.');
+  }
   return {
     projectId: identifier(query.projectId, '프로젝트 ID'), memberId: identifier(query.memberId, '팀원 ID'), date, dayRange,
     deadlineOffset: offset(query.deadlineOffset), reviewOffset: offset(query.reviewOffset),
     gitlabOffset: offset(query.gitlabOffset), reservationOffset: offset(query.reservationOffset),
+    issueMetric, issueOffset: offset(query.issueOffset),
   };
 }
 
@@ -75,14 +84,22 @@ function emptyCounts(): TeamOverviewCounts {
   return { open: 0, overdue: 0, dueSoon: 0, unscheduled: 0, unassigned: 0 };
 }
 
-function count(aggregate: TeamOverviewCounts, issue: Issue, daysToDeadline: number | null): void {
-  aggregate.open++;
-  if (daysToDeadline !== null) {
-    if (daysToDeadline < 0) aggregate.overdue++;
-    else if (daysToDeadline <= 7) aggregate.dueSoon++;
-  }
-  if (!isCalendarDate(issue.startDate) || !isCalendarDate(issue.endDate)) aggregate.unscheduled++;
-  if (!issue.assigneeId) aggregate.unassigned++;
+type RankedIssue<T> = { issue: T; priority: Priority };
+type RankedIssueIdentity = Pick<TeamOverviewIssueQueueItem, 'id' | 'key' | 'deadline'>;
+function compareRankedIssues(a: RankedIssue<RankedIssueIdentity>, b: RankedIssue<RankedIssueIdentity>): number {
+  const aDeadline = a.issue.deadline;
+  const bDeadline = b.issue.deadline;
+  const dateOrder = aDeadline === null ? Number(bDeadline !== null)
+    : bDeadline === null ? -1 : aDeadline.localeCompare(bDeadline);
+  return dateOrder || priorityOrder.indexOf(a.priority) - priorityOrder.indexOf(b.priority) ||
+    issueKeys.compare(a.issue.key, b.issue.key) || a.issue.key.localeCompare(b.issue.key) || a.issue.id.localeCompare(b.issue.id);
+}
+
+function deadlineTiming(days: number | null): TeamOverviewIssueQueueItem['timing'] {
+  if (days === null) return null;
+  if (days < 0) return 'overdue';
+  if (days === 0) return 'today';
+  return days <= 7 ? 'soon' : 'later';
 }
 
 function issueSummary(data: OverviewData, selection: Selection) {
@@ -93,7 +110,8 @@ function issueSummary(data: OverviewData, selection: Selection) {
   const activeStatus = { workflows };
   const totals = emptyCounts();
   const matchingIssues = new Map<string, Issue>();
-  const deadlines: { issue: TeamOverviewDeadline; priority: Priority }[] = [];
+  const deadlines: RankedIssue<TeamOverviewDeadline>[] = [];
+  const queue: RankedIssue<TeamOverviewIssueQueueItem>[] = [];
   const referenceDay = calendarDay(selection.date);
   for (const issue of data.issues) {
     const project = countsByProject.get(issue.projectId);
@@ -103,21 +121,39 @@ function issueSummary(data: OverviewData, selection: Selection) {
     const status = statusMeta(activeStatus, issue.projectId, issue.status);
     if (status.category === 'done' || status.category === 'cancelled') continue;
     const effective = issueDeadline(issue);
-    const daysToDeadline = effective ? calendarDay(effective.value) - referenceDay : null;
-    count(totals, issue, daysToDeadline);
-    count(project, issue, daysToDeadline);
-    if (!effective || daysToDeadline === null || daysToDeadline > 7) continue;
-    deadlines.push({ priority: issue.priority, issue: {
+    const timing = deadlineTiming(effective ? calendarDay(effective.value) - referenceDay : null);
+    const startDate = isCalendarDate(issue.startDate) ? issue.startDate : null;
+    const endDate = isCalendarDate(issue.endDate) ? issue.endDate : null;
+    const metrics: Record<TeamOverviewIssueMetric, boolean> = {
+      open: true, overdue: timing === 'overdue', dueSoon: timing === 'today' || timing === 'soon',
+      unscheduled: startDate === null || endDate === null, unassigned: !issue.assigneeId,
+    };
+    for (const metric of TEAM_OVERVIEW_ISSUE_METRICS) {
+      if (!metrics[metric]) continue;
+      totals[metric]++;
+      project[metric]++;
+    }
+
+    const isDeadline = timing !== null && timing !== 'later';
+    const inQueue = selection.issueMetric && metrics[selection.issueMetric];
+    if (!isDeadline && !inQueue) continue;
+    const base = {
       id: issue.id, projectId: issue.projectId, key: issue.key, title: issue.title, assigneeId: issue.assigneeId,
-      statusLabel: status.label, statusColor: status.color, deadline: effective.value, deadlineSource: effective.source,
-      timing: daysToDeadline < 0 ? 'overdue' : daysToDeadline === 0 ? 'today' : 'soon',
-    } });
+      statusLabel: status.label, statusColor: status.color,
+    };
+    if (isDeadline && effective) {
+      deadlines.push({ priority: issue.priority, issue: { ...base, deadline: effective.value, deadlineSource: effective.source, timing } });
+    }
+    if (inQueue) {
+      queue.push({ priority: issue.priority, issue: {
+        ...base, startDate, endDate, priority: issue.priority, deadline: effective?.value ?? null, deadlineSource: effective?.source ?? null, timing,
+      } });
+    }
   }
-  deadlines.sort((a, b) => a.issue.deadline.localeCompare(b.issue.deadline) || priorityOrder.indexOf(a.priority) - priorityOrder.indexOf(b.priority) ||
-    issueKeys.compare(a.issue.key, b.issue.key) || a.issue.key.localeCompare(b.issue.key) || a.issue.id.localeCompare(b.issue.id));
-  const deadlinePage = page(deadlines, selection.deadlineOffset);
-  const visibleDeadlines = deadlinePage.items.map(entry => entry.issue);
-  return { totals, projects, deadlines: { ...deadlinePage, items: visibleDeadlines }, matchingIssues };
+  const deadlinePage = page(deadlines.sort(compareRankedIssues), selection.deadlineOffset);
+  const queuePage = page(queue.sort(compareRankedIssues), selection.issueOffset);
+  const issueQueue = selection.issueMetric && { ...queuePage, metric: selection.issueMetric, items: queuePage.items.map(row => row.issue) };
+  return { totals, projects, deadlines: { ...deadlinePage, items: deadlinePage.items.map(row => row.issue) }, issueQueue, matchingIssues };
 }
 
 function gitlabSummary(data: OverviewData, selection: Selection, issues: ReturnType<typeof issueSummary>['matchingIssues']): TeamOverviewPage<TeamOverviewGitlabActivity> {
@@ -151,9 +187,10 @@ function readOverview({ store, snapshot, timeReservations }: Dependencies, selec
       throw new TeamOverviewError(400, '등록된 팀원을 선택해 주세요.');
     }
     const data = snapshot();
-    const { totals, projects, deadlines, matchingIssues } = issueSummary(data, selection);
+    const { totals, projects, deadlines, issueQueue, matchingIssues } = issueSummary(data, selection);
     const result = {
       date, timeZone: DEFAULT_RESERVATION_TIME_ZONE, totals, projects, deadlines,
+      ...(issueQueue ? { issueQueue } : {}),
       reviews: listPendingTeamReviews(store, { projectId, memberId, offset: selection.reviewOffset, limit: PAGE_SIZE }),
       gitlab: gitlabSummary(data, selection, matchingIssues),
       reservations: timeReservations.calendarPage(selection.dayRange, { projectId, memberId, offset: selection.reservationOffset, limit: PAGE_SIZE }),

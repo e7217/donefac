@@ -48,18 +48,36 @@
   margin: 16px 0;
 }
 
-.team-overview-metric { padding: 12px 14px; }
-.team-overview-metric dt { color: #596b64; font-size: 12px; }
-.team-overview-metric dd {
-  margin: 2px 0 0;
+.team-overview-metric {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 12px 14px;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.team-overview-metric:hover { background-color: #f2f8f5; }
+.team-overview-metric[aria-pressed='true'] {
+  background-color: #e9f5ee;
+  border-color: #43816c;
+}
+.team-overview-metric[aria-pressed='true'] .team-overview-metric-label { font-weight: 700; }
+.team-overview-metric:focus-visible {
+  outline: 2px solid #227a65;
+  outline-offset: 2px;
+}
+.team-overview-metric-label { color: #596b64; font-size: 12px; }
+.team-overview-metric-value {
   color: #244236;
   font-size: 25px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
-.team-overview-metric dd span { margin-left: 4px; font-size: 12px; font-weight: 500; }
-.team-overview-metric[data-metric='overdue'] dd { color: #ae4142; }
+.team-overview-metric-value span { margin-inline-start: 4px; font-size: 12px; font-weight: 500; }
+.team-overview-metric[data-metric='overdue'] .team-overview-metric-value { color: #ae4142; }
 
 .team-overview-grid {
   display: grid;
@@ -122,6 +140,21 @@
 .team-overview-row-side { display: grid; gap: 2px; flex: none; text-align: end; font-variant-numeric: tabular-nums; }
 .team-overview-row-side time { white-space: nowrap; }
 .team-overview-row-side[data-timing='overdue'] { color: #a73e3f; }
+.team-overview-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.team-overview-queue-row .team-overview-row-side { max-width: 48%; overflow-wrap: anywhere; }
+.team-overview-queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 6px 16px 6px 0;
+}
+.team-overview-queue-actions .btn { min-height: 44px; font-size: 12px; }
+.team-overview-queue-actions .btn:focus-visible { outline: 2px solid #227a65; outline-offset: 2px; }
 .team-overview-time-range { grid-auto-flow: column; gap: 4px; }
 .team-overview-gitlab-link { display: flex; align-items: flex-start; gap: 4px; width: fit-content; }
 .team-overview-gitlab-link strong { color: #176254; }
@@ -165,6 +198,8 @@
   .team-overview-project-row { flex-wrap: wrap; }
   .team-overview-project-row .team-overview-row-main { flex-basis: 100%; }
   .team-overview-project-actions { flex: 1; }
+  .team-overview-queue-row { grid-template-columns: minmax(0, 1fr); }
+  .team-overview-queue-actions { padding: 0 12px 8px; }
   .team-overview-time-range { grid-auto-flow: row; }
   .team-overview-time-range > span { display: none; }
 }

@@ -3,6 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import { isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -71,10 +72,14 @@ function routeHash(route: WorkspaceRoute) {
   }
   if (route.view === 'documents' && route.documentId && route.sectionId) query.set('section', route.sectionId);
   if (route.view === 'teamoverview' && route.teamOverviewFilters) {
-    const { projectId, memberId, date } = route.teamOverviewFilters;
+    const { projectId, memberId, date, issueMetric, issueOffset } = route.teamOverviewFilters;
     if (projectId) query.set('teamProject', projectId);
     if (memberId) query.set('teamMember', memberId);
     if (date) query.set('teamDate', date);
+    if (issueMetric) {
+      query.set('teamQueue', issueMetric);
+      if (issueOffset) query.set('teamQueueOffset', String(issueOffset));
+    }
   }
   if (route.issueId && route.documentPreviewId) query.set('documentPreview', route.documentPreviewId);
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
@@ -141,10 +146,15 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const section = parameters.get('section');
   const sectionId = view === 'documents' && documentId && isDocumentSectionId(section) ? section : null;
   const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
-  const teamOverviewFilters = view === 'teamoverview' ? {
+  const teamQueue = parameters.get('teamQueue'), teamQueueOffset = parameters.get('teamQueueOffset');
+  const issueMetric = isTeamOverviewIssueMetric(teamQueue) ? teamQueue : undefined;
+  const issueOffset = issueMetric && teamQueueOffset && /^\d{1,7}$/.test(teamQueueOffset) && Number(teamQueueOffset) <= 1_000_000
+    ? Number(teamQueueOffset) || undefined : undefined;
+  const teamOverviewFilters: TeamOverviewFilters | undefined = view === 'teamoverview' ? {
     projectId: teamProject && snapshot.projects.some(project => project.id === teamProject) ? teamProject : '',
     memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
+    issueMetric, issueOffset,
   } : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, teamOverviewFilters };
 }
@@ -246,7 +256,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
     setSectionId(route.sectionId ?? null);
     const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
-    setTeamOverviewFilters(previous => previous.projectId === filters.projectId && previous.memberId === filters.memberId && previous.date === filters.date ? previous : filters);
+    setTeamOverviewFilters(previous => previous.projectId === filters.projectId && previous.memberId === filters.memberId &&
+      previous.date === filters.date && previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -453,7 +464,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
             onFiltersChange={filters => requestRoute({projectId,view,documentId:null,issueId,teamOverviewFilters:filters})}
-            openProject={(id, destination) => navigate(destination,id)}/>
+            openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}/>
         </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}

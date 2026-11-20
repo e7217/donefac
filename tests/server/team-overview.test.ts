@@ -113,6 +113,7 @@ test('team overview aggregates custom active workflows and effective deadlines; 
   const scoped = await f.overview({ projectId, memberId });
   assert.equal(scoped.timeZone, 'Asia/Seoul');
   assert.deepEqual(scoped.totals, { open: 5, overdue: 1, dueSoon: 2, unscheduled: 3, unassigned: 1 });
+  assert.equal(Object.hasOwn(scoped, 'issueQueue'), false);
   assert.deepEqual(scoped.projects, [{ projectId, ...scoped.totals }]);
   assert.deepEqual(scoped.deadlines.items.map(item => [item.id, item.deadlineSource, item.timing]), [
     [overdue.id, 'dueDate', 'overdue'], [today.id, 'endDate', 'today'], [soon.id, 'dueDate', 'soon'],
@@ -127,6 +128,57 @@ test('team overview aggregates custom active workflows and effective deadlines; 
   const whole = await f.overview();
   assert.equal(whole.totals.open, 6);
   assert.equal(whole.gitlab.total, 13);
+
+  for (const [issueMetric, expected] of [
+    ['open', [overdue, today, soon, later, noAssignee]],
+    ['overdue', [overdue]],
+    ['dueSoon', [today, soon]],
+    ['unscheduled', [today, soon, noAssignee]],
+    ['unassigned', [noAssignee]],
+  ] as const) {
+    const result = await f.overview({ projectId, memberId, issueMetric });
+    assert.deepEqual(result.totals, scoped.totals);
+    assert.deepEqual(result.deadlines, scoped.deadlines);
+    assert.equal(result.issueQueue?.metric, issueMetric);
+    assert.equal(result.issueQueue.total, scoped.totals[issueMetric]);
+    assert.deepEqual(result.issueQueue.items.map(item => item.id), expected.map(item => item.id));
+  }
+  const open = (await f.overview({ projectId, memberId, issueMetric: 'open' })).issueQueue;
+  assert.ok(open);
+  assert.deepEqual(open.items.map(row => [row.startDate, row.endDate, row.deadline, row.deadlineSource, row.timing]), [
+    [reference, '2026-11-26', '2026-11-19', 'dueDate', 'overdue'],
+    [null, reference, reference, 'endDate', 'today'],
+    [null, null, '2026-11-27', 'dueDate', 'soon'],
+    [reference, '2026-11-22', '2026-11-28', 'dueDate', 'later'],
+    [null, null, null, null, null],
+  ]);
+  assert.deepEqual(open.items[0], {
+    id: overdue.id, projectId, key: overdue.key, title: overdue.title, assigneeId: f.teammate.id,
+    startDate: reference, endDate: '2026-11-26', deadline: '2026-11-19', deadlineSource: 'dueDate', timing: 'overdue',
+    priority: overdue.priority, statusLabel: '팀 확인', statusColor: '#58a4bd',
+  });
+  const acrossProjects = await f.overview({ issueMetric: 'open' });
+  assert.ok(acrossProjects.issueQueue?.items.some(item => item.id === other.id));
+  assert.ok(!acrossProjects.issueQueue?.items.some(item => item.id === terminal.id));
+});
+
+test('team overview independently pages the chosen issue metric by deadline, priority and numeric issue key', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('날짜를 먼저 표시', { priority: 'low', endDate: reference });
+  const urgent = await f.issue('날짜 없는 긴급 업무', { priority: 'urgent' });
+  const undated = [];
+  for (let index = 0; index < 10; index++) undated.push(await f.issue(`날짜 없는 업무 ${index}`));
+  const unscoped = await f.overview({ issueMetric: 'unassigned' });
+  assert.ok(unscoped.issueQueue);
+  assert.deepEqual([unscoped.issueQueue.total, unscoped.issueQueue.offset, unscoped.issueQueue.limit], [12, 0, 10]);
+  assert.deepEqual(unscoped.issueQueue.items.map(item => item.id), [first.id, urgent.id, ...undated.slice(0, 8).map(issue => issue.id)]);
+  const next = await f.overview({ issueMetric: 'unassigned', issueOffset: '10' });
+  assert.deepEqual(next.issueQueue?.items.map(item => item.id), undated.slice(8).map(issue => issue.id));
+  assert.deepEqual(next.deadlines, unscoped.deadlines);
+  const empty = await f.overview({ issueMetric: 'unassigned', memberId: f.member.id });
+  assert.deepEqual(empty.issueQueue, { metric: 'unassigned', total: 0, offset: 0, limit: 10, items: [] });
+  const stale = await f.overview({ issueMetric: 'unassigned', issueOffset: '20' });
+  assert.deepEqual(stale.issueQueue, { metric: 'unassigned', total: 12, offset: 20, limit: 10, items: [] });
 });
 
 test('team overview pages pinned pending reviews and today’s reservations independently by reviewer and assigned user', async t => {
@@ -194,6 +246,9 @@ test('team overview rejects malformed filters and uses Seoul today with a no-sto
     `${query}&extra=1`, `${query}&date=2026-11-20`, 'date=2025-02-29', `${query}&projectId=&memberId=${f.member.id}`,
     `${query}&memberId=${f.member.id}&memberId=${f.teammate.id}`, `${query}&deadlineOffset=-1`, `${query}&reviewOffset=1.5`,
     `${query}&gitlabOffset=1000001`, `${query}&reservationOffset=0&reservationOffset=1`, `${query}&memberId=missing-member`,
+    `${query}&issueMetric=`, `${query}&issueMetric=other`, `${query}&issueMetric=overdue&issueMetric=unassigned`,
+    `${query}&issueOffset=0`, `${query}&issueMetric=open&issueOffset=-1`, `${query}&issueMetric=open&issueOffset=1000001`,
+    `${query}&issueMetric=open&issueOffset=0&issueOffset=1`,
   ]) await f.call(`/team-overview?${invalid}`, 400);
   await f.call(`/team-overview?${query}&projectId=missing-project`, 404);
   const key = await f.call<ApiKeyCreated>('/api-keys', 201, {

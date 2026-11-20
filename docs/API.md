@@ -653,3 +653,5 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 `totals`와 `projects`는 프로젝트 워크플로에서 열린 업무의 마감 초과·오늘부터 7일 이내·일정 미정·미배정 수를 반환한다. `deadlines`에는 목표 마감일이나 계획 종료일이 해당하는 업무가 표시된다. `reviews`는 현재 검토 대기의 고정 저장본 메타데이터, `gitlab`은 기준일을 포함한 최근 7일의 저장된 티켓 연결, `reservations`는 기준일과 겹치는 확정 시간 배정이다. 한 요청에서 같은 저장 시점의 상태를 읽는다.
 
 `memberId`는 업무와 GitLab에서 담당자 또는 협력자, 검토에서는 검토자, 시간 배정에서는 배정된 팀원과 대조한다. 각 목록은 `total`, `offset`, `limit`, `items`를 포함한다. `deadlineOffset`, `reviewOffset`, `gitlabOffset`, `reservationOffset`은 각각 기본값 0, 한 번에 10건을 반환한다.
+
+`issueMetric`을 지정하면 응답에 `issueQueue`를 추가한다. `open`은 열린 업무, `overdue`는 기준일 전 마감, `dueSoon`은 기준일 포함 7일 이내 마감, `unscheduled`는 시작일 또는 종료일 미정, `unassigned`는 담당자 미지정이다. 선택한 지표의 `total`은 같은 응답의 집계값과 같다. `issueOffset`은 `issueMetric`과 함께 사용하며 기본값은 0이다. 목록은 10개씩 반환하고 마감일·우선순위·업무 키 순으로 정렬한다. 마감일이 비어 있는 업무는 날짜가 있는 업무 뒤에 표시한다. 각 업무에는 현재 상태, 담당자, 우선순위, 시작일·종료일과 적용한 마감일 정보가 포함된다.

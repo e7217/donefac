@@ -468,14 +468,19 @@ export interface IssueTimeReservationEntry extends IssueTimeReservation {
   issueKey: string;
   issueTitle: string;
 }
-export interface TeamOverviewFilters { projectId: string; memberId: string; date: string }
-export interface TeamOverviewCounts {
-  open: number;
-  overdue: number;
-  dueSoon: number;
-  unscheduled: number;
-  unassigned: number;
+export const TEAM_OVERVIEW_ISSUE_METRICS = ['open', 'overdue', 'dueSoon', 'unscheduled', 'unassigned'] as const;
+export type TeamOverviewIssueMetric = typeof TEAM_OVERVIEW_ISSUE_METRICS[number];
+export function isTeamOverviewIssueMetric(value: unknown): value is TeamOverviewIssueMetric {
+  return TEAM_OVERVIEW_ISSUE_METRICS.some(metric => metric === value);
 }
+export interface TeamOverviewFilters {
+  projectId: string;
+  memberId: string;
+  date: string;
+  issueMetric?: TeamOverviewIssueMetric;
+  issueOffset?: number;
+}
+export type TeamOverviewCounts = Record<TeamOverviewIssueMetric, number>;
 export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }
 export interface TeamOverviewDeadline {
   id: string;
@@ -488,6 +493,14 @@ export interface TeamOverviewDeadline {
   deadline: string;
   deadlineSource: 'dueDate' | 'endDate';
   timing: 'overdue' | 'today' | 'soon';
+}
+export interface TeamOverviewIssueQueueItem extends Omit<TeamOverviewDeadline, 'deadline' | 'deadlineSource' | 'timing'> {
+  startDate: string | null;
+  endDate: string | null;
+  priority: Priority;
+  deadline: TeamOverviewDeadline['deadline'] | null;
+  deadlineSource: TeamOverviewDeadline['deadlineSource'] | null;
+  timing: TeamOverviewDeadline['timing'] | 'later' | null;
 }
 export interface TeamOverviewGitlabActivity {
   issueId: string;
@@ -503,6 +516,7 @@ export interface TeamOverviewResult {
   totals: TeamOverviewCounts;
   projects: TeamOverviewProject[];
   deadlines: TeamOverviewPage<TeamOverviewDeadline>;
+  issueQueue?: TeamOverviewPage<TeamOverviewIssueQueueItem> & { metric: TeamOverviewIssueMetric };
   reviews: TeamOverviewPage<DocumentPublicationListItem>;
   gitlab: TeamOverviewPage<TeamOverviewGitlabActivity>;
   reservations: TeamOverviewPage<IssueTimeReservationEntry>;
