@@ -1,0 +1,202 @@
+.page.my-work-page {
+  max-width: 1200px;
+}
+
+.my-work-heading h1,
+.my-work-heading p {
+  margin: 0;
+}
+
+.my-work-heading p,
+.my-work-total,
+.my-work-group-heading > span {
+  color: #52655e;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.my-work-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 14px;
+  padding: 16px;
+}
+
+.my-work-filter {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.my-work-filter .field {
+  min-width: 0;
+  font-weight: 400;
+}
+
+.my-work-include-closed {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  font-size: 12px;
+}
+
+.my-work-include-closed input {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.my-work-total {
+  margin: 12px 0 8px;
+}
+
+.my-work-empty {
+  margin: 0;
+  padding: 24px;
+  color: #52655e;
+}
+
+.my-work-groups {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.my-work-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.my-work-queue-group[data-group='overdue'] .my-work-group-heading h2 {
+  color: #a24042;
+}
+
+.my-work-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.my-work-list li {
+  border-top: 1px solid var(--line);
+}
+
+.my-work-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(85px, 16%) minmax(112px, 18%) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 16px;
+  text-align: left;
+}
+
+.my-work-row:hover {
+  background: #f2f8f5;
+}
+
+.my-work-row:focus-visible {
+  outline-offset: -3px;
+}
+
+.my-work-identity,
+.my-work-item-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.my-work-item-title {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 8px;
+}
+
+.my-work-item-title strong {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.my-work-item-project,
+.my-work-item-status,
+.my-work-item-date {
+  color: #52655e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.my-work-item-project > span {
+  margin: 0 5px;
+}
+
+.my-work-item-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.my-work-item-date time {
+  display: block;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.my-work-row-arrow {
+  color: #5d7368;
+}
+
+.my-work-pages {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.my-work-pages span {
+  margin-right: auto;
+  color: #52655e;
+}
+
+@media (max-width: 760px) {
+  .my-work-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .my-work-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 6px 12px;
+  }
+
+  .my-work-identity {
+    grid-column: 1 / 3;
+  }
+
+  .my-work-item-status {
+    grid-column: 1;
+  }
+
+  .my-work-item-date {
+    grid-column: 2 / 4;
+  }
+
+  .my-work-item-date time {
+    display: inline;
+  }
+
+  .my-work-row-arrow {
+    grid-row: 1;
+    grid-column: 3;
+  }
+}

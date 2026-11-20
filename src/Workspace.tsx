@@ -3,14 +3,15 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, WorkspaceSnapshot } from '../shared/types';
-import { STATUS, type StatusCategory } from '../shared/types';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { issueSearchText } from '../shared/issue-schema';
+import { countActiveMyWork } from '../shared/my-work';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
 import { IssuePanel } from './features/IssuePanel';
+import { MyWork } from './features/MyWork';
 import TeamNotifications from './features/TeamNotifications';
 const WorkflowSettings = lazy(() => import('./features/WorkflowSettings').then(module => ({default: module.WorkflowSettings})));
 const IssueSchemaSettings = lazy(() => import('./features/IssueSchemaSettings').then(module => ({default: module.IssueSchemaSettings})));
@@ -265,7 +266,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       <div className="workspace-brand"><div className="brand-mark"><Command size={22}/></div><div><strong>Teamspace</strong><span>함께 만드는 팀의 작업 공간</span></div><button className="icon-btn mobile-only" onClick={() => setSidebarOpen(false)} aria-label="메뉴 닫기"><X size={18}/></button></div>
       <button className="sidebar-search" onClick={() => setSearchOpen(true)}><Search size={16}/><span>업무와 문서 검색</span><kbd>⌘ K</kbd></button>
       <nav className="sidebar-section">
-        <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{data.issues.filter(i => i.assigneeId === actorId && !isTerminalStatus(data, i.projectId, i.status)).length}</span></button>
+        <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId)}</span></button>
         <button className={`nav-item ${view === 'trash' ? 'active' : ''}`} onClick={() => navigate('trash')}><Trash2 size={17}/><span>휴지통</span></button>
       </nav>
       <div className="sidebar-section-title"><span>프로젝트</span><button className="icon-btn" title="프로젝트 만들기" aria-label="프로젝트 만들기" onClick={() => setProjectModal(true)}><Plus size={15}/></button></div>
@@ -291,7 +292,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       </div></header>
       <main className={`main-content view-${view}`}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
-        {view === 'mywork' && <MyWork {...props}/>}
+        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'issues' && <Issues {...props}/>}
         {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} onOpenPlanning={id => openPlanIn('planning',id)}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
@@ -377,16 +378,6 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 }
 
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
-
-function MyWork(props: FeatureProps) {
-  const issues = props.data.issues.filter(i => i.assigneeId === props.actorId);
-  const categories: StatusCategory[] = ['in_progress','review','todo','backlog','done','cancelled'];
-  return <div className="page"><div className="page-heading"><div><div className="eyebrow">MY WORK</div><h1>내 업무</h1><p>프로젝트를 넘어, 내가 맡은 일을 한곳에서 확인하세요.</p></div></div>{categories.map(category => {
-    const matching = issues.filter(i => statusMeta(props.data,i.projectId,i.status).category === category);
-    if (category === 'cancelled' && !matching.length) return null;
-    return <section className="card my-work-group" key={category}><div className="card-heading"><h2><span className="status-dot" style={{background:STATUS[category].color}}/>{STATUS[category].label}</h2><span className="count-pill">{matching.length}</span></div>{matching.map(issue => <button key={issue.id} className="overview-issue" onClick={() => props.openIssue(issue.id)}><span className="issue-key">{issue.key}</span><span className="overview-issue-title">{issue.title}</span><span className="badge" style={{color:statusMeta(props.data,issue.projectId,issue.status).color}}>{statusMeta(props.data,issue.projectId,issue.status).label}</span><span className="muted">{props.data.projects.find(p => p.id === issue.projectId)?.name}</span></button>)}{!matching.length && <div className="compact-empty">이 상태의 업무가 없습니다.</div>}</section>;
-  })}</div>;
-}
 
 function SearchDialog(props: FeatureProps & {onClose:()=>void}) {
   const [query,setQuery] = useState('');
