@@ -6,7 +6,8 @@ import type { FeatureProps, IssueWorklogPage, User, WorklogEntry } from '../../s
 import { isCalendarDate } from '../../shared/calendar';
 import { api, ApiError } from '../lib/api';
 import { todayDate } from './schedule-utils';
-import { formatWorklogMinutes, newWorklogRequestId } from '../lib/worklogs';
+import { formatWorklogMinutes } from '../lib/worklogs';
+import { newRequestId } from '../lib/request-id';
 import './worklogs.css';
 
 export interface IssueWorklogsProps {
@@ -231,7 +232,7 @@ function Worklogs({ issueId, actorId, users, notify, onChanged, onDraftChange }:
     };
     const create = !editing;
     const currentAttempt = create
-      ? (recovery ?? attempt.current ?? { requestId: newWorklogRequestId(), payload })
+      ? (recovery ?? attempt.current ?? { requestId: newRequestId(), payload })
       : null;
     if (currentAttempt) attempt.current = currentAttempt;
     const controller = begin(recovery ? 'recover' : 'save');

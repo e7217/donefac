@@ -1,19 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, Plus, Search, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type FeatureProps, type Issue, type IssueFieldFilter, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
-import { afterAcceptedNavigation } from '../lib/navigation';
-import { ApiError, dateLabel, patch, post } from '../lib/api';
-import { allowedNextStatuses, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
-import { issueTypeMeta, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
-import { CustomFields, CustomFieldSummary, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
-import { PlanningSelect } from './PlanningSelectors';
+import { PRIORITY, type FeatureProps, type Issue, type IssueFieldFilter, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
+import { ApiError, dateLabel, patch } from '../lib/api';
+import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
+import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
+import { CustomFieldSummary, IssueTypeName } from './CustomFields';
+import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
-import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import './issues.css';
 import './issue-order.css';
 
@@ -289,32 +287,4 @@ export function Issues(props: FeatureProps) {
     })}</div>}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
   </div>;
-}
-
-function NewIssueModal({ data, projectId, initialStatus, onClose, refresh, notify, openIssue }: FeatureProps & { initialStatus: IssueStatus; onClose: () => void }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [selectedProject, setSelectedProject] = useState(isAll(projectId) ? data.projects[0]?.id || '' : projectId);
-  const [selectedType, setSelectedType] = useState(() => initialIssueType(data, selectedProject));
-  const [selectedStatus, setSelectedStatus] = useState(() => projectStatuses(data, selectedProject).some(status => status.id === initialStatus) ? initialStatus : projectWorkflow(data, selectedProject).initialStatusId);
-  const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
-  const dirtyRef = useRef(false), pendingRef = useRef(false);
-  const values = valuesByProject[selectedProject] || {};
-  const states = projectStatuses(data, selectedProject);
-  const required = requiredFieldsFor(data, selectedProject, selectedType, selectedStatus);
-  function close() { if (pendingRef.current) return false; if (dirtyRef.current && !window.confirm('작성 중인 새 업무를 버리고 닫을까요?')) return false; dirtyRef.current = false; onClose(); return true; }
-  useEffect(() => {
-    const guard = (event: Event) => { if (event.defaultPrevented) return; if (pendingRef.current) { event.preventDefault(); notify('업무 생성이 끝난 뒤 이동해 주세요.', 'error'); } else if (dirtyRef.current && !window.confirm('작성 중인 새 업무를 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; onClose(); }); };
-    const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current || pendingRef.current) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
-  }, [notify, onClose]);
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (pendingRef.current) return; const form = new FormData(event.currentTarget); pendingRef.current = true; setBusy(true); setError('');
-    try {
-      const issue = await post<Issue>('/issues', { projectId: selectedProject, title: String(form.get('title') || '').trim(), description: form.get('description'), type: selectedType, status: selectedStatus, priority: form.get('priority'), assigneeId: form.get('assigneeId') || null, startDate: form.get('startDate') || null, endDate: form.get('endDate') || null, dueDate: form.get('dueDate') || null, estimate: form.get('estimate') ? Number(form.get('estimate')) : null, plannedEffortMinutes: form.get('plannedEffortMinutes') ? Number(form.get('plannedEffortMinutes')) : null, labels: String(form.get('labels') || '').split(',').map(value => value.trim()).filter(Boolean), parentId: form.get('parentId') || null, collaboratorIds: form.getAll('collaboratorIds'), cycleId: form.get('cycleId') || null, moduleId: form.get('moduleId') || null, releaseId: form.get('releaseId') || null, customFields: values });
-      dirtyRef.current = false; await refresh(); notify('새 업무를 만들었습니다.'); pendingRef.current = false; onClose(); openIssue(issue.id);
-    } catch (err) { setError(errorMessage(err)); } finally { pendingRef.current = false; setBusy(false); }
-  }
-  return <div className="issue-modal-overlay" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}><section className="issue-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-issue-title"><form onSubmit={submit} onChange={() => { dirtyRef.current = true; }}><header><div><span className="feature-eyebrow">NEW ISSUE</span><h2 id="new-issue-title">새 업무 만들기</h2></div><button className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header><fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}><div className="issue-create-fields"><label className="issue-form-label">프로젝트<select name="projectId" className="field" value={selectedProject} onChange={event => { const next = event.target.value; setSelectedProject(next); setSelectedType(initialIssueType(data, next)); setSelectedStatus(projectWorkflow(data, next).initialStatusId); }} required>{data.projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label><label className="issue-form-label">업무 제목<input autoFocus className="field issue-title-input" name="title" placeholder="무엇을 해야 하나요?" maxLength={300} required /></label><label className="issue-form-label">설명<textarea className="field" name="description" placeholder="배경, 목표, 완료 조건을 적어주세요." rows={4} /></label><div className="issue-form-grid"><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={selectedType} onChange={setSelectedType} name="type" /></label><label className="issue-form-label">상태<select name="status" aria-label="새 업무 상태" className="field" value={selectedStatus} onChange={event => setSelectedStatus(event.target.value)}>{states.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></label><label className="issue-form-label">우선순위<select name="priority" className="field" defaultValue="medium">{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label><label className="issue-form-label">담당자<select className="field" name="assigneeId"><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input type="date" name="startDate" className="field" /></label><label className="issue-form-label">종료일<input type="date" name="endDate" className="field" /></label></div><CustomFields data={data} projectId={selectedProject} issueType={selectedType} values={values} onChange={next => { dirtyRef.current = true; setValuesByProject(previous => ({ ...previous, [selectedProject]: next })); }} disabled={busy} requiredFields={required} />{required.length > 0 && <p className="issue-section-empty">필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}<details open={required.some(field => ['dueDate','estimate','labels','parentId','collaboratorIds','cycle','module','release'].includes(field))}><summary className="issue-section-caption">추가 속성</summary><div className="issue-form-grid"><label className="issue-form-label">목표 마감일<input className="field" type="date" name="dueDate" /></label><label className="issue-form-label">예상 소요 (포인트)<input className="field" type="number" name="estimate" min="0" step="0.5" /></label><label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} /></label><label className="issue-form-label">라벨<input className="field" name="labels" placeholder="쉼표로 구분" /></label><label className="issue-form-label">상위 업무<select className="field" name="parentId" key={selectedProject}><option value="">없음</option>{data.issues.filter(issue => issue.projectId === selectedProject).map(issue => <option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select></label>{(['cycle','module','release'] as const).map(field => <label className="issue-form-label" key={field}>{REQUIRED_FIELD_LABELS[field]}<PlanningSelect data={data} projectId={selectedProject} kind={field} name={`${field}Id`} /></label>)}<label className="issue-form-label">참여자<select className="field" name="collaboratorIds" multiple>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label></div></details>{error && <div className="issue-form-error" role="alert">{error}</div>}</div></fieldset><footer><span className="muted">상세 속성은 생성 후에도 수정할 수 있어요.</span><button className="btn btn-ghost" type="button" disabled={busy} onClick={close}>취소</button><button className="btn btn-primary" type="submit" disabled={busy || !data.projects.length || !selectedType}>{busy ? '만드는 중…' : <><Plus size={16} /> 업무 만들기</>}</button></footer></form></section></div>;
 }

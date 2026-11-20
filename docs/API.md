@@ -107,6 +107,12 @@ curl --fail-with-body \
 
 삭제할 때는 `?expectedVersion=3`처럼 전달한다. 하위 업무·문서가 있으면 삭제를 거절한다. 문서 `content`는 Tiptap JSON이며, 공동 편집 문서의 본문 교체는 편집 세대를 바꾸므로 의도한 전체 교체에만 사용한다.
 
+## 문서에서 후속 업무 만들기
+
+브라우저의 `POST /api/documents/:id/follow-up-issues`에 `{requestId, expectedDocumentVersion, issue}`를 보낸다. `requestId`는 새 요청마다 생성하는 UUID v4이며 `issue`는 일반 티켓 생성과 같은 입력을 사용한다. 프로젝트 문서는 현재 문서의 프로젝트를 사용하고, 공통 문서는 `issue.projectId`를 지정한다. 신규 요청은 문서 버전을 검사하고 업무, 번호, 연결 및 활동 기록을 함께 저장한다. 최초 응답은 `201`과 `{issue, link, duplicate:false}`를 반환한다.
+
+응답을 받지 못하면 같은 작업자와 문서에서 같은 요청 ID와 본문으로 재시도한다. 기존 업무와 연결을 열 수 있으면 `200`과 `{issue, link, duplicate:true}`로 응답한다. 요청 내용이나 연결 상태가 바뀌면 `409`를 반환한다. 자체 백업은 업무와 `후속 업무` 연결을 보존하며 복원 시 재시도용 기록을 초기화한다. 이 경로는 브라우저 관리 API에서 제공한다.
+
 ## 문서 참조·포함·접기
 
 문서 본문에는 다음 블록을 넣을 수 있다. `issueReference`는 `issueId`, `documentReference`와 `documentInclude`는 `documentId`를 사용하며, `label`은 대상이 없어졌을 때 표시할 이름이다. 모든 대상은 키의 프로젝트 범위 안에 있어야 한다. 포함 원문의 내용을 현재 문서에 복사하지 않으며, 조회 응답도 참조 ID를 유지한다.

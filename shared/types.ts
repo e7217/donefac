@@ -387,6 +387,7 @@ export interface DocumentPublicationList {
 export type DependencyType = 'FS' | 'SS' | 'FF' | 'SF';
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: DependencyType; lagDays: number; version?: number }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string }
+export interface DocumentFollowUpResult { issue: Issue; link: ResourceLink; duplicate: boolean }
 export interface Comment { id: string; resourceType: 'issue' | 'document'; resourceId: string; authorId: string; body: string; createdAt: string }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface AttachmentHead extends Attachment { currentVersionId: string; versionCount: number; hasVersionHistory: boolean }

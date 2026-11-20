@@ -17,6 +17,7 @@ import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
+import { DocumentFollowUpError, DocumentFollowUpService } from './document-follow-up.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -55,7 +56,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { PRIORITY, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -114,6 +115,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const issueSchemas=new IssueSchemaService(store);
   const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
   const documentContent=new DocumentContentService(store);
+  const documentFollowUp=new DocumentFollowUpService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -610,19 +612,39 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.json(result);
   });
-  app.post('/api/issues',(req,res)=>{
+  // The caller owns the transaction, including any links created with the issue.
+  const createIssueInTransaction=(req:Request,input:Record<string,unknown>):Issue=>{
     const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
-    const activeTypes=issueSchemas.get(text(req.body.projectId,'프로젝트',200)).issueTypes.filter(type=>!type.archived);
-    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(req.body.projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>k in req.body).map(k=>[k,req.body[k]]))};
-    store.transaction(()=>{
-      Object.assign(i,planning.resolveIssueFields(req.body,i.projectId));validateIssue(i);
-      const p=get('projects',i.projectId), row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as {next_number:number}|undefined;
-      const num=row?.next_number||1;i.key=`${p.key}-${num}`;
-      store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);
-      if(done(i))i.completedAt=timestamp;
-      store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);
-      if(i.assigneeId)notifyIssue(i,actor(req),'issue-assigned',[i.assigneeId],timestamp);
-    });res.status(201).json(i);
+    const projectId=text(input.projectId,'프로젝트',200);
+    const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
+    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
+    Object.assign(i,planning.resolveIssueFields(input,i.projectId));validateIssue(i);
+    const p=get<Project>('projects',i.projectId), row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as {next_number:number}|undefined;
+    const num=row?.next_number||1;i.key=`${p.key}-${num}`;
+    store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);
+    if(done(i))i.completedAt=timestamp;
+    store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);
+    if(i.assigneeId)notifyIssue(i,actor(req),'issue-assigned',[i.assigneeId],timestamp);
+    return i;
+  };
+  app.post('/api/issues',(req,res)=>{
+    const issue=store.transaction(()=>createIssueInTransaction(req,req.body));
+    res.status(201).json(issue);
+  });
+  app.post('/api/documents/:id/follow-up-issues',(req,res)=>{
+    const result=documentFollowUp.create({documentId:String(req.params.id),actorId:actor(req),body:req.body},{
+      create(documentId,expectedVersion,input){
+        const document=get<DocPage>('documents',documentId);
+        checkVersion(document,expectedVersion);
+        if(document.projectId!==null&&document.projectId!==input.projectId)fail('프로젝트 문서의 후속 업무는 같은 프로젝트에 만들어 주세요.');
+        const issue=createIssueInTransaction(req,input);
+        const link:ResourceLink={id:uid(),issueId:issue.id,documentId,kind:'후속 업무'};
+        store.put('resource_links',link);
+        activity(req,'document',documentId,'후속 업무 생성',`${issue.key} ${issue.title}`);
+        return {issue,link};
+      },
+    });
+    res.status(result.duplicate?200:201).json(result);
   });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
@@ -1119,6 +1141,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       }
       const previousImports=new Map(sourcePreservation.allImports().map(value=>[value.id,value.version]));
       const previousWorklogs=worklogs.clearForRestore();
+      documentFollowUp.clearForImport();
       outbound.resetForImport();
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       migrations.resetForNativeImport();
@@ -1182,6 +1205,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
+    if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});
