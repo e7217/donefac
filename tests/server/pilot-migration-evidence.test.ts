@@ -15,6 +15,12 @@ const archivedId = '00000000-0000-0000-0000-000000000030';
 const fileId = '00000000-0000-0000-0000-000000000040';
 const recordCounts = { linked: 4, trashed: 0, missing: 0, 'archive-only': 1, excluded: 0 };
 const attachmentCounts = { verified: 1, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 };
+const targetDigests = {
+  comments: { count: 1, sha256: '1'.repeat(64) },
+  revisions: { count: 1, sha256: '2'.repeat(64) },
+  worklogs: { count: 1, sha256: '3'.repeat(64) },
+  issueRelations: { count: 1, sha256: '4'.repeat(64) },
+};
 
 function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false } = {}) {
   const packages = [jira, wiki];
@@ -37,6 +43,8 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
     attachments: [{ sourceRecordId: archivedId, fileId, recordStatus: 'linked', status: corrupt ? 'corrupt' : 'verified',
       packageSha256: wiki.sha256, product: wiki.product, sourceInstance: wiki.instanceKey, size: 11,
       sha256: corrupt ? 'never-emit-invalid-file-metadata' : 'c'.repeat(64), title: 'never-emit-original-file-title' }],
+    targetContent: { version: 1, ...targetDigests, comments: { ...targetDigests.comments, body: 'never-emit-comment' },
+      documentHistory: 'never-emit-unexpected-target-section' },
   };
   const workspace = {
     projects: [{ id: 'project-synthetic', name: 'never-emit-private-project-name' }],
@@ -48,12 +56,12 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
   return { packages, receipt, observations, workspace };
 }
 
-function evidence(input: ReturnType<typeof sample>) {
+function evidence(input: ReturnType<typeof sample>, observations: unknown = input.observations) {
   return collectMigrationEvidence(async path => {
     if (path === '/source-imports') return [input.receipt];
     if (path === '/workspace') return input.workspace;
     assert.equal(path, `/source-imports/${receiptId}/reconciliation/audit?expectedVersion=${input.receipt.version}`);
-    return input.observations;
+    return observations;
   }, input.packages);
 }
 
@@ -63,6 +71,7 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.status, 'verified');
   assert.deepEqual(before.packages.map(pkg => pkg.receiptIds), [[receiptId], [receiptId]]);
   assert.equal(before.receipts[0].attachmentCounts.verified, 1);
+  assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.equal(before.workspace.counts.documents, 1);
   assert.doesNotMatch(JSON.stringify(before), /never-emit|\/private\//);
   assert.deepEqual(compareMigrationEvidence(before, after), {
@@ -72,6 +81,36 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.deepEqual(compareMigrationEvidence(before, changed), {
     status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: false, packagesMatch: true,
   });
+});
+
+test('migration rehearsal detects changed target contents even when restored counts and workspace match', async () => {
+  const input = sample();
+  const before = await evidence(input);
+  for (const [section, original] of Object.entries(targetDigests)) {
+    const after = await evidence(input, { ...input.observations, targetContent: {
+      ...input.observations.targetContent, [section]: { ...original, sha256: 'f'.repeat(64) },
+    } });
+    assert.equal(after.status, 'verified');
+    assert.deepEqual(after.receipts[0].recordCounts, before.receipts[0].recordCounts);
+    assert.deepEqual(compareMigrationEvidence(before, after), {
+      status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: true, packagesMatch: true,
+    }, section);
+  }
+});
+
+test('migration rehearsal rejects absent or malformed target-content evidence', async () => {
+  const input = sample();
+  const { targetContent, ...withoutTarget } = input.observations;
+  await assert.rejects(evidence(input, withoutTarget), /이관 대상 내용 검증 형식 또는 버전/);
+  await assert.rejects(evidence(input, { ...input.observations, targetContent: { ...targetContent, version: 2 } }), /이관 대상 내용 검증 형식 또는 버전/);
+  const malformed = {
+    comments: undefined, revisions: [], worklogs: { ...targetDigests.worklogs, count: -1 },
+    issueRelations: { ...targetDigests.issueRelations, sha256: 'never-emit-invalid-digest' },
+  };
+  for (const [section, value] of Object.entries(malformed)) {
+    await assert.rejects(evidence(input, { ...input.observations, targetContent: { ...targetContent, [section]: value } }),
+      { message: `이관 대상 내용 검증 항목(${section})의 건수 또는 해시가 올바르지 않습니다.` });
+  }
 });
 
 test('migration rehearsal surfaces pending stages, conflicted package identities, and corrupt files', async () => {

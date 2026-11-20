@@ -87,6 +87,17 @@ function attachmentEvidence(raw, receiptKeys, expectedCounts) {
   return fingerprint(observations);
 }
 
+function targetContentEvidence(raw) {
+  requireEvidence(isObject(raw) && raw.version === 1, '이관 대상 내용 검증 형식 또는 버전이 올바르지 않습니다.');
+  function section(name) {
+    const value = raw[name];
+    requireEvidence(isObject(value) && count(value.count) && hex(value.sha256), `이관 대상 내용 검증 항목(${name})의 건수 또는 해시가 올바르지 않습니다.`);
+    return { count: value.count, sha256: value.sha256 };
+  }
+  return { version: 1, comments: section('comments'), revisions: section('revisions'),
+    worklogs: section('worklogs'), issueRelations: section('issueRelations') };
+}
+
 function noticeCounts(notices) {
   const counts = new Map();
   for (const notice of notices ?? []) {
@@ -106,8 +117,9 @@ async function auditReceipt(call, receipt, packageIds, receiptKeys) {
   const attachmentCounts = counts(raw.attachmentCounts, attachmentStatuses);
   requireEvidence(integrity.records.observed === sum(Object.values(recordCounts)), '이관 원본의 검증 건수와 대조 건수가 다릅니다.');
   const attachmentsSha256 = attachmentEvidence(raw.attachments, receiptKeys, attachmentCounts);
+  const targetContent = targetContentEvidence(raw.targetContent);
   return { id: receipt.id, version: receipt.version, packageIds,
-    projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256,
+    projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256, targetContent,
     configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]), notices: noticeCounts(receipt.notices) };
 }
 

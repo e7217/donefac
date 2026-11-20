@@ -287,6 +287,17 @@ export interface SourceReconciliationIntegrity {
   columnMismatches: number;
   packages: SourceReconciliationIntegrityPackage[];
 }
+export interface SourceReconciliationContentDigest {
+  count: number;
+  sha256: string;
+}
+export interface SourceReconciliationTargetContent {
+  version: 1;
+  comments: SourceReconciliationContentDigest;
+  revisions: SourceReconciliationContentDigest;
+  worklogs: SourceReconciliationContentDigest;
+  issueRelations: SourceReconciliationContentDigest;
+}
 export interface SourceReconciliationAudit {
   importId: string;
   receiptVersion: number;
@@ -294,6 +305,7 @@ export interface SourceReconciliationAudit {
   completedAt: string;
   integrity: SourceReconciliationIntegrity;
   recordCounts: SourceReconciliationPage['counts'];
+  targetContent: SourceReconciliationTargetContent;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];
 }

@@ -2211,6 +2211,17 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.deepEqual(new Set(individual.rows.map(row => row.sourceRecordId)), new Set([commentSource.sourceRecordId, removed.sourceRecordId]));
     assert.ok(individual.rows.every(row => row.target?.owner?.projectId === destination.projectId));
     assert.equal((await checkFile(removed.sourceRecordId)).status, 'verified');
+    const individualContent = (await fullAudit()).targetContent;
+    assert.equal(individualContent.comments.count, 1);
+    const archivedComment = f.db.prepare('SELECT json FROM trash_items WHERE id=?').get(commentArchive.data.trashItemId);
+    assert.ok(archivedComment && typeof archivedComment.json === 'string');
+    const archivedCommentMarker = '비공개 합성 휴지통 댓글 변경';
+    f.db.prepare("UPDATE trash_items SET json=json_set(json,'$.item.body',?) WHERE id=?").run(archivedCommentMarker, commentArchive.data.trashItemId);
+    const changedIndividual = await fullAudit();
+    assert.equal(changedIndividual.targetContent.comments.count, individualContent.comments.count);
+    assert.notEqual(changedIndividual.targetContent.comments.sha256, individualContent.comments.sha256);
+    assert.ok(!JSON.stringify(changedIndividual).includes(archivedCommentMarker));
+    f.db.prepare('UPDATE trash_items SET json=? WHERE id=?').run(archivedComment.json, commentArchive.data.trashItemId);
 
     const trashed = await f.call<{ trashEntryId: string }>(`/documents/${documentId}`, 'DELETE');
     assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
@@ -2222,6 +2233,21 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.deepEqual(fullTrash.recordCounts, trashAudit.counts);
     assert.deepEqual(fullTrash.attachmentCounts, clean.attachmentCounts);
     assert.ok([older, newer, removed].every(value => fullTrash.attachments.some(row => row.sourceRecordId === value.sourceRecordId && row.recordStatus === 'trashed' && row.status === 'verified')));
+    assert.equal(fullTrash.targetContent.revisions.count, individualContent.revisions.count);
+    const archivedDocument = f.db.prepare('SELECT json FROM trash_entries WHERE id=?').get(trashed.data.trashEntryId);
+    assert.ok(archivedDocument && typeof archivedDocument.json === 'string');
+    const archivedRevisions = (JSON.parse(archivedDocument.json) as { revisions: DocRevision[] }).revisions;
+    const generatedIndex = archivedRevisions.findIndex(row => row.summary === '원본 현재 문서 이관');
+    assert.notEqual(generatedIndex, -1);
+    const archivedRevisionMarker = '비공개 합성 휴지통 이력 변경';
+    f.db.prepare('UPDATE trash_entries SET json=json_set(json,?,?) WHERE id=?')
+      .run(`$.revisions[${generatedIndex}].plainText`, archivedRevisionMarker, trashed.data.trashEntryId);
+    const changedArchive = await fullAudit();
+    assert.deepEqual(changedArchive.recordCounts, fullTrash.recordCounts);
+    assert.equal(changedArchive.targetContent.revisions.count, fullTrash.targetContent.revisions.count);
+    assert.notEqual(changedArchive.targetContent.revisions.sha256, fullTrash.targetContent.revisions.sha256);
+    assert.ok(!JSON.stringify(changedArchive).includes(archivedRevisionMarker));
+    f.db.prepare('UPDATE trash_entries SET json=? WHERE id=?').run(archivedDocument.json, trashed.data.trashEntryId);
 
     const backup = await f.call('/export');
     assert.equal(backup.status, 200);
@@ -2251,6 +2277,113 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
     assert.equal((await checkFile(archiveOnly.sourceRecordId)).status, 'unbound');
     assert.deepEqual((await fullAudit(restored.receiptVersion)).attachmentCounts, { ...clean.attachmentCounts, verified: 0, missing: 3 });
   } finally { await f.close(); }
+});
+
+test('whole-receipt audit detects changed migrated target data with identical counts and versions', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const date = '2020-08-01T00:00:00Z';
+  const author = { accountId: 'receipt-test-author', displayName: '합성 작성자' };
+  const issueFields = {
+    project: { id: '42', key: 'OLD', name: '이전 Jira' }, created: date, updated: date,
+    issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' },
+  };
+  const jira = await f.upload(Buffer.from(JSON.stringify({ issues: [
+    { id: '101', key: 'OLD-1', fields: { ...issueFields, summary: '합성 검증 티켓',
+      comment: { comments: [{ id: '310', body: '검증 대상 원본 댓글', author, created: date }] },
+      worklog: { worklogs: [{ id: '410', comment: '검증 대상 원본 작업 시간', author, started: date, timeSpentSeconds: 91 }] },
+      issuelinks: [{ id: '510', type: { id: '1', name: 'Blocks' }, outwardIssue: { id: '102', key: 'OLD-2' } }],
+    } },
+    { id: '102', key: 'OLD-2', fields: { ...issueFields, summary: '합성 연결 티켓' } },
+  ] })), 'target-evidence-jira.json', 'jira');
+  const wiki = await f.upload(confluence(true).bytes, 'target-evidence-wiki.zip', 'confluence');
+  const configuration = await f.configuration([jira, wiki], 'AUDIT');
+  configuration.excludedRecords = [`${wiki.id}/attachment:704`];
+  const preview = await f.preview(configuration);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  const reconciliation = `/source-imports/${receipt.id}/reconciliation`;
+  const auditPath = `${reconciliation}/audit?expectedVersion=${receipt.version}`;
+  async function audit() {
+    const response = await f.call<SourceReconciliationAudit>(auditPath);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return response.data;
+  }
+  const rows = (await f.call<SourceReconciliationPage>(`${reconciliation}?limit=100`)).data.rows;
+  const comment = rows.find(row => row.kind === 'comment' && row.product === 'jira')?.target;
+  const revision = rows.find(row => row.kind === 'revision')?.target;
+  const issue = rows.find(row => row.kind === 'issue' && row.sourceKey === 'OLD-1')?.target;
+  const otherIssue = rows.find(row => row.kind === 'issue' && row.sourceKey === 'OLD-2')?.target;
+  assert.ok(comment && revision?.owner && issue && otherIssue);
+  const worklogPath = `/issues/${issue.id}/worklogs`;
+  const worklog = (await f.call<IssueWorklogPage>(worklogPath)).data.entries[0];
+  assert.equal(worklog?.durationSeconds, 91);
+  const relation = f.db.prepare('SELECT id FROM issue_relations WHERE source_issue_id=? AND target_issue_id=?').get(issue.id, otherIssue.id);
+  assert.ok(relation && typeof relation.id === 'string');
+
+  const clean = await audit();
+  assert.equal(clean.targetContent.version, 1);
+  const sections = ['comments', 'revisions', 'worklogs', 'issueRelations'] as const;
+  const expectedCounts = [2, 2, 1, 1];
+  assert.deepEqual(sections.map(section => clean.targetContent[section].count), expectedCounts);
+  for (const section of sections) assert.match(clean.targetContent[section].sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual((await audit()).targetContent, clean.targetContent);
+  assert.doesNotMatch(JSON.stringify(clean.targetContent), /검증 대상 원본 댓글|검증 대상 원본 작업 시간|보존한 원본 댓글|보존한 이전 본문|receipt-test-author/);
+
+  const marker = 'API 응답에 포함하지 않는 합성 변경값';
+  const revisionRow = f.db.prepare('SELECT json FROM revisions WHERE id=?').get(revision.id);
+  assert.ok(revisionRow && typeof revisionRow.json === 'string');
+  const revisionAuthor = (JSON.parse(revisionRow.json) as DocRevision).authorId;
+  const alternativeAuthor = revisionAuthor === 'user-jun' ? 'user-seo' : 'user-jun';
+  const generatedRevision = f.db.prepare('SELECT id FROM revisions WHERE document_id=? AND id<>?').get(revision.owner.id, revision.id);
+  assert.ok(generatedRevision && typeof generatedRevision.id === 'string');
+  const mutations = [
+    ['comments', 'comments', comment.id, '$.body', marker],
+    ['revisions', 'revisions', revision.id, '$.authorId', alternativeAuthor],
+    ['revisions', 'revisions', generatedRevision.id, '$.plainText', marker],
+    ['worklogs', 'worklogs', worklog.id, '$.durationSeconds', 92],
+    ['issueRelations', 'issue_relations', relation.id, '$.type', 'duplicates'],
+  ] as const;
+  for (const [section, table, id, path, value] of mutations) {
+    const original = f.db.prepare(`SELECT json FROM ${table} WHERE id=?`).get(id);
+    assert.ok(original && typeof original.json === 'string');
+    assert.equal(f.db.prepare(`UPDATE ${table} SET json=json_set(json,?,?) WHERE id=?`).run(path, value, id).changes, 1);
+    const altered = await audit();
+    assert.deepEqual(altered.recordCounts, clean.recordCounts);
+    assert.deepEqual(altered.integrity, clean.integrity);
+    assert.deepEqual(altered.attachmentCounts, clean.attachmentCounts);
+    assert.deepEqual(sections.map(name => altered.targetContent[name].count), expectedCounts);
+    assert.deepEqual(sections.filter(name => altered.targetContent[name].sha256 !== clean.targetContent[name].sha256), [section]);
+    assert.ok(!JSON.stringify(altered).includes(marker));
+    assert.equal(f.db.prepare(`UPDATE ${table} SET json=? WHERE id=?`).run(original.json, id).changes, 1);
+  }
+  assert.deepEqual((await audit()).targetContent, clean.targetContent);
+
+  const open = fileSystem.open;
+  let changedDuringFileScan = false;
+  const concurrentChange = t.mock.method(fileSystem, 'open', async (...args: Parameters<typeof open>) => {
+    if (!changedDuringFileScan && String(args[0]).startsWith(join(f.dir, 'uploads'))) {
+      changedDuringFileScan = true;
+      assert.equal(f.db.prepare("UPDATE worklogs SET json=json_set(json,'$.durationSeconds',92) WHERE id=?").run(worklog.id).changes, 1);
+    }
+    return open(...args);
+  });
+  try {
+    assert.equal((await f.call(auditPath)).status, 409);
+    assert.equal(changedDuringFileScan, true);
+  } finally { concurrentChange.mock.restore(); }
+
+  assert.equal((await f.call(`${worklogPath}/${worklog.id}`, 'DELETE', { expectedVersion: worklog.version }, worklog.authorId)).status, 200);
+  const deletedWorklog = await audit();
+  assert.equal(deletedWorklog.targetContent.worklogs.count, 1, 'the deleted migrated worklog retains a stored record');
+  assert.notEqual(deletedWorklog.targetContent.worklogs.sha256, clean.targetContent.worklogs.sha256);
+  f.db.prepare("UPDATE worklogs SET json=json_set(json,'$.note',?) WHERE id=?").run(marker, worklog.id);
+  const alteredDeletedWorklog = await audit();
+  assert.equal(alteredDeletedWorklog.targetContent.worklogs.count, 1);
+  assert.notEqual(alteredDeletedWorklog.targetContent.worklogs.sha256, deletedWorklog.targetContent.worklogs.sha256);
+  assert.ok(!JSON.stringify(alteredDeletedWorklog).includes(marker));
 });
 
 test('retained source verification distinguishes archival loss from deleted live targets and intentional exclusions', async t => {

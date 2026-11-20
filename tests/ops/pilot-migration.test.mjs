@@ -11,25 +11,53 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const date = '2020-03-01T00:00:00Z';
 const privateTitle = 'synthetic-private-issue-title';
+const privateRelatedTitle = 'synthetic-private-related-issue-title';
 const privateBody = 'synthetic-private-document-body';
+const privateJiraComment = 'synthetic-private-jira-comment';
+const privateConfluenceComment = 'synthetic-private-confluence-comment';
+const privateRevision = 'synthetic-private-historical-document-body';
+const privateWorklog = 'synthetic-private-worklog-note';
+const jiraAuthor = 'synthetic-jira-author-key';
+const confluenceAuthor = 'synthetic-confluence-author-key';
 const originalFrom = 'synthetic-source-instance';
 const attachment = Buffer.from('synthetic source attachment\0');
 
 function fixturePackages() {
   const jira = zip([
     { path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml>
+      <ApplicationUser id="21" userKey="${jiraAuthor}" lowerUserName="audit-jira-user"/>
+      <User id="22" userName="audit-jira-user" displayName="Migration fixture Jira author" active="1"/>
       <Project id="10" pkey="SRC" name="Jira fixture"/><Status id="1" pname="Open"/><IssueType id="2" pname="Task"/>
       <Issue id="100" project="10" number="1" summary="${privateTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
+      <Issue id="101" project="10" number="2" summary="${privateRelatedTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
+      <IssueLinkType id="600" linkname="Blocks" inward="is blocked by" outward="blocks"/>
+      <IssueLink id="601" linktype="600" source="100" destination="101"/>
+      <Action id="400" issue="100" author="audit-jira-user" type="comment" created="${date}" body="${privateJiraComment}"/>
+      <Worklog id="500" issue="100" author="audit-jira-user" startdate="${date}" timeworked="91" created="${date}" updated="${date}" body="${privateWorklog}"/>
       <FileAttachment id="700" issue="100" filename="original.bin" filesize="${attachment.length}" created="${date}"/>
     </entity-engine-xml>`) },
     { path: 'attachments/SRC/SRC-1/700', bytes: attachment },
   ]);
   const confluence = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id><property name="name">audit-wiki-user</property>
+      <property name="displayName">Migration fixture Confluence author</property></object>
     <object class="Space"><id name="id">20</id><property name="key">WIKI</property><property name="name">Confluence fixture</property></object>
-    <object class="Page"><id name="id">200</id><property name="title">Original page</property><property name="version">1</property>
-      <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property></object>
+    <object class="Page"><id name="id">200</id><property name="title">Original page</property><property name="version">2</property>
+      <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
+      <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property>
+      <collection name="historicalVersions"><element class="Page"><id name="id">201</id></element></collection></object>
+    <object class="Page"><id name="id">201</id><property name="title">Historical page</property><property name="version">1</property>
+      <property name="contentStatus">historical</property><property name="originalVersion" class="Page"><id name="id">200</id></property>
+      <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
+      <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
     <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>${privateBody}</p>]]></property>
       <property name="content" class="Page"><id name="id">200</id></property></object>
+    <object class="BodyContent"><id name="id">301</id><property name="body"><![CDATA[<p>${privateRevision}</p>]]></property>
+      <property name="content" class="Page"><id name="id">201</id></property></object>
+    <object class="Comment"><id name="id">400</id><property name="containerContent" class="Page"><id name="id">200</id></property>
+      <property name="creationDate">${date}</property><property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
+    <object class="BodyContent"><id name="id">401</id><property name="body"><![CDATA[<p>${privateConfluenceComment}</p>]]></property>
+      <property name="content" class="Comment"><id name="id">400</id></property></object>
   </hibernate-generic>`) }]);
   return [{ filename: 'private-jira.zip', product: 'jira', bytes: jira }, { filename: 'private-wiki.zip', product: 'confluence', bytes: confluence }];
 }
@@ -73,7 +101,8 @@ async function readReport(root, answer) {
   assert.ok(match, answer.stdout + answer.stderr);
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
-  for (const value of [root, privateTitle, privateBody, originalFrom, 'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
+  for (const value of [root, privateTitle, privateRelatedTitle, privateBody, privateJiraComment, privateConfluenceComment,
+    privateRevision, privateWorklog, jiraAuthor, confluenceAuthor, originalFrom, 'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
   assert.equal((await stat(path)).mode & 0o777, 0o600);
@@ -132,15 +161,45 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     const actor = workspace.users[0].id;
     assert.equal(workspace.issues.length + workspace.documents.length, 0);
     const query = new URLSearchParams(staged.packages.map(pkg => ['packageId', pkg.packageId]));
-    const { defaultConfiguration: configuration } = await json(base, `/migrations/options?${query}`);
+    const { defaultConfiguration: configuration, identities } = await json(base, `/migrations/options?${query}`);
     configuration.projects = configuration.projects.map(project => ({ ...project, key: 'REH', name: 'Rehearsal fixture' }));
     configuration.sourceBaseUrls = Object.fromEntries(staged.packages.map(pkg => [pkg.packageId, `https://${pkg.product}.example.invalid`]));
+    for (const sourceValue of [jiraAuthor, confluenceAuthor]) {
+      const identity = identities.find(value => value.sourceValue === sourceValue);
+      assert.ok(identity, `Fixture author ${sourceValue} was not analyzed`);
+      configuration.users[identity.id] = actor;
+    }
     const preview = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration } });
     assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
-    assert.equal(preview.counts.issues, 1);
+    assert.equal(preview.counts.issues, 2);
     assert.equal(preview.counts.documents, 1);
+    assert.equal(preview.counts.comments, 2);
+    assert.equal(preview.counts.revisions, 2);
+    assert.equal(preview.counts.worklogs, 1);
+    assert.equal(preview.counts.issueRelations, 1);
     await json(base, `/migrations/previews/${preview.id}/apply`, { method: 'POST', actor, status: 201,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
+    const imported = await json(base, '/workspace');
+    const issue = imported.issues.find(value => value.title === privateTitle);
+    const related = imported.issues.find(value => value.title === privateRelatedTitle);
+    const [document] = imported.documents;
+    assert.ok(issue && related && document);
+    const [jiraComments, wikiComments, revisions, worklogs, relations] = await Promise.all([
+      json(base, `/comments?resourceType=issue&resourceId=${issue.id}`),
+      json(base, `/comments?resourceType=document&resourceId=${document.id}`),
+      json(base, `/documents/${document.id}/revisions`),
+      json(base, `/issues/${issue.id}/worklogs`),
+      json(base, `/issues/${issue.id}/relations`),
+    ]);
+    assert.deepEqual(jiraComments.map(({ body, authorId }) => [body, authorId]), [[privateJiraComment, actor]]);
+    assert.deepEqual(wikiComments.map(({ body, authorId }) => [body, authorId]), [[privateConfluenceComment, actor]]);
+    assert.deepEqual(revisions.sort((left, right) => left.version - right.version)
+      .map(({ version, title, plainText, authorId }) => [version, title, plainText, authorId]), [
+      [1, 'Historical page', privateRevision, actor],
+      [2, 'Original page', privateBody, actor],
+    ]);
+    assert.deepEqual(worklogs.entries.map(({ note, durationSeconds, authorId }) => [note, durationSeconds, authorId]), [[privateWorklog, 91, actor]]);
+    assert.deepEqual(relations.map(({ sourceIssueId, targetIssueId, type }) => [sourceIssueId, targetIssueId, type]), [[issue.id, related.id, 'Blocks']]);
   } finally {
     review.child.kill('SIGINT');
     const stopped = await review.exited;
@@ -153,7 +212,15 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(report.status, 'verified');
   assert.equal(report.source.evidence.receipts.length, 1);
   assert.equal(report.source.evidence.receipts[0].attachmentCounts.verified, 1);
-  assert.equal(report.source.evidence.workspace.counts.issues, 1);
+  const { targetContent } = report.source.evidence.receipts[0];
+  assert.equal(targetContent.version, 1);
+  for (const [section, count] of Object.entries({ comments: 2, revisions: 2, worklogs: 1, issueRelations: 1 })) {
+    assert.equal(targetContent[section].count, count);
+    assert.match(targetContent[section].sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(Object.keys(targetContent[section]).sort(), ['count', 'sha256']);
+  }
+  assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
+  assert.equal(report.source.evidence.workspace.counts.issues, 2);
   assert.equal(report.source.evidence.workspace.counts.documents, 1);
   assert.equal(report.comparison.matches, true);
   assert.deepEqual(report.source.bundles, report.restore.bundles);

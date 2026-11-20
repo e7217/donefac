@@ -455,6 +455,8 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 `integrity`의 `records`와 `boundAttachments`는 보존 원본 수와 대상 첨부 버전 ID가 연결된 원본 수의 이관 당시 기준(`expected`)과 검사값(`observed`)이다. `packages`는 이름·수량·원본 집합 SHA-256을 패키지별로 대조한다. `verified`는 저장된 원본 기준과 일치, `mismatch`는 불일치, `counts-only`는 당시 수량만 비교 가능, `unavailable`은 당시 기준을 읽을 수 없는 상태다. `unmatchedRecords`와 `columnMismatches`는 출처를 확인할 수 없는 기록과 저장 식별 정보 불일치를 보여준다. 원본 무결성 `verified`와 현재 대상·파일 상태는 독립된 결과다.
 
+`targetContent`의 `version`은 `1`이다. `comments`, `revisions`, `worklogs`, `issueRelations`는 각각 저장된 대상의 `count`와 `sha256`을 반환한다. 원본에 연결된 댓글과 작업 기록은 보관 데이터가 남은 휴지통과 삭제 기록도 포함한다. 문서 이력은 직접 연결한 버전과 영수증에 연결한 문서의 저장 이력을 한 번씩 센다. 업무 관계는 영수증에 연결된 활성 업무가 양쪽 중 하나에 있는 관계를 센다. 이 값은 현재 대상의 복원 전후 대조에 쓰며, `targetContent`에는 본문이나 작성자 정보가 들어가지 않는다.
+
 서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 

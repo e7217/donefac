@@ -1,11 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 import { constants, statSync } from 'node:fs';
 import fileSystem from 'node:fs/promises';
 import type { Express } from 'express';
 import type {
   Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment,
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage, SourceReconciliationOwner,
-  SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget,
+  SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
@@ -29,6 +29,8 @@ type AuditMatchRow = MatchRow & {
   ownerVersion: number | null; targetVersion: number | null; targetUpdatedAt: string | null;
   fileOwnerId: string | null; fileOwnerType: SourceReconciliationOwner['type'] | null;
 };
+type AuditTargetProjection = { auditRowOrder: number; targetPayload: string | null; targetColumns: string | null };
+type ContentFingerprint = { count: number; hash: Hash };
 type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
 type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
 type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string };
@@ -61,9 +63,10 @@ function parseQuery(input: Record<string, unknown>): ReceiptQuery {
   return { kind, status: status as ReceiptQuery['status'], offset: integer('offset', 0, 0, 1_000_000), limit: integer('limit', 30, 1, 100), q: casefold(q.trim()) };
 }
 
-// The projection keeps archived bodies, metadata values and file bytes outside the response and JS scan.
+// The whole-receipt audit reads migrated target payloads for hashing only. Original bodies and file bytes aren't projected.
 const attachmentJson = 'coalesce(av.json,a.json,CASE WHEN archived_attachment.id IS NOT NULL THEN archived_file.json END)';
 const auditProjection = `
+    r.rowid AS auditRowOrder,
     CASE WHEN r.kind='attachment' THEN coalesce(json_extract(r.json,'$.record.metadata.actualSize'),json_extract(r.json,'$.record.metadata.size')) END AS originalSize,
     CASE WHEN r.kind='attachment' THEN json_extract(r.json,'$.record.metadata.sha256') END AS originalSha,
     json_extract(${attachmentJson},'$.size') AS size,
@@ -73,7 +76,13 @@ const auditProjection = `
     r.owner_id AS originalOwnerId, r.owner_type AS originalOwnerType,
     coalesce(json_extract(i.json,'$.version'),json_extract(d.json,'$.version')) AS ownerVersion,
     coalesce(json_extract(v.json,'$.version'),json_extract(w.json,'$.version')) AS targetVersion,
-    coalesce(json_extract(c.json,'$.updatedAt'),json_extract(p.json,'$.updatedAt')) AS targetUpdatedAt,`;
+    coalesce(json_extract(c.json,'$.updatedAt'),json_extract(p.json,'$.updatedAt')) AS targetUpdatedAt,
+    coalesce(c.json,archived_comment.json,v.json,w.json) AS targetPayload,
+    CASE WHEN c.id IS NOT NULL THEN json_array('live',c.resource_type,c.resource_id,c.author_id)
+      WHEN archived_comment.id IS NOT NULL THEN json_array('individual-archive',archived_comment.id,archived_comment.owner_type,archived_comment.owner_id,archived_comment.deleted_at)
+      WHEN v.id IS NOT NULL THEN json_array('live',v.document_id)
+      WHEN w.id IS NOT NULL THEN json_array('worklogs',w.issue_id,w.project_id,w.author_id,w.work_date,w.created_at,w.minutes,w.deleted_at)
+    END AS targetColumns,`;
 const rowsSql = (audit: boolean) => `
   SELECT r.id AS sourceRecordId, r.kind, r.source_id AS sourceId, r.product, r.source_instance AS sourceInstance,
     ${audit ? auditProjection : ''}
@@ -130,7 +139,7 @@ const rowsSql = (audit: boolean) => `
     AND archived_attachment.owner_type=r.owner_type AND archived_attachment.owner_id=r.owner_id
   LEFT JOIN trash_entries t ON t.resource_type=CASE WHEN r.target_type IN ('issue','document') THEN r.target_type ELSE r.owner_type END
     AND t.resource_id=CASE WHEN r.target_type IN ('issue','document') THEN r.target_id ELSE r.owner_id END
-  WHERE r.import_id=? AND json_valid(r.json) ORDER BY r.kind,r.rowid`;
+  WHERE r.import_id=? AND json_valid(r.json) ORDER BY ${audit ? 'r.id' : 'r.kind,r.rowid'}`;
 
 function packageIdentity(product: string, instance: string, sha256: string) {
   return JSON.stringify([product, instance, sha256]);
@@ -147,12 +156,17 @@ function archiveProjection(archive: TrashArchive, audit: boolean) {
   if (audit) for (const { id, size, sha256, resourceId, resourceType } of [...archive.attachments, ...archive.attachmentVersions]) {
     files.set(id, { size, sha256, resourceId, resourceType });
   }
-  return { labels, files };
+  const contents = audit ? {
+    comment: new Map(archive.comments.map(value => [value.id, contentSha256(JSON.stringify(value))])),
+    revision: new Map(archive.revisions.map(value => [value.id, contentSha256(JSON.stringify(value))])),
+  } : undefined;
+  return { labels, files, contents };
 }
 
 function scanReceipt(
   { store, trash }: Dependencies, receipt: SourceImport, audit: boolean,
-  visit: (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null, archivedFile?: FileMetadata) => void,
+  visit: (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null,
+    archivedFile?: FileMetadata, archivedContentSha256?: string) => void,
 ): SourceReconciliationPage['counts'] {
   const packages = new Map(receipt.packages.map(value => [packageIdentity(value.source.product, value.source.instanceKey, value.sha256), value.stagingId]));
   const excluded = new Set(receipt.configuration.excludedRecords);
@@ -176,6 +190,7 @@ function scanReceipt(
     let status: SourceReconciliationStatus = excludedRecord ? 'excluded' : 'archive-only';
     let target: SourceReconciliationTarget | null = null;
     let archivedFile: FileMetadata | undefined;
+    let archivedContentSha256: string | undefined;
     if (status !== 'excluded' && row.targetType && row.targetId) {
       let archived: string | null = null;
       if (!row.linked && row.individualTrashId) {
@@ -183,10 +198,11 @@ function scanReceipt(
       } else if (!row.linked && row.trashId) {
         if (row.targetType === 'issue' || row.targetType === 'document') {
           archived = [row.trashIssueKey, row.trashTitle].filter(Boolean).join(' · ') || row.targetId;
-        } else if (['comment', 'revision', 'attachment'].includes(row.targetType)) {
+        } else if (row.targetType === 'comment' || row.targetType === 'revision' || row.targetType === 'attachment') {
           const children = archivedChildren(row.trashId);
-          archived = children.labels[row.targetType]?.get(row.targetId) ?? null;
+          archived = children.labels[row.targetType].get(row.targetId) ?? null;
           if (row.targetType === 'attachment') archivedFile = children.files.get(row.targetId);
+          else archivedContentSha256 = children.contents?.[row.targetType].get(row.targetId);
         }
       }
       status = row.linked ? 'linked' : archived !== null ? 'trashed' : 'missing';
@@ -199,7 +215,7 @@ function scanReceipt(
       };
     }
     counts[status]++;
-    visit(row, status, target, archivedFile);
+    visit(row, status, target, archivedFile, archivedContentSha256);
   }
   return counts;
 }
@@ -318,16 +334,131 @@ function compareArchive(receipt: SourceImport, measured: ReturnType<SourcePreser
   return { status, records, boundAttachments, unmatchedRecords: measured.unmatchedRecords, columnMismatches: measured.columnMismatches, packages };
 }
 
+function contentSection(type: TargetType) {
+  switch (type) {
+    case 'comment': return 'comments';
+    case 'revision': return 'revisions';
+    case 'worklog': return 'worklogs';
+    default: return null;
+  }
+}
+
+function contentFingerprint(): ContentFingerprint {
+  return { count: 0, hash: createHash('sha256') };
+}
+
+function contentSha256(json: string) {
+  return createHash('sha256').update(json).digest('hex');
+}
+
+function addContent(fingerprint: ContentFingerprint, identity: unknown[], payloadSha256: string) {
+  fingerprint.hash.update(JSON.stringify([...identity, payloadSha256])).update('\n');
+  fingerprint.count++;
+}
+
+function finishContent({ count, hash }: ContentFingerprint) {
+  return { count, sha256: hash.digest('hex') };
+}
+
+function issueRelationContent(store: Store, importId: string, linkedIssues: ReadonlySet<string>) {
+  const fingerprint = contentFingerprint();
+  if (!linkedIssues.size) return finishContent(fingerprint);
+  // Anchor each lookup to receipt endpoints so SQLite uses the endpoint indexes instead of scanning unrelated relations.
+  const rows = store.db.prepare(`
+    WITH receipt_issues AS (
+      SELECT DISTINCT i.id FROM source_records r JOIN issues i ON i.id=r.target_id
+      WHERE r.import_id=? AND r.target_type='issue' AND json_valid(r.json)
+    ), receipt_relations AS (
+      SELECT relation.id FROM receipt_issues i CROSS JOIN issue_relations relation ON relation.source_issue_id=i.id
+      UNION
+      SELECT relation.id FROM receipt_issues i CROSS JOIN issue_relations relation ON relation.target_issue_id=i.id
+    )
+    SELECT relation.id, relation.source_issue_id, relation.target_issue_id, relation.json
+    FROM receipt_relations matched CROSS JOIN issue_relations relation ON relation.id=matched.id
+    ORDER BY relation.id
+  `).iterate(importId);
+  for (const result of rows) {
+    const row = result as { id: string; source_issue_id: string; target_issue_id: string; json: string };
+    if (!linkedIssues.has(row.source_issue_id) && !linkedIssues.has(row.target_issue_id)) continue;
+    addContent(fingerprint, [row.id, row.source_issue_id, row.target_issue_id], contentSha256(row.json));
+  }
+  return finishContent(fingerprint);
+}
+
+function addDocumentRevisions(
+  { store, trash }: Dependencies, importId: string, documents: ReadonlyMap<string, string | null>, observed: Set<string>,
+  fingerprint: ContentFingerprint,
+) {
+  if (!documents.size) return;
+  // The current migrated page snapshot can have no direct source-revision binding. Follow bound documents as well.
+  const revisions = store.db.prepare(`
+    WITH receipt_documents AS (
+      SELECT DISTINCT d.id FROM source_records r JOIN documents d ON d.id=r.target_id
+      WHERE r.import_id=? AND r.target_type='document' AND json_valid(r.json)
+    )
+    SELECT revision.id, revision.document_id FROM receipt_documents d
+    CROSS JOIN revisions revision ON revision.document_id=d.id
+    ORDER BY revision.id
+  `).iterate(importId);
+  const readRevision = store.db.prepare('SELECT json FROM revisions WHERE id=?');
+  for (const result of revisions) {
+    const { id, document_id: documentId } = result as { id: string; document_id: string };
+    if (documents.get(documentId) !== null || observed.has(id)) continue;
+    const row = readRevision.get(id) as { json: string };
+    addContent(fingerprint, ['document-history', documentId, id], contentSha256(row.json));
+    observed.add(id);
+  }
+  for (const [documentId, trashId] of [...documents].sort(([left], [right]) => left.localeCompare(right))) {
+    if (trashId === null) continue;
+    const archive = trash.get(trashId);
+    for (const revision of archive.revisions.sort((left, right) => left.id.localeCompare(right.id))) {
+      if (observed.has(revision.id)) continue;
+      addContent(fingerprint, ['parent-archive', documentId, trashId, revision.id], contentSha256(JSON.stringify(revision)));
+      observed.add(revision.id);
+    }
+  }
+}
+
 function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collect: boolean) {
   const integrity = compareArchive(receipt, dependencies.preservation.measureArchive(receipt));
   const fingerprint = createHash('sha256');
   fingerprint.update(JSON.stringify(integrity)).update('\n');
-  const entries: AuditEntry[] = [];
-  const recordCounts = scanReceipt(dependencies, receipt, true, (row, status, target, archivedFile) => {
+  const orderedEntries: { order: number; entry: AuditEntry }[] = [];
+  const contents = { comments: contentFingerprint(), revisions: contentFingerprint(), worklogs: contentFingerprint() };
+  const linkedIssues = new Set<string>();
+  const boundDocuments = new Map<string, string | null>();
+  const observedRevisions = new Set<string>();
+  const recordCounts = scanReceipt(dependencies, receipt, true, (match, status, target, archivedFile, archivedContentSha256) => {
+    const { auditRowOrder, targetPayload, targetColumns, ...row } = match as AuditMatchRow & AuditTargetProjection;
     fingerprint.update(JSON.stringify([row, status, target, archivedFile ?? null])).update('\n');
-    if (collect && row.kind === 'attachment') entries.push(auditEntry(row as AuditMatchRow, status, archivedFile));
+    if (collect && row.kind === 'attachment') orderedEntries.push({ order: auditRowOrder, entry: auditEntry(row, status, archivedFile) });
+    if (!target) return;
+    if (target.type === 'issue' && status === 'linked') linkedIssues.add(target.id);
+    if (target.type === 'document') {
+      if (status === 'linked') boundDocuments.set(target.id, null);
+      else if (status === 'trashed' && row.trashId) boundDocuments.set(target.id, row.trashId);
+    }
+    const section = contentSection(target.type);
+    if (!section || (targetPayload === null && !archivedContentSha256)) return;
+    if (section === 'revisions') {
+      if (observedRevisions.has(target.id)) return;
+      observedRevisions.add(target.id);
+    }
+    if (targetPayload !== null) {
+      addContent(contents[section], [row.sourceRecordId, target.id, status, targetColumns], contentSha256(targetPayload));
+    } else if (archivedContentSha256) {
+      addContent(contents[section], [row.sourceRecordId, target.id, status, 'parent-archive', row.trashId,
+        row.originalOwnerType, row.originalOwnerId], archivedContentSha256);
+    }
   });
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity };
+  addDocumentRevisions(dependencies, receipt.id, boundDocuments, observedRevisions, contents.revisions);
+  const targetContent: SourceReconciliationTargetContent = {
+    version: 1, comments: finishContent(contents.comments), revisions: finishContent(contents.revisions),
+    worklogs: finishContent(contents.worklogs), issueRelations: issueRelationContent(dependencies.store, receipt.id, linkedIssues),
+  };
+  fingerprint.update(JSON.stringify(targetContent));
+  const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity, targetContent };
 }
 
 function errorCode(error: unknown): unknown {
@@ -402,7 +533,7 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   if (!current || current.version !== expectedVersion || auditSnapshot(dependencies, current, false).fingerprint !== before.fingerprint) conflict();
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
-    integrity: before.integrity, recordCounts: before.recordCounts, attachmentCounts, attachments,
+    integrity: before.integrity, recordCounts: before.recordCounts, targetContent: before.targetContent, attachmentCounts, attachments,
   };
 }
 
