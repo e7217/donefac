@@ -1144,7 +1144,7 @@ test('Confluence label-only refresh keeps active collaborators and restores the 
 
   type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; revisions: DocRevision[] };
   const backup = (await f.call<Backup>('/export')).data;
-  assert.equal(backup.schemaVersion, 61);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const archive = backup.sourceRecords.find(row => row.sourceImportId === result.data.import.id && row.targetId === document.id);
   assert.match(archive?.confluencePageFieldHashes?.labels ?? '', /^[a-f\d]{64}$/);
   const version = backup.revisions.find(item => item.documentId === document.id && item.version === message.document.version);

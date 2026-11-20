@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import type { TeamNotification } from '../../shared/types.js';
+import { ISSUE_RISK_NOTIFICATION_KINDS, type TeamNotification } from '../../shared/types.js';
 import { NotificationsService, TeamNotificationError } from '../../server/notifications.js';
 import { Store } from '../../server/store.js';
 
@@ -96,4 +96,56 @@ test('notification restore preserves read state and deleted target references wh
   assert.deepEqual(JSON.parse(JSON.stringify(notifications.all())), backup);
   assert.deepEqual(rowIds(notifications.list('recipient', 'all').items), expected);
   assert.equal(notifications.count('recipient'), 1);
+});
+
+test('upgrades the previous SQLite notification table in place and omits detail for existing rows', t => {
+  const { store, dir } = fixture(t);
+  store.db.exec('ALTER TABLE team_notifications DROP COLUMN detail');
+  const legacy: TeamNotification = { ...event, id: 'existing-notice', recipientId: 'recipient', readAt: event.createdAt };
+  store.db.prepare(`INSERT INTO team_notifications
+    (seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(27, legacy.id, legacy.recipientId, legacy.actorId, legacy.kind, legacy.projectId, legacy.targetId,
+      legacy.targetLabel, legacy.createdAt, legacy.readAt);
+
+  const upgraded = new NotificationsService(store);
+  assert.deepEqual(upgraded.all(), [legacy]);
+  assert.equal(Object.hasOwn(upgraded.list('recipient', 'all').items[0], 'detail'), false);
+  assert.deepEqual({ ...store.db.prepare('SELECT seq,detail FROM team_notifications WHERE id=?').get(legacy.id) }, { seq: 27, detail: null });
+
+  const reopenedStore = new Store(dir);
+  try {
+    const reopened = new NotificationsService(reopenedStore);
+    reopened.notify({ ...event, kind: 'issue-block-added', detail: '외부 업무 LEG-2', recipientIds: ['recipient'] });
+    assert.deepEqual(reopened.all()[0], legacy);
+    assert.equal(reopened.list('recipient', 'unread').items[0].detail, '외부 업무 LEG-2');
+  } finally { reopenedStore.db.close(); }
+});
+
+test('risk notification details survive restore and invalid or cross-kind details are rejected', t => {
+  const { store, notifications } = fixture(t);
+  const recipients = { recipientIds: ['recipient'] };
+  notifications.notify({ ...event, ...recipients });
+  const details = ['LEG-2 선행 검토', '선행 검토 완료', '가'.repeat(500)];
+  ISSUE_RISK_NOTIFICATION_KINDS.forEach((kind, index) => {
+    notifications.notify({ ...event, ...recipients, kind, detail: details[index] });
+  });
+  const unread = notifications.list('recipient', 'unread');
+  assert.deepEqual(unread.items.slice(0, 3).map(row => row.detail), [...details].reverse());
+  assert.equal(Object.hasOwn(unread.items[3], 'detail'), false);
+  notifications.markRead('recipient', unread.items[0].id);
+  const backup = notifications.all();
+  store.transaction(() => notifications.restore(JSON.parse(JSON.stringify(backup)), users));
+  assert.deepEqual(notifications.all(), backup);
+
+  const [legacy, risk] = backup;
+  const missing = { ...risk };
+  delete missing.detail;
+  for (const row of [missing, { ...legacy, detail: risk.detail }, { ...legacy, detail: null },
+    ...[null, 42, '', ' ', '가'.repeat(501), '금지\u0000문자', '줄\n바꿈'].map(detail => ({ ...risk, detail }))]) {
+    assert.throws(() => store.transaction(() => notifications.restore([row], users)), TeamNotificationError);
+    assert.deepEqual(notifications.all(), backup);
+  }
+  assert.throws(() => notifications.notify({ ...event, ...recipients, kind: 'issue-block-resolved' }), TeamNotificationError);
+  assert.throws(() => notifications.notify({ ...event, ...recipients, detail: '다른 알림의 상세 내용' }), TeamNotificationError);
+  assert.deepEqual(notifications.all(), backup);
 });

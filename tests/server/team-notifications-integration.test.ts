@@ -7,8 +7,9 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { ISSUE_RISK_NOTIFICATION_KINDS } from '../../shared/types.js';
 import type {
-  ApiKeyCreated, Comment, DocPage, DocumentPublicationView, Issue, LegacyPackageSummary, MigrationOptions,
+  ApiKeyCreated, Comment, DocPage, DocumentPublicationView, Issue, IssueRelation, LegacyPackageSummary, MigrationOptions,
   MigrationPreview, NotificationSubscription, NotificationSubscriptionState, NotificationSubscriptionTarget,
   TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -94,6 +95,11 @@ function event(item: TeamNotification) {
   const { kind, recipientId, actorId, projectId, targetId, targetLabel } = item;
   return { kind, recipientId, actorId, projectId, targetId, targetLabel };
 }
+
+const riskKinds: ReadonlySet<TeamNotification['kind']> = new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+const isRiskNotification = (item: TeamNotification) => riskKinds.has(item.kind);
+const riskInbox = async (f: Fixture, actorId: string, query = '') =>
+  (await inbox(f, actorId, query)).items.filter(isRiskNotification);
 
 test('issue assignment and comments notify their committed recipients without duplicates or self notifications', async t => {
   const f = await fixture(t);
@@ -558,6 +564,110 @@ test('notification history and read state survive restart and schema 15 restore,
   await expectStatus(f.call('/import', 'POST', { data: old }));
   assert.deepEqual(await inbox(f, reviewer), { items: [], nextCursor: null, unreadCount: 0 });
   assert.ok((await expectStatus(f.call<WorkspaceSnapshot>('/workspace'))).issues.some(value => value.id === received.id));
+});
+
+test('deadline postponement uses the effective date and native backup preserves risk details and read state', async t => {
+  const f = await fixture(t);
+  let ticket = await issue(f, reviewer, '마감 변경 확인 업무', [reviewer, collaborator, editor]);
+  const path = `/issues/${ticket.id}`;
+  const issueSubscription = subscriptionPath('issue', ticket.id);
+  const projectSubscription = subscriptionPath('project', ticket.projectId);
+  for (const actor of [reviewer, collaborator, editor]) await checkSubscription(f, issueSubscription, actor, true);
+  for (const actor of [reviewer, other, editor]) await checkSubscription(f, projectSubscription, actor, true);
+  const patch = async (changes: Partial<Pick<Issue, 'dueDate' | 'endDate' | 'status'>>) => {
+    ticket = await expectStatus(f.call<Issue>(path, 'PATCH', { expectedVersion: ticket.version, ...changes }));
+  };
+
+  await patch({ dueDate: '2026-11-20', endDate: '2026-11-22' });
+  await patch({ endDate: '2026-11-25' });
+  await patch({ dueDate: '2026-11-19' });
+  await patch({ dueDate: '2026-11-19' });
+  assert.deepEqual(await riskInbox(f, reviewer), []);
+
+  await patch({ dueDate: '2026-11-21' });
+  await patch({ dueDate: null });
+  await patch({ endDate: null });
+  await patch({ endDate: '2026-11-26' });
+  await patch({ dueDate: '2026-11-26' });
+  await patch({ status: 'done', endDate: '2026-11-28', dueDate: null });
+  await patch({ endDate: '2026-11-30' });
+
+  const expectedDetails = [
+    '목표 마감일 2026-11-21 → 계획 종료일 2026-11-25',
+    '목표 마감일 2026-11-19 → 목표 마감일 2026-11-21',
+  ];
+  const recipients = [reviewer, collaborator, other];
+  for (const recipientId of recipients) {
+    const items = await riskInbox(f, recipientId);
+    assert.deepEqual(items.map(item => ({ ...event(item), detail: item.detail })), expectedDetails.map(detail => ({
+      kind: 'issue-deadline-postponed', recipientId, actorId: editor, projectId: ticket.projectId,
+      targetId: ticket.id, targetLabel: `${ticket.key} ${ticket.title}`, detail,
+    })));
+    assert.ok(items.every(item => item.readAt === null));
+  }
+  assert.deepEqual(await riskInbox(f, editor), []);
+
+  const [latest, earlier] = await riskInbox(f, reviewer);
+  const markRead = (id: string) => expectStatus(f.call(`/notifications/${id}/read`, 'PATCH', undefined, reviewer));
+  await markRead(earlier.id);
+  const saved = await riskInbox(f, reviewer);
+  assert.equal(saved[0].readAt, null);
+  assert.ok(saved[1].readAt);
+  const backup = await expectStatus(f.call<Backup>('/export'));
+  assert.equal(backup.schemaVersion, 62);
+  assert.deepEqual(
+    backup.teamNotifications.filter(item => item.recipientId === reviewer && isRiskNotification(item)),
+    [...saved].reverse(),
+  );
+  await f.restart();
+  const old = { ...backup, schemaVersion: 61 };
+  const rejection = await expectStatus(f.call<{ error: string }>('/import', 'POST', { data: old }), 400);
+  assert.match(rejection.error, /schemaVersion 62/);
+  assert.deepEqual(await riskInbox(f, reviewer), saved);
+  await markRead(latest.id);
+  assert.deepEqual(await riskInbox(f, reviewer, '?filter=unread'), []);
+  await expectStatus(f.call('/import', 'POST', { data: backup }));
+  assert.deepEqual(await riskInbox(f, reviewer), saved);
+  assert.deepEqual(await riskInbox(f, reviewer, '?filter=unread'), [saved[0]]);
+  await expectStatus(f.call('/import', 'POST', {
+    data: { ...old, teamNotifications: old.teamNotifications.filter(item => !isRiskNotification(item)) },
+  }));
+  assert.deepEqual(await riskInbox(f, reviewer), []);
+});
+
+test('failed risk notification insertion rolls back relation creation and the retried mutation notifies once', async t => {
+  const f = await fixture(t);
+  const source = await issue(f, editor, '트랜잭션에서 저장할 차단 원인');
+  const target = await issue(f, reviewer, '차단되는 업무', [collaborator]);
+  const path = `/issues/${source.id}/relations`;
+  const request = { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' };
+  const restartWithSql = (sql: string) => f.restart(dataDir => {
+    const db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
+    try { db.exec(sql); } finally { db.close(); }
+  });
+  await restartWithSql(`
+    CREATE TRIGGER reject_issue_block_notification BEFORE INSERT ON team_notifications
+    WHEN NEW.kind='issue-block-added' AND NEW.recipient_id='user-jun'
+    BEGIN SELECT RAISE(ABORT, 'synthetic notification insertion failure'); END
+  `);
+  const before = await expectStatus(f.call<WorkspaceSnapshot>('/workspace'));
+  await expectStatus(f.call(path, 'POST', request), 500);
+  assert.deepEqual(await expectStatus(f.call<IssueRelation[]>(path)), []);
+  assert.deepEqual(await expectStatus(f.call<IssueRelation[]>(`/issues/${target.id}/relations`)), []);
+  assert.deepEqual(await expectStatus(f.call<WorkspaceSnapshot>('/workspace')), before);
+  for (const recipient of [reviewer, collaborator]) assert.deepEqual(await riskInbox(f, recipient), []);
+
+  await restartWithSql('DROP TRIGGER reject_issue_block_notification');
+  const created = await expectStatus(f.call<IssueRelation>(path, 'POST', request), 201);
+  assert.deepEqual(await expectStatus(f.call<IssueRelation>(path, 'POST', request)), created);
+  assert.deepEqual(await expectStatus(f.call<IssueRelation[]>(path)), [created]);
+  for (const recipientId of [reviewer, collaborator]) {
+    const items = await riskInbox(f, recipientId);
+    assert.deepEqual(items.map(item => ({ ...event(item), detail: item.detail })), [{
+      kind: 'issue-block-added', recipientId, actorId: editor, projectId: target.projectId,
+      targetId: target.id, targetLabel: `${target.key} ${target.title}`, detail: `${source.key} ${source.title}`,
+    }]);
+  }
 });
 
 test('Jira imports with mapped assignees and comments preserve the inbox without creating live notifications', async t => {

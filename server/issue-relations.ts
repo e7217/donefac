@@ -6,6 +6,7 @@ import type { Store } from './store.js';
 
 type RelationChange = '업무 관계 추가' | '업무 관계 수정' | '업무 관계 해제';
 type Audit = (issueId: string, action: RelationChange, detail: string) => void;
+type NotifyChange = (before: IssueRelation | undefined, after: IssueRelation | undefined) => void;
 type Row = { json: string };
 
 export class IssueRelationError extends Error {
@@ -53,7 +54,7 @@ export class IssueRelationsService {
     return listIssueRelations(this.store, issueId);
   }
 
-  create(issueId: string, input: unknown, audit: Audit): { relation: IssueRelation; created: boolean } {
+  create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
     const { type, direction, value: otherId } = relationInput(input, 'otherIssueId');
     if (!isRelationId(issueId) || !isRelationId(otherId)) {
       throw new IssueRelationError(400, '연결할 업무를 선택해 주세요.');
@@ -72,11 +73,12 @@ export class IssueRelationsService {
         .run(relation.id, relation.sourceIssueId, relation.targetIssueId, JSON.stringify(relation));
       recordIssueRelationVersion(this.store, relation.version);
       this.recordActivity(issue, other, relation, '업무 관계 추가', audit);
+      notifyChange(undefined, relation);
       return { relation, created: true };
     });
   }
 
-  update(issueId: string, relationId: string, input: unknown, audit: Audit): IssueRelation {
+  update(issueId: string, relationId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): IssueRelation {
     const { type, direction, value: expectedVersion } = relationInput(input, 'expectedVersion');
     return this.store.transaction(() => {
       const { issue, other, relation } = this.requireLocalRelation(issueId, relationId);
@@ -92,17 +94,19 @@ export class IssueRelationsService {
         .run(updated.sourceIssueId, updated.targetIssueId, JSON.stringify(updated), updated.id);
       recordIssueRelationVersion(this.store, updated.version);
       this.recordActivity(issue, other, updated, '업무 관계 수정', audit);
+      notifyChange(relation, updated);
       return updated;
     });
   }
 
-  remove(issueId: string, relationId: string, expected: unknown, audit: Audit): void {
+  remove(issueId: string, relationId: string, expected: unknown, audit: Audit, notifyChange: NotifyChange): void {
     const expectedVersion = typeof expected === 'string' && /^\d+$/.test(expected) ? Number(expected) : undefined;
     this.store.transaction(() => {
       const { issue, other, relation } = this.requireLocalRelation(issueId, relationId);
       verifyVersion(relation, expectedVersion);
       this.store.remove('issue_relations', relation.id);
       this.recordActivity(issue, other, relation, '업무 관계 해제', audit);
+      notifyChange(relation, undefined);
     });
   }
 

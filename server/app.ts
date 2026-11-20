@@ -24,6 +24,7 @@ import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssuePasteError, IssuePasteService } from './issue-paste.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
+import { IssueBlockerNotifications } from './issue-blocker-notifications.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -70,11 +71,13 @@ import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationScheduleMode } from '../shared/issue-relations.js';
+import { issueDeadline } from '../shared/my-work.js';
+import { isTerminalStatus } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -200,8 +203,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return store.all<any>('users')[0]?.id || fail('먼저 팀원을 등록해 주세요.');
   };
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
-  const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string|null)[], createdAt: string) =>
-    notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt});
+  const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string|null)[], createdAt: string, detail?: string) =>
+    notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt,...(detail===undefined?{}:{detail})});
+  const notifyIssueRisk = (issue: Issue, actorId: string, kind: typeof ISSUE_RISK_NOTIFICATION_KINDS[number], createdAt: string, detail: string) =>
+    notifyIssue(issue,actorId,kind,[issue.assigneeId,...(issue.collaboratorIds??[]),...issueSubscribers(issue)],createdAt,detail);
+  const blockerNotifications = new IssueBlockerNotifications(store,projectId=>workflows.get(projectId),notifyIssueRisk);
   const notifyDocument = (document: DocPage, actorId: string, kind: Extract<TeamNotificationKind, `document-${string}`>, recipientIds: string[], createdAt: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:document.projectId,targetId:document.id,targetLabel:document.title,createdAt});
   const notifyDocumentCreated = (document: DocPage) =>
@@ -212,9 +218,21 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     notifyDocument(document,comment.authorId,'document-comment',[document.authorId,...documentSubscribers(document)],comment.createdAt);
   const stopIssueWatch = store.onChange(({before,after,context})=>{
     const old=before as Issue | undefined, issue=after as Issue | undefined;
-    if(!old || !issue || old.status===issue.status || !context.actorId ||
+    if(!old || !issue)return;
+    const statusChanged=old.status!==issue.status;
+    const datesChanged=old.dueDate!==issue.dueDate||old.endDate!==issue.endDate;
+    if((!statusChanged&&!datesChanged) || !context.actorId ||
       (context.origin!=='user' && context.origin!=='automation') || !store.get('users',context.actorId)) return;
-    notifyIssue(issue,context.actorId,'issue-status-changed',issueSubscribers(issue),issue.updatedAt);
+    if(statusChanged){
+      notifyIssue(issue,context.actorId,'issue-status-changed',issueSubscribers(issue),issue.updatedAt);
+      blockerNotifications.sourceStatusChanged(old,issue,context.actorId,issue.updatedAt);
+    }
+    if(!datesChanged)return;
+    const previousDeadline=issueDeadline(old),deadline=issueDeadline(issue);
+    if(!previousDeadline||!deadline||deadline.value<=previousDeadline.value||
+      isTerminalStatus({workflows:[workflows.get(issue.projectId)]},issue.projectId,issue.status))return;
+    const label=(date:NonNullable<ReturnType<typeof issueDeadline>>)=>`${date.source==='dueDate'?'목표 마감일':'계획 종료일'} ${date.value}`;
+    notifyIssueRisk(issue,context.actorId,'issue-deadline-postponed',issue.updatedAt,`${label(previousDeadline)} → ${label(deadline)}`);
   },['issues']);
   app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
   const attachmentRows=(type:string,id:string)=>{
@@ -1374,18 +1392,20 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     actor(req);
     return (issueId: string, action: string, detail: string) => activity(req,'issue',issueId,action,detail);
   };
+  const relationNotification = (req: Request) => (before: IssueRelation | undefined, after: IssueRelation | undefined) =>
+    blockerNotifications.relationChanged(before,after,actor(req),now());
   app.get('/api/issues/:id/relations',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));
   });
   app.post('/api/issues/:id/relations',(req,res)=>{
-    const { relation, created }=issueRelations.create(req.params.id,req.body,relationAudit(req));
+    const { relation, created }=issueRelations.create(req.params.id,req.body,relationAudit(req),relationNotification(req));
     res.status(created?201:200).json(relation);
   });
   app.patch('/api/issues/:id/relations/:relationId',(req,res)=>{
-    res.json(issueRelations.update(req.params.id,req.params.relationId,req.body,relationAudit(req)));
+    res.json(issueRelations.update(req.params.id,req.params.relationId,req.body,relationAudit(req),relationNotification(req)));
   });
   app.delete('/api/issues/:id/relations/:relationId',(req,res)=>{
-    issueRelations.remove(req.params.id,req.params.relationId,req.query.expectedVersion,relationAudit(req));
+    issueRelations.remove(req.params.id,req.params.relationId,req.query.expectedVersion,relationAudit(req),relationNotification(req));
     res.json({ok:true});
   });
   app.post('/api/issues/:issueId/relations/:relationId/schedule-dependency', (req, res) => {
@@ -1785,6 +1805,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     }
     if(data.schemaVersion<29&&Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row: {kind?:unknown} | null)=>row?.kind==='issue-created'||row?.kind==='document-created')){
       fail('업무·문서 생성 알림을 포함한 백업은 schemaVersion 29가 필요합니다.');
+    }
+    const issueRiskKinds:ReadonlySet<unknown>=new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+    if(data.schemaVersion<62&&Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row:{kind?:unknown;detail?:unknown}|null)=>
+      row?.detail!==undefined||issueRiskKinds.has(row?.kind))){
+      fail('업무 차단·마감 연기 알림을 포함한 백업은 schemaVersion 62가 필요합니다.');
     }
     const subscriptionRefs={
       users:new Set((data.users as User[]).map(user=>user.id)),
