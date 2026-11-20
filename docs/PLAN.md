@@ -157,6 +157,8 @@ Push 웹훅은 브랜치 이름과 커밋 메시지의 티켓 키로 MR 전 개�
 
 ## 기존 도구 원본 이관
 
+Jira Data Center REST 수집은 프로젝트 또는 명시한 업무 키를 기준으로 Jira에서 읽을 수 있는 원본을 전용 ZIP으로 저장한다. 검색과 활동 페이지의 업무·ID·범위를 대조하고, 첨부는 지정한 Jira 서비스에서 원본 ID가 일치하는 바이트를 읽는다. 확보한 범위와 생략 항목을 기록한다. 생성한 ZIP은 기존의 오프라인 미리보기, 검토 적용과 물리 복원 절차를 사용한다. [Jira REST 수집과 리허설](PILOT.md#jira-data-center에서-rest-자료-수집)
+
 병행 기간에는 업무와 문서에 Jira 티켓 및 Confluence 페이지 주소를 연결한다. 조회 버튼을 누르면 설정한 각 서버의 읽기 API에서 제목·상태·식별자와 수정 시각을 가져온다. 팀에서 사용할 연결의 자격 증명은 서버의 별도 파일에 둔다. 연결 주소는 전체 백업에서 보존하며, 원본 조회는 GET 요청으로 처리한다. [Jira 이슈 읽기 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/), [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/)
 
 기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 오프라인 분석과 원문 보관에 이어 작성자·상태·유형·필드 매핑, 문서 변환, 새 프로젝트 적용을 구현했다.

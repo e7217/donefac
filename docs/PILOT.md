@@ -109,9 +109,30 @@ npm run test:pilot
 
 같은 검사에서 합성 Jira 관리자 XML과 별도 첨부 경로를 담은 ZIP, Confluence 공간 XML ZIP을 신규 프로젝트에 함께 적용한다. Jira 원래 키와 작성자 매핑, 91초 작업 기록, 명시적으로 제외한 공개 제한 기록, Confluence 페이지 ID와 업무 양방향 연결을 확인한다. 서로 다른 두 공간에 제목이 같은 문서를 두고 상대 참조가 원본과 같은 공간의 문서를 여는지 확인한다. 다른 공간의 동명 첨부를 가리키는 링크와 전체 첨부 버전의 크기·SHA-256·다운로드 바이트도 대조한다. 별도 물리 복원본에서 원본 패키지 바이트와 전체 이관 검증 결과를 다시 비교하고, 복원한 업무의 상태 변경을 확인한다.
 
+## Jira Data Center에서 REST 자료 수집
+
+관리자 내보내기 대신 현재 읽을 수 있는 Jira 업무를 이관 리허설용 ZIP으로 수집할 수 있다. 설정 파일에서 하나의 프로젝트 전체 또는 현재 업무 키 목록을 지정한다. `baseUrl`에는 `/jira` 같은 실제 서비스 경로를 포함한다. 인증 파일에는 `Bearer <토큰>` 또는 `Basic <사용자:암호의 base64>`를 한 줄로 저장한다. 인증 파일은 Git 밖에 두며 상대 경로는 설정 파일 기준이다.
+
+```json
+{
+  "baseUrl": "https://jira.example.test/jira",
+  "authFile": "/run/secrets/teamspace-jira-auth",
+  "projectKey": "TEAM",
+  "includeAttachments": true
+}
+```
+
+```bash
+npm run pilot:jira:collect -- /absolute/path/jira-config.json /absolute/path/jira-project.zip
+```
+
+한 번에 500개까지 수집한다. 더 큰 프로젝트는 `projectKey` 대신 `"issueKeys": ["TEAM-11", "TEAM-12"]`처럼 현재 키로 나눈다. 작업은 Jira Data Center REST v2의 GET 요청만 사용한다. 원래 업무 키·필드 이름과 스키마·댓글·작업 시간·변경 이력을 ZIP에 저장한다. 댓글과 작업 시간은 페이지의 소유 업무·원본 ID·범위 및 겹치는 내장 응답을 대조한다. 첨부는 같은 호스트와 서비스 경로에서 ID를 확인한 파일의 바이트를 가져온다. 첨부 없이 먼저 검토할 때는 `includeAttachments`를 `false`로 지정한다. [Jira 검색 API](https://developer.atlassian.com/server/jira/platform/rest/v10000/api-group-search/) · [Jira 업무 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/) · [첨부 메타데이터 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-attachment/)
+
+출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Teamspace 분석기로 이 흐름을 검사한다.
+
 ## 오프라인 원본 이관 리허설
 
-리허설 명령은 지정한 내보내기 파일을 전용 워크스페이스에 분석한다. Jira 관리자 XML과 첨부파일을 담은 ZIP, Confluence 공간 XML ZIP 등 [지원 형식](API.md#기존-도구-원본-분석)에 해당하는 파일을 매니페스트에 적는다. `file`은 절대 경로나 매니페스트 기준 상대 경로다. 같은 원본 시스템에서 받은 후속 파일에는 같은 `instanceKey`를 사용한다.
+리허설 명령은 지정한 내보내기 파일을 전용 워크스페이스에 분석한다. Jira REST 수집 ZIP, Jira 관리자 XML과 첨부파일을 담은 ZIP, Confluence 공간 XML ZIP 등 [지원 형식](API.md#기존-도구-원본-분석)에 해당하는 파일을 매니페스트에 적는다. `file`은 절대 경로나 매니페스트 기준 상대 경로다. 같은 원본 시스템에서 받은 후속 파일에는 같은 `instanceKey`를 사용한다.
 
 ```json
 {
