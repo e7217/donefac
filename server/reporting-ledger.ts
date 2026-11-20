@@ -163,6 +163,11 @@ export class ReportingLedger {
       existing.set(issue.id, state);
     }
   }
+  recordImportedIssueUpdate(before: Issue, after: Issue, actorId: string): void {
+    const workflow = this.lookup(before.projectId);
+    const prior = this.state(before, workflow), updated = this.state(after, workflow);
+    if (!same(prior, updated)) this.append('changed', prior, updated, { actorId, origin: 'import' }, workflow.version);
+  }
   validateRestore(raw: unknown, exportedAt: string, restoreAt: string, projects: Project[]): ReportingLedgerData {
     const exported = instant(exportedAt, '백업 내보내기 시각'), restore = instant(restoreAt, '복원 시각'), source = object(raw);
     if (!Array.isArray(source.coverage) || !Array.isArray(source.events)) invalid('백업의 보고 수집 구간과 사건 목록이 필요합니다.');

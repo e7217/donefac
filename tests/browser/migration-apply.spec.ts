@@ -133,6 +133,97 @@ test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트�
   }
 });
 
+test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유지하며 새 설명을 반영한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `REF${id}`, targetKey = `TGT${id}`, instance = `refresh-source-${id}`;
+  const originalTitle = `이전 Jira 제목 ${id}`, localTitle = `Teamspace에서 작성한 제목 ${id}`, nextTitle = `새 Jira 제목 ${id}`;
+  const originalDescription = '처음 이관한 Jira 설명', nextDescription = '다시 내보낸 Jira의 설명';
+  const originalIssueKey = `${sourceKey}-1`;
+  const jiraExport = (summary: string, description: string, updated: string) => Buffer.from(JSON.stringify({ issues: [{
+    id: '30010', key: originalIssueKey, fields: {
+      project: { id: '10100', key: sourceKey, name: `원본 프로젝트 ${sourceKey}` },
+      summary, description, created: '2020-01-01T00:00:00Z', updated,
+      status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+    },
+  }] }));
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const original = await upload(request, `refresh-original-${id}.json`, jiraExport(originalTitle, originalDescription, '2020-01-02T00:00:00Z'), instance);
+    staged.push(original);
+    const initial = await importIntoProject(request, original, targetKey, `이전 이관 프로젝트 ${id}`);
+    const [projectId] = initial.import.projectIds;
+    const imported = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.find(issue => issue.projectId === projectId)!;
+    expect(imported).toMatchObject({ title: originalTitle, description: originalDescription });
+    const savedResponse = await request.patch(`/api/issues/${imported.id}`, { data: { expectedVersion: imported.version, title: localTitle } });
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const saved = await savedResponse.json() as Issue;
+
+    const next = await upload(request, `refresh-next-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-03T00:00:00Z'), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append');
+    const refresh = settings.getByRole('checkbox', { name: '기존 Jira 업무 변경분 반영', exact: true });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(refresh).not.toBeChecked();
+    const appendOnly = await preview(page, settings);
+    expect(appendOnly.canApply).toBe(false);
+    expect(appendOnly.configuration.appendTo?.refreshExisting).toBeUndefined();
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+    await refresh.check();
+    await expect(review).toHaveCount(0);
+    await mode.selectOption('new');
+    await expect(refresh).toHaveCount(0);
+    await mode.selectOption('append');
+    await expect(refresh).toBeChecked();
+
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendTo?.refreshExisting).toBe(true);
+    expect(plan.counts).toMatchObject({ issues: 0, updatedIssues: 1, updatedFields: 1, conflictingFields: 1 });
+    const changes = review.getByRole('region', { name: '기존 Jira 업무 변경 검토', exact: true });
+    await expect(changes.getByRole('heading', { name: `${imported.key} Jira ${originalIssueKey}`, exact: true })).toBeVisible();
+    const title = changes.getByRole('listitem', { name: '제목', exact: true });
+    await expect(title).toContainText('현재 값 유지');
+    await expect(title).toContainText(localTitle);
+    await expect(title).toContainText(nextTitle);
+    const description = changes.getByRole('listitem', { name: '설명', exact: true });
+    await expect(description).toContainText('Jira 값 반영');
+    await expect(description).toContainText(originalDescription);
+    await expect(description).toContainText(nextDescription);
+    const bounds = await changes.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => { expect(dialog.message()).toContain('기존 업무 1건 변경'); await dialog.accept(); });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
+    await expect(receipt.getByText('변경 업무 1', { exact: true })).toBeVisible();
+    await expect(receipt.getByText('현재 값을 유지할 필드 1', { exact: true })).toBeVisible();
+    const after = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.filter(issue => issue.projectId === projectId);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: imported.id, key: imported.key, version: saved.version + 1, title: localTitle, description: nextDescription });
+
+    await selectPackage(settings, next.filename);
+    await mode.selectOption('append');
+    await refresh.check();
+    const repeated = await preview(page, settings);
+    expect(repeated.canApply).toBe(false);
+    await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
+    await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집한 부모 문서의 참조를 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

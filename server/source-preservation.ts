@@ -1,5 +1,5 @@
 import type { Express, Request } from 'express';
-import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacyRecordKind, LegacySource, MigrationAppendConfiguration, MigrationConfiguration, MigrationNotice, Project, SourceImport, SourceImportIntegrity, SourceImportIntegrityPackage, SourceRecordArchive, SourceRecordPage, SourceRecordSummary, User } from '../shared/types.js';
+import { JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationIssueField, type JiraMigrationIssueFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type User } from '../shared/types.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
@@ -40,12 +40,16 @@ function mapping<T>(raw: unknown, convert: (value: unknown) => T): Record<string
 }
 export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppendConfiguration {
   const append = object(raw, '기존 프로젝트 추가 설정');
-  if (Object.keys(append).length !== 4) fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
+  const refresh = Object.hasOwn(append, 'refreshExisting');
+  if (Object.keys(append).length !== (refresh ? 5 : 4) || (refresh && append.refreshExisting !== true)) {
+    fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
+  }
   return {
     projectId: string(append.projectId, '추가 대상 프로젝트', 200),
     statuses: mapping(append.statuses, value => string(value, '추가 대상 상태', 200)),
     issueTypes: mapping(append.issueTypes, value => string(value, '추가 대상 업무 유형', 200)),
     fields: mapping(append.fields, value => nullable(value, '추가 대상 필드', 200)),
+    ...(refresh ? { refreshExisting: true } : {}),
   };
 }
 export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
@@ -72,6 +76,15 @@ function configuration(raw: unknown, users: Set<string>): MigrationConfiguration
   if (appendTo && appendPagesTo) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
   return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy,
     excludedRecords, ...(appendTo ? { appendTo } : {}), ...(appendPagesTo ? { appendPagesTo } : {}) };
+}
+
+const jiraIssueFields = new Set<string>(JIRA_MIGRATION_ISSUE_FIELDS);
+function parseJiraIssueFieldHashes(raw: unknown): JiraMigrationIssueFieldHashes {
+  const entries = Object.entries(object(raw, 'Jira 업무 필드 기준'));
+  if (entries.some(([field]) => !jiraIssueFields.has(field))) fail(400, 'Jira 업무 필드 기준에 지원하지 않는 필드가 있습니다.');
+  const hashes: JiraMigrationIssueFieldHashes = {};
+  for (const [field, value] of entries) hashes[field as JiraMigrationIssueField] = sha(value);
+  return hashes;
 }
 
 function parseIntegrity(raw: unknown, packages: SourceImport['packages']): SourceImportIntegrity | undefined {
@@ -238,7 +251,11 @@ export class SourcePreservationService {
       if (targetProjectId && !owner.projectIds.includes(targetProjectId)) fail(400, '원본 대상 프로젝트가 이관 영수증에 없습니다.');
       const expected = ({ project: 'project', issue: 'issue', page: 'document', comment: 'comment', revision: 'revision', attachment: 'attachment' } as Record<string, string>)[record.kind]; if (targetType !== null && targetType !== expected) fail(400, '원본 객체 종류와 적용 대상 종류가 다릅니다.');
       if (value.excluded !== undefined && (value.excluded !== true || targetType !== null)) fail(400, '제외된 원본은 적용 대상에 연결할 수 없습니다.');
-      return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId, ...(value.excluded === true ? { excluded: true } : {}) } as SourceRecordArchive;
+      const jiraIssueFieldHashes = Object.hasOwn(value, 'jiraIssueFieldHashes') ? parseJiraIssueFieldHashes(value.jiraIssueFieldHashes) : undefined;
+      if (jiraIssueFieldHashes && (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' ||
+          ownerType !== 'issue' || ownerId !== targetId || !targetProjectId)) fail(400, 'Jira 업무 필드 기준의 원본과 연결 대상을 확인해 주세요.');
+      return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
+        ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
     validateArchiveManifests(imports, records);

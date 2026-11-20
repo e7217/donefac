@@ -1,6 +1,6 @@
 import { createHash,randomUUID } from 'node:crypto';
-import type { AttachmentVersion,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,Issue,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,SourceRecordArchive,StatusCategory } from '../shared/types.js';
-import { ISSUE_TYPES } from '../shared/types.js';
+import type { AttachmentVersion,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,SourceRecordArchive,StatusCategory } from '../shared/types.js';
+import { ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
 import { defaultIssueSchema, fieldApplies } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -9,7 +9,7 @@ import { convertLegacyContent } from './migration-content.js';
 import { isJiraWorklog,isRestrictedJiraWorklog,parseJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
-import type { MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
+import type { MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
@@ -24,9 +24,15 @@ const scalar=(value:unknown):unknown=>Array.isArray(value)&&value.length===1?sca
 const fieldMap=(row:LegacyRecord)=>object(row.metadata.fields);
 const normalizedName=(value:string)=>value.replace(/[\s_/-]/g,'').toLowerCase();
 function sourceField(row:LegacyRecord,...names:string[]):unknown{const fields=fieldMap(row);const name=Object.keys(fields).find(name=>names.some(candidate=>normalizedName(name)===normalizedName(candidate)));return name===undefined?undefined:fields[name];}
+function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
+  const raw = scalar(sourceField(row, kind, kind === 'issuetype' ? 'type' : 'status') ?? row.metadata[kind]);
+  const item = object(raw);
+  return { value: string(item.id) || string(item.value) || string(item.name) || string(item.text) || string(raw) || '__unspecified__',
+    label: string(item.name || item.text || item.value) };
+}
 function builtin(pkg:MigrationPackage,row:LegacyRecord,kind:'status'|'issuetype',index?:Map<string,LegacyRecord>):{value:string;label:string}{
-  const raw=scalar(sourceField(row,kind,kind==='issuetype'?'Issue Type':'Status',kind==='issuetype'?'type':'status')??row.metadata[kind]),item=object(raw),value=string(item.id)||string(item.value)||string(item.name)||string(item.text)||string(raw)||'__unspecified__';
-  const option=index?index.get(`option:builtin:${kind}:${value}`):pkg.dataset.records.find(option=>option.kind==='option'&&option.sourceId===`builtin:${kind}:${value}`);return{value,label:string(item.name||item.text||item.value)||option?.title||(value==='__unspecified__'?(kind==='status'?'상태 미지정':'유형 미지정'):value)};
+  const { value, label } = sourceBuiltin(row, kind);
+  const option=index?index.get(`option:builtin:${kind}:${value}`):pkg.dataset.records.find(option=>option.kind==='option'&&option.sourceId===`builtin:${kind}:${value}`);return{value,label:label||option?.title||(value==='__unspecified__'?(kind==='status'?'상태 미지정':'유형 미지정'):value)};
 }
 function customField(row:LegacyRecord){return row.kind==='field'&&!row.sourceId.startsWith('builtin:')&&row.metadata.fieldType!=='csv-label-only';}
 function suggestedKind(row:LegacyRecord):CustomFieldKind|'archive'{const type=string(row.metadata.fieldType||row.metadata.customfieldtypekey||row.metadata.fieldtype).toLowerCase();if(/multi.*user|cascad|group|version|project/.test(type))return'archive';if(/multi.*select|multi.*checkbox/.test(type))return'multi_select';if(/select|radio/.test(type))return'select';if(/checkbox|boolean/.test(type))return'checkbox';if(/float|number|decimal|integer/.test(type))return'number';if(/date/.test(type))return'date';if(/userpicker|user$/.test(type))return'user';if(/url/.test(type))return'url';if(/text|string/.test(type))return'text';return'archive';}
@@ -62,6 +68,98 @@ function jiraEnglishDate(value:string):{local:string;century:boolean}|null{
   const match=/^(\d{1,2})\/([A-Za-z]{3})\/(\d{2}|\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(?:\s+(AM|PM))?)?$/i.exec(value);if(!match)return null;const month=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(match[2].toLowerCase())+1;if(!month)return null;let hour=Number(match[4]||0);if(match[8]){if(hour<1||hour>12)return null;hour=hour%12+(match[8].toUpperCase()==='PM'?12:0);}const century=match[3].length===2,year=century?2000+Number(match[3]):Number(match[3]),local=`${String(year).padStart(4,'0')}-${String(month).padStart(2,'0')}-${match[1].padStart(2,'0')} ${String(hour).padStart(2,'0')}:${match[5]||'00'}:${match[6]||'00'}${match[7]?`.${match[7]}`:''}`;return{local,century};
 }
 
+function sourceTimestamp(value: string | null, timezone: string): string | null {
+  if (!value) return null;
+  const english = jiraEnglishDate(value);
+  if (english) return localDate(english.local, timezone);
+  if (/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)) {
+    const parsed = /^\d{4}-\d\d-\d\d/.test(value) && !isCalendarDate(value.slice(0, 10)) ? NaN :
+      Date.parse(value.replace(/ UTC$/, 'Z').replace(/^(\d{4}-\d\d-\d\d) /, '$1T'));
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+  }
+  return localDate(value, timezone);
+}
+
+function sourceCalendarDate(raw: string, timezone: string): string | null {
+  if (isCalendarDate(raw)) return raw;
+  const timestamp = sourceTimestamp(raw, timezone);
+  if (!timestamp) return null;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(new Date(timestamp)).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function jiraFieldDigest(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField]): string {
+  return hash(field, JSON.stringify(Array.isArray(value) ? [...new Set(value)].sort() : value));
+}
+
+function jiraFieldDigests(values: JiraMigrationIssueValues): JiraMigrationIssueFieldHashes {
+  const result: JiraMigrationIssueFieldHashes = {};
+  for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
+    const value = values[field];
+    if (value !== undefined) result[field] = jiraFieldDigest(field, value);
+  }
+  return result;
+}
+
+const jiraCalendarFields = {
+  startDate: ['startDate', 'Start date', 'Start'], endDate: ['endDate', 'End date', 'End'], dueDate: ['dueDate', 'due', 'duedate'],
+} as const;
+
+function jiraAssignee(row: LegacyRecord): string {
+  return row.references.find(reference => reference.kind === 'identity' && reference.relation === 'assignee')?.sourceId ||
+    string(scalar(sourceField(row, 'assignee')));
+}
+
+function jiraSnapshotValue(row: LegacyRecord, names: readonly string[]): unknown {
+  const recent = object(row.metadata.jiraScheduleFields);
+  for (const fields of [recent, fieldMap(row), row.metadata]) {
+    const key = Object.keys(fields).find(name => names.some(alias => normalizedName(alias) === normalizedName(name)));
+    if (key !== undefined) return scalar(fields[key]);
+  }
+}
+
+function jiraLabels(row: LegacyRecord): unknown {
+  if (Array.isArray(row.metadata.jiraSnapshotLabels)) return row.metadata.jiraSnapshotLabels;
+  const raw = sourceField(row, 'labels');
+  return raw === undefined ? row.metadata.labels : raw;
+}
+
+function jiraLabelValues(raw: unknown): string[] | null {
+  if (raw === null || raw === undefined) return [];
+  const labels = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[;,]/) : null;
+  if (!labels || !labels.every(label => typeof label === 'string' && label.length <= 60)) return null;
+  return [...new Set(labels.filter(label => label.length > 0))];
+}
+
+function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyRecord, previous: LegacyRecord): boolean {
+  if (field === 'status' || field === 'type') {
+    const kind = field === 'status' ? 'status' : 'issuetype';
+    const incoming = sourceBuiltin(current, kind), archived = sourceBuiltin(previous, kind);
+    return incoming.value === archived.value || !incoming.label && incoming.value === archived.label ||
+      !archived.label && archived.value === incoming.label;
+  }
+  const identity = (row: LegacyRecord): unknown => {
+    switch (field) {
+      case 'title': return row.title.trim();
+      case 'description': return [row.textFormat, row.text];
+      case 'priority': {
+        const raw = scalar(sourceField(row, 'priority'));
+        const item = object(raw);
+        return string(item.id || item.name || item.text || raw);
+      }
+      case 'assigneeId': return jiraAssignee(row);
+      case 'labels': {
+        const raw = jiraLabels(row);
+        return jiraLabelValues(raw)?.sort() ?? raw;
+      }
+      case 'startDate': case 'endDate': case 'dueDate': return jiraSnapshotValue(row, jiraCalendarFields[field]) ?? '';
+      case 'estimate': return jiraSnapshotValue(row, ['estimate']) ?? '';
+    }
+  };
+  return JSON.stringify(identity(current)) === JSON.stringify(identity(previous));
+}
+
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
 type KnownIssue = { issueId: string; projectId: string | null };
@@ -75,6 +173,7 @@ class Planner{
   private attachmentVersionsById = new Map<string, AttachmentVersion>();
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
+  private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes: JiraMigrationIssueFieldHashes }>();
   private boundIssues = new Map<string, KnownIssue>();
   private boundPages = new Map<string, KnownPage>();
   private boundPageIdsByTitle = new Map<string, Set<string>>();
@@ -157,6 +256,210 @@ class Planner{
     return ownerReferences.length
       ? ownerReferences.every(reference => this.boundIssues.has(reference.sourceId))
       : !!row.containerId && this.boundIssues.has(row.containerId);
+  }
+  private originalJiraIssueDigests(previous: MigrationJiraRefreshCandidate['previous']): JiraMigrationIssueFieldHashes {
+    const { archive, stagingId, configuration } = previous;
+    if (archive.jiraIssueFieldHashes) return archive.jiraIssueFieldHashes;
+    const { record, source } = archive;
+    const previousAppend = configuration.appendTo;
+    const values: JiraMigrationIssueValues = {};
+    if (record.title.trim() && record.title.trim().length <= 300) values.title = record.title.trim();
+    const description = convertLegacyContent(record, { resolveReference: () => null });
+    if (!description.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK' || item.code.startsWith('UNRESOLVED_'))) {
+      values.description = description.plainText;
+    }
+    const sourceState = sourceBuiltin(record, 'status').value;
+    const sourceType = sourceBuiltin(record, 'issuetype').value;
+    const stateOption = optionId(stagingId, 'status', sourceState);
+    const typeOption = optionId(stagingId, 'issuetype', sourceType);
+    if (previousAppend) {
+      if (previousAppend.statuses[stateOption]) values.status = previousAppend.statuses[stateOption];
+      if (previousAppend.issueTypes[typeOption]) values.type = previousAppend.issueTypes[typeOption];
+    } else {
+      if (Object.hasOwn(configuration.statuses, stateOption)) values.status = `s_${hash(source.product, source.instanceKey, sourceState).slice(0, 24)}`;
+      if (Object.hasOwn(configuration.issueTypes, typeOption)) {
+        values.type = configuration.issueTypes[typeOption] || `t_${hash(source.product, source.instanceKey, sourceType).slice(0, 24)}`;
+      }
+    }
+    values.priority = this.priority(sourceField(record, 'priority'));
+    const assignee = jiraAssignee(record);
+    values.assigneeId = assignee ? configuration.users[optionId(stagingId, 'identity', assignee)] ?? null : null;
+    const labels = sourceField(record, 'labels') ?? record.metadata.labels;
+    values.labels = [...new Set((Array.isArray(labels) ? labels : typeof labels === 'string' ? labels.split(/[;,]/) : []).map(value => string(value)))];
+    for (const [field, names] of Object.entries(jiraCalendarFields) as [keyof typeof jiraCalendarFields, readonly string[]][]) {
+      const raw = scalar(sourceField(record, ...names));
+      if (raw === undefined || raw === null || raw === '') values[field] = null;
+      else {
+        const date = sourceCalendarDate(string(raw), configuration.timezone);
+        if (date) values[field] = date;
+      }
+    }
+    const rawEstimate = sourceField(record, 'estimate');
+    const estimate = rawEstimate === undefined || rawEstimate === null || rawEstimate === '' ? null : Number(rawEstimate);
+    values.estimate = estimate !== null && Number.isFinite(estimate) && estimate >= 0 && estimate <= 100000 ? estimate : null;
+    return jiraFieldDigests(values);
+  }
+  private jiraRefreshValues(entry: Entry): JiraMigrationIssueValues {
+    const { row, pkg } = entry;
+    const mapping = this.configuration.appendTo!;
+    const { schema, workflow } = this.input.append!;
+    const values: JiraMigrationIssueValues = {};
+    const hasSnapshotFields = Array.isArray(row.metadata.jiraSnapshotFields);
+    const explicit = hasSnapshotFields ? row.metadata.jiraSnapshotFields as unknown[] : [];
+    const unavailable = (field: string) => this.notice('JIRA_REFRESH_FIELD_UNAVAILABLE',
+      `원본 '${field}' 값을 확인하거나 현재 프로젝트에 매핑할 수 없어 해당 필드를 보존합니다.`, 'warning', entry);
+    const title = row.title.trim();
+    if (title && title.length <= 300) values.title = title;
+    else if (title) unavailable('제목');
+    if (explicit.includes('description') || !hasSnapshotFields && (row.text || sourceField(row, 'description') !== undefined)) {
+      const description = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request) });
+      if (description.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK') || description.plainText.length > 200000) unavailable('설명');
+      else {
+        values.description = description.plainText;
+        for (const item of description.diagnostics) this.notice(item.code, item.message, item.severity, entry, item.severity === 'warning');
+      }
+    }
+    const state = sourceBuiltin(row, 'status').value;
+    if (state !== '__unspecified__') {
+      const id = mapping.statuses[optionId(pkg.summary.id, 'status', state)];
+      if (workflow.statuses.some(status => status.id === id)) values.status = id;
+      else unavailable('상태');
+    }
+    const type = sourceBuiltin(row, 'issuetype').value;
+    if (type !== '__unspecified__') {
+      const id = mapping.issueTypes[optionId(pkg.summary.id, 'issuetype', type)];
+      if (schema.issueTypes.some(issueType => issueType.id === id && !issueType.archived)) values.type = id;
+      else unavailable('업무 유형');
+    }
+    const rawPriority = scalar(sourceField(row, 'priority'));
+    if (rawPriority !== undefined && rawPriority !== null && rawPriority !== '') {
+      const item = object(rawPriority);
+      const option = this.sourceEntry(entry, 'option', `builtin:priority:${string(item.id || rawPriority)}`);
+      const label = string(item.name || item.text || option?.row.title || rawPriority);
+      const priority = this.priority(label);
+      if (priority !== 'medium' || /^(?:medium|normal|major|보통|중간)$/i.test(label.trim())) values.priority = priority;
+      else unavailable('우선순위');
+    }
+    const sourceAssignee = jiraAssignee(row);
+    if (sourceAssignee) {
+      const mapped = this.mappedAuthor(entry, sourceAssignee);
+      if (mapped) values.assigneeId = mapped;
+      else unavailable('담당자');
+    } else if (explicit.includes('assigneeId')) values.assigneeId = null;
+    const rawLabels = jiraLabels(row);
+    if (rawLabels !== undefined || explicit.includes('labels')) {
+      const labels = jiraLabelValues(rawLabels);
+      if (labels) values.labels = labels;
+      else unavailable('라벨');
+    }
+    for (const [field, names] of Object.entries(jiraCalendarFields) as [keyof typeof jiraCalendarFields, readonly string[]][]) {
+      const raw = jiraSnapshotValue(row, names);
+      if (raw === undefined && !explicit.includes(field)) continue;
+      if (raw === undefined || raw === null || raw === '') values[field] = null;
+      else {
+        const date = sourceCalendarDate(string(raw), this.configuration.timezone);
+        if (date) values[field] = date;
+        else unavailable(field === 'startDate' ? '시작일' : field === 'endDate' ? '종료일' : '마감일');
+      }
+    }
+    const rawEstimate = jiraSnapshotValue(row, ['estimate']);
+    if (rawEstimate !== undefined || explicit.includes('estimate')) {
+      if (rawEstimate === undefined || rawEstimate === null || rawEstimate === '') values.estimate = null;
+      else if ((typeof rawEstimate === 'number' || typeof rawEstimate === 'string') && Number.isFinite(Number(rawEstimate)) &&
+          !!String(rawEstimate).trim() && Number(rawEstimate) >= 0 && Number(rawEstimate) <= 100000) values.estimate = Number(rawEstimate);
+      else unavailable('예상 작업량');
+    }
+    return values;
+  }
+  private jiraReviewValue(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField]): string {
+    if (value === null || value === '' || Array.isArray(value) && value.length === 0) return '비어 있음';
+    const append = this.input.append!;
+    let label = Array.isArray(value) ? value.join(', ') : String(value);
+    if (field === 'status') label = append.workflow.statuses.find(status => status.id === value)?.label ?? label;
+    if (field === 'type') label = append.schema.issueTypes.find(type => type.id === value)?.name ?? label;
+    if (field === 'assigneeId') label = this.input.users.find(user => user.id === value)?.name ?? label;
+    if (field === 'priority') label = PRIORITY[value as Issue['priority']];
+    return label.length > 300 ? `${label.slice(0, 297)}…` : label;
+  }
+  private createJiraRefreshes(): void {
+    if (!this.configuration.appendTo?.refreshExisting || !this.input.append) return;
+    const append = this.input.append;
+    const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
+    const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
+      .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
+    const review: JiraMigrationIssueReview[] = [];
+    const updates: NonNullable<PreparedMigration['issueUpdates']> = [];
+    const seen = new Set<string>();
+    let updatedFields = 0, conflictingFields = 0, skippedIssueUpdates = 0;
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'issue' || !this.retainedEntries.has(entry.key)) continue;
+      const sourceKey = string(entry.row.metadata.key) || entry.row.sourceId;
+      const binding = this.originalIssue(entry.row.sourceId) ?? this.originalIssue(sourceKey);
+      const candidate = binding && candidates.get(binding.id);
+      if (!candidate || sourceErrors.has(entry.key) || this.restricted(entry)) {
+        skippedIssueUpdates++;
+        this.notice('JIRA_REFRESH_ISSUE_UNAVAILABLE', '현재 업무 연결이나 접근 범위 또는 원본 자료를 확인할 수 없어 변경분은 적용하지 않습니다.', 'warning', entry);
+        continue;
+      }
+      const { issue, previous } = candidate;
+      if (seen.has(issue.id)) {
+        this.notice('JIRA_REFRESH_OVERLAPPING_ISSUE', '같은 기존 업무의 기록이 겹칩니다. 패키지에서 적용할 기록 하나를 남겨 주세요.', 'error', entry);
+        continue;
+      }
+      seen.add(issue.id);
+      const oldTimestamp = sourceTimestamp(previous.archive.record.updatedAt, previous.configuration.timezone);
+      const incomingTimestamp = sourceTimestamp(entry.row.updatedAt, this.configuration.timezone);
+      if (!oldTimestamp || !incomingTimestamp || incomingTimestamp <= oldTimestamp) {
+        skippedIssueUpdates++;
+        this.notice('JIRA_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 수정 시각을 확인할 수 없어 변경분은 적용하지 않습니다.', 'info', entry);
+        continue;
+      }
+      if ([previous.archive.record.updatedAt, entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
+        this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);
+      }
+      const values = this.jiraRefreshValues(entry);
+      const hashes = { ...this.originalJiraIssueDigests(previous) };
+      const accepted: JiraMigrationIssueValues = {};
+      const fields: JiraMigrationIssueReview['fields'] = [];
+      let canCheckpoint = false;
+      for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
+        const next = values[field];
+        if (next === undefined) continue;
+        const current = issue[field];
+        const incomingHash = jiraFieldDigest(field, next);
+        const currentHash = jiraFieldDigest(field, current);
+        if (sameJiraSourceField(field, entry.row, previous.archive.record)) {
+          canCheckpoint = true;
+          continue;
+        }
+        if (hashes[field] === incomingHash) {
+          canCheckpoint = true;
+          continue;
+        }
+        if (currentHash === incomingHash) {
+          hashes[field] = incomingHash;
+          canCheckpoint = true;
+          continue;
+        }
+        const decision = currentHash === hashes[field] ? 'apply' : 'conflict';
+        fields.push({ field, current: this.jiraReviewValue(field, current), incoming: this.jiraReviewValue(field, next), decision });
+        if (decision === 'apply') {
+          Object.assign(accepted, { [field]: next });
+          hashes[field] = incomingHash;
+          canCheckpoint = true;
+          updatedFields++;
+        } else conflictingFields++;
+      }
+      if (fields.length) review.push({ issueId: issue.id, key: issue.key, sourceKey, fields });
+      if (Object.keys(accepted).length) updates.push({ issueId: issue.id, expectedVersion: issue.version, changes: accepted });
+      if (canCheckpoint) this.jiraRefreshCheckpoints.set(entry.key, { issue, hashes });
+    }
+    if (conflictingFields) {
+      this.notice('JIRA_REFRESH_LOCAL_CONFLICT', `팀에서 수정한 필드 ${conflictingFields}개를 보존합니다.`, 'warning', undefined, true);
+    }
+    this.result.preview.issueRefresh = review;
+    this.result.issueUpdates = updates;
+    Object.assign(this.result.preview.counts, { updatedIssues: updates.length, updatedFields, conflictingFields, skippedIssueUpdates });
   }
   private originalPage(sourceId: string): KnownPage | undefined {
     const append = this.input.appendPages;
@@ -269,7 +572,7 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   initializeOriginBases(): void {
     const suppliedBases = this.configuration.sourceBaseUrls;
     const packages = this.input.packages;
@@ -821,16 +1124,22 @@ class Planner{
   archive():void{
     for (const entry of this.entries) {
       const excluded = this.excluded.has(entry.key);
-      const binding = excluded ? undefined : this.bindings.get(entry.key);
+      const checkpoint = this.jiraRefreshCheckpoints.get(entry.key);
+      const binding = checkpoint ? { type: 'issue' as const, id: checkpoint.issue.id, projectId: checkpoint.issue.projectId }
+        : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
-      const owner = ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
+      const owner = checkpoint ? binding : ownerEntry ? this.bindings.get(ownerEntry.key) : undefined;
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
+      const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
+      const fieldHashes = checkpoint?.hashes ??
+        (createdIssue && entry.pkg.dataset.source.product === 'jira' ? jiraFieldDigests(createdIssue) : undefined);
       const value: SourceRecordArchive = {
         id: this.archiveIds.get(entry.key) || randomUUID(), sourceImportId: this.input.id,
         packageSha256: entry.pkg.summary.sha256, source: structuredClone(entry.pkg.dataset.source), record: structuredClone(entry.row),
         targetType: binding?.type ?? null, targetId: binding?.id ?? null, targetProjectId: binding?.projectId ?? owner?.projectId ?? null,
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
+        ...(fieldHashes ? { jiraIssueFieldHashes: fieldHashes } : {}),
       };
       if (entry.row.kind === 'project' || entry.row.kind === 'identity') {
         value.ownerType = null;
@@ -863,8 +1172,9 @@ class Planner{
         ...(sourceUrl ? { sourceUrl } : {}),
       });
     }
-    if (this.input.append && !this.result.issues.length && !this.notices.some(notice => notice.severity === 'error')) {
-      this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
+    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendTo?.refreshExisting) this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
+      else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
     }
     if (this.input.appendPages && !this.result.documents.length && !this.notices.some(notice => notice.severity === 'error')) {
       this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');

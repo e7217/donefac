@@ -13,7 +13,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -134,6 +134,143 @@ test('incremental Jira imports append only new issues to the bound project and r
   const noChanges = await f.preview(config);
   assert.equal(noChanges.canApply,false,JSON.stringify(noChanges.notices));
   assert.equal(noChanges.counts.retainedIssues,2);
+});
+
+test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules and survive native restore', async t => {
+  const initial = await fixture(), f = await fixture();
+  t.after(() => Promise.all([initial.close(), f.close()]));
+  const source = 'synthetic-jira-refresh';
+  const row = (id: string, key: string, updated: string, title: string, fields: Record<string, unknown>) => ({ id, key, fields: {
+    project: { id: '10100', key: 'HIST', name: '팀 Jira' }, created: '2020-01-01T00:00:00Z', updated, summary: title,
+    issuetype: { id: '3', name: 'Task' }, ...fields,
+  } });
+  const upload = (target: MigrationFixture, name: string, rows: ReturnType<typeof row>[]) =>
+    target.upload(Buffer.from(JSON.stringify({ issues: rows })), `${name}.json`, 'jira', source);
+  const open = { id: '1', name: 'Open' }, completed = { id: '2', name: 'Done' };
+  const initialPack = await upload(initial, 'jira-old-baseline', [
+    row('100', 'HIST-1', '2020-01-02T00:00:00Z', '원래 Jira 제목', {
+      description: '원본 설명', status: open, priority: { name: 'Medium' }, labels: ['old'], duedate: '2020-01-15',
+    }),
+    row('200', 'HIST-2', '2020-01-02T00:00:00Z', '완료 상태의 원본 업무', { status: completed }),
+  ]);
+  const first = await initial.apply(await initial.preview(await initial.configuration(initialPack, 'SYNC')));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[]; reportingLedger: ReportingLedgerData };
+  // Exercise a real upgrade with no refresh checkpoints or staging files available on the destination.
+  const previous = (await initial.call<Backup>('/export')).data;
+  previous.schemaVersion = 38;
+  for (const receipt of previous.sourceImports) delete receipt.integrity;
+  for (const record of previous.sourceRecords) delete record.jiraIssueFieldHashes;
+  const upgraded = await f.call('/import', 'POST', { data: previous });
+  assert.equal(upgraded.status, 200, JSON.stringify(upgraded.data));
+  const snapshot = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+  const currentTicket = async (key: string) => (await snapshot()).issues.find(ticket => ticket.key === key)!;
+  const ticket = await currentTicket('SYNC-1');
+  const local = await f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', {
+    expectedVersion: ticket.version, title: '팀이 수정한 제목', description: '팀이 수정한 본문',
+  });
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+
+  const delta = await upload(f, 'jira-delta', [row('100', 'HIST-1', '2020-01-03T00:00:00Z', 'Jira에서 변경한 제목', {
+    status: completed, priority: { name: 'High' }, labels: [], duedate: '2020-01-29',
+  })]);
+  async function reviewConfig(pkg: LegacyPackageSummary) {
+    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    const target = options.appendTarget;
+    assert.ok(target);
+    return { ...options.defaultConfiguration, appendTo: {
+      projectId, refreshExisting: true as const,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
+      fields: {},
+    } };
+  }
+  const config = await reviewConfig(delta);
+  const appendOnly = structuredClone(config) as MigrationConfiguration;
+  delete appendOnly.appendTo?.refreshExisting;
+  assert.equal((await f.preview(appendOnly)).canApply, false);
+  assert.equal((await f.call('/migrations/preview', 'POST', { configuration: { ...config, appendTo: { ...config.appendTo, refreshExisting: false } } })).status, 400);
+
+  const path = `/projects/${projectId}/workflow`;
+  const workflow = (await f.call<ProjectWorkflow>(path)).data;
+  const doneId = workflow.statuses.find(status => status.category === 'done')!.id;
+  const locked = await f.call<ProjectWorkflow>(path, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.filter(edge => edge.from !== ticket.status || edge.to !== doneId),
+  });
+  assert.equal(locked.status, 200, JSON.stringify(locked.data));
+  const blocked = await f.preview(config);
+  assert.equal(blocked.canApply, false, JSON.stringify(blocked.notices));
+  assert.ok(blocked.notices.some(notice => notice.code === 'JIRA_REFRESH_VALIDATION' && notice.message.includes('SYNC-1')));
+  assert.equal((await f.apply(blocked)).status, 409);
+  assert.equal((await f.call(path, 'PATCH', { ...workflow, expectedVersion: locked.data.version })).status, 200);
+
+  const earlier = await f.preview(config);
+  assert.equal(earlier.canApply, true, JSON.stringify(earlier.notices));
+  const reviewRow = earlier.issueRefresh?.find(item => item.issueId === ticket.id);
+  assert.ok(reviewRow);
+  assert.equal(reviewRow.sourceKey, 'HIST-1');
+  assert.deepEqual(Object.fromEntries(reviewRow.fields.map(item => [item.field, item.decision])), {
+    title: 'conflict', status: 'apply', priority: 'apply', labels: 'apply', dueDate: 'apply',
+  });
+  const freshEdit = await f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: local.data.version, description: '검토 뒤 다시 편집한 본문' });
+  assert.equal(freshEdit.status, 200);
+  assert.equal((await f.apply(earlier)).status, 409);
+  assert.equal((await currentTicket('SYNC-1')).priority, 'medium');
+  const reviewed = await f.preview(config);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  assert.equal(reviewed.counts.issues, 0);
+  assert.equal(reviewed.counts.updatedIssues, 1);
+  assert.equal(reviewed.counts.updatedFields, 4);
+  assert.equal(reviewed.counts.conflictingFields, 1);
+  f.db.exec(`CREATE TRIGGER fail_jira_refresh_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Jira refresh receipt failure'); END`);
+  try { assert.equal((await f.apply(reviewed)).status, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_jira_refresh_receipt'); }
+  assert.deepEqual(await currentTicket('SYNC-1'), freshEdit.data);
+  const afterFailure = (await f.call<Backup>('/export')).data;
+  assert.equal(afterFailure.reportingLedger.events.some(event => event.kind === 'changed' && event.origin === 'import' && event.issueId === ticket.id), false);
+  const result = await f.apply(reviewed);
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  assert.equal((await f.apply(reviewed)).data.duplicate, true);
+  const refreshed = await currentTicket('SYNC-1');
+  assert.equal(refreshed.id, ticket.id);
+  assert.equal(refreshed.version, freshEdit.data.version + 1);
+  assert.equal(refreshed.title, '팀이 수정한 제목');
+  assert.equal(refreshed.description, '검토 뒤 다시 편집한 본문');
+  assert.equal(refreshed.priority, 'high');
+  assert.equal(refreshed.status, doneId);
+  assert.ok(refreshed.completedAt);
+  assert.equal(refreshed.dueDate, '2020-01-29');
+  assert.deepEqual(refreshed.labels, []);
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.ok(backup.reportingLedger.events.some(event => event.origin === 'import' && event.kind === 'changed' && event.issueId === ticket.id && event.after?.statusId === doneId));
+  const checkpoint = backup.sourceRecords.find(record => record.sourceImportId === result.data.import.id && record.targetId === ticket.id);
+  assert.ok(checkpoint?.jiraIssueFieldHashes?.priority);
+  assert.ok(checkpoint.jiraIssueFieldHashes.title);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 38 } })).status, 400);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal((await f.preview(config)).canApply, false);
+
+  const newer = await upload(f, 'jira-follow-up', [
+    row('100', 'HIST-1', '2020-01-04T00:00:00Z', 'Jira에서 변경한 제목', { status: completed, priority: { name: 'Low' } }),
+    row('300', 'HIST-3', '2020-01-04T00:00:00Z', '함께 이관하는 새 Jira 업무', { status: open }),
+  ]);
+  const followUp = await f.preview(await reviewConfig(newer));
+  assert.equal(followUp.canApply, true, JSON.stringify(followUp.notices));
+  assert.equal(followUp.counts.issues, 1);
+  assert.equal(followUp.counts.updatedFields, 1);
+  assert.equal((await f.apply(followUp)).status, 201);
+  assert.equal((await currentTicket('SYNC-1')).priority, 'low');
+  assert.equal((await currentTicket('SYNC-1')).title, '팀이 수정한 제목');
+  assert.equal((await currentTicket('SYNC-3')).title, '함께 이관하는 새 Jira 업무');
+  assert.equal((await f.preview(config)).canApply, false);
+  const next = await f.call<Issue>('/issues', 'POST', { projectId, title: '이관으로 번호가 소비되지 않는 팀 업무' });
+  assert.equal(next.status, 201, JSON.stringify(next.data));
+  assert.equal(next.data.key, 'SYNC-4');
 });
 
 const gitlabPath = '/integrations/gitlab';

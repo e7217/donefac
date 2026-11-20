@@ -350,6 +350,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 `counts.issues`는 새 업무 수, `retainedIssues`와 `retainedRecords`는 이전 이관으로 이미 처리해 원본으로 보관하는 업무와 관련 기록 수다. 휴지통이나 영구 삭제한 업무의 원본 ID도 중복 생성 방지에 사용한다. 새 업무는 현재 연결 가능한 부모나 관계를 참조할 수 있다. 적용은 대상의 설정 버전, 다음 업무 번호와 원본 연결을 다시 확인한다. 형식 37 자체 백업은 추가 이관의 대상과 매핑을 보존한다.
 
+### 이미 이관한 Jira 업무에 원본 변경분 반영
+
+위 설정에 `appendTo.refreshExisting: true`를 지정하면 같은 프로젝트에 연결된 기존 티켓도 검토한다. 새 패키지의 실제 수정 시각이 직전 원본 기록보다 늦을 때 제목·설명·유형·상태·우선순위·담당자·라벨·시작일·종료일·마감일·예상 작업량 중 확인 가능한 값을 비교한다. 원본에서 생략한 필드나 Teamspace에서 별도로 편집한 필드는 현재 값이 유지된다. 사용자·상태·유형을 반영할 때는 검토한 매핑을 사용한다.
+
+`preview.issueRefresh`는 Teamspace 업무 키, 원래 Jira 업무 키와 각 필드의 현재 값·원본 값·반영 여부를 보여준다. `updatedIssues`, `updatedFields`, `conflictingFields`, `skippedIssueUpdates`에서 반영·충돌·건너뛴 업무 건수를 확인한다. 한 요청은 기존 티켓 1,000개와 비교에 쓰는 데이터 64MiB까지 지원한다. 워크플로 전이와 필수 필드를 검증하고, 적용 전 티켓이 수정되면 새 미리보기가 필요하다. 새 티켓 추가와 기존 티켓 갱신은 하나의 이관으로 적용할 수 있다. 형식 39 자체 백업은 변경분 이관 설정과 필드별 비교 기준을 보존한다.
+
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
 선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.

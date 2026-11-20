@@ -2,12 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, User } from '../shared/types.js';
+import type { Issue, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
-import type { MigrationAppendContext, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
+import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import type { Store } from './store.js';
@@ -20,11 +20,13 @@ const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
 const conversionVersion = 2;
+const MAX_REFRESH_ISSUES = 1000;
+const MAX_REFRESH_BYTES = 64 * MiB;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
 type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourceSpaceId' | 'sourceSpaceKey'> & { instanceKey: string };
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
-const changedAppend = '추가 대상의 프로젝트 설정, 업무 번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
 const changedPageAppend = '문서를 추가할 프로젝트 또는 원본 페이지 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
@@ -32,6 +34,7 @@ const jiraNumericId = /^\d+$/;
 
 type Hooks = {
   actor: (request: Request) => string;
+  validateIssueUpdates?: (prepared: PreparedMigration, request: Request) => void;
   persistCanonical: (prepared: PreparedMigration, request: Request) => void;
 };
 
@@ -144,8 +147,63 @@ export class MigrationService {
       FROM source_bindings AS binding LEFT JOIN issues AS issue ON issue.id=binding.target_id
       WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
       ORDER BY binding.source_alias`).all(instanceKey) as MigrationAppendContext['knownIssues'];
-    const token = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues])).digest('hex');
-    return { project, workflow, schema, nextIssueNumber: sequence.value, token, knownIssues };
+    const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
+    const refreshIssues = configuration.appendTo.refreshExisting
+      ? this.jiraRefreshIssues(packages, configuration, knownIssues, project.id, instanceKey, digest)
+      : undefined;
+    return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues, ...(refreshIssues ? { refreshIssues } : {}) };
+  }
+  private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'], projectId: string, instanceKey: string, digest: ReturnType<typeof createHash>): MigrationJiraRefreshCandidate[] {
+    const live = new Map(knownIssues.filter(issue => issue.projectId === projectId).map(issue => [issue.alias, issue.issueId]));
+    const excluded = new Set(configuration.excludedRecords);
+    const selected = new Set<string>();
+    for (const { summary, dataset } of packages) for (const row of dataset.records) {
+      if (row.kind !== 'issue' || excluded.has(`${summary.id}/${row.id}`)) continue;
+      const byId = live.get(row.sourceId);
+      const byKey = typeof row.metadata.key === 'string' ? live.get(row.metadata.key) : undefined;
+      if (byId) selected.add(byId);
+      if (byKey) selected.add(byKey);
+    }
+    if (selected.size > MAX_REFRESH_ISSUES) fail(413, '기존 Jira 업무의 변경은 한 번에 1000개까지 검토할 수 있습니다. 패키지를 나누어 주세요.');
+
+    const oldIssue = this.store.db.prepare('SELECT json FROM issues WHERE id=? AND project_id=?');
+    // Source import timestamps are captured at preview creation. A later refresh is prepared against
+    // the previously stored baseline, and a restore can insert archived rows in a different order.
+    const oldArchive = this.store.db.prepare(`SELECT archive.json, archive.import_id AS importId FROM source_records AS archive
+      JOIN source_imports AS receipt ON receipt.id=archive.import_id
+      WHERE archive.target_type='issue' AND archive.target_id=? AND archive.product='jira' AND archive.source_instance=? AND archive.kind='issue'
+      ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, archive.id DESC LIMIT 1`);
+    const receipts = new Map<string, SourceImport | undefined>();
+    const candidates: MigrationJiraRefreshCandidate[] = [];
+    let bytes = 0;
+    const include = (json: string) => {
+      bytes += Buffer.byteLength(json);
+      if (bytes > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Jira 원본이 64MiB를 넘습니다. 패키지를 나누어 주세요.');
+      digest.update(json).update('\n');
+    };
+
+    digest.update('\njira-refresh\n');
+    for (const issueId of [...selected].sort()) {
+      const current = oldIssue.get(issueId, projectId) as { json: string } | undefined;
+      const previous = oldArchive.get(issueId, instanceKey) as { json: string; importId: string } | undefined;
+      digest.update(JSON.stringify([issueId, Boolean(current), Boolean(previous)])).update('\n');
+      if (!current || !previous) continue;
+      include(current.json);
+      include(previous.json);
+      const archive = JSON.parse(previous.json) as SourceRecordArchive;
+      if (!receipts.has(previous.importId)) {
+        const receipt = this.store.get<SourceImport>('source_imports', previous.importId);
+        if (receipt) include(JSON.stringify(receipt));
+        receipts.set(previous.importId, receipt);
+      }
+      const receipt = receipts.get(previous.importId);
+      const pkg = receipt?.packages.find(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' && pkg.source.instanceKey === instanceKey);
+      if (!receipt || !pkg || archive.targetId !== issueId || archive.targetProjectId !== projectId) continue;
+      candidates.push({ issue: JSON.parse(current.json) as Issue, previous: {
+        archive, stagingId: pkg.stagingId, configuration: receipt.configuration,
+      } });
+    }
+    return candidates;
   }
   private pageAppendDestination(packages: MigrationPackage[], options: MigrationOptions): PageAppendDestination | undefined {
     const instanceKey = this.sourceInstance(packages, 'confluence');
@@ -270,7 +328,8 @@ export class MigrationService {
     }
     return config;
   }
-  private async preview(value: unknown, actorId: string): Promise<MigrationPreview> {
+  private async preview(value: unknown, request: Request, hooks: Hooks): Promise<MigrationPreview> {
+    const actorId = hooks.actor(request);
     const configuration = this.validateConfiguration(value);
     this.reserve();
     try {
@@ -288,6 +347,7 @@ export class MigrationService {
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
       this.verifyPackages(prepared.sourceImport.packages);
       const binding = this.store.db.prepare('SELECT target_type AS type,target_id AS id FROM source_bindings WHERE product=? AND source_instance=? AND kind=? AND source_alias=?');
+      const refreshIssueIds = new Set(append?.refreshIssues?.map(candidate => candidate.issue.id));
       const duplicate = prepared.sourceRecords.find(row => {
         if (!row.targetId || !['project', 'issue', 'page'].includes(row.record.kind)) return false;
         const { source, record } = row;
@@ -297,6 +357,8 @@ export class MigrationService {
         return aliases.some(alias => {
           const bound = binding.get(source.product, source.instanceKey, record.kind, alias) as { type: string; id: string } | undefined;
           if (!bound) return false;
+          if (source.product === 'jira' && record.kind === 'issue' && row.targetType === 'issue' && row.jiraIssueFieldHashes &&
+              bound.type === 'issue' && bound.id === row.targetId && refreshIssueIds.has(bound.id)) return false;
           return !(existingProject && record.kind === 'project' && row.targetType === 'project' &&
             bound.type === 'project' && bound.id === existingProject.id && row.targetId === existingProject.id);
         });
@@ -311,6 +373,7 @@ export class MigrationService {
           recordId: sourcePackage ? `${sourcePackage.stagingId}/${duplicate.record.id}` : null, requiresAcknowledgement: false,
         });
       }
+      if (prepared.preview.canApply && prepared.issueUpdates?.length) hooks.validateIssueUpdates?.(prepared, request);
 
       // Keep the review available even for a blocked plan, without saving arrays that cannot be applied.
       if (!prepared.preview.canApply) {
@@ -446,7 +509,7 @@ export class MigrationService {
       }
       res.json(options);
     });
-    app.post('/api/migrations/preview', async (req, res) => res.status(201).json(await this.preview(req.body.configuration, hooks.actor(req))));
+    app.post('/api/migrations/preview', async (req, res) => res.status(201).json(await this.preview(req.body.configuration, req, hooks)));
     app.get('/api/migrations/previews/:id', (req, res) => res.json(this.getPreview(String(req.params.id), hooks.actor(req), true).prepared.preview));
     app.post('/api/migrations/previews/:id/apply', async (req, res) => {
       const result = await this.apply(String(req.params.id), req, hooks);

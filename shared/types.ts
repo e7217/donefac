@@ -146,6 +146,15 @@ export interface MigrationAppendConfiguration {
   statuses: Record<string, string>;
   issueTypes: Record<string, string>;
   fields: Record<string, string | null>;
+  refreshExisting?: true;
+}
+export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
+export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
+export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>>;
+export type JiraMigrationIssueFieldHashes = Partial<Record<JiraMigrationIssueField, string>>;
+export interface JiraMigrationIssueReview {
+  issueId: string; key: string; sourceKey: string;
+  fields: { field: JiraMigrationIssueField; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
 }
 export interface MigrationPageAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceSpaceId: string; sourceSpaceKey?: string;
@@ -171,6 +180,7 @@ export interface MigrationPreview {
   projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string}[];
+  issueRefresh?: JiraMigrationIssueReview[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
@@ -193,6 +203,7 @@ export interface SourceRecordArchive {
   targetType:'project'|'issue'|'document'|'comment'|'revision'|'attachment'|null;targetId:string|null;targetProjectId:string|null;
   ownerType:'issue'|'document'|null;ownerId:string|null;
   excluded?:true;
+  jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number }
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string }

@@ -1,7 +1,16 @@
-import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
+import type { Attachment,AttachmentVersion,Comment,DocPage,DocRevision,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,MigrationConfiguration,MigrationPreview,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
+export interface MigrationJiraRefreshCandidate {
+  issue: Issue;
+  previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration };
+}
+export interface MigrationJiraIssueUpdate {
+  issueId: string;
+  expectedVersion: number;
+  changes: JiraMigrationIssueValues;
+}
 export interface MigrationAppendContext {
   project: Project;
   workflow: ProjectWorkflow;
@@ -9,6 +18,7 @@ export interface MigrationAppendContext {
   nextIssueNumber: number;
   token: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
+  refreshIssues?: MigrationJiraRefreshCandidate[];
 }
 export interface MigrationPageAppendContext {
   project: Project;
@@ -34,4 +44,5 @@ export interface PreparedMigration {
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
   append?: { projectId: string; token: string; startIssueNumber: number };
   appendPages?: { projectId: string; token: string };
+  issueUpdates?: MigrationJiraIssueUpdate[];
 }

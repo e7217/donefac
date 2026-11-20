@@ -21,6 +21,64 @@ test('options are stable opaque IDs scoped by package and include an explicit ed
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
 });
 
+test('Jira refresh clears explicit blank CSV fields while protecting malformed values and source-unchanged mappings', () => {
+  const snapshot = (id: string, extension: 'json' | 'csv', data: string): MigrationPackage => {
+    const filename = `issues.${extension}`;
+    const source = pkg(id, 'jira', []);
+    source.dataset = parseJira(new Map([[filename, Buffer.from(data)]]), 'same-jira');
+    source.summary = { ...source.summary, filename, source: source.dataset.source };
+    return source;
+  };
+  const issueJson = (id: string, key: string, updated: string, summary: string, fields: object): object => ({ id, key, fields: {
+    project: { id: '42', key: 'OLD' }, summary, updated, created,
+    issuetype: { id: '3', name: 'Task' }, ...fields,
+  } });
+  const open = { id: '1', name: 'Open' }, done = { id: '2', name: 'Done' };
+  const original = snapshot('original', 'json', JSON.stringify({ issues: [
+    issueJson('1', 'OLD-1', created, '남길 제목', { status: open, description: '비울 설명', labels: ['alpha', 'beta'],
+      assignee: { name: 'original-owner' }, priority: { id: '4', name: 'High' } }),
+    issueJson('2', 'OLD-2', created, '보조 업무', { status: done }),
+  ] }));
+  const request = input([original]);
+  for (const identity of buildMigrationOptions([original]).identities) request.configuration.users[identity.id] = actor.id;
+  const baseline = buildMigrationPlan(request);
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const canonical = baseline.issues[0];
+  const archive = baseline.sourceRecords.find(row => row.targetId === canonical.id)!;
+  const project = baseline.projects[0], workflow = baseline.workflows[0], schema = baseline.issueSchemas[0];
+  const refresh = (source: MigrationPackage, current = canonical) => {
+    const planned = input([source]);
+    planned.configuration.appendTo = {
+      projectId: project.id, refreshExisting: true,
+      statuses: Object.fromEntries(buildMigrationOptions([source]).statuses.map(option => [option.id, workflow.statuses[1].id])),
+      issueTypes: {}, fields: {},
+    };
+    planned.append = {
+      project, workflow, schema, nextIssueNumber: 3, token: 'test-planner',
+      knownIssues: [{ alias: '1', issueId: canonical.id, projectId: project.id }, { alias: 'OLD-1', issueId: canonical.id, projectId: project.id }],
+      refreshIssues: [{ issue: current, previous: { archive, stagingId: original.summary.id, configuration: request.configuration } }],
+    };
+    return buildMigrationPlan(planned);
+  };
+  const csv = 'Issue id,Issue key,Project id,Project key,Summary,Updated,Description,Assignee,Labels,Labels,Priority,Status\n' +
+    '1,OLD-1,42,OLD,남길 제목,2020-01-02T00:00:00Z,,,beta,alpha,Unrecognized,Open';
+  const clear = refresh(snapshot('csv', 'csv', csv), { ...canonical, status: workflow.statuses[1].id });
+  assert.equal(clear.preview.canApply, true, JSON.stringify(clear.preview.notices));
+  assert.deepEqual(clear.issueUpdates?.[0].changes, { description: '', assigneeId: null });
+  assert.deepEqual(clear.preview.issueRefresh?.[0].fields.map(field => field.field), ['description', 'assigneeId']);
+  assert.equal(clear.sourceRecords.find(row => row.targetId === canonical.id)?.jiraIssueFieldHashes?.status, archive.jiraIssueFieldHashes?.status);
+  assert.ok(notices(clear).has('JIRA_REFRESH_FIELD_UNAVAILABLE'));
+  const bad = refresh(snapshot('malformed', 'json', JSON.stringify({ issues: [
+    issueJson('1', 'OLD-1', '2020-01-02T00:00:00Z', '남길 제목', {
+      status: open, description: { type: 'unrecognized' }, labels: { malformed: true }, priority: 'Unrecognized',
+    }),
+  ] })));
+  assert.equal(bad.preview.canApply, false);
+  assert.deepEqual(bad.issueUpdates, []);
+  assert.ok(bad.preview.notices.some(notice => notice.code === 'JIRA_REFRESH_FIELD_UNAVAILABLE' && notice.message.includes('설명')));
+  assert.ok(bad.preview.notices.some(notice => notice.code === 'JIRA_REFRESH_FIELD_UNAVAILABLE' && notice.message.includes('라벨')));
+});
+
 test('pure planning merges selected containers, preserves typed zero/false and archives every original history/author exactly',()=>{
   const packages=[jira(),confluence()],original=structuredClone(packages),request=input(packages),options=buildMigrationOptions(packages);for(const identity of options.identities)request.configuration.users[identity.id]=actor.id;const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.projects.length,1);assert.equal(plan.issues.length,2);assert.equal(plan.documents.length,1);assert.equal(plan.comments.length,2);assert.equal(plan.revisions.length,2);assert.equal(plan.documents[0].version,3);assert.equal(plan.revisions.find(revision=>revision.title==='과거 문서')!.version,1);assert.equal(plan.sourceImport.id,request.id);assert.equal(plan.preview.id,request.id);assert.deepEqual(packages,original);
   const issue=plan.issues.find(issue=>issue.title==='업무 1')!,schema=plan.issueSchemas[0];assert.equal(issue.customFields![schema.fields.find(field=>field.name==='점수')!.id],0);assert.equal(issue.customFields![schema.fields.find(field=>field.name==='확인')!.id],false);assert.equal(plan.workflows[0].statuses[0].label,'원본 열림');assert.equal(plan.issues.find(issue=>issue.title==='업무 2')!.parentId,issue.id);assert.equal(plan.issueRelations[0].type,'Blocks');assert.ok(notices(plan).has('WORKFLOW_RULES_NOT_REPRODUCED'));assert.equal(plan.sourceRecords.length,packages.reduce((sum,pkg)=>sum+pkg.dataset.records.length,0));const history=plan.sourceRecords.find(row=>row.record.id==='history:jh')!;assert.equal(history.targetId,null);assert.equal(history.ownerType,'issue');assert.equal(history.ownerId,issue.id);assert.deepEqual(history.record,packages[0].dataset.records.find(row=>row.id==='history:jh'));assert.ok(plan.sourceRecords.every(row=>row.id!==row.record.id));

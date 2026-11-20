@@ -10,6 +10,24 @@
 .migration-append-project { margin-top: .75rem; padding: .8rem 1rem; border: 1px solid #d4e2de; border-radius: .5rem; }
 .migration-append-project h3 { margin: 0; }
 .migration-append-project p { margin: .45rem 0 0; overflow-wrap: anywhere; }
+.migration-refresh-option { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: .6rem; align-items: baseline; margin-top: .75rem; padding-top: .75rem; border-top: 1px solid #dbe7e4; cursor: pointer; }
+.migration-refresh-option input { width: 1rem; height: 1rem; margin: 0; align-self: center; accent-color: #177c72; }
+.migration-refresh-option span { font-weight: 650; }
+.migration-refresh-option small { grid-column: 2; margin-top: .15rem; }
+.migration-refresh-review { margin: 1rem 0; }
+.migration-refresh-review h4 { margin: 0 0 .6rem; }
+.migration-refresh-issue { margin: .5rem 0; padding: .7rem; border: 1px solid #dbe7e4; border-radius: .5rem; }
+.migration-refresh-issue h5 { display: flex; flex-wrap: wrap; gap: .35rem .6rem; margin: 0 0 .55rem; font-size: .9rem; overflow-wrap: anywhere; }
+.migration-refresh-issue ul { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none; }
+.migration-refresh-issue li { min-width: 0; padding: .55rem; border-radius: .35rem; background: #f6faf8; }
+.migration-refresh-field-heading { display: flex; flex-wrap: wrap; gap: .35rem .6rem; justify-content: space-between; align-items: center; font-size: .875rem; }
+.migration-refresh-field-heading span { border-radius: .3rem; padding: .1rem .4rem; font-size: .8125rem; font-weight: 650; }
+.migration-refresh-field-heading .is-apply { color: #176355; background: #dff0e8; }
+.migration-refresh-field-heading .is-conflict { color: #734b1e; background: #fcf0d8; }
+.migration-refresh-issue dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: .4rem .75rem; margin: .4rem 0 0; }
+.migration-refresh-issue dl div { min-width: 0; }
+.migration-refresh-issue dt { color: #516965; font-size: .8125rem; }
+.migration-refresh-issue dd { margin: 0; font-size: .875rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .migration-notice-source-button { margin-top: .4rem; }
 .migration-original-dialog {
