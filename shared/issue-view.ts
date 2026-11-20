@@ -1,11 +1,29 @@
-import type { Issue, IssueViewDateFilter, IssueViewPlanningFilter, PlanningItem, ProjectIssueOrder, ProjectIssueSchema, SavedViewState, WorkspaceSnapshot } from './types.js';
+import type { Issue, IssueViewDateFilter, IssueViewGitlabFilter, IssueViewPlanningFilter, PlanningItem, ProjectIssueOrder, ProjectIssueSchema, SavedViewState, WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
+import { summarizeIssueGitlabLinks, type IssueGitlabSummary } from './issue-gitlab-view.js';
 import { PLANNING_FIELDS } from './planning-helpers.js';
 
 export class IssueViewPlanningFilterError extends Error {
   readonly status = 400;
+}
+
+export class IssueViewGitlabFilterError extends Error {
+  readonly status = 400;
+}
+
+export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilter | undefined {
+  switch (value) {
+    case undefined:
+    case 'open_merge_request':
+    case 'failed_pipeline':
+    case 'running_pipeline':
+    case 'no_activity':
+      return value;
+    default:
+      throw new IssueViewGitlabFilterError('GitLab 활동 필터를 확인해 주세요.');
+  }
 }
 
 const planSelectors = Object.entries(PLANNING_FIELDS);
@@ -79,15 +97,25 @@ function matchesDateFilter(issue: Issue, filter: IssueViewDateFilter): boolean {
   return filter.mode === 'overlap' && complete && (!filter.from || endDate >= filter.from) && (!filter.to || startDate <= filter.to);
 }
 
+function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: IssueGitlabSummary | undefined): boolean {
+  switch (filter) {
+    case 'open_merge_request': return Boolean(summary?.openMergeRequests);
+    case 'failed_pipeline': return Boolean(summary?.failedPipelines);
+    case 'running_pipeline': return Boolean(summary?.runningPipelines);
+    case 'no_activity': return !summary?.activityCount;
+  }
+}
+
 /** The same criteria drive the issue screen and snapshots of a shared view. */
 export function createIssueViewMatcher(
   filters: SavedViewState['filters'],
-  data: Pick<WorkspaceSnapshot, 'issueSchemas' | 'users'>,
+  data: Pick<WorkspaceSnapshot, 'issueSchemas' | 'users'> & Partial<Pick<WorkspaceSnapshot, 'gitlabLinks'>>,
   schema: ProjectIssueSchema,
 ): (issue: Issue) => boolean {
-  const {status,assigneeId,type,planning} = filters;
+  const {status,assigneeId,type,planning,gitlab} = filters;
   const search = filters.query.toLowerCase();
   const matchFields = createIssueFieldMatcher(filters.fieldFilter, schema);
+  const gitlabSummaries = gitlab ? summarizeIssueGitlabLinks(data.gitlabLinks ?? []) : undefined;
   const planConditions = planning ? planSelectors.flatMap(([, { idField }]) => {
     const selected = planning[idField];
     return selected === undefined ? [] : [{ idField, selected }];
@@ -98,6 +126,7 @@ export function createIssueViewMatcher(
     (type === 'all' || issue.type === type) &&
     planConditions.every(({ idField, selected }) => (issue[idField] ?? null) === selected) &&
     (!planning?.dates || matchesDateFilter(issue, planning.dates)) &&
+    (!gitlab || matchesGitlabFilter(gitlab, gitlabSummaries?.get(issue.id))) &&
     matchFields(issue) &&
     (!search || issueSearchText(data, issue).toLowerCase().includes(search));
 }

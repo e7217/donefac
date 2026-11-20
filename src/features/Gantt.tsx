@@ -17,6 +17,7 @@ import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
+import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { dayNumber, dependencyLabel, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
@@ -221,13 +222,17 @@ function ProjectGantt(props: GanttProps) {
   const hasProject = data.projects.some(project => project.id === projectId);
   const sharedViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [data.savedViews, projectId]);
-  const sharedView = sharedViews.find(view => view.id === ganttViewId);
+  const { sharedView, matchSharedView } = useMemo(() => {
+    const view = data.savedViews?.find(view => view.id === ganttViewId && view.projectId === projectId);
+    return { sharedView: view, matchSharedView: view ? createIssueViewMatcher(view.filters, data, projectIssueSchema(data, projectId)) : null };
+  }, [data, ganttViewId, projectId]);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
-  const sharedPlanningFilter = sharedView?.filters.planning;
+  const sharedFilters = sharedView?.filters;
+  const sharedGitlabFilter = sharedFilters?.gitlab;
+  const sharedPlanningFilter = sharedFilters?.planning;
   const sharedPlanningLabels = issuePlanningFilterLabels(sharedPlanningFilter, projectPlans);
   const sharedDateFilter = sharedPlanningFilter?.dates;
   const overlapAnchor = sharedDateFilter?.mode === 'overlap' ? sharedDateFilter.from ?? sharedDateFilter.to : undefined;
-  const matchSharedView = sharedView ? createIssueViewMatcher(sharedView.filters, data, projectIssueSchema(data, projectId)) : null;
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
   const shiftPlan = planShift && (projectPlans.find(item => item.id === planShift.id) ?? planShift);
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
@@ -602,6 +607,9 @@ function ProjectGantt(props: GanttProps) {
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
       {sharedPlanningLabels.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 계획·일정 조건">
         {sharedPlanningLabels.map(label => <li key={label}>{label}</li>)}
+      </ul>}
+      {sharedGitlabFilter && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 GitLab 조건">
+        <li>{ISSUE_GITLAB_FILTER_LABELS[sharedGitlabFilter]}</li>
       </ul>}
     </div>}
     {sharedViewUnavailable && <div className="gantt-shared-view-warning">

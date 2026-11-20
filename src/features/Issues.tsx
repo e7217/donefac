@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
-import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type SavedView, type SavedViewState } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState } from '../../shared/types';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
@@ -14,6 +14,9 @@ import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
+import { GitlabActivityRefresh } from './GitlabActivity';
+import { ISSUE_GITLAB_FILTER_LABELS, IssueGitlabSummary } from './IssueGitlabSummary';
+import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
@@ -25,7 +28,7 @@ type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
 type BoardDrop = IssuePlacement & { status: IssueStatus };
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
-type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning'>;
+type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 
 function IssueOrderControls({ issue, previous, next, busy, move }: {
@@ -89,15 +92,16 @@ export function Issues(props: FeatureProps & {
   const [type, setType] = useState('all');
   const [projectFilters, setProjectFilters] = useState(() => new Map<string, ProjectFilters>());
   const [filterEditorEpoch, setFilterEditorEpoch] = useState(0);
-  const { fieldFilter, planning } = projectFilters.get(projectId) ?? {};
+  const { fieldFilter, planning, gitlab } = projectFilters.get(projectId) ?? {};
   const planningItems = data.planningItems ?? [];
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
   const filters = useMemo(() => ({
-    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
-  }), [query, status, assignee, type, fieldFilter, planning]);
+    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}), ...(gitlab ? { gitlab } : {}),
+  }), [query, status, assignee, type, fieldFilter, planning, gitlab]);
+  const gitlabSummary = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
-    issueSchemas:data.issueSchemas,users:data.users,
-  }, schema), [filters,data.issueSchemas,data.users,schema]);
+    issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
+  }, schema), [filters,data.issueSchemas,data.users,data.gitlabLinks,schema]);
   const [creating, setCreating] = useState(false);
   const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');
   const [busy, setBusy] = useState<string | null>(null);
@@ -113,18 +117,19 @@ export function Issues(props: FeatureProps & {
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
+  const showGitlabRefresh = Boolean(gitlab) || projectIssues.some(issue => gitlabSummary.has(issue.id));
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const issues = unavailableView ? [] : projectIssues.filter(matchesIssue);
   const bulk = useIssueBulkEdit(props, issues);
   const projectSelected = data.projects.some(project => project.id === projectId);
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning);
+  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab);
   function updateProjectFilters(change: ProjectFilters) {
     setProjectFilters(previous => {
       const next = new Map(previous);
       const filters = { ...previous.get(projectId), ...change };
-      if (filters.fieldFilter || filters.planning) next.set(projectId, filters);
+      if (filters.fieldFilter || filters.planning || filters.gitlab) next.set(projectId, filters);
       else next.delete(projectId);
       return next;
     });
@@ -135,7 +140,7 @@ export function Issues(props: FeatureProps & {
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
     setType(value.filters.type);
-    updateProjectFilters({ fieldFilter: value.filters.fieldFilter, planning: value.filters.planning });
+    updateProjectFilters({ fieldFilter: value.filters.fieldFilter, planning: value.filters.planning, gitlab: value.filters.gitlab });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
@@ -145,7 +150,7 @@ export function Issues(props: FeatureProps & {
   function clearFilters() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
-    updateProjectFilters({ fieldFilter: undefined, planning: undefined });
+    updateProjectFilters({ fieldFilter: undefined, planning: undefined, gitlab: undefined });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   function closeBulkEdit() {
@@ -278,6 +283,12 @@ export function Issues(props: FeatureProps & {
       <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} disabled={bulk.locked} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
       <select className="issue-filter" aria-label="담당자 필터" value={assignee} disabled={bulk.locked} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
       <select className="issue-filter" aria-label="유형 필터" value={type} disabled={bulk.locked} onChange={e => setType(e.target.value)}><option value="all">모든 유형</option>{type !== 'all' && !issueTypes.some(item => item.id === type) && <option value={type}>{type} (저장된 조건)</option>}{issueTypes.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (보관됨)' : ''}</option>)}</select>
+      <select className="issue-filter" aria-label="GitLab 조건" value={gitlab ?? ''} disabled={bulk.locked}
+        onChange={event => updateProjectFilters({ gitlab: (event.target.value || undefined) as IssueViewGitlabFilter | undefined })}>
+        <option value="">GitLab 전체</option>
+        {Object.entries(ISSUE_GITLAB_FILTER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      {showGitlabRefresh && <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={bulk.locked} />}
       {order && !bulk.active && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
       {projectSelected && view === 'list' && <button ref={bulkToggle} type="button" className="btn btn-ghost issue-bulk-toggle" aria-pressed={bulk.active}
         disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
@@ -307,7 +318,8 @@ export function Issues(props: FeatureProps & {
           disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} /></label></td>}
         <td><button className="issue-title-button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} /></button>
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
-          <CustomFieldSummary data={data} issue={issue} limit={2} />{controls(issue, issues, index)}</td>
+          <CustomFieldSummary data={data} issue={issue} limit={2} />
+          <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />{controls(issue, issues, index)}</td>
         <td><span className="issue-status-select"><StatusDot color={statusMeta(data, issue.projectId, issue.status).color} /><select aria-label={`${issue.key} 상태`} value={issue.status} disabled={Boolean(busy) || bulk.active} onChange={e => changeStatus(issue, e.target.value as IssueStatus)}>{allowedNextStatuses(data, issue).map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></span></td>
         <td><span className="issue-priority"><PriorityIcon value={issue.priority} />{PRIORITY[issue.priority]}</span></td>
         <td>{user ? <span className="issue-assignee"><span className="issue-avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span>{user.name}</span> : <span className="muted">미지정</span>}</td>
@@ -330,6 +342,7 @@ export function Issues(props: FeatureProps & {
               draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={() => openIssue(issue.id)}>
               <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
               <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}</span>
+              <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
               <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
             </button>
             <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />

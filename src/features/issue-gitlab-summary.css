@@ -1,0 +1,38 @@
+.issue-gitlab-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.issue-gitlab-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #eef4f0;
+  color: #3b6254;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.issue-gitlab-state svg {
+  flex: none;
+}
+
+.issue-gitlab-state.is-failed {
+  background: #fff0ea;
+  color: #9b3e26;
+}
+
+.issue-table .issue-gitlab-summary {
+  margin-left: 5px;
+}
+
+.issue-board-card .issue-gitlab-summary {
+  margin-top: 0;
+}

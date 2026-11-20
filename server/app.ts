@@ -1438,6 +1438,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if (data.schemaVersion < 47 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'planning')
     )) fail('계획·일정 조건을 포함한 보기는 schemaVersion 47이 필요합니다.');
+    if (data.schemaVersion < 53 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'gitlab')
+    )) fail('GitLab 조건을 포함한 보기는 schemaVersion 53이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));

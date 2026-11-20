@@ -1,5 +1,5 @@
 import type { Express } from 'express';
-import type { Issue, IssueFieldBreakdownPage, SavedView, User } from '../shared/types.js';
+import type { GitlabLink, Issue, IssueFieldBreakdownPage, SavedView, User } from '../shared/types.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
 import { buildIssueFieldBreakdown, FieldBreakdownError } from './field-breakdown.js';
 import type { IssueSchemaService } from './issue-schema.js';
@@ -31,7 +31,12 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
       view = selected;
     }
     const users = store.all<User>('users');
-    const match = view ? createIssueViewMatcher(view.filters,{issueSchemas:[schema],users},schema) : undefined;
+    const gitlabLinks = view?.filters.gitlab
+      ? store.db.prepare(`SELECT link.json FROM gitlab_links AS link
+          JOIN issues AS issue ON issue.id = link.issue_id WHERE issue.project_id = ?`)
+        .all(projectId).map(row => JSON.parse(String(row.json)) as GitlabLink)
+      : [];
+    const match = view ? createIssueViewMatcher(view.filters,{issueSchemas:[schema],users,gitlabLinks},schema) : undefined;
     const issues: Issue[] = [];
     for (const row of store.db.prepare('SELECT json FROM issues WHERE project_id=?').iterate(projectId)) {
       const issue = JSON.parse(String(row.json)) as Issue;

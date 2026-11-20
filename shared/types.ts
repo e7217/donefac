@@ -811,9 +811,10 @@ export interface IssueViewPlanningFilter {
   releaseId?: string | null;
   dates?: IssueViewDateFilter;
 }
+export type IssueViewGitlabFilter = 'open_merge_request' | 'failed_pipeline' | 'running_pipeline' | 'no_activity';
 export interface SavedViewState {
   layout: 'list' | 'board';
-  filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter; planning?: IssueViewPlanningFilter };
+  filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter; planning?: IssueViewPlanningFilter; gitlab?: IssueViewGitlabFilter };
 }
 export interface IssueFieldBreakdownBucket {
   id: string;

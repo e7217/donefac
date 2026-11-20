@@ -209,17 +209,21 @@ test('GitLab link verification discards changed settings and restores manual lin
   assert.deepEqual({ ...restored, manualLinkId: link.manualLinkId }, link);
   assert.notEqual(restored.manualLinkId, link.manualLinkId);
   await f.call(deletePath(f.issue.id, link), { method: 'DELETE' }, 409);
+  await restore({ ...backup, schemaVersion: 52 });
+  const [legacyRestored] = await f.links();
+  assert.deepEqual({ ...legacyRestored, manualLinkId: link.manualLinkId }, link);
+  assert.notEqual(legacyRestored.manualLinkId, restored.manualLinkId);
 
   const saved = (await f.call<WorkspaceSnapshot>('/workspace')).issues.find(value => value.id === f.issue.id)!;
   const trash = await f.call<{ trashEntryId: string }>(`/issues/${saved.id}`, { method: 'DELETE', body: { expectedVersion: saved.version } });
   const archived = await f.call<Backup>('/export');
-  assert.deepEqual(archived.trashEntries.find(value => value.id === trash.trashEntryId)?.gitlabLinks, [restored]);
+  assert.deepEqual(archived.trashEntries.find(value => value.id === trash.trashEntryId)?.gitlabLinks, [legacyRestored]);
   assert.match((await restore({ ...archived, schemaVersion: 51 }, 400)).error!, /schemaVersion 52/);
   await restore(archived);
   await f.call(`/trash/${trash.trashEntryId}/restore`, { method: 'POST', body: {} });
   const [recovered] = await f.links();
   assert.equal(recovered.id, link.id);
-  assert.notEqual(recovered.manualLinkId, restored.manualLinkId);
-  await f.call(deletePath(f.issue.id, restored), { method: 'DELETE' }, 409);
+  assert.notEqual(recovered.manualLinkId, legacyRestored.manualLinkId);
+  await f.call(deletePath(f.issue.id, legacyRestored), { method: 'DELETE' }, 409);
   await f.call(deletePath(f.issue.id, recovered), { method: 'DELETE' });
 });
