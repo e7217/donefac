@@ -176,6 +176,44 @@ test('a migrated document can move to another project or common documents and na
   } finally { f.close(); }
 });
 
+test('native Confluence source-version markers require one compatible original page and opted-in archive', () => {
+  const f = fixture(); try {
+    const projectId = f.page.targetProjectId!, documentId = f.page.targetId!;
+    const source = f.page.source;
+    f.page.record.containerId = 'space-1';
+    f.page.record.metadata = { sourceClass: 'Page', version: '1' };
+    f.prepared.sourceRecords.push(f.archive('project', 'space-1', { targetType: 'project', targetId: projectId, targetProjectId: projectId }, source));
+    persist(f);
+
+    const backup = data(f), pkg = f.prepared.sourceImport.packages[1], receiptId = randomUUID(), revisionId = randomUUID();
+    backup.imports.push({ ...structuredClone(f.prepared.sourceImport), id: receiptId, projectIds: [projectId], packages: [pkg],
+      configuration: { ...f.prepared.sourceImport.configuration, packageIds: [pkg.stagingId], projects: [], appendPagesTo: { projectId, refreshHistory: true } } });
+    const revision = f.archive('revision', '201', {
+      sourceImportId: receiptId, targetType: 'revision', targetId: revisionId, targetProjectId: projectId, ownerType: 'document', ownerId: documentId,
+    }, source);
+    revision.record.metadata = { sourceClass: 'Page', version: '2', currentVersionId: '200' };
+    revision.record.references = [{ kind: 'page', sourceId: '200', relation: 'current-version' }];
+    backup.records.push(revision);
+    const context = f.context();
+    context.revisions.push({ ...context.revisions[0], id: revisionId, version: 2, confluenceSourceVersion: 2 });
+    assert.deepEqual(f.service.validateImport(backup, context), backup);
+
+    const changedOwner = structuredClone(backup);
+    changedOwner.records.at(-1)!.record.metadata.currentVersionId = 'different-page';
+    changedOwner.records.at(-1)!.record.references[0].sourceId = 'different-page';
+    assert.throws(() => f.service.validateImport(changedOwner, context), /같은 공간 문서/);
+    const unreviewed = structuredClone(backup);
+    delete unreviewed.imports.at(-1)!.configuration.appendPagesTo!.refreshHistory;
+    assert.throws(() => f.service.validateImport(unreviewed, context), /확인된 원본 보관 객체/);
+    const unmarked = structuredClone(context);
+    delete unmarked.revisions.at(-1)!.confluenceSourceVersion;
+    assert.throws(() => f.service.validateImport(backup, unmarked), /보존 원본의 문서·버전/);
+    const duplicate = structuredClone(context);
+    duplicate.revisions.push({ ...duplicate.revisions.at(-1)!, id: randomUUID() });
+    assert.throws(() => f.service.validateImport(backup, duplicate), /원본 버전 번호가 잘못되었거나 중복/);
+  } finally { f.close(); }
+});
+
 test('native replacement increments receipt versions, rebuilds bindings, refuses UUID mutation and rolls back completely on late failure', () => {
   const f = fixture(); try {
     persist(f); const original = data(f), previous = new Map([[f.prepared.sourceImport.id, 7]]);

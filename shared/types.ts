@@ -163,6 +163,7 @@ export interface MigrationPageAppendConfiguration {
   projectId: string;
   refreshExisting?: true;
   refreshAttachments?: true;
+  refreshHistory?: true;
 }
 export const CONFLUENCE_MIGRATION_DOCUMENT_FIELDS = ['title', 'content'] as const;
 export type ConfluenceMigrationDocumentField = typeof CONFLUENCE_MIGRATION_DOCUMENT_FIELDS[number];
@@ -501,7 +502,7 @@ export interface DocPage {
   content: RichContent; plainText: string; icon: string; status: 'draft' | 'published';
   version: number; authorId: string; createdAt: string; updatedAt: string;
 }
-export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string }
+export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string; confluenceSourceVersion?: number }
 export interface DocumentReview {
   revisionId: string;
   requestedById: string;

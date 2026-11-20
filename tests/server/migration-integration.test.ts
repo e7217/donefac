@@ -1065,6 +1065,127 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   await expectedBytes(third.id, thirdBytes);
 });
 
+test('Confluence history append preserves the current draft and deleted comments and survives a trash backup', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
+  const date = prop('creationDate', '2020-06-01T00:00:00Z');
+  const body = (kind: string, id: string, content: string) => object('BodyContent', `9${id}`,
+    prop('body', `<![CDATA[<p>${content}</p>]]>`) + ref('content', kind, id));
+  const page = (id: string, version: number, title: string, content: string, historical = false) => object('Page', id,
+    prop('title', title) + prop('version', String(version)) + ref('space', 'Space', '42') + date +
+    prop('lastModificationDate', `2020-06-0${version}T00:00:00Z`) +
+    (historical ? prop('contentStatus', 'historical') + ref('originalVersion', 'Page', '100') : '')) + body('Page', id, content);
+  const comment = (id: string, content: string) => object('Comment', id, ref('containerContent', 'Page', '100') + date) + body('Comment', id, content);
+  const space = object('Space', '42', prop('key', 'WHIST') + prop('name', '이력 위키'));
+  const upload = (name: string, rows: string[], withSpace = true) => f.upload(zip([{
+    path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${withSpace ? space : ''}${rows.join('')}</hibernate-generic>`),
+  }]), `${name}.zip`, 'confluence', 'synthetic-confluence-history');
+
+  const initialPack = await upload('initial-history', [page('100', 1, '최초 제목', '최초 본문'), comment('600', '처음 옮긴 댓글')]);
+  const initial = await f.apply(await f.preview(await f.configuration(initialPack, 'HIST')));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  const workspace = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+  const doc = (await workspace()).documents.find(value => value.projectId === projectId)!;
+  const revisions = () => f.call<DocRevision[]>(`/documents/${doc.id}/revisions`).then(result => result.data);
+  const comments = () => f.call<Comment[]>(`/comments?resourceType=document&resourceId=${doc.id}`).then(result => result.data);
+  const initialRevisions = await revisions();
+  const [importedComment] = await comments();
+  assert.ok(doc && importedComment);
+  const deleted = await f.call<{trashItemId: string}>(`/comments/${importedComment.id}`, 'DELETE');
+  assert.equal(deleted.status, 200);
+  assert.equal((await f.call(`/trash/items/${deleted.data.trashItemId}`, 'DELETE')).status, 200);
+  const localComment = await f.call<Comment>('/comments', 'POST', { resourceType: 'document', resourceId: doc.id, body: '팀에서 작성한 댓글' });
+  assert.equal(localComment.status, 201);
+
+  const delta = await upload('history-delta', [page('100', 4, '바뀐 원본 제목', '현재 원본 본문'),
+    page('101', 1, '최초 이력', '이미 최초 적용에 저장한 본문', true), page('102', 2, '원본 버전 2', '원본의 두 번째 본문', true),
+    comment('600', '삭제 뒤 다시 나타난 댓글'), comment('601', '추가할 원본 댓글')]);
+  const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${delta.id}`)).data;
+  assert.equal(options.appendPagesTarget?.projectId, projectId);
+  assert.equal((await f.preview({ ...options.defaultConfiguration, appendPagesTo: { projectId } })).canApply, false);
+  const config: MigrationConfiguration = { ...options.defaultConfiguration, appendPagesTo: { projectId, refreshHistory: true } };
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.documents, 0);
+  assert.equal(plan.counts.newConfluenceComments, 1);
+  assert.equal(plan.counts.newConfluenceRevisions, 1);
+  const competingPlan = await f.preview(config);
+  assert.equal(competingPlan.canApply, true, JSON.stringify(competingPlan.notices));
+  const edit = await f.call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, title: '팀에서 편집한 제목' });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+  assert.equal(edit.data.version, 2);
+  const [localRevision] = await revisions();
+
+  f.db.exec(`CREATE TRIGGER fail_confluence_history_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT,'synthetic history receipt failure'); END;`);
+  try {
+    assert.equal((await f.apply(plan)).status, 500);
+    assert.deepEqual(await comments(), [localComment.data]);
+    assert.deepEqual(await revisions(), [localRevision, ...initialRevisions]);
+  } finally { f.db.exec('DROP TRIGGER fail_confluence_history_receipt'); }
+
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal((await f.apply(plan)).data.duplicate, true);
+  assert.equal((await f.apply(competingPlan)).status, 409);
+  assert.equal((await f.preview(config)).canApply, false);
+  assert.deepEqual((await workspace()).documents.find(value => value.id === doc.id), edit.data);
+  const currentComments = await comments();
+  assert.deepEqual(currentComments.map(value => value.body).sort(), ['추가할 원본 댓글', '팀에서 작성한 댓글'].sort());
+  assert.deepEqual(currentComments.find(value => value.id === localComment.data.id), localComment.data);
+  const saved = await revisions();
+  assert.deepEqual(saved.slice(0, -1), [localRevision, ...initialRevisions]);
+  const original = saved.at(-1)!;
+  assert.equal(original.confluenceSourceVersion, 2);
+  assert.equal(original.version, localRevision.version);
+  assert.equal(original.plainText, '원본의 두 번째 본문');
+  const pinned = await f.call<{items: DocRevision[]}>(`/documents/${doc.id}/include-revisions`);
+  assert.equal(pinned.status, 200);
+  assert.deepEqual(pinned.data.items.map(value => value.id), saved.map(value => value.id));
+  assert.equal(pinned.data.items.at(-1)?.confluenceSourceVersion, 2);
+  const liveBackup = (await f.call<{revisions: DocRevision[]}>('/export')).data;
+  const changedSourceVersion = { ...liveBackup, revisions: liveBackup.revisions.map(revision => revision.id === original.id
+    ? { ...revision, version: 9, confluenceSourceVersion: 9 } : revision) };
+  assert.equal((await f.call('/import', 'POST', { data: changedSourceVersion })).status, 400);
+  assert.deepEqual(await revisions(), saved);
+
+  const archived = await f.call<{ trashEntryId: string }>(`/documents/${doc.id}`, 'DELETE');
+  assert.equal(archived.status, 200);
+  const backup = (await f.call<WorkspaceSnapshot & {schemaVersion: number}>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 41 } })).status, 400);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST')).status, 200);
+  assert.deepEqual(await comments(), currentComments);
+  const [trashRestoreRevision, ...preserved] = await revisions();
+  assert.equal(trashRestoreRevision.summary, '휴지통에서 복원');
+  assert.deepEqual(preserved, saved);
+  assert.equal((await f.preview(config)).canApply, false);
+
+  const sparse = await upload('history-without-page-or-space', [comment('602', '페이지 없이 제출한 댓글')], false);
+  const sparseOptions = (await f.call<MigrationOptions>(`/migrations/options?packageId=${sparse.id}`)).data;
+  assert.equal(sparseOptions.appendPagesTarget?.projectId, projectId);
+  const sparsePlan = await f.preview({ ...sparseOptions.defaultConfiguration, appendPagesTo: { projectId, refreshHistory: true } });
+  assert.equal(sparsePlan.canApply, true, JSON.stringify(sparsePlan.notices));
+  assert.equal(sparsePlan.counts.newConfluenceComments, 1);
+  assert.equal((await f.apply(sparsePlan)).status, 201);
+  assert.ok((await comments()).some(value => value.body === '페이지 없이 제출한 댓글'));
+
+  const restoredDocument = (await workspace()).documents.find(value => value.id === doc.id)!;
+  const recovered = await f.call<DocPage>(`/documents/${doc.id}/restore`, 'POST', { expectedVersion: restoredDocument.version, revisionId: original.id });
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.data));
+  assert.equal(recovered.data.plainText, original.plainText);
+  assert.equal(recovered.data.version, restoredDocument.version + 1);
+  const [recoveredRevision] = await revisions();
+  assert.equal(recoveredRevision.confluenceSourceVersion, undefined);
+  assert.equal(recoveredRevision.summary, 'Confluence 원본 버전 2에서 복구');
+});
+
 function confluence(withAuditFixtures = false) {
   const first = Buffer.from('첫 버전\r\n\x00바이너리'), latest = Buffer.from('두 번째 버전😀\r\n원본');
   const prop = (name: string, text: string) => `<property name="${name}">${text}</property>`, ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`, object = (type: string, id: string, text: string) => `<object class="${type}"><id name="id">${id}</id>${text}</object>`;

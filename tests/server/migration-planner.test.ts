@@ -158,6 +158,96 @@ test('all available attachment versions retain distinct files and a missing newe
   const source=confluence(),sha1=createHash('sha256').update('one').digest('hex'),sha2=createHash('sha256').update('two').digest('hex');source.dataset.records.push(record('attachment','a3',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'3'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a2',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'2',currentVersionId:'a3',packagePath:'attachments/two',sha256:sha2,size:3,mimeType:'text/html'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a1',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'1',currentVersionId:'a3',packagePath:'attachments/one',sha256:sha1,size:3},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}));source.dataset.records.find(row=>row.id==='page:10')!.text='<ac:image><ri:attachment ri:filename="image.png"/></ac:image>';const request=input([source]);request.fileInfo={wiki:{'attachments/one':{size:3,sha256:sha1,mimeType:'image/png'},'attachments/two':{size:3,sha256:sha2,mimeType:'image/png'}}};const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.attachments.length,1);assert.equal(plan.attachmentVersions.length,2);assert.equal(plan.fileCopies.length,2);const latest=plan.attachmentVersions.find(version=>version.versionLabel==='2')!;assert.equal(plan.attachments[0].id,latest.id);assert.equal(plan.attachments[0].mimeType,'image/png');assert.ok(plan.attachmentVersions.every(version=>version.attachmentId===latest.id));assert.equal(new Set(plan.fileCopies.map(file=>file.fileId)).size,2);assert.ok(plan.preview.requiredAcknowledgements.includes('ATTACHMENT_LATEST_MISSING'));const absent=plan.sourceRecords.find(row=>row.record.id==='attachment:a3')!;assert.equal(absent.targetId,null);assert.equal(absent.ownerId,plan.documents[0].id);assert.equal(plan.sourceRecords.find(row=>row.record.id==='attachment:a1')!.targetId,plan.attachmentVersions.find(version=>version.versionLabel==='1')!.id);assert.ok(JSON.stringify(plan.documents[0].content).includes(`attachments/${latest.id}/content?inline=1`));
 });
 
+test('Confluence history appends original rows with proven owners and leaves repeats and unsafe bodies in the archive', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const current = page('10', { authorId: null, metadata: { version: '8' } });
+  const anchor = page('20', { authorId: null });
+  const initial = pkg('initial-history', 'confluence', [space, current, anchor]);
+  const baseline = buildMigrationPlan(input([initial]));
+  const project = baseline.projects[0], [owner, other] = baseline.documents;
+  const revision = (id: string, version: number, text: string, extra: Partial<LegacyRecord> = {}) => record('revision', id, {
+    title: `과거 문서 ${id}`, text, textFormat: 'confluence-storage', updatedAt: created,
+    references: [{ kind: 'page', sourceId: '10', relation: 'current-version' }],
+    metadata: { sourceClass: 'Page', currentVersionId: '10', version: String(version) }, ...extra,
+  });
+  const comment = (id: string, text: string, sourcePage = '10', extra: Partial<LegacyRecord> = {}) => record('comment', id, {
+    text, textFormat: 'confluence-storage', createdAt: created, containerId: sourcePage,
+    references: [{ kind: 'page', sourceId: sourcePage, relation: 'container-content' }], metadata: { sourceClass: 'Comment' }, ...extra,
+  });
+  const link = (reference: string) => `<p><ac:link><ri:attachment ${reference}><ri:page ri:content-id="10"/></ri:attachment></ac:link></p>`;
+  const source = pkg('additional-history', 'confluence', [space,
+    comment('reply', '<p><strong>새</strong> 댓글</p>', '10', { parentId: 'deleted', references: [
+      { kind: 'page', sourceId: '10', relation: 'container-content' }, { kind: 'comment', sourceId: 'deleted', relation: 'parent' },
+    ] }),
+    comment('deleted', '<p>수정된 원본 댓글</p>', '20'),
+    comment('restricted', '<p>접근 제한 댓글</p>', '10', { metadata: { sourceClass: 'Comment', restricted: true } }),
+    comment('restricted-reply', '<p>다른 패키지에 제한된 상위 댓글이 있습니다.</p>', '10', { parentId: 'restricted-parent', references: [
+      { kind: 'page', sourceId: '10', relation: 'container-content' }, { kind: 'comment', sourceId: 'restricted-parent', relation: 'parent' },
+    ] }),
+    revision('old-2', 2, '<p>저장된 본문</p>'),
+    revision('old-3', 3, link('ri:content-id="historical-file"')),
+    revision('old-4', 4, link('ri:filename="image.png"')),
+    revision('old-5', 5, link('ri:content-id="file"')),
+    revision('old-6a', 6, '<p>버전 중복 A</p>'), revision('old-6b', 6, '<p>버전 중복 B</p>'),
+    revision('old-7', 7, '<p>제목 길이 제한</p>', { title: 'a'.repeat(301) }),
+    revision('unsafe-version', Number.MAX_SAFE_INTEGER, '<p>버전 번호 범위 초과</p>'),
+    revision('current-alias', 8, '<p>이미 저장된 현재 버전</p>'),
+    revision('orphan', 1, '<p>고아 원본 본문</p>', { metadata: { sourceClass: 'BodyContent', orphan: true } }),
+  ], [{ id: 'missing-primary', severity: 'error', code: 'NO_PRIMARY_CONTENT', message: '현재 문서 객체가 없습니다.', path: 'entities.xml', recordId: null }]);
+  const upstream = pkg('upstream-restrictions', 'confluence', [space,
+    comment('restricted-parent', '<p>접근 제한 상위 댓글</p>', '10', { metadata: { sourceClass: 'Comment', restricted: true } }),
+  ]);
+  for (const pack of [source, upstream]) pack.dataset.source.instanceKey = initial.dataset.source.instanceKey;
+  const attachment = { id: 'prior-file-version', attachmentId: 'primary-file', resourceType: 'document' as const,
+    resourceId: owner.id, filename: 'image.png', mimeType: 'image/png', size: 3, sha256: 'a'.repeat(64),
+    authorId: actor.id, createdAt: created, versionLabel: '1', sourceImportId: 'first-import', sourceRecordId: 'first-file-record' };
+  const request = input([source, upstream]);
+  request.configuration.appendPagesTo = { projectId: project.id, refreshHistory: true };
+  request.appendPages = { project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'append-history',
+    knownPages: [{ sourceId: '10', documentId: owner.id }, { sourceId: '20', documentId: other.id }].map(row => ({
+      ...row, projectId: project.id, sourceSpaceId: 's', sourceTitle: `문서 ${row.sourceId}`,
+    })),
+    knownHistory: [
+      { kind: 'revision', sourceId: '10', sourcePageId: '10', documentId: owner.id, sourceVersion: 8 },
+      { kind: 'comment', sourceId: 'deleted', sourcePageId: '10', documentId: owner.id, sourceVersion: null },
+    ],
+    knownAttachments: [{ sourcePageId: '10', sourceRootId: 'file', sourceId: 'historical-file', sourceRevision: 1,
+      documentId: owner.id, filename: 'image.png', version: attachment, hasLocalVersions: false },
+      { sourcePageId: '10', sourceRootId: 'file', sourceId: 'file', sourceRevision: 2,
+        documentId: owner.id, filename: 'image.png', version: { ...attachment, id: 'primary-file', versionLabel: '2' }, hasLocalVersions: false }],
+  };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.deepEqual(plan.confluenceHistoryOwners, [owner.id]);
+  assert.deepEqual(plan.documents, []);
+  assert.equal(plan.documentUpdates, undefined);
+  assert.deepEqual(plan.comments.map(row => [row.resourceId, row.body]), [[owner.id, '새 댓글']]);
+  assert.deepEqual(plan.revisions.map(row => [row.documentId, row.version, row.confluenceSourceVersion]), [[owner.id, 2, 2], [owner.id, 3, 3]]);
+  assert.equal(plan.preview.counts.newConfluenceComments, 1);
+  assert.equal(plan.preview.counts.newConfluenceRevisions, 2);
+  assert.deepEqual(plan.reusedAttachmentVersions, [attachment]);
+  assert.match(JSON.stringify(plan.revisions[1].content), /\/api\/attachments\/prior-file-version\/content/);
+  assert.equal(plan.sourceRecords.find(row => row.record.sourceId === 'reply')?.ownerId, owner.id);
+  assert.equal(plan.sourceRecords.find(row => row.record.sourceId === 'reply')?.record.parentId, 'deleted');
+  assert.deepEqual(plan.sourceRecords.filter(row => ['comment', 'revision'].includes(row.record.kind) && row.targetId).map(row => row.record.sourceId), ['reply', 'old-2', 'old-3']);
+  assert.ok(notices(plan).has('CONFLUENCE_HISTORY_RAW_ONLY'));
+  assert.ok(!notices(plan).has('SOURCE_NO_PRIMARY_CONTENT'));
+
+  request.appendPages.knownHistory!.push(
+    { kind: 'comment', sourceId: 'reply', sourcePageId: '10', documentId: owner.id, sourceVersion: null },
+    { kind: 'revision', sourceId: 'old-2', sourcePageId: '10', documentId: owner.id, sourceVersion: 2 },
+    { kind: 'revision', sourceId: 'old-3', sourcePageId: '10', documentId: owner.id, sourceVersion: 3 },
+  );
+  const repeat = buildMigrationPlan(request);
+  assert.equal(repeat.preview.canApply, false);
+  assert.ok(notices(repeat).has('SOURCE_NO_PRIMARY_CONTENT'));
+
+  request.configuration.appendPagesTo = { projectId: project.id };
+  const defaultPlan = buildMigrationPlan(request);
+  assert.deepEqual(defaultPlan.comments, []);
+  assert.deepEqual(defaultPlan.revisions, []);
+});
+
 test('Confluence attachment refresh preserves source pins and guards ambiguous or unavailable versions', () => {
   const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
   const asset = (id: string, revision: number, bytes?: string, root?: string, sourcePage = '10') => record('attachment', id, {

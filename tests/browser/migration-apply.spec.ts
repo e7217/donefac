@@ -554,6 +554,142 @@ test('360px에서 기존 Confluence 문서에 첨부를 추가하고 새 버전�
   }
 });
 
+test('360px에서 기존 Confluence 문서의 댓글과 원본 이력만 추가하고 팀 버전과 구분한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), instance = `confluence-history-append-${id}`, title = `이력을 이관한 기존 문서 ${id}`;
+  const historicalTitle = `과거 원본 제목 ${id}`, historicalBody = '과거 Confluence 원본 본문';
+  const originalBody = '처음 이관한 Confluence 본문', teamTitle = `팀에서 바꾼 제목 ${id}`;
+  const teamComment = '팀 문서에 먼저 작성한 댓글', sourceComment = '원본에서 뒤늦게 추가로 이관한 댓글';
+  const prop = (name: string, value: string) => `<property name="${name}"><![CDATA[${value}]]></property>`;
+  const ref = (name: string, kind: string, sourceId: string) => `<property name="${name}" class="${kind}"><id name="id">${sourceId}</id></property>`;
+  const object = (kind: string, sourceId: string, fields: string) => `<object class="${kind}"><id name="${kind === 'ConfluenceUserImpl' ? 'key' : 'id'}">${sourceId}</id>${fields}</object>`;
+  const dates = prop('creationDate', '2020-01-01T00:00:00Z') + prop('lastModificationDate', '2020-01-02T00:00:00Z');
+  const space = ref('space', 'Space', '42'), author = ref('creator', 'ConfluenceUserImpl', 'old-user');
+  const content = (id: string, kind: string, sourceId: string, body: string) => object('BodyContent', id, prop('body', `<p>${body}</p>`) + ref('content', kind, sourceId) + prop('bodyType', '2'));
+  const exportSpace = (updated: boolean) => zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    ${object('Space', '42', prop('key', `CH${id}`) + prop('name', `이력 원본 공간 ${id}`))}
+    ${object('ConfluenceUserImpl', 'old-user', prop('name', 'confluence-old-author'))}
+    ${object('Page', '100', prop('title', updated ? 'Confluence 최신 제목' : title) + prop('version', updated ? '3' : '1') + space + author + dates)}
+    ${content('200', 'Page', '100', updated ? 'Confluence 최신 본문' : originalBody)}
+    ${updated ? object('Page', '101', prop('title', historicalTitle) + prop('version', '2') + prop('contentStatus', 'historical') + ref('originalVersion', 'Page', '100') + space + author + dates) : ''}
+    ${updated ? content('201', 'Page', '101', historicalBody) : ''}
+    ${updated ? object('Comment', '600', ref('containerContent', 'Page', '100') + author + dates) : ''}
+    ${updated ? content('202', 'Comment', '600', sourceComment) : ''}
+  </hibernate-generic>`) }]);
+  const staged: LegacyPackageSummary[] = [];
+  let pinHostId: string | undefined;
+  try {
+    const original = await upload(request, `original-history-${id}.zip`, exportSpace(false), instance);
+    staged.push(original);
+    const [projectId] = (await importIntoProject(request, original, `CH${id}`, `이력을 보존하는 프로젝트 ${id}`)).import.projectIds;
+    const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const imported = workspace.documents.find(document => document.projectId === projectId && document.title === title)!;
+    expect(imported).toMatchObject({ plainText: originalBody, version: 1 });
+    const savedResponse = await request.patch(`/api/documents/${imported.id}`, { data: { title: teamTitle, expectedVersion: imported.version } });
+    expect(savedResponse.status(), await savedResponse.text()).toBe(200);
+    const saved = await savedResponse.json() as DocPage;
+    expect(saved.version).toBe(2);
+    const posted = await request.post('/api/comments', { data: { resourceType: 'document', resourceId: saved.id, body: teamComment } });
+    expect(posted.status(), await posted.text()).toBe(201);
+    const pinHostResponse = await request.post('/api/documents', { data: { projectId, title: `원본 버전을 포함하는 문서 ${id}` } });
+    expect(pinHostResponse.status(), await pinHostResponse.text()).toBe(201);
+    const pinHost = await pinHostResponse.json() as DocPage;
+    pinHostId = pinHost.id;
+
+    const next = await upload(request, `next-history-${id}.zip`, exportSpace(true), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append-pages');
+    const history = settings.getByRole('checkbox', { name: '기존 Confluence 문서에 댓글과 변경 이력 추가', exact: true });
+    const document = settings.getByRole('checkbox', { name: '기존 Confluence 문서 변경분 반영', exact: true });
+    const attachments = settings.getByRole('checkbox', { name: '기존 Confluence 문서에 첨부와 버전 추가', exact: true });
+    for (const option of [history, document, attachments]) await expect(option).not.toBeChecked();
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await history.check();
+    await document.check();
+    await attachments.check();
+    await mode.selectOption('new');
+    await mode.selectOption('append-pages');
+    for (const option of [history, document, attachments]) await expect(option).toBeChecked();
+    await document.uncheck();
+    await attachments.uncheck();
+
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendPagesTo).toEqual({ projectId, refreshHistory: true });
+    expect(plan.counts).toMatchObject({ documents: 0, newConfluenceComments: 1, newConfluenceRevisions: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    for (const label of ['기존 문서의 새 댓글 1', '기존 문서의 새 원본 버전 1']) await expect(review.getByText(label, { exact: true })).toBeVisible();
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('기존 문서에 새 댓글 1건 추가');
+      expect(dialog.message()).toContain('기존 문서에 새 원본 버전 1건 추가');
+      await dialog.accept();
+    });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Confluence 이관 결과', exact: true })).toBeVisible();
+    for (const label of ['기존 문서의 새 댓글 1', '기존 문서의 새 원본 버전 1']) await expect(receipt.getByText(label, { exact: true })).toBeVisible();
+    expect((await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).documents.find(value => value.id === saved.id)).toEqual(saved);
+
+    await page.goto(`/#/${projectId}/documents/${saved.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(teamTitle);
+    await expect(page.locator('.docs-prose')).toContainText(originalBody);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    await expect(page.locator('.docs-comment p').filter({ hasText: teamComment })).toHaveCount(1);
+    await expect(page.locator('.docs-comment p').filter({ hasText: sourceComment })).toHaveCount(1);
+    await page.getByRole('button', { name: '이력', exact: true }).click();
+    const revisions = page.locator('.docs-revision');
+    await expect(revisions).toHaveCount(3);
+    await expect(revisions.first()).toContainText('버전 2');
+    await expect(revisions.first().getByText('현재', { exact: true })).toBeVisible();
+    const importedRevision = revisions.filter({ hasText: 'Confluence 원본 버전 2' });
+    await expect(importedRevision.getByText('현재', { exact: true })).toHaveCount(0);
+    await importedRevision.click();
+    const detail = page.locator('.docs-history-preview');
+    await expect(detail.getByText('Confluence 원본 버전 2', { exact: true })).toBeVisible();
+    await expect(detail.getByRole('heading', { name: historicalTitle, exact: true })).toBeVisible();
+    await expect(detail).toContainText(historicalBody);
+    await detail.getByRole('button', { name: '이 버전과 현재 편집본 비교', exact: true }).click();
+    const comparison = page.getByRole('dialog', { name: '문서 버전 비교', exact: true });
+    await expect(comparison.getByLabel('비교 기준 버전', { exact: true }).locator('option:checked')).toHaveText(`Confluence 원본 버전 2 · ${historicalTitle}`);
+    await expect(comparison.getByText('기준 · Confluence 원본 버전 2', { exact: false })).toBeVisible();
+    await comparison.getByRole('button', { name: '문서 버전 비교 닫기', exact: true }).click();
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('Confluence 원본 버전 2의 내용으로 복구');
+      await dialog.dismiss();
+    });
+    await detail.getByRole('button', { name: '이 버전으로 복구', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(teamTitle);
+
+    await page.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
+    await page.goto(`/#/${projectId}/documents/${pinHost.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(pinHost.title);
+    await page.getByRole('button', { name: '문서 버전 포함 삽입', exact: true }).click();
+    const chooser = page.getByRole('dialog', { name: '문서 버전 포함 삽입', exact: true });
+    await chooser.getByLabel('참조할 항목 검색', { exact: true }).fill(teamTitle);
+    await chooser.getByRole('button').filter({ hasText: teamTitle }).click();
+    await expect(chooser.getByRole('button', { name: '버전 2 포함', exact: true })).toBeVisible();
+    const sourceOption = chooser.getByRole('button', { name: 'Confluence 원본 버전 2 포함', exact: true });
+    const sourceLabel = sourceOption.getByText('Confluence 원본 버전 2', { exact: true });
+    expect(await sourceLabel.evaluate(label => label.clientWidth >= label.scrollWidth)).toBe(true);
+    await sourceOption.click();
+    const pinned = page.getByRole('region', { name: `고정 포함 문서 ${historicalTitle}`, exact: true });
+    await pinned.getByRole('button', { name: '고정 버전 내용 보기', exact: true }).click();
+    await expect(pinned.getByText('Confluence 원본 버전 2', { exact: true })).toBeVisible();
+    await expect(pinned).toContainText(historicalBody);
+  } finally {
+    if (pinHostId) await request.delete(`/api/documents/${pinHostId}`);
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px 이관 진단에서 해당 패키지의 원본을 확인하고 같은 미리보기로 돌아간다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

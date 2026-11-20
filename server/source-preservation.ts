@@ -56,12 +56,14 @@ export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable
   const append = object(raw, '기존 프로젝트 문서 추가 설정');
   const refresh = Object.hasOwn(append, 'refreshExisting');
   const attachments = Object.hasOwn(append, 'refreshAttachments');
-  if (Object.keys(append).length !== 1 + Number(refresh) + Number(attachments) || (refresh && append.refreshExisting !== true) ||
-      (attachments && append.refreshAttachments !== true)) {
+  const history = Object.hasOwn(append, 'refreshHistory');
+  if (Object.keys(append).length !== 1 + Number(refresh) + Number(attachments) + Number(history) ||
+      (refresh && append.refreshExisting !== true) || (attachments && append.refreshAttachments !== true) ||
+      (history && append.refreshHistory !== true)) {
     fail(400, '기존 프로젝트 문서 추가 설정 형식을 확인해 주세요.');
   }
   return { projectId: string(append.projectId, '문서를 추가할 프로젝트', 200), ...(refresh ? { refreshExisting: true } : {}),
-    ...(attachments ? { refreshAttachments: true } : {}) };
+    ...(attachments ? { refreshAttachments: true } : {}), ...(history ? { refreshHistory: true } : {}) };
 }
 function configuration(raw: unknown, users: Set<string>): MigrationConfiguration {
   const value = object(raw, '이관 설정');
@@ -170,7 +172,59 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}), ...(integrity ? { integrity } : {}) };
 }
 const baseAttachment = (value: Attachment): Attachment => ({ id: value.id, resourceType: value.resourceType, resourceId: value.resourceId, filename: value.filename, mimeType: value.mimeType, size: value.size, sha256: value.sha256, authorId: value.authorId, createdAt: value.createdAt });
-type ConfluenceArchiveKind = 'attachment' | 'page' | 'revision';
+type ConfluenceArchiveKind = 'attachment' | 'page' | 'revision' | 'comment';
+export function confluenceHistoryVersion(value: unknown): number | null {
+  const version = typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(version) && version > 0 ? version : null;
+}
+
+export function confluenceHistoryPage(record: LegacyRecord,
+  lookup: (kind: 'comment' | 'revision', sourceId: string) => LegacyRecord | undefined): string | null {
+  const pending = [{ row: record, exiting: false }];
+  const visiting = new Set<string>();
+  const checked = new Set<string>();
+  let page: string | null = null;
+  while (pending.length) {
+    const { row, exiting } = pending.pop()!;
+    const key = stable([row.kind, row.sourceId]);
+    if (exiting) {
+      visiting.delete(key);
+      checked.add(key);
+      continue;
+    }
+    if (checked.has(key)) continue;
+    if (visiting.has(key) || row.metadata.restricted === true || row.metadata.orphan === true || row.metadata.bodyVariant === true) return null;
+    let owners: LegacyRecord['references'];
+    if (row.kind === 'comment' && row.metadata.sourceClass === 'Comment') {
+      if (row.metadata.currentVersionId || row.metadata.contentStatus === 'historical' ||
+          row.metadata.originalVersionId && row.metadata.originalVersionId !== row.sourceId ||
+          row.references.some(ref => ['current-version', 'original-version'].includes(ref.relation) && ref.sourceId !== row.sourceId)) return null;
+      owners = row.references.filter(ref => ref.relation === 'container-content');
+      if (owners.length !== 1 || owners[0].sourceId !== row.containerId) return null;
+    } else if (row.kind === 'revision' && ['Page', 'BlogPost'].includes(String(row.metadata.sourceClass))) {
+      owners = row.references.filter(ref => ref.relation === 'current-version' || ref.relation === 'original-version' && ref.sourceId !== row.sourceId);
+      if (!owners.length || owners.some(ref => ref.kind !== 'revision' && ref.kind !== 'page') ||
+          row.metadata.currentVersionId && !owners.some(ref => ref.relation === 'current-version' && ref.sourceId === row.metadata.currentVersionId) ||
+          row.metadata.originalVersionId && row.metadata.originalVersionId !== row.sourceId &&
+            !owners.some(ref => ref.relation === 'original-version' && ref.sourceId === row.metadata.originalVersionId)) return null;
+    } else return null;
+    visiting.add(key);
+    pending.push({ row, exiting: true });
+    for (const owner of owners) {
+      if (owner.kind === 'page') {
+        if (page !== null && page !== owner.sourceId) return null;
+        page = owner.sourceId;
+        continue;
+      }
+      if (owner.kind !== 'comment' && owner.kind !== 'revision') return null;
+      const target = lookup(owner.kind, owner.sourceId);
+      if (!target || target.kind !== owner.kind || target.sourceId !== owner.sourceId ||
+          row.kind === 'revision' && target.metadata.sourceClass !== row.metadata.sourceClass) return null;
+      pending.push({ row: target, exiting: false });
+    }
+  }
+  return page;
+}
 export function confluenceAttachmentOrigin(record: LegacyRecord, lookup: (kind: ConfluenceArchiveKind, id: string) => LegacyRecord | undefined) {
   const pageOf = (candidate: LegacyRecord): string | null => {
     if (candidate.kind !== 'attachment' || candidate.metadata.restricted === true || !candidate.containerId) return null;
@@ -210,6 +264,7 @@ function confluenceArchiveKey(record: SourceRecordArchive, kind = record.record.
   return stable([record.sourceImportId, record.packageSha256, record.source.instanceKey, kind, sourceId]);
 }
 interface EarlierAttachments { versions: AttachmentVersion[]; records: SourceRecordArchive[] }
+interface AppliedConfluenceHistory { owners: Set<string>; commentIds: Set<string>; revisionIds: Set<string> }
 type Binding = { product: string; instance: string; kind: string; alias: string; type: string; id: string; importId: string };
 interface ArchiveSqlRow {
   id: string;
@@ -247,6 +302,8 @@ export class SourcePreservationService {
       CREATE INDEX IF NOT EXISTS source_records_owner ON source_records(owner_type,owner_id,kind);
       CREATE INDEX IF NOT EXISTS source_records_target ON source_records(target_type,target_id);
       CREATE INDEX IF NOT EXISTS source_records_author ON source_records(import_id,product,source_instance,kind,source_id);
+      CREATE INDEX IF NOT EXISTS source_records_confluence_history
+        ON source_records(source_instance,kind,source_id) WHERE product='confluence';
       CREATE TABLE IF NOT EXISTS attachment_versions(id TEXT PRIMARY KEY,attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS attachment_versions_attachment ON attachment_versions(attachment_id);
       CREATE UNIQUE INDEX IF NOT EXISTS attachment_versions_local_revision
@@ -286,7 +343,7 @@ export class SourcePreservationService {
   }
   versionsForAttachments(ids: string[]): AttachmentVersion[] { const result: AttachmentVersion[] = []; for (const id of new Set(ids)) result.push(...(this.store.db.prepare('SELECT json FROM attachment_versions WHERE attachment_id=? ORDER BY rowid').all(id) as { json: string }[]).map(row => JSON.parse(row.json) as AttachmentVersion)); return result; }
   validateImport(input: { imports: unknown; records: unknown; versions: unknown; relations: unknown }, context: SourcePreservationContext,
-    earlier?: EarlierAttachments): SourcePreservationData {
+    earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory): SourcePreservationData {
     const users = new Set(context.users.map(value => value.id)), imports = list(input.imports, '이관 영수증', 10000).map(value => parseImport(value, users)), byImport = unique(imports, '이관 영수증');
     const datasets = new Map<string, ReturnType<typeof emptyDataset>>(), packages = new Map(imports.map(value => [value.id, new Map(value.packages.map(pkg => [stable([pkg.sha256, pkg.source]), pkg]))]));
     const records = list(input.records, '보존 원본').map(raw => {
@@ -359,6 +416,7 @@ export class SourcePreservationService {
     const byVersion = unique(versions, '첨부 버전');
     this.validateConfluenceAttachmentRoots(versions, records, earlier);
     this.validateTargets(records, context, byVersion);
+    this.validateConfluenceHistory(imports, records, context.revisions, appliedHistory);
     const issues = new Map(context.issues.map(value => [value.id, value]));
     const relations = list(input.relations, '업무 관계').map(raw => { const value = object(raw, '업무 관계'), sourceIssueId = string(value.sourceIssueId, '관계 원본 업무', 200), targetIssueId = string(value.targetIssueId, '관계 대상 업무', 200); if (!issues.has(sourceIssueId) || !issues.has(targetIssueId) || sourceIssueId === targetIssueId) fail(400, '업무 관계는 현재 존재하는 서로 다른 업무를 연결해야 합니다.'); return { id: string(value.id, '업무 관계 ID', 200), sourceIssueId, targetIssueId, type: string(value.type, '업무 관계 종류', 300), version: positive(value.version), createdAt: timestamp(value.createdAt) }; });
     unique(relations, '업무 관계'); this.bindings(records); return { imports, records, versions, relations };
@@ -368,6 +426,114 @@ export class SourcePreservationService {
       AND kind=? AND source_id=? AND json_extract(json,'$.packageSha256')=? LIMIT 2`)
       .all(archive.sourceImportId, archive.source.instanceKey, kind, sourceId, archive.packageSha256) as { json: string }[];
     return rows.length === 1 ? (JSON.parse(rows[0].json) as SourceRecordArchive).record : undefined;
+  }
+  private validateConfluenceHistory(imports: SourceImport[], records: SourceRecordArchive[], revisions: DocRevision[],
+    applied?: AppliedConfluenceHistory): void {
+    const enabled = new Map(imports.filter(receipt => receipt.configuration.appendPagesTo?.refreshHistory)
+      .map(receipt => [receipt.id, receipt]));
+    const marked = revisions.filter(revision => revision.confluenceSourceVersion !== undefined);
+    if (!enabled.size && (applied ? !applied.commentIds.size && !applied.revisionIds.size : !marked.length)) return;
+    const markedVersions = new Set<string>();
+    for (const revision of marked) {
+      const version = positive(revision.confluenceSourceVersion);
+      const key = stable([revision.documentId, version]);
+      if (version !== revision.version || markedVersions.has(key)) fail(400, 'Confluence 문서 이력의 원본 버전 번호가 잘못되었거나 중복되었습니다.');
+      markedVersions.add(key);
+    }
+    const confluence = records.filter(archive => archive.source.product === 'confluence');
+    const receipts = new Map(imports.map(receipt => [receipt.id, receipt]));
+    const raw = new Map(confluence.map(archive => [confluenceArchiveKey(archive), archive]));
+    const anchors = new Map<string, SourceRecordArchive[]>();
+    const projects = new Set<string>();
+    const aliases = new Map<string, number>();
+    const sourceVersions = new Map<string, SourceRecordArchive[]>();
+    const byRevision = new Map(revisions.map(revision => [revision.id, revision]));
+    for (const archive of confluence) {
+      const { kind, sourceId, metadata } = archive.record;
+      const instance = archive.source.instanceKey;
+      if (kind === 'page' && archive.targetType === 'document' && archive.targetId) {
+        const key = stable([instance, archive.targetId]);
+        const group = anchors.get(key) ?? [];
+        group.push(archive);
+        anchors.set(key, group);
+      } else if (kind === 'project' && archive.targetType === 'project') {
+        projects.add(stable([instance, sourceId, archive.targetId]));
+      } else if ((kind === 'comment' || kind === 'revision') && archive.targetType === kind) {
+        const key = stable([instance, kind, sourceId]);
+        aliases.set(key, (aliases.get(key) ?? 0) + 1);
+        const version = kind === 'revision' ? confluenceHistoryVersion(metadata.version) : null;
+        if (version === null) continue;
+        const versionKey = stable([instance, archive.ownerId, version]);
+        const group = sourceVersions.get(versionKey) ?? [];
+        group.push(archive);
+        sourceVersions.set(versionKey, group);
+      }
+    }
+    const archivedPage = this.store.db.prepare(`SELECT candidate.json FROM source_bindings AS binding
+      JOIN source_records AS candidate ON candidate.import_id=binding.import_id AND candidate.product=binding.product
+        AND candidate.source_instance=binding.source_instance AND candidate.kind=binding.kind AND candidate.source_id=binding.source_alias
+        AND candidate.target_type=binding.target_type AND candidate.target_id=binding.target_id
+      WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
+        AND binding.target_id=? LIMIT 2`);
+    const archivedProject = this.store.db.prepare(`SELECT 1 FROM source_bindings WHERE product='confluence' AND source_instance=?
+      AND kind='project' AND source_alias=? AND target_type='project' AND target_id=?`);
+    const previousAlias = this.store.db.prepare(`SELECT 1 FROM source_records WHERE product='confluence' AND source_instance=? AND kind=?
+      AND target_type IN ('comment','revision') AND target_type=kind AND source_id=? AND import_id<>? LIMIT 1`);
+    const archivedPages = new Map<string, SourceRecordArchive[]>();
+    const pageOf = (archive: SourceRecordArchive) => confluenceHistoryPage(archive.record, (kind, id) => {
+      const related = raw.get(confluenceArchiveKey(archive, kind, id));
+      return related?.excluded ? undefined : related?.record;
+    });
+    const verifiedComments = new Set<string>(), verifiedMarkers = new Set<string>();
+    for (const archive of confluence) {
+      const receipt = enabled.get(archive.sourceImportId);
+      const { kind, sourceId, metadata } = archive.record;
+      if (!receipt || kind !== archive.targetType || (kind !== 'comment' && kind !== 'revision')) continue;
+      const revision = kind === 'revision' && archive.targetId ? byRevision.get(archive.targetId) : undefined;
+      const instance = archive.source.instanceKey;
+      const ownerId = archive.ownerId;
+      const projectId = receipt.configuration.appendPagesTo!.projectId;
+      const ownerKey = stable([instance, ownerId]);
+      if (applied && ownerId && applied.owners.has(ownerId) && !archivedPages.has(ownerKey)) {
+        const saved = archivedPage.all(instance, ownerId) as { json: string }[];
+        archivedPages.set(ownerKey, saved.map(row => JSON.parse(row.json) as SourceRecordArchive));
+      }
+      const previousPages = applied ? archivedPages.get(ownerKey) ?? [] : (anchors.get(ownerKey) ?? []).filter(page =>
+        page.sourceImportId !== receipt.id && Date.parse(receipts.get(page.sourceImportId)!.createdAt) <= Date.parse(receipt.createdAt));
+      if (applied ? !ownerId || !applied.owners.has(ownerId) : !previousPages.length && revision?.confluenceSourceVersion === undefined) continue;
+      const sourcePageId = pageOf(archive);
+      const origins = previousPages.filter(page => page.record.sourceId === sourcePageId && page.targetProjectId === projectId &&
+        page.record.containerId && page.ownerType === 'document' && page.ownerId === ownerId &&
+        ['Page', 'BlogPost'].includes(String(page.record.metadata.sourceClass)));
+      const spaces = new Set(origins.map(page => page.record.containerId));
+      const [space] = spaces;
+      if (!ownerId || archive.ownerType !== 'document' || archive.targetProjectId !== projectId || !sourcePageId || spaces.size !== 1 || !space ||
+          !(projects.has(stable([instance, space, projectId])) || applied && archivedProject.get(instance, space, projectId)) ||
+          archive.record.references.some(ref => ref.kind === 'project' && ref.relation === 'space' && ref.sourceId !== space) ||
+          (aliases.get(stable([instance, kind, sourceId])) ?? 0) !== 1 || applied && previousAlias.get(instance, kind, sourceId, receipt.id)) {
+        fail(400, 'Confluence 이력의 기존 같은 공간 문서 연결과 원본 ID를 확인해 주세요.');
+      }
+      if (kind === 'comment') {
+        if (verifiedComments.has(archive.targetId!)) fail(400, 'Confluence 댓글의 보존 원본이 중복되었습니다.');
+        verifiedComments.add(archive.targetId!);
+        continue;
+      }
+      const version = confluenceHistoryVersion(metadata.version);
+      const duplicates = sourceVersions.get(stable([instance, ownerId, version])) ?? [];
+      const [initial] = origins.sort((a, b) => Date.parse(receipts.get(a.sourceImportId)?.createdAt ?? '') - Date.parse(receipts.get(b.sourceImportId)?.createdAt ?? ''));
+      if (version === null || version === confluenceHistoryVersion(initial.record.metadata.version) ||
+          duplicates.some(other => other.id !== archive.id && pageOf(other) === sourcePageId) ||
+          revision && (revision.documentId !== ownerId || revision.confluenceSourceVersion !== version || verifiedMarkers.has(revision.id))) {
+        fail(400, 'Confluence 문서 이력과 보존 원본의 문서·버전 번호를 확인해 주세요.');
+      }
+      if (revision) verifiedMarkers.add(revision.id);
+    }
+    if (marked.some(revision => (!applied || applied.revisionIds.has(revision.id)) && !verifiedMarkers.has(revision.id))) {
+      fail(400, 'Confluence 문서 이력에 확인된 원본 보관 객체가 없습니다.');
+    }
+    if (applied && [...applied.commentIds].some(id => !verifiedComments.has(id))) {
+      fail(400, 'Confluence 댓글에 확인된 원본 보관 객체가 없습니다.');
+    }
   }
   private validateConfluenceAttachmentRoots(versions: AttachmentVersion[], records: SourceRecordArchive[], earlier?: EarlierAttachments): void {
     const extended = versions.filter(version => version.sourceRevision !== undefined);
@@ -462,7 +628,10 @@ export class SourcePreservationService {
     const versions = this.versionsForAttachments(anchorIds).filter(version => version.sourceImportId !== prepared.sourceImport.id);
     const earlier = versions.length ? { versions, records: [...new Set(versions.map(version => version.sourceRecordId).filter((id): id is string => !!id))]
       .map(id => this.store.get<SourceRecordArchive>('source_records', id)).filter((record): record is SourceRecordArchive => !!record) } : undefined;
-    const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations }, context, earlier);
+    const owners = new Set(prepared.confluenceHistoryOwners);
+    const appliedHistory = { owners, commentIds: new Set(prepared.comments.filter(comment => owners.has(comment.resourceId)).map(comment => comment.id)),
+      revisionIds: new Set(prepared.revisions.filter(revision => revision.confluenceSourceVersion !== undefined).map(revision => revision.id)) };
+    const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations }, context, earlier, appliedHistory);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');

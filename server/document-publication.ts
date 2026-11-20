@@ -74,7 +74,7 @@ export class DocumentPublicationService {
     const existing = this.store.db.prepare(`
       SELECT json FROM revisions WHERE document_id=? AND json_extract(json,'$.version')=?
         AND json_extract(json,'$.title')=? AND json_extract(json,'$.content')=?
-        AND json_extract(json,'$.plainText')=? ORDER BY id LIMIT 1
+        AND json_extract(json,'$.plainText')=? AND json_type(json,'$.confluenceSourceVersion') IS NULL ORDER BY id LIMIT 1
     `).get(document.id, document.version, document.title, JSON.stringify(document.content), document.plainText) as { json: string } | undefined;
     if (existing) return JSON.parse(existing.json) as DocRevision;
     const revision: DocRevision = {
@@ -186,7 +186,7 @@ export class DocumentPublicationService {
     const moment = (value: unknown, label: string): string => { const result = timestamp(value, label); if (result > through) fail(400, '문서 검토 시각이 백업 내보내기 이후입니다.'); return result; };
     const reference = (value: unknown, documentId: string, requestedAt: string): string => {
       const result = id(value, '문서 저장본 ID'), revision = revisionMap.get(result);
-      if (!revision || revision.documentId !== documentId || usedRevisions.has(result) || !Number.isSafeInteger(revision.version) || revision.version < 1 || revision.version > documentMap.get(documentId)!.version || typeof revision.title !== 'string' || !revision.title.trim() || revision.title.length > 300 || !userIds.has(revision.authorId) || !Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(requestedAt)) fail(400, '문서 검토 저장본이 중복되거나 문서 버전·제목·작성자·시각이 올바르지 않습니다.');
+      if (!revision || revision.documentId !== documentId || revision.confluenceSourceVersion !== undefined || usedRevisions.has(result) || !Number.isSafeInteger(revision.version) || revision.version < 1 || revision.version > documentMap.get(documentId)!.version || typeof revision.title !== 'string' || !revision.title.trim() || revision.title.length > 300 || !userIds.has(revision.authorId) || !Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(requestedAt)) fail(400, '문서 검토 저장본이 중복되거나 문서 버전·제목·작성자·시각이 올바르지 않습니다.');
       usedRevisions.add(result); return result;
     };
     return value.map(raw => {

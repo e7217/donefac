@@ -15,6 +15,7 @@ import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import { DocumentOutline, jumpToDocumentHeading, outlineHeadingTitle, type DocumentOutlineEntry } from './DocumentOutline';
+import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
 
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude';
@@ -115,13 +116,14 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, decisionSou
   }, []);
 
   const revision = loaded && 'revision' in loaded ? loaded.revision : undefined;
+  const revisionLabel = revision?.confluenceSourceVersion != null ? documentRevisionLabel(revision) : revision ? `고정 버전 ${revision.version}` : '고정 버전';
   const title = revision?.title || label || '제목 없는 문서';
   const toggleLabel = decisionSource ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
   return <section className="doc-included-content doc-pinned-include" aria-label={`${decisionSource ? '결정 근거 원문' : '고정 포함 문서'} ${title}`}>
     <button type="button" className="doc-reference-card document" aria-expanded={open}
       aria-label={toggleLabel} onClick={() => { setLoaded(null); setOpen(!open); }}>
       <span className="doc-reference-icon"><FileClock size={15} aria-hidden="true" /></span>
-      <span><small>{revision ? `고정 버전 ${revision.version}` : '고정 버전'}</small><strong>{title}</strong></span>
+      <span><small>{revisionLabel}</small><strong>{title}</strong></span>
       {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
     </button>
     {open && !loaded && <p className="doc-pinned-message" role="status">고정 버전을 불러오는 중…</p>}
@@ -324,7 +326,7 @@ function createsIncludeCycle(data: WorkspaceSnapshot, source: string, target: st
   return false;
 }
 
-type RevisionChoice = Pick<DocRevision, 'id' | 'version' | 'title' | 'createdAt'>;
+type RevisionChoice = Pick<DocRevision, 'id' | 'version' | 'title' | 'createdAt' | 'confluenceSourceVersion'>;
 type RevisionPage = { items: RevisionChoice[]; nextOffset: number | null };
 type RevisionPageLoad = { offset: number; attempt: number; page?: RevisionPage; error?: string };
 
@@ -353,11 +355,11 @@ function RevisionChoices({ source, onBack, onChoose }: { source: DocPage; onBack
       <button type="button" className="btn btn-ghost" ref={backButton} onClick={onBack}><ArrowLeft size={14} /> 문서 고르기</button>
       <strong>{source.title}</strong>
     </div>
-    <div className="doc-reference-results" aria-label="포함할 저장 버전" aria-busy={!current}>
+    <div className="doc-reference-results doc-revision-options" aria-label="포함할 저장 버전" aria-busy={!current}>
       {!current && <p role="status">저장 버전을 불러오는 중…</p>}
       {current?.error && <><p role="alert">{current.error}</p><button type="button" onClick={() => setAttempt(previous => previous + 1)}>저장 버전 다시 불러오기</button></>}
-      {current?.page?.items.map(revision => <button type="button" key={revision.id} aria-label={`버전 ${revision.version} 포함`} onClick={() => onChoose(revision)}>
-        <span>버전 {revision.version}</span><strong>{revision.title}</strong><time dateTime={revision.createdAt}>{new Date(revision.createdAt).toLocaleDateString('ko-KR')}</time><ChevronRight size={15} aria-hidden="true" />
+      {current?.page?.items.map(revision => <button type="button" key={revision.id} aria-label={`${documentRevisionLabel(revision)} 포함`} onClick={() => onChoose(revision)}>
+        <span>{documentRevisionLabel(revision)}</span><strong>{revision.title}</strong><time dateTime={revision.createdAt}>{new Date(revision.createdAt).toLocaleDateString('ko-KR')}</time><ChevronRight size={15} aria-hidden="true" />
       </button>)}
       {current?.page && !current.page.items.length && <p>포함할 저장 버전이 없습니다.</p>}
     </div>

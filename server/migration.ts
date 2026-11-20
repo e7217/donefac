@@ -13,7 +13,7 @@ import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { confluenceAttachmentOrigin, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
+import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -31,7 +31,7 @@ type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourc
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
-const changedPageAppend = '대상 프로젝트와 원본 연결 또는 문서·첨부 버전이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedPageAppend = '대상 프로젝트, 원본 연결 또는 문서·첨부 이력이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
 const jiraNumericId = /^\d+$/;
 
@@ -212,11 +212,11 @@ export class MigrationService {
     }
     return candidates;
   }
-  private pageAppendDestination(packages: MigrationPackage[], options: MigrationOptions): PageAppendDestination | undefined {
+  private pageAppendDestination(packages: MigrationPackage[], options: MigrationOptions, allowSparseHistory = false): PageAppendDestination | undefined {
     const instanceKey = this.sourceInstance(packages, 'confluence');
     if (!instanceKey) return;
     const spaces = options.containers.filter(container => container.documentCount > 0);
-    const sourceSpaceId = spaces[0]?.sourceProjectId;
+    const sourceSpaceId = spaces[0]?.sourceProjectId ?? (allowSparseHistory ? this.sparseConfluenceSpace(packages, instanceKey) : undefined);
     if (!sourceSpaceId || sourceSpaceId === '__unassigned__' || spaces.some(space => space.sourceProjectId !== sourceSpaceId)) return;
     const binding = this.projectBinding('confluence', instanceKey, sourceSpaceId);
     const project = binding && this.store.get<Project>('projects', binding.id);
@@ -237,9 +237,30 @@ export class MigrationService {
     }
     return { project, instanceKey, sourceSpaceId, ...(keys.size === 1 ? { sourceSpaceKey: [...keys][0] } : {}) };
   }
+  private sparseConfluenceSpace(packages: MigrationPackage[], instanceKey: string): string | undefined {
+    const ownerPages = new Set<string>();
+    for (const pkg of packages) {
+      const history = new Map(pkg.dataset.records.filter(record => record.kind === 'comment' || record.kind === 'revision')
+        .map(record => [record.id, record]));
+      for (const record of history.values()) {
+        const page = confluenceHistoryPage(record, (kind, id) => history.get(`${kind}:${id}`));
+        if (page && (record.kind === 'comment' || page !== record.sourceId)) ownerPages.add(page);
+      }
+    }
+    if (!ownerPages.size) return;
+    const rows = this.store.db.prepare(`SELECT DISTINCT json_extract(snapshot.json,'$.record.containerId') AS space
+      FROM source_bindings AS binding JOIN source_records AS snapshot ON snapshot.import_id=binding.import_id
+        AND snapshot.product=binding.product AND snapshot.source_instance=binding.source_instance
+        AND snapshot.kind=binding.kind AND snapshot.source_id=binding.source_alias
+        AND snapshot.target_type=binding.target_type AND snapshot.target_id=binding.target_id
+      WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
+        AND binding.source_alias IN (SELECT value FROM json_each(?)) LIMIT 2`)
+      .all(instanceKey, JSON.stringify([...ownerPages])) as { space: string | null }[];
+    return rows.length === 1 ? rows[0].space ?? undefined : undefined;
+  }
   private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false): MigrationPageAppendContext | undefined {
     if (!configuration.appendPagesTo) return;
-    const destination = this.pageAppendDestination(packages, buildMigrationOptions(packages));
+    const destination = this.pageAppendDestination(packages, buildMigrationOptions(packages), configuration.appendPagesTo.refreshHistory);
     if (!destination || destination.project.id !== configuration.appendPagesTo.projectId) {
       return fail(applying ? 409 : 400, applying ? changedPageAppend : invalidPageAppend);
     }
@@ -275,14 +296,86 @@ export class MigrationService {
     FROM bound_pages AS bound ORDER BY bound.sourceId`).all(instanceKey, sourceSpaceId, instanceKey, project.id) as MigrationPageAppendContext['knownPages'];
     const knownPages = boundPages.filter(page => page.sourceSpaceId === sourceSpaceId || selectedPageIds.has(page.sourceId));
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
-    const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, digest);
+    // Additive history checks the exact reused files at apply, so unrelated local attachment updates can proceed.
+    const attachmentDigest = configuration.appendPagesTo.refreshHistory && !configuration.appendPagesTo.refreshAttachments ? undefined : digest;
+    const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, attachmentDigest);
+    const knownHistory = configuration.appendPagesTo.refreshHistory
+      ? this.confluenceKnownHistory(packages, knownPages, destination, digest) : undefined;
     const refreshDocuments = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
-      ...(refreshDocuments ? { refreshDocuments } : {}) };
+      ...(refreshDocuments ? { refreshDocuments } : {}), ...(knownHistory ? { knownHistory } : {}) };
+  }
+  private confluenceKnownHistory(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>):
+    NonNullable<MigrationPageAppendContext['knownHistory']> {
+    const selected = { comment: new Set<string>(), revision: new Set<string>() };
+    const revisionPages = new Set<string>();
+    for (const pkg of packages) {
+      const history = new Map(pkg.dataset.records.filter(record => record.kind === 'comment' || record.kind === 'revision')
+        .map(record => [record.id, record]));
+      for (const record of history.values()) {
+        if (record.kind === 'comment') selected.comment.add(record.sourceId);
+        if (record.kind !== 'revision') continue;
+        selected.revision.add(record.sourceId);
+        const page = confluenceHistoryPage(record, (kind, id) => history.get(`${kind}:${id}`));
+        if (page) revisionPages.add(page);
+      }
+    }
+    if (!selected.comment.size && !selected.revision.size) return [];
+    const livePages = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
+      .map(page => [page.sourceId, page.documentId]));
+    const liveDocumentIds = JSON.stringify([...new Set([...revisionPages].flatMap(page => livePages.get(page) ?? []))]);
+    // The archive retains targets when users remove live comments or document revisions.
+    const rows = this.store.db.prepare(`WITH history AS (
+      SELECT snapshot.id, snapshot.json FROM source_records AS snapshot
+      WHERE snapshot.owner_type='document' AND snapshot.owner_id IN (SELECT value FROM json_each(?))
+        AND snapshot.product='confluence' AND snapshot.source_instance=? AND snapshot.kind='revision' AND snapshot.target_type='revision'
+      UNION
+      SELECT snapshot.id, snapshot.json FROM source_records AS snapshot
+      WHERE snapshot.product='confluence' AND snapshot.source_instance=? AND snapshot.kind='comment' AND snapshot.target_type='comment'
+        AND snapshot.source_id IN (SELECT value FROM json_each(?))
+      UNION
+      SELECT snapshot.id, snapshot.json FROM source_records AS snapshot
+      WHERE snapshot.product='confluence' AND snapshot.source_instance=? AND snapshot.kind='revision' AND snapshot.target_type='revision'
+        AND snapshot.source_id IN (SELECT value FROM json_each(?))
+    ) SELECT json FROM history ORDER BY id`).iterate(liveDocumentIds, instanceKey, instanceKey,
+      JSON.stringify([...selected.comment]), instanceKey, JSON.stringify([...selected.revision])) as Iterable<{ json: string }>;
+    const known: NonNullable<MigrationPageAppendContext['knownHistory']> = [];
+    const add = (source: typeof known[number], archive: SourceRecordArchive) => {
+      known.push(source);
+      digest.update(JSON.stringify([source, archive.id, archive.targetId])).update('\n');
+    };
+    for (const row of rows) {
+      const archive = JSON.parse(row.json) as SourceRecordArchive;
+      const { kind, sourceId } = archive.record;
+      if ((kind !== 'comment' && kind !== 'revision') || !archive.ownerId || archive.ownerType !== 'document') continue;
+      const page = archive.targetProjectId === project.id
+        ? confluenceHistoryPage(archive.record, (kind, id) => this.sources.confluenceArchivedRecord(archive, kind, id)) : null;
+      const sourcePageId = page && livePages.get(page) === archive.ownerId ? page : null;
+      if (kind === 'revision' && (!sourcePageId || !revisionPages.has(sourcePageId)) && !selected.revision.has(sourceId)) continue;
+      add({ kind, sourceId, sourcePageId, documentId: archive.ownerId,
+        sourceVersion: sourcePageId && kind === 'revision' ? confluenceHistoryVersion(archive.record.metadata.version) : null }, archive);
+    }
+    if (!revisionPages.size) return known;
+    const initial = this.store.db.prepare(`SELECT snapshot.json FROM source_bindings AS binding
+      JOIN source_records AS snapshot ON snapshot.import_id=binding.import_id AND snapshot.product=binding.product
+        AND snapshot.source_instance=binding.source_instance AND snapshot.kind=binding.kind AND snapshot.source_id=binding.source_alias
+        AND snapshot.target_id=binding.target_id AND snapshot.target_type=binding.target_type
+      WHERE binding.product='confluence' AND binding.source_instance=? AND binding.kind='page' AND binding.target_type='document'
+        AND binding.target_id IN (SELECT value FROM json_each(?))
+      ORDER BY snapshot.id`).iterate(instanceKey, liveDocumentIds) as Iterable<{ json: string }>;
+    for (const row of initial) {
+      const archive = JSON.parse(row.json) as SourceRecordArchive;
+      const { sourceId, containerId, metadata } = archive.record;
+      if (containerId !== sourceSpaceId || !archive.targetId || livePages.get(sourceId) !== archive.targetId || archive.targetProjectId !== project.id) continue;
+      const sourceVersion = confluenceHistoryVersion(metadata.version);
+      if (sourceVersion !== null) add({ kind: 'revision', sourceId, sourcePageId: sourceId, documentId: archive.targetId, sourceVersion }, archive);
+    }
+    return known;
   }
   private confluenceKnownAttachments(knownPages: MigrationPageAppendContext['knownPages'],
-    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['knownAttachments']> {
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest?: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['knownAttachments']> {
     const livePages = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
       .map(page => [page.sourceId, page.documentId]));
     if (!livePages.size) return [];
@@ -311,7 +404,7 @@ export class MigrationService {
       const attachment = { ...origin, sourceId: archive.record.sourceId, filename: typeof filename === 'string' && filename ? filename.trim() : version?.filename ?? '',
         documentId: row.documentId, version, hasLocalVersions: version !== null && row.latestLocalId !== null };
       known.push(attachment);
-      digest.update(JSON.stringify([attachment, version ? row.latestLocalId : null])).update('\n');
+      digest?.update(JSON.stringify([attachment, version ? row.latestLocalId : null])).update('\n');
     }
     return known;
   }
@@ -629,7 +722,7 @@ export class MigrationService {
         options.appendTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceProjectId,
           statuses: workflow.statuses, issueTypes: schema.issueTypes, fields: schema.fields };
       }
-      const pageDestination = this.pageAppendDestination(packages, options);
+      const pageDestination = this.pageAppendDestination(packages, options, true);
       if (pageDestination) {
         const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = pageDestination;
         options.appendPagesTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceSpaceId, sourceSpaceKey };

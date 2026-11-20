@@ -76,7 +76,8 @@ export function resolveDocumentDecisionSource(store: Store, document: DocPage, a
   }
   const content = JSON.stringify(document.content);
   const rows = store.db.prepare(`SELECT json FROM revisions
-    WHERE document_id=? AND json_extract(json,'$.version')=? ORDER BY rowid DESC`).all(document.id, document.version) as { json: string }[];
+    WHERE document_id=? AND json_extract(json,'$.version')=? AND json_type(json,'$.confluenceSourceVersion') IS NULL
+    ORDER BY rowid DESC`).all(document.id, document.version) as { json: string }[];
   const existing = rows.map(row => JSON.parse(row.json) as DocRevision)
     .find(revision => revision.title === document.title && JSON.stringify(revision.content) === content);
   if (existing) return { revisionId: existing.id, from, to, text };
@@ -97,7 +98,8 @@ export function validateDocumentDecisionSource(value: unknown, documentId: strin
       || !revisionId.isWellFormed() || /[\u0000-\u001f\u007f]/u.test(revisionId)) throw invalidSource();
   const revision = revisions.get(revisionId);
   if (!revision && !knownDocument) return;
-  if (!revision || revision.documentId !== documentId || readDocumentSelection(revision.content, from, to) !== text) throw invalidSource();
+  if (!revision || revision.documentId !== documentId || revision.confluenceSourceVersion !== undefined ||
+      readDocumentSelection(revision.content, from, to) !== text) throw invalidSource();
 }
 
 export class DocumentFollowUpService {

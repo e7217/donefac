@@ -1,4 +1,4 @@
-import type { RichContent } from '../../shared/types';
+import type { DocRevision, RichContent } from '../../shared/types';
 import { ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isIssueSummaryGroupBy } from '../../shared/document-nodes';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
@@ -23,6 +23,10 @@ export function templateContent(id: string): RichContent {
 }
 
 export function contentText(node: RichContent): string { return documentPlainText(node); }
+
+export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'confluenceSourceVersion'>): string {
+  return revision.confluenceSourceVersion == null ? `버전 ${revision.version}` : `Confluence 원본 버전 ${revision.confluenceSourceVersion}`;
+}
 
 function summaryHtml(node: RichContent): string {
   const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

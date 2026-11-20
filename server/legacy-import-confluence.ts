@@ -59,13 +59,14 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
   }
   if(!objects.length)throw new LegacyImportError(400,'entities.xml에서 Confluence 객체를 찾을 수 없습니다.');
   const rows=new Map<string,LegacyRecord>(),pageByTitle=new Map<string,string[]>(),currentByHistory=new Map<string,string>();
+  const historyRecordId=(type:string,id:string)=>type==='Comment'?`comment:${id}`:type==='Attachment'?`attachment:${id}`:`revision:${id}`;
   const mapHistory=(type:string)=>{for(const item of byType.get(type)??[])for(const historyId of refs(item.node,'historicalVersions')){
     const key=`${type}:${historyId}`,previous=currentByHistory.get(key);
-    if(previous&&previous!==item.id)diagnostic(data,{severity:'error',code:'CONFLUENCE_HISTORY_AMBIGUOUS',message:'과거 버전이 둘 이상의 현재 객체에 연결되어 있습니다.',recordId:`${type==='Page'||type==='BlogPost'?'revision':'attachment'}:${historyId}`,path:xmlPath});
+    if(previous&&previous!==item.id)diagnostic(data,{severity:'error',code:'CONFLUENCE_HISTORY_AMBIGUOUS',message:'과거 버전이 둘 이상의 현재 객체에 연결되어 있습니다.',recordId:historyRecordId(type,historyId),path:xmlPath});
     else currentByHistory.set(key,item.id);
   }};
   for(const type of CONTENT_TYPES)mapHistory(type);
-  for(const item of objects){const original=ref(item.node,'originalVersion');if(original&&original!==item.id){const key=`${item.type}:${item.id}`,previous=currentByHistory.get(key);if(previous&&previous!==original)diagnostic(data,{severity:'error',code:'CONFLUENCE_HISTORY_AMBIGUOUS',message:'historicalVersions와 originalVersion의 연결 대상이 다릅니다. 원본 관계를 보존했으며 현재 버전을 임의로 합치지 않았습니다.',path:xmlPath});else currentByHistory.set(key,original);}}
+  for(const item of objects){const original=ref(item.node,'originalVersion');if(original&&original!==item.id){const key=`${item.type}:${item.id}`,previous=currentByHistory.get(key);if(previous&&previous!==original)diagnostic(data,{severity:'error',code:'CONFLUENCE_HISTORY_AMBIGUOUS',message:'historicalVersions와 originalVersion의 연결 대상이 다릅니다. 원본 관계를 보존했으며 현재 버전을 임의로 합치지 않았습니다.',recordId:historyRecordId(item.type,item.id),path:xmlPath});else currentByHistory.set(key,original);}}
   const historyChecked=new Set<string>();for(const start of currentByHistory.keys()){
     const seen=new Set<string>();let key=start;while(currentByHistory.has(key)&&!historyChecked.has(key)){if(seen.has(key)){diagnostic(data,{severity:'error',code:'CONFLUENCE_HISTORY_CYCLE',message:'문서 또는 첨부의 버전 관계가 순환합니다. 원본 버전 연결을 검토해야 합니다.',path:xmlPath});break;}seen.add(key);key=`${key.slice(0,key.indexOf(':'))}:${currentByHistory.get(key)!}`;}for(const id of seen)historyChecked.add(id);
   }
@@ -135,7 +136,7 @@ function attachBodies(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
       const body = property(list[0].node, 'body');
       row.text = scalar(body);
       row.metadata.bodyType = prop(list[0].node, 'bodyType');
-      if (row.kind === 'page' && body) row.metadata.bodyPresent = true;
+      if (body) row.metadata.bodyPresent = true;
     }
     else{row.metadata.bodyContents=list.map(body=>({id:body.id,bodyType:prop(body.node,'bodyType'),text:prop(body.node,'body')}));for(const body of list)addRecord(data,record('revision',`BodyContent:${body.id}`,{text:prop(body.node,'body'),textFormat:'confluence-storage',metadata:{sourceClass:'BodyContent',originalId:body.id,bodyType:prop(body.node,'bodyType'),bodyVariant:true},references:[{kind:row.kind,sourceId:row.sourceId,relation:'body-owner'}]}));diagnostic(data,{severity:'error',code:'CONFLUENCE_MULTIPLE_BODIES',message:'한 콘텐츠에 여러 본문 객체가 있어 원문들을 별도로 보존했습니다. 적용할 본문을 임의로 선택하지 않았습니다.',recordId:row.id,path});}
     for(const body of list)if(property(body.node,'body')?.children.length)diagnostic(data,{severity:'error',code:'CONFLUENCE_NON_SCALAR_BODY',message:'본문이 CDATA/문자열이 아닌 XML 자식 요소로 저장되어 원문 속성 값을 정확하게 복원할 수 없습니다.',recordId:row.id,path});

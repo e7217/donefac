@@ -493,6 +493,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const attachmentOwners = new Set(value.confluenceAttachmentOwners ?? []);
       const newConfluenceAttachments = value.attachments.filter(file => attachmentOwners.has(file.resourceId)).length;
       const newConfluenceVersions = value.attachmentVersions.filter(version => version.sourceRevision !== undefined).length;
+      const historyOwners = new Set(value.confluenceHistoryOwners ?? []);
+      const newConfluenceComments = value.comments.filter(comment => historyOwners.has(comment.resourceId)).length;
+      const newConfluenceRevisions = value.revisions.filter(revision => historyOwners.has(revision.documentId)).length;
+      const hasConfluenceHistory = newConfluenceComments > 0 || newConfluenceRevisions > 0;
       if (value.appendPages) {
         const { projectId } = value.appendPages;
         get<Project>('projects', projectId);
@@ -502,11 +506,19 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
             [...attachmentOwners].some(id => store.get<DocPage>('documents', id)?.projectId !== projectId))) {
           fail('첨부를 추가할 기존 Confluence 문서를 확인해 주세요.', 409);
         }
+        if (historyOwners.size && (value.preview.configuration.appendPagesTo?.refreshHistory !== true ||
+            [...historyOwners].some(id => store.get<DocPage>('documents', id)?.projectId !== projectId))) {
+          fail('댓글과 이력을 추가할 기존 Confluence 문서를 확인해 주세요.', 409);
+        }
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length ||
-            (!value.documents.length && !refreshedDocuments.length && !newConfluenceAttachments && !newConfluenceVersions) ||
+            (!value.documents.length && !refreshedDocuments.length && !newConfluenceAttachments && !newConfluenceVersions && !hasConfluenceHistory) ||
             value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
-            value.revisions.some(revision => !newDocumentIds.has(revision.documentId)) ||
-            value.comments.some(record => record.resourceType !== 'document' || !newDocumentIds.has(record.resourceId)) ||
+            value.revisions.some(revision => store.get('revisions', revision.id) || (newDocumentIds.has(revision.documentId)
+              ? revision.confluenceSourceVersion !== undefined
+              : !historyOwners.has(revision.documentId) || revision.confluenceSourceVersion !== revision.version ||
+                !Number.isSafeInteger(revision.version) || revision.version < 1)) ||
+            value.comments.some(record => record.resourceType !== 'document' || store.get('comments', record.id) ||
+              (!newDocumentIds.has(record.resourceId) && !historyOwners.has(record.resourceId))) ||
             value.attachments.some(file => file.resourceType !== 'document' || (!newDocumentIds.has(file.resourceId) && !attachmentOwners.has(file.resourceId)) ||
               store.get('attachments', file.id) || store.get('attachment_versions', file.id))) {
           fail('기존 프로젝트에 추가할 문서의 범위가 올바르지 않습니다.',409);
@@ -574,13 +586,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
       if (newConfluenceAttachments) details.push(`기존 문서에 첨부 ${newConfluenceAttachments}개 추가`);
       if (newConfluenceVersions) details.push(`기존 첨부에 버전 ${newConfluenceVersions}개 추가`);
+      if (newConfluenceComments) details.push(`기존 문서에 원본 댓글 ${newConfluenceComments}개 추가`);
+      if (newConfluenceRevisions) details.push(`기존 문서에 원본 이력 ${newConfluenceRevisions}개 추가`);
       activity(req, 'source-import', value.sourceImport.id, action, details.join(' · '));
     },
   });
@@ -1023,7 +1037,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     trashItems.finishCleanup();
     res.json({ok:true});
   });
-  app.get('/api/documents/:id/revisions',(req,res)=>{get('documents',req.params.id);res.json(store.all<any>('revisions').filter(r=>r.documentId===req.params.id).sort((a,b)=>b.version-a.version));});
+  app.get('/api/documents/:id/revisions',(req,res)=>{
+    get('documents',req.params.id);
+    const revisions=store.all<DocRevision>('revisions').filter(revision=>revision.documentId===req.params.id);
+    revisions.sort((a,b)=>Number(a.confluenceSourceVersion!==undefined)-Number(b.confluenceSourceVersion!==undefined)||b.version-a.version);
+    res.json(revisions);
+  });
   app.get('/api/document-publications/count',(req,res)=>{
     if(Object.keys(req.query).length)return fail('검토 수에 조회 조건을 지정할 수 없습니다.');
     res.set('Cache-Control','no-store').json({pendingAssigned:countDocumentAssignedReviews(store,actor(req))});
@@ -1045,7 +1064,21 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.json(documentPublication.transition(req.params.id,actor(req),req.body,content=>apiKeys.authorizeDocumentBody(req,content)));
   });
   app.post('/api/documents/:id/restore',(req,res)=>{
-    const updated=store.transaction(()=>{const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);const r=get('revisions',req.body.revisionId);if(r.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');let d=validateDocument({...old,title:r.title,content:r.content,plainText:r.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});store.put('documents',d);d=collaboration.replaceBody(d,{allowMissing:true});const actorId=actor(req);revision(d,actorId,`버전 ${r.version}에서 복구`);activity(req,'document',d.id,'문서 복구',`버전 ${r.version} → ${d.version}`);if(d.title!==old.title||JSON.stringify(d.content)!==JSON.stringify(old.content))notifyDocumentUpdate(d,actorId,d.updatedAt);return d;});
+    const updated=store.transaction(()=>{
+      const old=get<DocPage>('documents',req.params.id);
+      checkVersion(old,req.body.expectedVersion);
+      const saved=get<DocRevision>('revisions',req.body.revisionId);
+      if(saved.documentId!==old.id)fail('이 문서의 버전이 아닙니다.');
+      const sourceVersion=saved.confluenceSourceVersion===undefined ? `버전 ${saved.version}` : `Confluence 원본 버전 ${saved.confluenceSourceVersion}`;
+      let document=validateDocument({...old,title:saved.title,content:saved.content,plainText:saved.plainText,version:old.version+1,updatedAt:now()},old,{allowMissing:true});
+      store.put('documents',document);
+      document=collaboration.replaceBody(document,{allowMissing:true});
+      const actorId=actor(req);
+      revision(document,actorId,`${sourceVersion}에서 복구`);
+      activity(req,'document',document.id,'문서 복구',`${sourceVersion} → ${document.version}`);
+      if(document.title!==old.title||JSON.stringify(document.content)!==JSON.stringify(old.content))notifyDocumentUpdate(document,actorId,document.updatedAt);
+      return document;
+    });
     collaboration.reset(updated.id,'문서 이력에서 복구되었습니다.');res.json(updated);
   });
   app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
@@ -1299,6 +1332,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<39&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshExisting!==undefined))fail('기존 Jira 업무의 변경분을 반영한 영수증에는 schemaVersion 39 백업이 필요합니다.');
     if(data.schemaVersion<40&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshExisting!==undefined))fail('기존 Confluence 문서의 변경분을 반영한 영수증에는 schemaVersion 40 백업이 필요합니다.');
     if(data.schemaVersion<41&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshAttachments!==undefined))fail('기존 Confluence 문서의 첨부를 추가한 영수증에는 schemaVersion 41 백업이 필요합니다.');
+    if(data.schemaVersion<42&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshHistory!==undefined))fail('기존 Confluence 문서의 댓글과 이력을 추가한 영수증에는 schemaVersion 42 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
@@ -1348,6 +1382,8 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];
     const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
+    const allImportedRevisions=[...importedRevisions,...importedTrash.flatMap(entry=>entry.revisions)];
+    if(data.schemaVersion<42&&allImportedRevisions.some(revision=>revision.confluenceSourceVersion!==undefined))fail('Confluence 원본 버전을 구분하는 문서 이력에는 schemaVersion 42 백업이 필요합니다.');
     if(data.schemaVersion<33&&(
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'integrity')))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'excluded')))
@@ -1355,7 +1391,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
-    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:[...data.comments,...archiveComments],revisions:data.revisions,attachments:[...data.attachments,...archiveAttachments]});
+    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:[...data.comments,...archiveComments],revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
     const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     for(const entry of importedTrash){
@@ -1484,7 +1520,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for(const l of data.resourceLinks){get('issues',l.issueId);get('documents',l.documentId);text(l.kind,'관계',80);store.put('resource_links',l);}
       for(const c of data.comments){if(!['issue','document'].includes(c.resourceType))fail('잘못된 댓글 대상입니다.');get(c.resourceType==='issue'?'issues':'documents',c.resourceId);get('users',c.authorId);text(c.body,'댓글',20000);store.put('comments',c);}
       for(const r of importedRevisions){get('documents',r.documentId);get('users',r.authorId);if(!Number.isInteger(r.version)||r.version<1)fail('문서 이력을 확인해 주세요.');store.put('revisions',r);}
-      for(const d of data.documents)if(!data.revisions.some((r:any)=>r.documentId===d.id&&r.version===d.version))revision(d,d.authorId,'백업 가져오기');
+      for(const d of importedDocuments)if(!importedRevisions.some(r=>r.documentId===d.id&&r.version===d.version&&r.confluenceSourceVersion===undefined))revision(d,d.authorId,'백업 가져오기');
       documentPublication.replaceRestored(importedPublications);
       for(const a of data.activities){get('users',a.actorId);store.put('activities',a);}
       for(const a of data.attachments){attachmentTarget(a.resourceType,a.resourceId);get('users',a.authorId);if(!validTimestamp(a.createdAt))fail('첨부파일 작성 시간을 확인해 주세요.');store.put('attachments',a);}

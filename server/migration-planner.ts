@@ -11,6 +11,7 @@ import type { MigrationPageIdentity, MigrationReferenceInput } from './migration
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
+import { confluenceHistoryPage } from './source-preservation.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -232,6 +233,7 @@ interface ConfluenceAttachmentSeries {
   entries: Entry[];
 }
 type PlannedAttachment = { entry: Entry; value: AttachmentVersion; path: string };
+type ConfluenceHistoryCandidate = { entry: Entry; sourcePageId: string; owner: KnownPage; version: number | null };
 const pageOwnerRelations = new Set(['container-content', 'current-version', 'body-owner']);
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
@@ -268,6 +270,8 @@ class Planner{
   private retainedEntries = new Set<string>();
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes: JiraMigrationIssueFieldHashes }>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
+  private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
+  private missingHistoryPrimaryNotices: { message: string; entry?: Entry }[] = [];
   private boundIssues = new Map<string, KnownIssue>();
   private boundPages = new Map<string, KnownPage>();
   private boundPageIdsByTitle = new Map<string, Set<string>>();
@@ -664,7 +668,7 @@ class Planner{
     const containers = this.options.containers.filter(container => container.documentCount > 0);
     if (!append || !mapping || this.configuration.appendTo || append.project.id !== mapping.projectId || !instance ||
         this.input.packages.some(({ dataset }) => dataset.source.product !== 'confluence' || dataset.source.instanceKey !== instance) ||
-        !containers.length || containers.some(container => container.sourceProjectId !== append.sourceSpaceId)) {
+        (!containers.length && mapping.refreshHistory !== true) || containers.some(container => container.sourceProjectId !== append.sourceSpaceId)) {
       this.notice('APPEND_PAGE_TARGET_INVALID', '같은 Confluence 공간에 연결된 기존 프로젝트를 확인해 주세요.', 'error');
       return;
     }
@@ -678,7 +682,9 @@ class Planner{
       ids.add(page.sourceId);
       this.boundPageIdsByTitle.set(page.sourceTitle, ids);
     }
-    for (const container of containers) this.projectsByContainer.set(container.id, append.project);
+    for (const container of this.options.containers) {
+      if (container.sourceProjectId === append.sourceSpaceId) this.projectsByContainer.set(container.id, append.project);
+    }
 
     for (const entry of this.entries) {
       if (entry.row.kind !== 'page' || this.excluded.has(entry.key)) continue;
@@ -690,10 +696,16 @@ class Planner{
       this.retainedEntries.add(entry.key);
     }
     const retainedPages = this.retainedEntries.size;
+    const refreshHistory = mapping.refreshHistory === true;
+    const knownHistoryIds = new Set(refreshHistory ? append.knownHistory?.map(row => JSON.stringify([row.kind, row.sourceId])) : []);
     for (const entry of this.entries) {
       if (!['attachment', 'comment', 'revision'].includes(entry.row.kind) || this.excluded.has(entry.key)) continue;
       const owner = this.ownerEntry(entry);
-      if (owner ? this.retainedEntries.has(owner.key) : this.retainedPageOwner(entry)) this.retainedEntries.add(entry.key);
+      const history = refreshHistory && (entry.row.kind === 'comment' || entry.row.kind === 'revision');
+      const knownHistory = history && knownHistoryIds.has(JSON.stringify([entry.row.kind, entry.row.sourceId]));
+      const originalOwner = history && confluenceHistoryPage(entry.row, (kind, id) => this.sourceEntry(entry, kind, id)?.row);
+      if (knownHistory || (originalOwner && this.boundPages.has(originalOwner)) || (history && !owner) ||
+          (owner ? this.retainedEntries.has(owner.key) : this.retainedPageOwner(entry))) this.retainedEntries.add(entry.key);
     }
     this.result.preview.counts.retainedPages = retainedPages;
     this.result.preview.counts.retainedRecords = this.retainedEntries.size;
@@ -762,7 +774,7 @@ class Planner{
   time(value:string|null,entry:Entry,required=true):string|null{if(!value){if(!required)return null;return this.unknownTime(entry,'원본 시각이 없습니다.');}let result:string|null=null;const english=jiraEnglishDate(value);if(english&&this.timezoneValid){result=localDate(english.local,this.configuration.timezone);if(result&&english.century)this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);}else if(/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(value)){const parsed=/^\d{4}-\d\d-\d\d/.test(value)&&!isCalendarDate(value.slice(0,10))?NaN:Date.parse(value.replace(/ UTC$/,'Z').replace(/^(\d{4}-\d\d-\d\d) /,'$1T'));if(Number.isFinite(parsed))result=new Date(parsed).toISOString();}else if(this.timezoneValid)result=localDate(value,this.configuration.timezone);return result||this.unknownTime(entry,'원본 시각을 지정 시간대에서 유일하게 해석할 수 없습니다.');}
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createSecondary();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   initializeOriginBases(): void {
     const suppliedBases = this.configuration.sourceBaseUrls;
     const packages = this.input.packages;
@@ -863,7 +875,15 @@ class Planner{
     if(this.result.appendPages)this.notice('CONFLUENCE_APPEND_ACCESS_NOT_REPRODUCED','추가하는 페이지는 대상 프로젝트의 접근 범위를 따릅니다. 원본에 접근 제한이 있는 콘텐츠는 제외 전까지 적용을 차단합니다.','warning',undefined,true);
     const sourceAliases=new Map<string,string>();for(const entry of this.entries)if(!this.skip(entry)&&['issue','page','project'].includes(entry.row.kind)){const target=this.bindings.get(entry.key)?.id;for(const alias of [entry.row.sourceId,...(entry.row.kind==='issue'&&entry.row.metadata.key?[string(entry.row.metadata.key)]:[])]){const key=JSON.stringify([entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,entry.row.kind,alias]),previous=sourceAliases.get(key);if(previous&&previous!==entry.key&&!(target&&target===this.bindings.get(previous)?.id))this.notice('SOURCE_BINDING_AMBIGUOUS','같은 원본 인스턴스·ID가 여러 적용 대상으로 존재합니다. 겹치는 내보내기를 제외해 주세요.','error',entry);else sourceAliases.set(key,entry.key);}}
     for(const entry of this.entries)if(!this.skip(entry)&&(this.restricted(entry)||entry.row.kind==='page'&&this.restrictedSourcePages.has(entry.row.sourceId)))this.notice('RESTRICTED_CONTENT','권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.','error',entry);
-    for(const pkg of this.input.packages){for(const diagnostic of pkg.dataset.diagnostics){const recordKey=diagnostic.recordId?`${pkg.summary.id}/${diagnostic.recordId}`:null;if(recordKey&&(this.excluded.has(recordKey)||this.retainedEntries.has(recordKey)))continue;const missingBytes=/ATTACHMENT_BYTES_MISSING/.test(diagnostic.code);if(diagnostic.severity==='error'&&!missingBytes)this.notice(`SOURCE_${diagnostic.code}`,diagnostic.message,'error',recordKey?this.entryByKey.get(recordKey):undefined);}
+    for(const pkg of this.input.packages){for(const diagnostic of pkg.dataset.diagnostics){
+      const recordKey = diagnostic.recordId ? `${pkg.summary.id}/${diagnostic.recordId}` : null;
+      if (recordKey && (this.excluded.has(recordKey) || this.retainedEntries.has(recordKey))) continue;
+      if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
+      const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
+      if (diagnostic.code === 'NO_PRIMARY_CONTENT' && this.result.appendPages && config.appendPagesTo?.refreshHistory === true) {
+        this.missingHistoryPrimaryNotices.push({ message: diagnostic.message, entry });
+      } else this.notice(`SOURCE_${diagnostic.code}`, diagnostic.message, 'error', entry);
+    }
       for(const warning of pkg.dataset.diagnostics.filter(notice=>notice.severity==='warning')){const key=warning.recordId?`${pkg.summary.id}/${warning.recordId}`:null;if(key&&(this.excluded.has(key)||this.retainedEntries.has(key)))continue;if(['DATE_TIMEZONE_UNRESOLVED','CONFLUENCE_TIMEZONE_UNKNOWN','MISSING_REFERENCE','CONFLUENCE_STORAGE_REFERENCES_UNRESOLVED'].includes(warning.code))continue;this.notice(`SOURCE_${warning.code}`,warning.message,'warning',warning.recordId?this.entryByKey.get(`${pkg.summary.id}/${warning.recordId}`):undefined,true);}
       if(pkg.dataset.unsupported.length)this.notice('UNSUPPORTED_SOURCE_RECORDS',`원본 ${pkg.summary.filename}의 미지원 객체/필드는 보관 가능한 분석 결과만 남으며 실행 기능을 재현하지 않습니다.`,'warning',undefined,true);
     }
@@ -1316,7 +1336,9 @@ class Planner{
   private confluenceSpace(entry: Entry): string | null {
     const declared = entry.row.references.find(reference => reference.kind === 'project' && reference.relation === 'space')?.sourceId;
     const sourceSpace = declared ?? this.ownerEntry(entry)?.container;
-    return sourceSpace && sourceSpace !== '__unassigned__' ? sourceSpace : null;
+    if (sourceSpace && sourceSpace !== '__unassigned__') return sourceSpace;
+    const retainedPage = this.configuration.appendPagesTo?.refreshHistory && this.retainedPageOwners.get(entry.key);
+    return retainedPage ? this.originalPage(retainedPage)?.sourceSpaceId ?? null : null;
   }
   private originIdentity(entry: Entry): string | undefined {
     const base = this.originBases.get(entry.pkg.summary.id);
@@ -1589,6 +1611,155 @@ class Planner{
       const sourceVersion=Number(current.row.metadata.version);document.version=Number.isSafeInteger(sourceVersion)&&sourceVersion>highest&&sourceVersion<=1000000000?sourceVersion:highest+1;this.result.revisions.push({id:randomUUID(),documentId:document.id,version:document.version,title:document.title,content:document.content,plainText:document.plainText,authorId:document.authorId,createdAt:document.updatedAt,summary:'원본 현재 문서 이관'});
     }
   }
+
+  private confluenceHistoryRestrictions(): Set<string> {
+    const restricted = new Set<string>();
+    const children = new Map<string, string[]>();
+    for (const entry of this.entries) {
+      const { kind, sourceId, references } = entry.row;
+      if (kind !== 'page' && kind !== 'comment' && kind !== 'revision') continue;
+      const key = JSON.stringify([kind, sourceId]);
+      if (this.restricted(entry) || entry.row.metadata.restricted === true || kind === 'page' && this.restrictedSourcePages.has(sourceId)) {
+        restricted.add(key);
+      }
+      if (kind === 'page') continue;
+      for (const reference of references) {
+        if (!pageOwnerRelations.has(reference.relation) && reference.relation !== 'original-version' &&
+            !(reference.kind === 'comment' && reference.relation === 'parent')) continue;
+        const parent = JSON.stringify([reference.kind, reference.sourceId]);
+        const descendants = children.get(parent) ?? [];
+        descendants.push(key);
+        children.set(parent, descendants);
+      }
+    }
+    // An export may only contain a reply while another selected export declares the parent's restrictions.
+    for (const parent of restricted) for (const child of children.get(parent) ?? []) restricted.add(child);
+    return restricted;
+  }
+
+  private confluenceHistoryCandidate(entry: Entry, sourceErrors: Set<string>, restricted: Set<string>): ConfluenceHistoryCandidate | null {
+    const append = this.input.appendPages!;
+    const { row } = entry;
+    const blocked = (candidate: Entry) => this.excluded.has(candidate.key) || sourceErrors.has(candidate.key) ||
+      restricted.has(JSON.stringify([candidate.row.kind, candidate.row.sourceId])) ||
+      candidate.row.references.some(ref => ref.kind === 'project' && ref.relation === 'space' && ref.sourceId !== append.sourceSpaceId);
+    if (!this.retainedEntries.has(entry.key) || blocked(entry)) return null;
+    const sourcePageId = confluenceHistoryPage(row, (kind, id) => {
+      const candidate = this.sourceEntry(entry, kind, id);
+      return candidate && !blocked(candidate) ? candidate.row : undefined;
+    });
+    if (!sourcePageId || this.restrictedSourcePages.has(sourcePageId) || this.excludedConfluenceAttachmentPages.has(sourcePageId)) return null;
+    const owner = this.originalPage(sourcePageId);
+    if (!owner || (!hasConfluenceBody(row) && !(row.kind === 'comment' && row.textFormat === 'plain' && row.text.trim()))) return null;
+    this.retainedPageOwners.set(entry.key, sourcePageId);
+    if (row.kind === 'comment') return { entry, sourcePageId, owner, version: null };
+    const version = confluenceSourceVersion(row);
+    const current = this.sourceEntry(entry, 'page', sourcePageId);
+    const currentVersion = current ? confluenceSourceVersion(current.row) : null;
+    if (version === null || version >= Number.MAX_SAFE_INTEGER || row.sourceId === sourcePageId || (currentVersion !== null && version >= currentVersion)) return null;
+    return { entry, sourcePageId, owner, version };
+  }
+
+  private historicalConfluenceAttachment(entry: Entry, sourcePageId: string, request: MigrationReferenceInput): ResolvedReference | null {
+    if (request.attachmentOwner === null) return null;
+    const owner = request.attachmentOwner === undefined ? sourcePageId : this.boundConfluenceAttachmentPage(entry, request);
+    if (!owner || !request.sourceId) return null;
+    const series = [...this.confluenceAttachmentSeries.get(owner)?.values() ?? []].filter(line =>
+      line.entries.some(row => row.row.sourceId === request.sourceId) || line.known.some(file => file.sourceId === request.sourceId));
+    // A filename and the current attachment ID can both point to new bytes in a later export.
+    if (series.length !== 1 || series[0].sourceRootId === request.sourceId) return null;
+    return this.lookupBoundConfluenceAttachment(entry, owner, request);
+  }
+
+  private createConfluenceHistory(): void {
+    const append = this.input.appendPages;
+    if (!append || this.configuration.appendPagesTo?.refreshHistory !== true) return;
+    const versionKey = (sourcePageId: string, version: number) => JSON.stringify([sourcePageId, version]);
+    const knownIds = new Set<string>(), knownVersions = new Set<string>(), sourceErrors = new Set<string>();
+    for (const row of append.knownHistory ?? []) {
+      knownIds.add(JSON.stringify([row.kind, row.sourceId]));
+      if (row.kind === 'revision' && row.sourceVersion !== null && row.sourcePageId && this.originalPage(row.sourcePageId)?.documentId === row.documentId) {
+        knownVersions.add(versionKey(row.sourcePageId, row.sourceVersion));
+      }
+    }
+    for (const pkg of this.input.packages) for (const diagnostic of pkg.dataset.diagnostics) {
+      if (diagnostic.severity === 'error' && diagnostic.recordId) sourceErrors.add(`${pkg.summary.id}/${diagnostic.recordId}`);
+    }
+    const groups = new Map<string, Entry[]>();
+    for (const entry of this.entries) {
+      if (entry.row.kind !== 'comment' && entry.row.kind !== 'revision') continue;
+      const key = JSON.stringify([entry.row.kind, entry.row.sourceId]);
+      if (knownIds.has(key)) continue;
+      const group = groups.get(key) ?? [];
+      group.push(entry);
+      groups.set(key, group);
+    }
+    const candidates: ConfluenceHistoryCandidate[] = [], versionCounts = new Map<string, number>();
+    const restricted = this.confluenceHistoryRestrictions();
+    let rawOnly = 0;
+    for (const group of groups.values()) {
+      const retained = group.filter(entry => this.retainedEntries.has(entry.key));
+      if (!retained.length) continue;
+      const candidate = this.confluenceHistoryCandidate(retained[0], sourceErrors, restricted);
+      const original = retained.length > 1 ? JSON.stringify(retained[0].row) : null;
+      if (!candidate || !this.uniqueConfluenceOrigin(group) || group.length !== retained.length || retained.slice(1).some(entry =>
+        JSON.stringify(entry.row) !== original || this.confluenceHistoryCandidate(entry, sourceErrors, restricted)?.sourcePageId !== candidate.sourcePageId)) {
+        rawOnly += retained.length;
+        continue;
+      }
+      if (candidate.version !== null) {
+        const key = versionKey(candidate.sourcePageId, candidate.version);
+        if (knownVersions.has(key)) continue;
+        versionCounts.set(key, (versionCounts.get(key) ?? 0) + 1);
+      }
+      candidates.push(candidate);
+    }
+
+    const owners = new Set<string>();
+    let newConfluenceComments = 0, newConfluenceRevisions = 0;
+    for (const { entry, sourcePageId, owner, version } of candidates) {
+      if (version !== null && versionCounts.get(versionKey(sourcePageId, version)) !== 1) {
+        rawOnly++;
+        continue;
+      }
+      const { row } = entry;
+      const title = row.title.trim() || owner.sourceTitle?.trim() || row.sourceId;
+      if (version !== null && title.length > 300) {
+        rawOnly++;
+        continue;
+      }
+      const converted = convertLegacyContent(row, { resolveReference: request => version !== null && request.kind === 'attachment'
+        ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request) });
+      const createdAt = version !== null ? row.updatedAt || row.createdAt : row.createdAt;
+      const invalidBody = version === null
+        ? !converted.plainText.trim() || converted.plainText.length > 20000 || converted.diagnostics.some(item => item.severity === 'error')
+        : !usableConfluenceBody(converted);
+      if (invalidBody || (this.configuration.datePolicy !== 'import-time' && !sourceTimestamp(createdAt, this.configuration.timezone))) {
+        rawOnly++;
+        continue;
+      }
+      const id = randomUUID(), projectId = append.project.id, authorId = this.author(entry);
+      const timestamp = this.time(createdAt, entry)!;
+      if (version === null) {
+        if (row.textFormat !== 'plain') this.notice('COMMENT_FORMAT_PLAIN_TEXT', '댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.', 'warning', entry, true);
+        this.result.comments.push({ id, resourceType: 'document', resourceId: owner.documentId, authorId, body: converted.plainText, createdAt: timestamp });
+        this.bindings.set(entry.key, { type: 'comment', id, projectId });
+        newConfluenceComments++;
+      } else {
+        this.result.revisions.push({ id, documentId: owner.documentId, version, confluenceSourceVersion: version,
+          title, content: converted.content, plainText: converted.plainText,
+          authorId, createdAt: timestamp, summary: string(row.metadata.versionComment) || `원본 버전 ${version}` });
+        this.bindings.set(entry.key, { type: 'revision', id, projectId });
+        newConfluenceRevisions++;
+      }
+      this.confluenceHistoryOwners.set(entry.key, { type: 'document', id: owner.documentId, projectId });
+      owners.add(owner.documentId);
+    }
+    if (rawOnly) this.notice('CONFLUENCE_HISTORY_RAW_ONLY', `소유 문서, 접근 범위, 버전, 제목, 본문 또는 날짜 문제로 댓글·이력 ${rawOnly}건은 원본으로 보관합니다.`, 'warning', undefined, true);
+    this.result.confluenceHistoryOwners = [...owners];
+    Object.assign(this.result.preview.counts, { newConfluenceComments, newConfluenceRevisions });
+  }
+
   createRelations():void{
     const resourcePairs=new Set<string>(),issuePairs=new Set<string>();
     const resource=(issueId:string,documentId:string)=>{const key=JSON.stringify([issueId,documentId]);if(resourcePairs.has(key))return;resourcePairs.add(key);this.result.resourceLinks.push({id:randomUUID(),issueId,documentId,kind:'related'});};
@@ -1681,7 +1852,7 @@ class Planner{
         : pageCheckpoint ? { type: 'document' as const, id: pageCheckpoint.document.id, projectId: pageCheckpoint.document.projectId }
         : excluded ? undefined : this.bindings.get(entry.key);
       const ownerEntry = excluded ? null : this.ownerEntry(entry);
-      const owner = issueCheckpoint || pageCheckpoint ? binding : this.confluenceAttachmentOwners.get(entry.key) ??
+      const owner = issueCheckpoint || pageCheckpoint ? binding : this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
         (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
@@ -1729,6 +1900,9 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
+    if (!this.result.confluenceHistoryOwners?.length) for (const { message, entry } of this.missingHistoryPrimaryNotices) {
+      this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
+    }
     const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
     const atlassianLinks = this.result.atlassianLinks.length;
     Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
@@ -1756,9 +1930,9 @@ class Planner{
       if (this.configuration.appendTo?.refreshExisting) this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
       else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
     }
-    if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.result.confluenceAttachmentOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendPagesTo?.refreshExisting || this.configuration.appendPagesTo?.refreshAttachments) {
-        this.notice('CONFLUENCE_REFRESH_NO_CHANGES', '적용할 새 Confluence 문서·첨부나 기존 변경분이 없습니다.', 'error');
+    if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.result.confluenceAttachmentOwners?.length && !this.result.confluenceHistoryOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendPagesTo?.refreshExisting || this.configuration.appendPagesTo?.refreshAttachments || this.configuration.appendPagesTo?.refreshHistory) {
+        this.notice('CONFLUENCE_REFRESH_NO_CHANGES', '적용할 새 Confluence 문서·첨부·댓글·이력이나 기존 문서 변경분이 없습니다.', 'error');
       }
       else this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
     }

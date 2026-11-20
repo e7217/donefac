@@ -7,6 +7,7 @@ import type { DocRevision, RichContent, User } from '../../shared/types';
 import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffUnit } from '../../shared/document-diff';
 import { contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
 import { containsOutlineHeading, ReadonlyDocumentContent } from './DocumentBlocks';
+import { documentRevisionLabel } from './document-utils';
 import './document-history.css';
 
 export interface DocumentHistoryProps {
@@ -29,7 +30,11 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
   const [compareOpen, setCompareOpen] = useState(false);
   const [beforeId, setBeforeId] = useState('');
   const [afterId, setAfterId] = useState('current');
-  const ordered = [...revisions].sort((a, b) => b.version - a.version || b.createdAt.localeCompare(a.createdAt));
+  const ordered = [...revisions].sort((a, b) => {
+    if (a.confluenceSourceVersion == null && b.confluenceSourceVersion != null) return -1;
+    if (a.confluenceSourceVersion != null && b.confluenceSourceVersion == null) return 1;
+    return (b.confluenceSourceVersion ?? b.version) - (a.confluenceSourceVersion ?? a.version) || b.createdAt.localeCompare(a.createdAt);
+  });
   const preview = ordered.find(value => value.id === previewId);
   const hasFormattedPreview = preview && (containsOutlineHeading(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
   const dirtyLabel = current.dirty ? '현재 미저장 초안' : '현재 편집본';
@@ -39,12 +44,12 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
     {current.dirty && <div className="docs-history-hint">현재 편집을 저장한 후 이전 버전으로 복구할 수 있어요. 비교에서는 미저장 초안도 확인할 수 있습니다.{onSaveCopy && <button disabled={saving} onClick={() => void onSaveCopy()}>편집을 새 문서로 보관</button>}</div>}
     {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}{error && <p className="docs-panel-error" role="alert">{error}</p>}
     {preview ? <div className="docs-history-preview">
-      <button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>버전 {preview.version}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
+      <button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>{documentRevisionLabel(preview)}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
       {hasFormattedPreview ? <><span className="document-history-preview-label">본문 미리보기</span><ReadonlyDocumentContent key={preview.id} content={preview.content} documentId={preview.documentId} mode="history" showOutline /></> : <>
         <span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}
       </>}
       <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button><button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>
-    </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>버전 {revision.version}{revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
+    </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>{documentRevisionLabel(revision)}{revision.confluenceSourceVersion == null && revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
     {!loading && !error && !ordered.length && <p className="docs-panel-muted">저장된 이력이 없습니다.</p>}
     {compareOpen && typeof document !== 'undefined' && createPortal(<Comparison revisions={ordered} current={current} beforeId={beforeId} afterId={afterId} setBeforeId={setBeforeId} setAfterId={setAfterId} onClose={() => setCompareOpen(false)} />, document.body)}
   </div>;
@@ -69,7 +74,7 @@ function Comparison({ revisions, current, beforeId, afterId, setBeforeId, setAft
   const closeRef = useRef<HTMLButtonElement>(null), dialogRef = useRef<HTMLElement>(null);
   useEffect(() => { const previous = document.activeElement; closeRef.current?.focus(); return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); }; }, []);
   const before = revisions.find(value => value.id === beforeId), savedAfter = revisions.find(value => value.id === afterId), after = afterId === 'current' ? currentSnapshot : savedAfter;
-  const beforeLabel = before ? `버전 ${before.version}` : '기준 버전 없음', afterLabel = afterId === 'current' ? `${currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 ${currentSnapshot.version} 기준` : savedAfter ? `버전 ${savedAfter.version}` : '대상 버전 없음';
+  const beforeLabel = before ? documentRevisionLabel(before) : '기준 버전 없음', afterLabel = afterId === 'current' ? `${currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 ${currentSnapshot.version} 기준` : savedAfter ? documentRevisionLabel(savedAfter) : '대상 버전 없음';
   const outcome = useMemo((): { result?: DocumentDiffResult; error?: string } => { if (!before || !after) return { error: '비교할 두 버전을 선택하세요.' }; try { return { result: diffDocuments(before, after) }; } catch (cause) { return { error: cause instanceof Error ? cause.message : '문서 구조를 비교하지 못했습니다.' }; } }, [before, after]);
   const groups = useMemo(() => groupsOf(outcome.result?.runs || []), [outcome.result]);
   const rows = useMemo(() => {
@@ -89,7 +94,7 @@ function Comparison({ revisions, current, beforeId, afterId, setBeforeId, setAft
   }
   return <div className="document-diff-overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} className="document-diff-dialog" role="dialog" aria-modal="true" aria-labelledby="document-diff-title" onKeyDown={keyboard}>
     <header><div><span>DOCUMENT HISTORY</span><h2 id="document-diff-title"><GitCompareArrows size={20} />문서 버전 비교</h2><p>제목과 저장된 본문 구조를 비교합니다. 비교 화면에서는 문서를 수정하지 않습니다.</p></div><button ref={closeRef} className="issue-icon-button" aria-label="문서 버전 비교 닫기" onClick={onClose}><X size={20} /></button></header>
-    <div className="document-diff-controls"><label>기준<select className="field" aria-label="비교 기준 버전" value={beforeId} onChange={event => { setBeforeId(event.target.value); reset(); }}>{revisions.map(revision => <option key={revision.id} value={revision.id}>버전 {revision.version} · {revision.title}</option>)}</select></label><label>대상<select className="field" aria-label="비교 대상 버전" value={afterId} onChange={event => { setAfterId(event.target.value); reset(); }}><option value="current">{currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 {currentSnapshot.version} 기준</option>{revisions.map(revision => <option key={revision.id} value={revision.id}>버전 {revision.version} · {revision.title}</option>)}</select></label><div className="document-diff-layout" aria-label="비교 표시 방식"><button className={layout === 'split' ? 'active' : ''} onClick={() => { setLayout('split'); setPage(0); }}><Columns2 size={14} />나란히</button><button className={layout === 'unified' ? 'active' : ''} onClick={() => { setLayout('unified'); setPage(0); }}><List size={14} />통합</button></div></div>
+    <div className="document-diff-controls"><label>기준<select className="field" aria-label="비교 기준 버전" value={beforeId} onChange={event => { setBeforeId(event.target.value); reset(); }}>{revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}</select></label><label>대상<select className="field" aria-label="비교 대상 버전" value={afterId} onChange={event => { setAfterId(event.target.value); reset(); }}><option value="current">{currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 {currentSnapshot.version} 기준</option>{revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}</select></label><div className="document-diff-layout" aria-label="비교 표시 방식"><button className={layout === 'split' ? 'active' : ''} onClick={() => { setLayout('split'); setPage(0); }}><Columns2 size={14} />나란히</button><button className={layout === 'unified' ? 'active' : ''} onClick={() => { setLayout('unified'); setPage(0); }}><List size={14} />통합</button></div></div>
     <div className="document-diff-current-note"><span>현재 편집본은 비교를 열거나 다시 불러온 시점의 내용입니다.</span><button className="btn btn-ghost" onClick={() => { setCurrentSnapshot(structuredClone(current)); reset(); }}>현재 편집본 다시 불러오기</button></div>
     <div className="document-diff-source-labels"><span>기준 · {beforeLabel}<strong>{before?.title}</strong></span><span>대상 · {afterLabel}<strong>{after?.title}</strong></span></div>
     {outcome.error ? <div className="document-diff-error" role="alert">{outcome.error}<p>한도: 본문 8MiB · 제목 64KiB · {DOCUMENT_DIFF_LIMITS.nodes.toLocaleString('ko-KR')}개 노드 · 깊이 {DOCUMENT_DIFF_LIMITS.depth}. 한도를 넘으면 비교를 중단하며 내용을 잘라서 동일하다고 표시하지 않습니다.</p></div> : outcome.result && <>

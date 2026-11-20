@@ -23,7 +23,7 @@ import { DocumentSelectionFollowUp } from './DocumentSelectionFollowUp';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
 import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
-import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, downloadDocument, templateContent } from './document-utils';
+import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
@@ -511,7 +511,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const capturedActor = actorRef.current;
     if (captured.dirty) { notify('현재 편집을 먼저 저장하거나 새 문서로 보관해주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || (sessionRef.current?.enabled && liveStateRef.current?.phase !== 'connected')) { notify('공동 편집을 서버에 동기화한 후 복구해주세요.', 'error'); return; }
-    if (!window.confirm(`버전 ${revision.version}의 내용으로 복구할까요? 현재 내용은 이력에 남습니다.`)) return;
+    if (!window.confirm(`${documentRevisionLabel(revision)}의 내용으로 복구할까요? 현재 내용은 이력에 남습니다.`)) return;
     savingRef.current = true; setSaving(true); setRestoring(true);
     // Toggling editability is UI state, not a content edit. Tiptap otherwise
     // emits onUpdate and would mark the newly restored revision dirty again.

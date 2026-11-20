@@ -4,7 +4,7 @@ import type { Attachment, DocRevision, RichContent } from '../shared/types.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 25;
-type RevisionSummary = Pick<DocRevision, 'id' | 'version' | 'title' | 'createdAt'>;
+type RevisionSummary = Pick<DocRevision, 'id' | 'version' | 'title' | 'createdAt'> & { confluenceSourceVersion: number | null };
 type RevisionOwner = Pick<DocRevision, 'documentId'>;
 type RevisionRow = { json: string };
 
@@ -97,12 +97,14 @@ export function registerDocumentIncludeRevisionRoutes(app: Express, store: Store
     const start = Number(offset);
     const rows = store.db.prepare(`
       SELECT id,json_extract(json,'$.version') AS version,json_extract(json,'$.title') AS title,
-        json_extract(json,'$.createdAt') AS createdAt
+        json_extract(json,'$.createdAt') AS createdAt,json_extract(json,'$.confluenceSourceVersion') AS confluenceSourceVersion
       FROM revisions WHERE document_id=?
-      ORDER BY version DESC,createdAt DESC,id
+      ORDER BY (confluenceSourceVersion IS NOT NULL),version DESC,createdAt DESC,id
       LIMIT ? OFFSET ?
     `).all(id, PAGE_SIZE + 1, start) as unknown as RevisionSummary[];
-    return response.json({ items: rows.slice(0, PAGE_SIZE), nextOffset: rows.length > PAGE_SIZE ? start + PAGE_SIZE : null });
+    const items = rows.slice(0, PAGE_SIZE).map(({ confluenceSourceVersion, ...row }) =>
+      confluenceSourceVersion === null ? row : { ...row, confluenceSourceVersion });
+    return response.json({ items, nextOffset: rows.length > PAGE_SIZE ? start + PAGE_SIZE : null });
   });
 
   app.get('/api/documents/:id/include-revisions/:revisionId', (request, response) => {

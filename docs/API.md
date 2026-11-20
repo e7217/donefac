@@ -374,6 +374,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 같은 공간의 기존 원본 첨부는 원본 ID나 확인된 소유 페이지와 파일명으로 찾아 저장한 파일의 고정 버전에 연결한다. 재사용 대상은 미리보기와 적용 시 크기·SHA-256으로 검사한다. `newConfluenceAttachments`, `newConfluenceAttachmentVersions`, `reusedConfluenceAttachmentVersions`에서 기존 문서의 새 첨부, 기존 첨부에 추가할 버전과 본문에서 재사용할 버전을 확인한다. 이전 링크는 당시 파일 ID로 열리며, 파일 목록은 팀이 직접 추가한 최신 버전을 우선한다. 형식 41 자체 백업은 추가 원본 버전과 이관 설정을 보존한다.
 
+### 기존 Confluence 문서에 댓글과 이력 추가
+
+`appendPagesTo.refreshHistory: true`를 지정하면 같은 원본 인스턴스와 공간에서 기존 문서로 확인된 페이지에 새 원본 댓글과 과거 저장본을 추가한다. 원본 파일에 현재 페이지나 공간 객체가 빠진 경우에는 기존 이관 기록으로 소유 페이지와 공간을 확인한다. 제목·본문, 첨부 옵션과 개별 또는 함께 적용할 수 있다. 현재 문서 버전과 팀에서 작성한 댓글을 보존한다. 이미 이관한 원본 댓글 ID와 문서의 원본 버전은 삭제 이력이 있더라도 알아본다. 소유 페이지, 본문, 버전이나 첨부를 확인할 수 없는 자료는 영수증에 원문으로 보관한다.
+
+미리보기와 영수증의 `newConfluenceComments`, `newConfluenceRevisions`에 추가 건수가 들어간다. 문서 이력과 고정 저장본 목록에서 과거 원본 저장본의 `confluenceSourceVersion`을 읽을 수 있다. 원본 저장본에서 복구하면 새 Teamspace 문서 버전이 생성된다. 형식 42 자체 백업은 추가 이관 설정과 원본 버전 표시를 보존한다.
+
 ### 적용 후 대조
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.
