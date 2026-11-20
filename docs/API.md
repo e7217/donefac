@@ -120,6 +120,8 @@ curl --fail-with-body \
 
 본문 형식 7은 `heading.attrs.sectionId`를 지원한다. ID는 영문자 또는 숫자로 시작하며 영문자·숫자·`_`·`-`로 구성된 1~80자다. 한 문서에 같은 ID를 두 번 지정하면 저장을 거절한다. 이 속성이 있는 본문을 수정할 때는 `contentSchemaVersion: 7`을 보낸다. 절 주소는 `#/project-id/documents/document-id?section=section-id`를 사용한다. 검토·발행 고정본 주소는 `publication=review` 또는 `publication=published`와 `revision`을 함께 넣는다. 자체 백업 형식 49와 문서 JSON 형식 7에서 절 ID를 보존한다.
 
+본문 형식 8은 `documentToc` 블록을 지원한다. `attrs`에는 `minLevel`과 `maxLevel`을 1~3의 숫자로, `layout`을 `list` 또는 `flat`으로 지정한다. 기본값은 각각 `1`, `3`, `list`다. 목차의 제목과 링크는 표시할 문서 버전에서 생성한다. 이 블록이 있는 문서의 본문을 교체하는 `PATCH`에는 `contentSchemaVersion: 8`을 보낸다. 자체 백업 형식 54와 문서 JSON 형식 8에 목차 설정을 보존한다.
+
 ## 상위 업무에서 하위 업무 만들기
 
 브라우저의 `POST /api/issues/:id/children`에 `{requestId, expectedParentVersion, issue}`를 보낸다. `requestId`는 UUID v4다. `issue`에는 업무 생성과 같은 속성을 보낸다. `projectId`와 `parentId`는 현재 상위 업무에서 정해지며, 함께 보낼 경우 같은 ID여야 한다. 현재 프로젝트의 유형·워크플로·필수 속성을 검사한 뒤 하위 업무와 번호, 상위·하위 업무 변경 기록을 한 트랜잭션에 저장한다.

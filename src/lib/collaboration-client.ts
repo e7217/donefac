@@ -11,6 +11,7 @@ import {
   type CollaborationSession,
 } from '../../shared/collaboration';
 import { documentNodeSchemaVersion, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS } from '../../shared/document-nodes';
+import { isDocumentSectionId } from '../../shared/document-sections';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
 
@@ -60,6 +61,7 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
     const referenceId = (id: unknown): id is string => typeof id === 'string' && Boolean(id.trim()) && id.length <= 200 && !/[\u0000-\u001f\u007f]/.test(id);
     const referenceLabel = (label: unknown) => label === undefined || typeof label === 'string' && label.length <= 300;
     let count = 0, issueBlockCount = 0;
+    const sectionIds = new Set<string>();
     const check = (value: unknown, depth: number) => {
       if (++count > 30000 || depth > 60) throw new Error('문서 중첩 한도를 초과했습니다.');
       const node = object(value);
@@ -87,7 +89,13 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
         if (mark.type === 'link' && typeof attrs.href === 'string' && /^(?:javascript|vbscript|data):/i.test(attrs.href.trim())) throw new Error('지원하지 않는 링크 형식입니다.');
       }
       if (node.type === 'image' && typeof attrs.src === 'string' && !/^(?:https?:\/\/|\/)/i.test(attrs.src)) throw new Error('지원하지 않는 이미지 형식입니다.');
-      if (node.type === 'heading' && (typeof attrs.level !== 'number' || ![1, 2, 3].includes(attrs.level))) throw new Error('지원하지 않는 제목 단계입니다.');
+      if (node.type === 'heading') {
+        if (typeof attrs.level !== 'number' || ![1, 2, 3].includes(attrs.level)) throw new Error('지원하지 않는 제목 단계입니다.');
+        if (attrs.sectionId !== undefined) {
+          if (!isDocumentSectionId(attrs.sectionId) || sectionIds.has(attrs.sectionId)) throw new Error('보관한 문서의 절 ID가 올바르지 않습니다.');
+          sectionIds.add(attrs.sectionId);
+        }
+      }
       if (node.content !== undefined) {
         if (!Array.isArray(node.content)) throw new Error('문서 블록 목록이 올바르지 않습니다.');
         for (const child of node.content) check(child, depth + 1);

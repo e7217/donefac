@@ -1,7 +1,7 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
 import {
-  contentReferences, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
-  isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
+  contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
+  isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
   MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
@@ -93,6 +93,12 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     if (node.type === 'statusBadge') {
       if (!isStatusBadgeLabel(attributes.label)) invalid(`상태 배지 이름은 1~${MAX_STATUS_BADGE_LABEL_LENGTH}자여야 합니다.`);
       if (attributes.tone !== undefined && !isStatusBadgeTone(attributes.tone)) invalid('상태 배지 색상을 확인해 주세요.');
+    }
+    if (node.type === 'documentToc') {
+      const { minLevel = DOCUMENT_TOC_DEFAULTS.minLevel, maxLevel = DOCUMENT_TOC_DEFAULTS.maxLevel, layout = DOCUMENT_TOC_DEFAULTS.layout } = attributes;
+      if (!isDocumentTocLevel(minLevel) || !isDocumentTocLevel(maxLevel) || minLevel > maxLevel || !isDocumentTocLayout(layout)) {
+        invalid('본문 목차의 제목 단계나 표시 방식을 확인해 주세요.');
+      }
     }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };

@@ -117,7 +117,8 @@ const lossyConfluenceCalloutConversions = new Set([
 ]);
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
-  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', ...lossyConfluenceCalloutConversions,
+  'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
+  'LEGACY_TOC_REPRESENTATION', ...lossyConfluenceCalloutConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -143,12 +144,12 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     if (usableConfluenceBody(converted)) values.content = converted.content;
     const currentHash = confluencePageFieldDigest('content', currentContent);
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
-      // A document imported before native annotations may still exactly match the old conversion.
+      // An older document can still exactly match the former annotation, section and table of contents conversion.
       for (const legacyAnnotations of [false, true]) {
-        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true });
+        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true, legacyDocumentToc: true });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
-          item.code !== 'ANCHOR_FLATTENED' && item.code !== 'ANCHOR_DECLARATION_FLATTENED') });
+          !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION'].includes(item.code)) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -837,7 +838,7 @@ class Planner{
       if (bodyChanged && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
-          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || diagnostic.code === 'SECTION_LINK_UNRESOLVED') {
+          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED'].includes(diagnostic.code)) {
             this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
           }
         }

@@ -1,6 +1,7 @@
 import type { DocRevision, RichContent } from '../../shared/types';
-import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
-import { isDocumentSectionId } from '../../shared/document-sections';
+import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
+import { documentNodes } from '../../shared/document-references';
+import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 
 const paragraph = (text = ''): RichContent => ({ type: 'paragraph', ...(text ? { content: [{ type: 'text', text }] } : {}) });
 const heading = (text: string): RichContent => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
@@ -55,8 +56,39 @@ function summaryHtml(node: RichContent): string {
   return text;
 }
 
+type MarkdownHeading = { anchor: string; level: number; title: string };
+
+function markdownHeadings(content: RichContent): Map<RichContent, MarkdownHeading> | undefined {
+  const headings: RichContent[] = [];
+  let hasToc = false;
+  for (const node of documentNodes(content)) {
+    if (node.type === 'documentToc') hasToc = true;
+    if (node.type === 'heading') headings.push(node);
+  }
+  if (!hasToc) return;
+  const reserved = new Set(headings.map(node => node.attrs?.sectionId).filter(isDocumentSectionId));
+  const result = new Map<RichContent, MarkdownHeading>();
+  let next = 0;
+  for (const heading of headings) {
+    const title = outlineHeadingTitle(documentPlainText(heading));
+    if (!title) continue;
+    const sectionId = heading.attrs?.sectionId;
+    let anchor = isDocumentSectionId(sectionId) ? sectionId : '';
+    if (!anchor) {
+      do { anchor = `teamspace-toc-${++next}`; } while (reserved.has(anchor));
+    }
+    result.set(heading, { anchor, level: Number(heading.attrs?.level) || 1, title });
+  }
+  return result;
+}
+
 export function contentMarkdown(node: RichContent): string {
-  const inline = () => (node.content || []).map(contentMarkdown).join('');
+  return renderMarkdown(node, markdownHeadings(node));
+}
+
+function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownHeading>): string {
+  const render = (node: RichContent) => renderMarkdown(node, headings);
+  const inline = () => (node.content || []).map(render).join('');
   if (node.type === 'text') {
     let text = (node.text || '').replace(/([\\`*_[\]])/g, '\\$1');
     for (const mark of node.marks || []) {
@@ -72,11 +104,18 @@ export function contentMarkdown(node: RichContent): string {
     case 'doc': return inline().trim() + '\n';
     case 'paragraph': return inline() + '\n\n';
     case 'heading': {
-      const sectionId = node.attrs?.sectionId;
+      const sectionId = headings?.get(node)?.anchor ?? node.attrs?.sectionId;
       const anchor = isDocumentSectionId(sectionId) ? `<a id="${sectionId}"></a>\n\n` : '';
       return anchor + '#'.repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1))) + ' ' + inline() + '\n\n';
     }
     case 'hardBreak': return '  \n';
+    case 'documentToc': {
+      const { minLevel, maxLevel, layout } = documentTocOptions(node.attrs);
+      const links = [...(headings?.values() ?? [])].filter(entry => entry.level >= minLevel && entry.level <= maxLevel)
+        .map(entry => `[${entry.title.replace(/([\\`*_\[\]<>])/g, '\\$1')}](#${entry.anchor})`);
+      const items = layout === 'flat' ? links.join(' · ') : links.map(link => `- ${link}`).join('\n');
+      return `**본문 목차**\n\n${items || '선택한 단계에 제목이 없습니다.'}\n\n`;
+    }
     case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
     case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
     case 'documentInclude': return `> 문서 포함: [${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
@@ -113,13 +152,13 @@ export function contentMarkdown(node: RichContent): string {
     case 'horizontalRule': return '\n---\n\n';
     case 'codeBlock': return '```' + (node.attrs?.language || '') + '\n' + contentText(node).trimEnd() + '\n```\n\n';
     case 'blockquote': return inline().trim().split('\n').map(line => '> ' + line).join('\n') + '\n\n';
-    case 'bulletList': return (node.content || []).map(child => '- ' + contentMarkdown(child).trim().replace(/\n/g, '\n  ')).join('\n') + '\n\n';
-    case 'orderedList': return (node.content || []).map((child, index) => `${Number(node.attrs?.start || 1) + index}. ` + contentMarkdown(child).trim().replace(/\n/g, '\n   ')).join('\n') + '\n\n';
+    case 'bulletList': return (node.content || []).map(child => '- ' + render(child).trim().replace(/\n/g, '\n  ')).join('\n') + '\n\n';
+    case 'orderedList': return (node.content || []).map((child, index) => `${Number(node.attrs?.start || 1) + index}. ` + render(child).trim().replace(/\n/g, '\n   ')).join('\n') + '\n\n';
     case 'taskList': return inline() + '\n';
     case 'taskItem': return `- [${node.attrs?.checked ? 'x' : ' '}] ` + inline().trim() + '\n';
     case 'image': return `![${String(node.attrs?.alt || '').replace(/\]/g, '\\]')}](${String(node.attrs?.src || '').replace(/[()]/g, encodeURIComponent)})\n\n`;
     case 'table': {
-      const rows = (node.content || []).map(row => (row.content || []).map(cell => contentMarkdown(cell).trim().replace(/\n/g, '<br>').replace(/\|/g, '\\|')));
+      const rows = (node.content || []).map(row => (row.content || []).map(cell => render(cell).trim().replace(/\n/g, '<br>').replace(/\|/g, '\\|')));
       if (!rows.length) return '';
       return '| ' + rows[0].join(' | ') + ' |\n| ' + rows[0].map(() => '---').join(' | ') + ' |\n' + rows.slice(1).map(row => '| ' + row.join(' | ') + ' |').join('\n') + '\n\n';
     }

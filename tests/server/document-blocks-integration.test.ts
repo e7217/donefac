@@ -91,6 +91,59 @@ test('stable heading sections survive protected writes, live state, native backu
   }
 });
 
+test('body contents navigation survives live state and active and archived version 54 backups', async () => {
+  const f = await fixture();
+  try {
+    const section: RichContent = { type: 'heading', attrs: { level: 2, sectionId: 'toc-target' }, content: [{ type: 'text', text: '배포 전 확인' }] };
+    const nav = (attrs: Record<string, unknown>): RichContent => ({ type: 'documentToc', attrs });
+    const before = body(nav({ minLevel: 1, maxLevel: 3, layout: 'list' }), section);
+    const document = await make(f, '본문 목차 문서', before);
+    const path = `/documents/${document.id}`;
+    assert.equal(documentContentSchemaVersion(document.content), 8);
+    const [original] = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    const oldWrite = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: document.version, contentSchemaVersion: 7, content: body(section),
+    });
+    assert.equal(oldWrite.status, 409);
+    assert.equal(oldWrite.data.details.contentSchemaVersion, 8);
+    const after = body(nav({ minLevel: 2, maxLevel: 2, layout: 'flat' }), section);
+    const edited = await f.call<DocPage>(path, 'PATCH', { expectedVersion: document.version, contentSchemaVersion: 8, content: after });
+    assert.equal(edited.status, 200);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: edited.data.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, 8);
+    assert.deepEqual(live.data.document.content, after);
+
+    const { data: backup } = await f.call<Backup>('/export');
+    assert.equal(backup.schemaVersion, 54);
+    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 53 } });
+    assert.equal(downgraded.status, 400);
+    assert.match(downgraded.data.error, /schemaVersion 54/u);
+    const mislabeled = structuredClone(backup);
+    const state = mislabeled.collabStates.find(item => item.documentId === document.id);
+    assert.ok(state);
+    state.schemaVersion = 7;
+    assert.equal((await f.call('/import', 'POST', { data: mislabeled })).status, 422);
+    assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.deepEqual(restored.document.content, after);
+
+    const archived = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restored.document.version });
+    assert.equal(archived.status, 200);
+    const { data: archive } = await f.call<Backup>('/export');
+    assert.equal(archive.documents.some(candidate => candidate.id === document.id), false);
+    assert.equal((await f.call('/import', 'POST', { data: { ...archive, schemaVersion: 53 } })).status, 400);
+    assert.equal((await f.call('/import', 'POST', { data: archive })).status, 200);
+    assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document.content, after);
+    const history = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    assert.deepEqual(history.find(revision => revision.id === original.id)?.content, before);
+  } finally {
+    await f.close();
+  }
+});
+
 test('manual writes, cycles and live historical restore preserve reference IDs and folded content atomically',async()=>{
   const f=await fixture();try{
     const target=await make(f,'포함할 원본');
@@ -274,6 +327,16 @@ test('document Markdown preserves reference destinations and folded content with
   const content=body(reference('issueReference','ticket/a?b','업무 [검토]'),reference('documentReference','doc/a','원문'),reference('documentInclude','included','실시간 원문'),details);
   const markdown=contentMarkdown(content);assert.ok(markdown.includes('#/all/issues?issue=ticket%2Fa%3Fb'));assert.ok(markdown.includes('#/all/documents/doc%2Fa'));assert.ok(markdown.includes('문서 포함:'));assert.ok(markdown.includes('<details>'));assert.ok(markdown.includes('<summary><strong>검토 &lt;기준&gt;</strong></summary>'));assert.ok(markdown.includes('접혀 있어도 보존할 결정'));assert.equal(contentReferences(content).length,3);assert.ok(contentText(content).includes('included'));
   assert.equal(contentText(body(p('마지막 공백  '))),'마지막 공백  ');assert.equal(contentText(body(p('원문'),{type:'paragraph'})),'원문\n');
+  const heading = (level: number, value: string, sectionId?: string): RichContent => ({
+    type: 'heading', attrs: { level, ...(sectionId ? { sectionId } : {}) }, content: [{ type: 'text', text: value }],
+  });
+  const navigation = body({ type: 'documentToc', attrs: { minLevel: 2, maxLevel: 2, layout: 'flat' } },
+    heading(1, '범위 밖', 'teamspace-toc-1'), heading(2, '검토 [대상]'), heading(2, '검토 [대상]', 'existing-id'));
+  const exported = contentMarkdown(navigation);
+  assert.ok(exported.includes('[검토 \\[대상\\]](#teamspace-toc-2) · [검토 \\[대상\\]](#existing-id)'));
+  assert.ok(exported.includes('<a id="teamspace-toc-2"></a>'));
+  assert.ok(exported.includes('<a id="existing-id"></a>'));
+  assert.ok(!exported.includes('[범위 밖]'));
 });
 
 test('document issue lists retain stable project and view identifiers and enforce automation project scope', async () => {

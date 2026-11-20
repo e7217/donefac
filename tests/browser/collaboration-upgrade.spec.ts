@@ -117,3 +117,28 @@ for (const { version, nodeType, blockLabel } of [
   expect(await stored(page)).toEqual({});
   expect(await canonical(f)).toEqual(previous);
 });
+
+test('형식 7의 미전송 편집을 기존 절 ID와 함께 보관한다', async ({ page, upgrade: f }) => {
+  const oldEpoch = randomUUID();
+  const version = 7;
+  const key = cacheKey(f.actors[0], f.document.id, oldEpoch, version);
+  const section: RichContent = { type: 'heading', attrs: { level: 2, sectionId: 'prior-room-section' },
+    content: [{ type: 'text', text: '미전송 절' }] };
+  const entries = { [key]: cache(oldEpoch, legacyUpdate('보관할 본문', [section]), '2099-01-01T00:00:00.000Z', version) };
+  const previous = await canonical(f);
+  await open(page, f, entries);
+  const recovery = page.locator('.docs-live-prose');
+  await expect(recovery).toHaveAttribute('contenteditable', 'false');
+  await expect(recovery.getByRole('heading', { name: '미전송 절' })).toHaveAttribute('data-document-section-id', 'prior-room-section');
+
+  const copying = page.waitForResponse(response => response.url().endsWith('/api/documents') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: '사본으로 보관', exact: true }).click();
+  const result = await copying;
+  expect(result.status(), await result.text()).toBe(201);
+  const copied = await result.json() as DocPage;
+  expect(copied.id).not.toBe(f.document.id);
+  expect(copied.content.content).toContainEqual(section);
+  await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(copied.title);
+  expect(await stored(page)).toEqual({});
+  expect(await canonical(f)).toEqual(previous);
+});

@@ -74,6 +74,24 @@ test('heading section IDs are canonical, unique within one document, and require
   assert.equal(normalizeDocumentContent({ type: 'doc', content: [heading('다른 문서', 'section_a-1')] }).content.content?.[0].attrs?.sectionId, 'section_a-1');
 });
 
+test('in-body tables of contents store only configuration in schema 8', () => {
+  const doc = (...content: RichContent[]): RichContent => ({ type: 'doc', content });
+  const toc: RichContent = { type: 'documentToc' };
+  const { content, plainText } = normalizeDocumentContent(doc(toc, heading('한 번만 저장할 제목', 'stable-id')));
+  assert.equal(documentContentSchemaVersion(content), 8);
+  assert.deepEqual({ ...content.content?.[0].attrs }, { minLevel: 1, maxLevel: 3, layout: 'list' });
+  assert.equal(content.content?.[0].content, undefined);
+  assert.equal(plainText.trim(), '한 번만 저장할 제목');
+  const filtered: RichContent = { ...toc, attrs: { minLevel: 2, maxLevel: 2, layout: 'flat' } };
+  assert.deepEqual(JSON.parse(JSON.stringify(normalizeDocumentContent(doc(filtered)).content)), doc(filtered));
+  for (const attrs of [{ minLevel: '2' }, { maxLevel: 4 }, { minLevel: null }, { minLevel: 3, maxLevel: 2 },
+    { layout: 'columns' }, { layout: null }, { headings: [] }]) {
+    rejects(() => normalizeDocumentContent(doc({ ...toc, attrs })));
+  }
+  rejects(() => normalizeDocumentContent(doc({ ...toc, content: [heading('목차에 들어가면 안 되는 제목')] })));
+  rejects(() => normalizeDocumentContent(doc({ type: 'paragraph', content: [toc] })));
+});
+
 test('editor heading copies and splits preserve the original ID and multi-heading formatting keeps each identity', () => {
   const document = schema.nodeFromJSON({ type: 'doc', content: [heading('첫 제목', 'first'), heading('둘째 제목', 'second', 3)] });
   const extension = createEditorExtensions().find(candidate => candidate.name === 'headingSections');
@@ -156,7 +174,7 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 through v6 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades v1 through v7 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
@@ -177,6 +195,9 @@ test('startup upgrades v1 through v6 rooms atomically, preserving Yjs bytes and 
     const legacyBytes = Buffer.from(Y.encodeStateAsUpdate(legacyRoom));
     legacyRoom.destroy();
     const g = insertState(f.store, 'doc-g', legacyHeading, 6, randomUUID(), legacyBytes);
+    const anchoredHeading = { type: 'doc', content: [heading('연결된 저장 절', 'retained-section')] };
+    f.store.put('documents', document('doc-h', anchoredHeading));
+    const h = insertState(f.store, 'doc-h', anchoredHeading, 7);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
@@ -184,9 +205,10 @@ test('startup upgrades v1 through v6 rooms atomically, preserving Yjs bytes and 
     request.run('doc-e',e.epoch,'old-request-v4','old-hash');
     request.run('doc-f',pinned.epoch,'old-request-v5','old-hash');
     request.run('doc-g',g.epoch,'old-request-v6','old-hash');
+    request.run('doc-h',h.epoch,'old-request-v7','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목'],['doc-h',h,'연결된 저장 절']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -196,6 +218,7 @@ test('startup upgrades v1 through v6 rooms atomically, preserving Yjs bytes and 
         assert.ok(session.document.plainText.includes(label));
       }
       assert.equal(JSON.stringify(migrated.session('doc-g').document.content), JSON.stringify(legacyHeading));
+      assert.deepEqual(migrated.session('doc-h').document.content, anchoredHeading);
       assert.deepEqual(migrated.session('doc-c'),current);
       assert.deepEqual(f.store.db.prepare('SELECT request_id FROM collaboration_requests').all().map(row=>row.request_id),['current-request']);
       const before=migrated.session('doc-a');const second=new CollaborationService(f.store,f.contents);try{assert.deepEqual(second.session('doc-a'),before);}finally{second.close();}
@@ -250,6 +273,7 @@ test('one invalid persisted room prevents every migration write, and legacy impo
       const anchored = document('doc-c', normalizeDocumentContent({ type: 'doc', content: [heading('연결할 절', 'section')] }).content);
       const anchoredState = { ...current, state: encode(anchored.content).toString('base64') };
       assert.equal(service.validateImport([anchoredState], [anchored])[0].schemaVersion, COLLABORATION_SCHEMA);
+      assert.equal(service.validateImport([{ ...anchoredState, schemaVersion: 7 }], [anchored])[0].schemaVersion, COLLABORATION_SCHEMA);
       assert.throws(() => service.validateImport([{ ...anchoredState, schemaVersion: 6 }], [anchored]),
         (error: unknown) => error instanceof CollaborationError && error.code === 'SCHEMA_MISMATCH');
       f.store.transaction(()=>{f.store.put('documents',legacyDoc);service.replaceImported(valid);});assert.ok(service.session('doc-a').document.plainText.includes('기존 형식'));
@@ -277,11 +301,11 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('live updates validate references/includes before durable ACK and reject v1 through v6 protocol clients',async()=>{
+test('live updates validate references/includes before durable ACK and reject v1 through v7 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{
     const session=service.enable('doc-a',1,'user-test');
-    for(const schemaVersion of [1,2,3,4,5,6]){
+    for(const schemaVersion of [1,2,3,4,5,6,7]){
       const old=new Peer(url);
       peers.push(old);
       await once(old.ws,'open');

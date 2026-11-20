@@ -20,6 +20,7 @@ import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Auto
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
+import { normalizeDocumentContent } from '../../server/document-content.js';
 
 async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -1326,6 +1327,66 @@ test('reviewed Confluence deltas preserve local edits, guard collaborative sessi
     assert.equal(metadata.document.title, '지원 문서 새 원본 제목');
     assert.deepEqual(metadata.document.content, supportingSession.data.document.content);
   }
+});
+
+test('Confluence refresh replaces an exact legacy table of contents and preserves an independently edited body', async t => {
+  const initial = await fixture(), f = await fixture();
+  t.after(() => Promise.all([initial.close(), f.close()]));
+  const source = 'confluence-legacy-toc';
+  const macro = '<ac:structured-macro ac:name="toc"></ac:structured-macro>';
+  const prop = (key: string, value: string) => `<property name="${key}">${value}</property>`;
+  const object = (kind: string, id: string, value: string) => `<object class="${kind}"><id name="id">${id}</id>${value}</object>`;
+  const link = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
+  const title = (id: string) => `원본 ${id}`;
+  const upload = (target: MigrationFixture, version: number, heading: string) => {
+    const space = object('Space', '42', prop('key', 'TOC') + prop('name', '합성 원본 목차'));
+    const pages = ['100', '200'].flatMap(id => [
+      object('Page', id, prop('title', title(id)) + prop('version', String(version)) + link('space', 'Space', '42') +
+        prop('creationDate', '2020-03-01T00:00:00Z') + prop('lastModificationDate', `2020-03-0${version + 1}T00:00:00Z`)),
+      object('BodyContent', `8${id}`, prop('body', `<![CDATA[${macro}<h2>${heading}</h2>]]>`) + link('content', 'Page', id)),
+    ]).join('');
+    const bytes = Buffer.from(`<hibernate-generic>${space}${pages}</hibernate-generic>`);
+    return target.upload(zip([{ path: 'entities.xml', bytes }]), `toc-v${version}.zip`, 'confluence', source);
+  };
+  const original = await upload(initial, 1, '이전 제목');
+  const applied = await initial.apply(await initial.preview(await initial.configuration(original, 'OLDTC')));
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await initial.call<Backup>('/export')).data;
+  backup.schemaVersion = 39;
+  for (const receipt of backup.sourceImports) delete receipt.integrity;
+  for (const record of backup.sourceRecords) delete record.confluencePageFieldHashes;
+  const oldContent = (heading: string) => normalizeDocumentContent({ type: 'doc', content: [
+    { type: 'codeBlock', content: [{ type: 'text', text: macro }] },
+    { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: heading }] },
+  ] });
+  const documents = backup.documents.filter(document => document.projectId === projectId);
+  const untouched = documents.find(document => document.title === title('100'))!;
+  const edited = documents.find(document => document.title === title('200'))!;
+  assert.ok(untouched && edited);
+  Object.assign(untouched, oldContent('이전 제목'));
+  Object.assign(edited, oldContent('팀에서 바꾼 제목'));
+  for (const revision of backup.revisions.filter(revision => documents.some(document => document.id === revision.documentId))) {
+    Object.assign(revision, oldContent('이전 제목'));
+  }
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  const restoredEdited = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === edited.id);
+  assert.match(restoredEdited?.plainText ?? '', /팀에서 바꾼 제목/);
+
+  const next = await upload(f, 2, '새 원본 제목');
+  const config = await f.configuration(next);
+  const plan = await f.preview({ ...config, appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.documentRefresh?.find(row => row.documentId === untouched.id)?.fields.find(field => field.field === 'content')?.decision, 'apply');
+  assert.equal(plan.documentRefresh?.find(row => row.documentId === edited.id)?.fields.find(field => field.field === 'content')?.decision, 'conflict');
+  assert.equal((await f.apply(plan)).status, 201);
+  const result = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents;
+  const converted = result.find(document => document.id === untouched.id);
+  assert.deepEqual(converted?.content.content?.[0], { type: 'documentToc', attrs: { minLevel: 1, maxLevel: 3, layout: 'list' } });
+  assert.match(converted?.plainText ?? '', /새 원본 제목/);
+  assert.deepEqual(result.find(document => document.id === edited.id)?.content, restoredEdited?.content);
 });
 
 test('Confluence attachment refresh reuses pinned bytes, adds immutable versions and preserves the manual head', async t => {

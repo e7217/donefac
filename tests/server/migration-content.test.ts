@@ -67,6 +67,49 @@ test('Confluence section links preserve proven case-sensitive anchors and degrad
   assert.equal(convert(xml.replace('Deploy guide', 'Renamed guide')).sectionTargets?.get('deploy'), targets.get('deploy'));
 });
 
+test('Confluence page and revision tables of contents become editable blocks with supported heading ranges and layouts', () => {
+  const toc = '<ac:structured-macro ac:name="toc" ac:macro-id="synthetic-toc"/>';
+  const flat = '<ac:macro ac:name="toc"><ac:parameter ac:name="type">flat</ac:parameter><ac:parameter ac:name="minLevel">2</ac:parameter><ac:parameter ac:name="maxLevel">3</ac:parameter><ac:parameter ac:name="separator">brackets</ac:parameter></ac:macro>';
+  const xml = `${toc}<h1>팀 설계</h1><p>안내 ${flat} 끝</p><h2>설치</h2><h3>확인</h3>`;
+  const result = convertLegacyContent(source('confluence-storage', xml), resolver());
+  canonical(result);
+  assert.deepEqual(result.content.content?.map(node => node.type), ['documentToc', 'heading', 'paragraph', 'documentToc', 'paragraph', 'heading', 'heading']);
+  assert.deepEqual(nodes(result.content, 'documentToc').map(node => ({ ...node.attrs })), [
+    { minLevel: 1, maxLevel: 3, layout: 'list' }, { minLevel: 2, maxLevel: 3, layout: 'flat' },
+  ]);
+  assert.deepEqual(result.diagnostics, []);
+  const revision = convertLegacyContent({ ...source('confluence-storage', xml), kind: 'revision' }, resolver());
+  assert.deepEqual(revision, result);
+  const comment = convertLegacyContent({ ...source('confluence-storage', toc), kind: 'comment' }, resolver());
+  assert.equal(nodes(comment.content, 'documentToc').length, 0);
+  assert.equal(comment.diagnostics[0]?.code, 'UNSUPPORTED_MACRO');
+
+  const deepHeading = convertLegacyContent(source('confluence-storage', `${toc}<h4>깊은 제목</h4>`), resolver());
+  assert.equal(nodes(deepHeading.content, 'documentToc').length, 1);
+  assert.equal(nodes(deepHeading.content, 'heading')[0].attrs?.level, 3);
+  assert.equal(deepHeading.diagnostics[0]?.code, 'HEADING_LEVEL_NORMALIZED');
+});
+
+test('Confluence table of contents preserves unsupported and malformed settings as inert XML', () => {
+  for (const [body, extra] of [
+    ['<ac:parameter ac:name="include">^(a+)+$</ac:parameter>', ''],
+    ['<ac:parameter ac:name="exclude"> </ac:parameter>', ''],
+    ['<ac:parameter ac:name="type">flat</ac:parameter><ac:parameter ac:name="separator">pipe</ac:parameter>', ''],
+    ['<ac:parameter ac:name="minLevel">3</ac:parameter><ac:parameter ac:name="maxLevel">2</ac:parameter>', ''],
+    ['<ac:parameter ac:name="minLevel">3</ac:parameter><ac:parameter ac:name="minLevel">2</ac:parameter>', ''],
+    ['<ac:parameter ac:name="minLevel"><strong>2</strong></ac:parameter>', ''],
+    ['<ac:parameter ac:name="maxLevel">3</ac:parameter>', '<h4>원래 제외되는 제목</h4>'],
+    ['<ac:rich-text-body><p>잘못 붙은 본문</p></ac:rich-text-body>', ''],
+  ]) {
+    const macro = `<ac:structured-macro ac:name="toc">${body}</ac:structured-macro>`;
+    const result = convertLegacyContent(source('confluence-storage', `${macro}${extra}`), resolver());
+    canonical(result);
+    assert.equal(nodes(result.content, 'documentToc').length, 0);
+    assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, macro);
+    assert.ok(result.diagnostics.some(item => item.code === 'TOC_PARAMETERS_UNSUPPORTED'));
+  }
+});
+
 test('Confluence callouts preserve types, titles and nested blocks, and status macros remain inline', () => {
   const variants = ['info', 'note', 'warning', 'tip', 'panel'];
   const xml = variants.map(variant => `<ac:structured-macro ac:name="${variant}" ac:macro-id="synthetic-id">

@@ -8,15 +8,16 @@ import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, RichContent, WorkspaceSnapshot } from '../../shared/types';
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText } from '../../shared/document-nodes';
-import { isDocumentSectionId } from '../../shared/document-sections';
+import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
-import { DocumentOutline, jumpToDocumentHeading, outlineHeadingTitle, type DocumentOutlineEntry } from './DocumentOutline';
+import { DocumentOutline, jumpToReadonlyHeading, type DocumentOutlineEntry } from './DocumentOutline';
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
+import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
 import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
 
@@ -47,15 +48,16 @@ function safeUrl(value: unknown, image = false): string | undefined {
   try { const url = new URL(value); if ((['https:', 'http:'].includes(url.protocol) || !image && ['mailto:', 'tel:'].includes(url.protocol)) && !url.username && !url.password) return value; } catch { /* Untrusted content stays text when the URL is invalid. */ }
 }
 type PinnedSource = { documentId: string; revisionId: string };
-type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline?: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string };
+type RenderState = { remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
 }
 
-export function containsOutlineHeading(node: RichContent): boolean {
+export function containsDocumentNavigation(node: RichContent): boolean {
+  if (node.type === 'documentToc') return true;
   if (node.type === 'heading') return headingTitle(node).length > 0;
-  return node.content?.some(containsOutlineHeading) ?? false;
+  return node.content?.some(containsDocumentNavigation) ?? false;
 }
 
 type RevisionRequest = { controller: AbortController; readers: number; result: Promise<DocRevision> };
@@ -167,10 +169,10 @@ function renderIncluded(context: Context, id: string, label: string, state: Rend
   if (!document) return <Notice key={key}>포함 문서를 찾을 수 없습니다: {label || id}</Notice>;
   if (state.visited.has(id)) return <Notice key={key}>순환 문서 포함을 중단했습니다: {document.title}</Notice>;
   if (state.includeDepth >= MAX_INCLUDE_DEPTH) return <Notice key={key}>문서 포함 깊이 제한(5단계)에 도달했습니다: {document.title}</Notice>;
-  const next = { ...state, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1 };
+  const next = { ...state, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined };
   const rendered = renderNode(document.content, context, next, `${key}:body`);
   state.remaining = next.remaining; state.exhausted = next.exhausted;
-  return <section className="doc-included-content" key={key} aria-label={`포함된 문서 ${document.title}`}>{documentCard(context, id, label, true)}<div className="doc-readonly-content">{rendered}{state.includeDepth === 0 && state.exhausted && <Notice>포함된 내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div></section>;
+  return <section className="doc-included-content" key={key} aria-label={`포함된 문서 ${document.title}`}>{documentCard(context, id, label, true)}<div className="doc-readonly-content" data-document-outline-root="">{rendered}{state.includeDepth === 0 && state.exhausted && <Notice>포함된 내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div></section>;
 }
 function renderNode(node: RichContent, context: Context, state: RenderState, key: string): ReactNode {
   if (state.remaining-- <= 0 || state.structuralDepth >= 60) { state.exhausted = true; return null; }
@@ -198,6 +200,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   }
   if (node.type === 'documentReference') return documentCard(context, textAttr(node, 'documentId'), textAttr(node, 'label'), false, key);
   if (node.type === 'documentInclude') return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key);
+  if (node.type === 'documentToc') return <ReadonlyDocumentToc key={key} entries={state.outline} attrs={node.attrs} />;
   if (node.type === 'issueList' || node.type === 'issueSummary') {
     const limit = Math.min(state.remaining, DOCUMENT_ISSUE_LIST_LIMIT);
     if (limit < DOCUMENT_ISSUE_LIST_LIMIT) state.exhausted = true;
@@ -218,11 +221,11 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'heading': {
       const level = attrs.level === 1 ? 1 : attrs.level === 2 ? 2 : 3;
       const Heading = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3';
-      const canNavigate = state.outline && state.includeDepth === 0 && children.every(child => child !== null);
+      const canNavigate = children.every(child => child !== null);
       const title = canNavigate ? headingTitle(node) : '';
       const sectionId = state.includeDepth === 0 && isDocumentSectionId(attrs.sectionId) ? attrs.sectionId : undefined;
       if (state.section && sectionId === state.section.id) state.section.target = key;
-      if (title) state.outline?.push({ target: key, level, title, sectionId });
+      if (title) state.outline.push({ target: key, level, title, sectionId });
       return <Heading key={key} data-document-outline-target={title || sectionId ? key : undefined}
         data-document-section-id={sectionId} tabIndex={title || sectionId ? -1 : undefined}>{children}</Heading>;
     }
@@ -263,18 +266,14 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   const context = contextOf(useContext(BlockContext));
   const contentRoot = useRef<HTMLDivElement>(null);
   const lastSection = useRef<{ documentId?: string; sectionId: string } | null>(null);
-  const outline: DocumentOutlineEntry[] | undefined = showOutline ? [] : undefined;
+  const outline: DocumentOutlineEntry[] = [];
   const state: RenderState = { remaining: nodeBudget, exhausted: false, visited: new Set(documentId ? [documentId] : context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId };
   const body = renderNode(content, context, state, 'readonly');
   const sectionTarget = state.section?.target;
   const goToHeading = useCallback((target: string) => {
     const root = contentRoot.current;
     if (!root) return false;
-    const heading = Array.from(root.querySelectorAll<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`))
-      .find(element => element.closest('[data-document-outline-root]') === root);
-    if (!heading) return false;
-    jumpToDocumentHeading(heading, root, true);
-    return true;
+    return jumpToReadonlyHeading(root, target);
   }, []);
   useEffect(() => {
     if (lastSection.current && (lastSection.current.documentId !== documentId || lastSection.current.sectionId !== sectionId)) lastSection.current = null;
@@ -286,7 +285,7 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   }, [documentId, sectionId, sectionTarget, goToHeading]);
   return <>
     {sectionId && !sectionTarget && <p className="document-section-not-found" role="status">이 문서에서 연결된 절을 찾을 수 없습니다.</p>}
-    {outline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
+    {showOutline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
     <div className="doc-readonly-content" data-document-outline-root="" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }
@@ -295,7 +294,7 @@ function ReferenceNodeView({ node, selected, deleteNode, editor }: NodeViewProps
   const label = typeof node.attrs.label === 'string' ? node.attrs.label : '';
   const included = node.type.name === 'documentInclude';
   const pinned = node.type.name === 'documentRevisionInclude';
-  const state: RenderState = { remaining: context.includeBudget, exhausted: false, visited: new Set(context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0 };
+  const state: RenderState = { remaining: context.includeBudget, exhausted: false, visited: new Set(context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, outline: [] };
   return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node={node.type.name} data-reference-id={node.attrs.issueId || node.attrs.documentId}>
     {node.type.name === 'issueReference' ? issueCard(context, node.attrs.issueId, label) : pinned ? pinnedRevision(node.attrs.documentId, node.attrs.revisionId, label, context.includeBudget, 'pin') : included ? renderIncluded(context, node.attrs.documentId, label, state, 'include') : documentCard(context, node.attrs.documentId, label)}
     {editor.isEditable && <button className="doc-reference-remove" type="button" aria-label={`${pinned ? '문서 버전 포함' : included ? '문서 포함' : '참조'} 블록 삭제`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (editor.isEditable) deleteNode(); }}><X size={12} /></button>}
@@ -329,7 +328,9 @@ function detailsBody(editor: Editor): boolean {
   return false;
 }
 export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExtension[] {
-  return extensions.map(extension => (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
+  return extensions.map(extension => extension.name === 'documentToc' ? extension.extend({ addNodeView() {
+    return ReactNodeViewRenderer(DocumentTocNodeView);
+  } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
     addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.teamspaceNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
     addKeyboardShortcuts() { return { Enter: () => detailsBody(this.editor), ArrowDown: () => this.editor.state.selection.$from.parentOffset === this.editor.state.selection.$from.parent.content.size && detailsBody(this.editor) }; },
   }) : decorateDocumentAnnotation(extension));

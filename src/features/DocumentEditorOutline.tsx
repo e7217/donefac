@@ -2,12 +2,42 @@
 
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import type { Editor } from '@tiptap/react';
-import { documentSectionHash, isDocumentSectionId } from '../../shared/document-sections';
+import type { Node as EditorNode } from '@tiptap/pm/model';
+import { documentSectionHash, isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { RichContent } from '../../shared/types';
 import { newRequestId } from '../lib/request-id';
-import { DocumentOutline, jumpToDocumentHeading, outlineHeadingTitle, type DocumentOutlineEntry } from './DocumentOutline';
+import { DocumentOutline, jumpToDocumentHeading, type DocumentOutlineEntry } from './DocumentOutline';
 
 const emptyDocument = () => null;
+const headingCache = new WeakMap<EditorNode, DocumentOutlineEntry<number>[]>();
+
+export function useOutlineDocument(editor: Editor | null) {
+  const subscribe = useCallback((changed: () => void) => {
+    editor?.on('create', changed);
+    editor?.on('transaction', changed);
+    return () => {
+      editor?.off('create', changed);
+      editor?.off('transaction', changed);
+    };
+  }, [editor]);
+  const readDocument = useCallback(() => editor && !editor.isDestroyed ? editor.state.doc : null, [editor]);
+  return useSyncExternalStore(subscribe, readDocument, emptyDocument);
+}
+
+export function editorHeadings(content: EditorNode): DocumentOutlineEntry<number>[] {
+  const cached = headingCache.get(content);
+  if (cached) return cached;
+  const headings: DocumentOutlineEntry<number>[] = [];
+  content.descendants((node, position) => {
+    if (node.type.name !== 'heading') return;
+    const id = isDocumentSectionId(node.attrs.sectionId) ? node.attrs.sectionId : undefined;
+    const title = outlineHeadingTitle(node.textBetween(0, node.content.size, '', child => child.type.name === 'statusBadge' ? String(child.attrs.label) : ' '));
+    if (title || id) headings.push({ target: position, level: node.attrs.level, title, sectionId: id });
+    return false;
+  });
+  headingCache.set(content, headings);
+  return headings;
+}
 
 function savedSectionIds(content: RichContent | null | undefined) {
   const ids = new Set<string>();
@@ -30,29 +60,16 @@ export function DocumentEditorOutline({ editor, documentId, projectId, sectionId
   canAssign?: boolean;
 }) {
   const lastJump = useRef<{ editor: Editor; documentId?: string; sectionId: string } | null>(null);
-  const subscribe = useCallback((changed: () => void) => {
-    editor?.on('create', changed);
-    editor?.on('transaction', changed);
-    return () => {
-      editor?.off('create', changed);
-      editor?.off('transaction', changed);
-    };
-  }, [editor]);
-  const readDocument = useCallback(() => editor && !editor.isDestroyed ? editor.state.doc : null, [editor]);
-  const content = useSyncExternalStore(subscribe, readDocument, emptyDocument);
+  const content = useOutlineDocument(editor);
   const savedIds = useMemo(() => savedSectionIds(savedContent), [savedContent]);
   const { entries, routeTarget } = useMemo(() => {
-    const headings: DocumentOutlineEntry<number>[] = [];
-    let routeTarget: number | undefined;
-    content?.descendants((node, position) => {
-      if (node.type.name !== 'heading') return;
-      const id = isDocumentSectionId(node.attrs.sectionId) ? node.attrs.sectionId : undefined;
-      if (id && id === sectionId) routeTarget = position;
-      const title = outlineHeadingTitle(node.textBetween(0, node.content.size, '', child => child.type.name === 'statusBadge' ? String(child.attrs.label) : ' '));
-      if (title) headings.push({ target: position, level: node.attrs.level, title, sectionId: id, sectionLinkPending: Boolean(id && !savedIds.has(id)) });
-      return false;
-    });
-    return { entries: headings, routeTarget };
+    const headings = content ? editorHeadings(content) : [];
+    return {
+      entries: headings.filter(heading => heading.title).map(heading => ({
+        ...heading, sectionLinkPending: Boolean(heading.sectionId && !savedIds.has(heading.sectionId)),
+      })),
+      routeTarget: sectionId ? headings.find(heading => heading.sectionId === sectionId)?.target : undefined,
+    };
   }, [content, sectionId, savedIds]);
 
   useEffect(() => {

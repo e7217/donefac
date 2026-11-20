@@ -5,7 +5,15 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 7;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 8;
+export type DocumentTocLevel = 1 | 2 | 3;
+export type DocumentTocLayout = 'list' | 'flat';
+export interface DocumentTocOptions {
+  minLevel: DocumentTocLevel;
+  maxLevel: DocumentTocLevel;
+  layout: DocumentTocLayout;
+}
+export const DOCUMENT_TOC_DEFAULTS = { minLevel: 1, maxLevel: 3, layout: 'list' } as const satisfies DocumentTocOptions;
 export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
 export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
 export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
@@ -26,9 +34,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentToc') return 8;
   if (nodeType === 'heading' && attrs?.sectionId !== undefined) return 7;
   if (nodeType === 'callout' || nodeType === 'statusBadge') return 6;
   if (nodeType === 'documentRevisionInclude') return 5;
@@ -45,6 +54,21 @@ export function documentContentSchemaVersion(content: RichContent): DocumentSche
     if (minimum > version) version = minimum;
   }
   return version;
+}
+
+export function isDocumentTocLevel(value: unknown): value is DocumentTocLevel {
+  return value === 1 || value === 2 || value === 3;
+}
+
+export function isDocumentTocLayout(value: unknown): value is DocumentTocLayout {
+  return value === 'list' || value === 'flat';
+}
+
+export function documentTocOptions(attrs: Record<string, unknown> = {}): DocumentTocOptions {
+  const minLevel = isDocumentTocLevel(attrs.minLevel) ? attrs.minLevel : DOCUMENT_TOC_DEFAULTS.minLevel;
+  const maxLevel = isDocumentTocLevel(attrs.maxLevel) ? attrs.maxLevel : DOCUMENT_TOC_DEFAULTS.maxLevel;
+  const range = minLevel <= maxLevel ? { minLevel, maxLevel } : DOCUMENT_TOC_DEFAULTS;
+  return { ...range, layout: isDocumentTocLayout(attrs.layout) ? attrs.layout : DOCUMENT_TOC_DEFAULTS.layout };
 }
 
 export interface DocumentIssueList {
@@ -140,6 +164,42 @@ function issueBlockNode(name: 'issueList' | 'issueSummary', label: string) {
 }
 export const IssueList = issueBlockNode('issueList', '업무 목록');
 export const IssueSummary = issueBlockNode('issueSummary', '업무 현황');
+
+function tocLevelAttribute(key: 'minLevel' | 'maxLevel', attribute: string) {
+  return {
+    default: DOCUMENT_TOC_DEFAULTS[key],
+    parseHTML: (element: HTMLElement) => {
+      const level = Number(element.getAttribute(attribute));
+      return isDocumentTocLevel(level) ? level : DOCUMENT_TOC_DEFAULTS[key];
+    },
+    renderHTML: (attributes: Record<string, unknown>) => ({ [attribute]: attributes[key] }),
+  };
+}
+
+const tocMinLevel = tocLevelAttribute('minLevel', 'data-toc-min-level');
+const tocMaxLevel = tocLevelAttribute('maxLevel', 'data-toc-max-level');
+export const DocumentToc = Node.create({
+  name: 'documentToc', group: 'block', atom: true, selectable: true, draggable: true,
+  addAttributes() {
+    return {
+      minLevel: tocMinLevel,
+      maxLevel: tocMaxLevel,
+      layout: {
+        default: DOCUMENT_TOC_DEFAULTS.layout,
+        parseHTML: (element: HTMLElement) => element.getAttribute('data-toc-layout') === 'flat' ? 'flat' : 'list',
+        renderHTML: (attributes: Record<string, unknown>) => ({ 'data-toc-layout': attributes.layout }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'nav[data-teamspace-node="documentToc"]',
+      getAttrs: element => tocMinLevel.parseHTML(element) <= tocMaxLevel.parseHTML(element) ? null : false }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['nav', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'documentToc' }), '본문 목차'];
+  },
+});
+
 export const Details = Node.create({
   name: 'details', group: 'block', content: 'detailsSummary detailsContent', defining: true, isolating: true,
   parseHTML() { return [{ tag: 'details[data-teamspace-node="details"]' }]; },
@@ -225,7 +285,7 @@ export const StatusBadge = Node.create({
 });
 
 export function documentNodeExtensions() {
-  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge];
+  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc];
 }
 
 export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {

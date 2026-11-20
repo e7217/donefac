@@ -6,6 +6,10 @@ export function isDocumentSectionId(value: unknown): value is string {
   return typeof value === 'string' && sectionIdPattern.test(value);
 }
 
+export function outlineHeadingTitle(text: string): string {
+  return text.trim().replace(/\s+/gu, ' ').replace(/^(.{240}).+$/u, '$1…');
+}
+
 export function documentSectionHash(
   documentId: string,
   sectionId: string,

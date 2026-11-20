@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Copy, Link2 } from 'lucide-react';
+import type { DocumentTocLayout } from '../../shared/document-nodes';
 import './document-outline.css';
 
 export type DocumentOutlineEntry<Target extends string | number = string> = {
@@ -12,10 +13,6 @@ export type DocumentOutlineEntry<Target extends string | number = string> = {
   sectionLinkPending?: boolean;
 };
 
-export function outlineHeadingTitle(text: string): string {
-  return text.trim().replace(/\s+/gu, ' ').replace(/^(.{240}).+$/u, '$1…');
-}
-
 export function jumpToDocumentHeading(heading: HTMLElement, contentRoot: HTMLElement, moveFocus = false) {
   if (!contentRoot.contains(heading)) return;
   for (let parent = heading.parentElement; parent && parent !== contentRoot; parent = parent.parentElement) {
@@ -25,19 +22,30 @@ export function jumpToDocumentHeading(heading: HTMLElement, contentRoot: HTMLEle
   if (moveFocus) heading.focus({ preventScroll: true });
 }
 
-function OutlineEntries<Target extends string | number>({ entries, onNavigate, onMouseDown, onCreateSectionLink, onCopySectionLink }: {
+export function jumpToReadonlyHeading(root: HTMLElement, target: string): boolean {
+  const heading = Array.from(root.querySelectorAll<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`))
+    .find(element => element.closest('[data-document-outline-root]') === root);
+  if (!heading) return false;
+  jumpToDocumentHeading(heading, root, true);
+  return true;
+}
+
+export function OutlineEntries<Target extends string | number>({ entries, onNavigate, onMouseDown, onCreateSectionLink, onCopySectionLink, label = '문서 제목', layout = 'list', limit = entries.length }: {
   entries: DocumentOutlineEntry<Target>[];
   onNavigate: (target: Target) => void;
   onMouseDown?: (event: MouseEvent<HTMLElement>) => void;
   onCreateSectionLink?: (target: Target) => void;
   onCopySectionLink?: (sectionId: string) => void;
+  label?: string;
+  layout?: DocumentTocLayout;
+  limit?: number;
 }) {
   const titleCounts = new Map<string, number>();
   for (const { title } of entries) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
   const occurrences = new Map<string, number>();
-  return <nav className="document-outline-navigation" aria-label="문서 제목">
+  return <nav className="document-outline-navigation" aria-label={label} data-outline-layout={layout}>
     <ol className="document-outline-entries" role="list">
-      {entries.map(({ target, level, title, sectionId, sectionLinkPending }) => {
+      {entries.slice(0, limit).map(({ target, level, title, sectionId, sectionLinkPending }) => {
         const occurrence = (occurrences.get(title) ?? 0) + 1;
         const total = titleCounts.get(title) ?? 1;
         occurrences.set(title, occurrence);

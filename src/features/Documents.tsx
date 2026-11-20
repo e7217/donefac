@@ -10,7 +10,7 @@ import {
   Code2, FileCheck2, FileClock, FilePlus2, FileText, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
-  Table2, Tag, Trash2, Unlink, X,
+  Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
@@ -23,6 +23,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
+import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
@@ -740,6 +741,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
+    { label: '본문 목차', search: 'toc table of contents 본문 목차', action: () => insertDocumentToc(editor) },
     { label: '안내 상자', search: 'callout info note warning tip panel 안내 상자', annotation: 'callout' },
     { label: '상태 배지', search: 'status badge 상태 배지', annotation: 'statusBadge' },
     { label: '접기 블록', search: 'details expand collapse 접기 펼치기', action: () => insertDetails(editor) },
@@ -942,6 +944,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('문서 버전 포함 삽입', <FileClock size={15} />, () => openReference('documentRevisionInclude'))}
+                {button('본문 목차 삽입', <TableOfContents size={15} />, () => insertDocumentToc(editor))}
                 {button('안내 상자 삽입', <Info size={15} />, event => { if (editor) openAnnotation(editor, 'callout', event.currentTarget); })}
                 {button('상태 배지 삽입', <Tag size={15} />, event => { if (editor) openAnnotation(editor, 'statusBadge', event.currentTarget); })}
                 {button('접기 블록 삽입', <ChevronDown size={15} />, () => insertDetails(editor))}

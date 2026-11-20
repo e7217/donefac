@@ -24,6 +24,7 @@ export interface MigrationContentContext {
   // Text-only fields and older migration checkpoints used explicit annotation labels.
   legacyAnnotations?: boolean;
   legacySectionBaseline?: boolean;
+  legacyDocumentToc?: boolean;
   sectionLinks?: {
     documentId: string;
     resolvePageSection?: (page: MigrationReferenceInput, fragment: string, fromUrl: boolean) => { documentId: string; sectionId: string } | null;
@@ -86,6 +87,8 @@ class Converter {
   private sections?: ReturnType<typeof scanConfluenceSections>;
   private localSectionLinks = new Map<Mark, { id: string; originalTarget: string }>();
   private sourceTitle = '';
+  private sourceHeadingMaximum = 3;
+  private richDocument = false;
   constructor(readonly source: string, readonly context: MigrationContentContext) {}
   sectionTargets(content: RichContent): ReadonlyMap<string, string> | undefined {
     if (!this.sections?.targets.size) return undefined;
@@ -412,6 +415,7 @@ class Converter {
     for (const child of node.children) if (typeof child !== 'string' && child.name === 'ac:parameter') params[child.attrs['ac:name'] || ''] = this.xmlText(child);
     const body = node.children.find(value => typeof value !== 'string' && ['ac:rich-text-body', 'ac:plain-text-body'].includes(value.name)) as XmlNode | undefined;
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
+    if (name === 'toc' && this.richDocument) return this.tableOfContents(node, params);
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
     if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
     if (this.context.legacyAnnotations) {
@@ -464,6 +468,37 @@ class Converter {
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
   }
+  tableOfContents(node: XmlNode, params: Record<string, string>): RichContent[] {
+    const parameters = node.children.filter(child => typeof child !== 'string');
+    const malformed = parameters.length !== Object.keys(params).length || node.children.some(child => {
+      if (typeof child === 'string') return Boolean(child.trim());
+      return child.name !== 'ac:parameter' || !child.attrs['ac:name'] || child.children.some(value => typeof value !== 'string');
+    });
+    const layout = params.type?.trim() ?? 'list';
+    const min = params.minLevel?.trim() ?? '1';
+    const max = params.maxLevel?.trim() ?? '7';
+    const minLevel = Number(min), maxLevel = Number(max);
+    const defaults: Record<string, string> = {
+      outline: 'false', style: 'default', indent: '', separator: 'brackets', include: '', exclude: '',
+      printable: 'true', class: '', absoluteUrl: 'false',
+    };
+    const unsupported = Object.entries(params).some(([key, value]) => {
+      if (['type', 'minLevel', 'maxLevel'].includes(key)) return false;
+      const parameterValue = key === 'include' || key === 'exclude' ? value : value.trim();
+      return !Object.hasOwn(defaults, key) || parameterValue !== defaults[key];
+    });
+    const wouldIncludeExcludedHeadings = maxLevel >= 3 && maxLevel < this.sourceHeadingMaximum;
+    if (malformed || unsupported || !['list', 'flat'].includes(layout) || !/^[1-3]$/.test(min) || !/^[1-7]$/.test(max) ||
+        minLevel > maxLevel || wouldIncludeExcludedHeadings) {
+      this.warn('TOC_PARAMETERS_UNSUPPORTED', '현재 편집기로 재현할 수 없는 목차 구조 또는 설정을 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    if (this.context.legacyDocumentToc) {
+      this.warn('LEGACY_TOC_REPRESENTATION', '이전 이관의 목차 원문 코드 블록을 확인했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    return [{ type: 'documentToc', attrs: { minLevel, maxLevel: Math.min(maxLevel, 3), layout } }];
+  }
   storage(title: string): RichContent[] {
     const htmlEntities: Record<string, string> = { nbsp: '160', mdash: '8212', ndash: '8211', hellip: '8230', copy: '169', reg: '174', trade: '8482', euro: '8364', lsquo: '8216', rsquo: '8217', ldquo: '8220', rdquo: '8221', laquo: '171', raquo: '187', bull: '8226', middot: '183' };
     const rawCdata: string[] = [];
@@ -482,6 +517,7 @@ class Converter {
         if (Object.hasOwn(item, '#text')) return [decodeXml(string(item['#text']))];
         if (Object.hasOwn(item, '#cdata')) { if (cdataIndex >= rawCdata.length) throw new Error('CDATA 위치가 일치하지 않습니다.'); return [rawCdata[cdataIndex++]]; }
         const name = Object.keys(item).find(key => key !== ':@'); if (!name) return [];
+        if (this.richDocument && /^h[4-6]$/.test(name)) this.sourceHeadingMaximum = Math.max(this.sourceHeadingMaximum, Number(name[1]));
         return [{ name, attrs: Object.fromEntries(Object.entries(object(item[':@'])).map(([key, value]) => [key, decodeXml(string(value))])), children: build(item[name], depth + 1) }];
       });
     };
@@ -587,7 +623,10 @@ class Converter {
   convert(record: LegacyRecord): RichContent[] {
     if (record.textFormat === 'none' || record.textFormat === 'plain') return this.plain(this.source);
     if (record.textFormat === 'adf') { const parsed = object(JSON.parse(this.source)); if (parsed.type !== 'doc' || parsed.version !== 1 || !Array.isArray(parsed.content)) throw new Error('ADF 루트 또는 버전이 올바르지 않습니다.'); return this.adf(parsed); }
-    if (record.textFormat === 'confluence-storage') return this.storage(record.title);
+    if (record.textFormat === 'confluence-storage') {
+      this.richDocument = record.kind === 'page' || record.kind === 'revision';
+      return this.storage(record.title);
+    }
     if (record.textFormat === 'jira-wiki') return this.wiki();
     return this.fallback(record.textFormat, this.source);
   }
