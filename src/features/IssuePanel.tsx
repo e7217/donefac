@@ -10,6 +10,7 @@ import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
+import { NewIssueModal } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
@@ -50,6 +51,12 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [childCreation, setChildCreation] = useState<Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version'> | null>(null);
+  const childCreationTrigger = useRef<HTMLButtonElement>(null);
+  const closeChildCreation = useCallback(() => {
+    setChildCreation(null);
+    requestAnimationFrame(() => childCreationTrigger.current?.focus({ preventScroll: true }));
+  }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
   const [documentId, setDocumentId] = useState('');
   const [linking, setLinking] = useState(false);
@@ -133,13 +140,22 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       window.removeEventListener('teamspace:workspace-imported', loadComments);
     };
   }, [issueId, props.actorId]);
-  useEffect(() => { const handler = (event: KeyboardEvent) => { if (event.key === 'Escape' && !saving) closePanel(); }; document.addEventListener('keydown', handler); return () => document.removeEventListener('keydown', handler); }, [closePanel, saving]);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !saving && !childCreation) closePanel();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [closePanel, saving, childCreation]);
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
   const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
   const availableDocuments = data.documents.filter(d => !linkedDocuments.some(l => l.documentId === d.id));
   const gitlabLinks = data.gitlabLinks.filter(l => l.issueId === issueId);
   const activities = data.activities.filter(a => a.resourceId === issueId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const children = data.issues.filter(i => i.parentId === issueId);
+  const children = data.issues.filter(i => i.parentId === issueId).map(child => ({
+    child, status: statusMeta(data, child.projectId, child.status),
+  }));
+  const completedChildren = children.filter(({ status }) => status.category === 'done').length;
   const nextStatuses = allowedNextStatuses(data, {projectId:draft.projectId,status:baseDraft?.status || draft.status,type:draft.type});
   const requiredFields = requiredFieldsFor(data,draft.projectId,draft.type,draft.status,baseDraft?.status);
   const dependencies = data.dependencies.filter(d => d.predecessorId === issueId || d.successorId === issueId);
@@ -196,7 +212,10 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
   }
   async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
   const parent = data.issues.find(i => i.id === issue.parentId);
-  return <div className="issue-panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) closePanel(); }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading">
+  return <>
+    <div className="issue-panel-backdrop" inert={Boolean(childCreation)} onMouseDown={event => {
+      if (event.target === event.currentTarget && !saving && !childCreation) closePanel();
+    }}><aside className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading">
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">
@@ -232,7 +251,19 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
         {error && <div className="issue-form-error" role="alert">{error}</div>}
         <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
-      {children.length > 0 && <section className="issue-related-section"><h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>{children.map(child => <button className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}><IssueTypeIcon type={child.type} data={data} projectId={child.projectId} /><span className="issue-key">{child.key}</span><span>{child.title}</span><span className="issue-related-status" style={{ color: statusMeta(data,child.projectId,child.status).color }}>{statusMeta(data,child.projectId,child.status).label}</span><ChevronRight size={14} /></button>)}</section>}
+      <section className="issue-related-section" aria-label="하위 업무">
+        <div className="issue-children-heading">
+          <h3><LayersIcon />하위 업무 <span>{children.length}</span></h3>
+          {children.length > 0 && <span className="issue-children-completed">완료 {completedChildren}개</span>}
+          <button ref={childCreationTrigger} className="btn" type="button" disabled={saving} onClick={() => setChildCreation(issue)}>
+            <Plus size={14} aria-hidden="true" />하위 업무 추가
+          </button>
+        </div>
+        {children.map(({ child, status }) => <button type="button" className="issue-related-row" key={child.id} onClick={() => navigateIssue(child.id)}>
+          <IssueTypeIcon type={child.type} data={data} projectId={child.projectId} /><span className="issue-key">{child.key}</span><span>{child.title}</span>
+          <span className="issue-related-status" style={{ color: status.color }}>{status.label}</span><ChevronRight size={14} aria-hidden="true" />
+        </button>)}
+      </section>
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} />
       <section className="issue-related-section">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
@@ -299,7 +330,9 @@ function IssuePanelContent(props: FeatureProps & { issueId: string; onClose: () 
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <div className="issue-activity-list">{activities.length ? activities.map(activity => { const user = data.users.find(u => u.id === activity.actorId); return <article key={activity.id}><span className="issue-activity-dot"><Check size={12} /></span><div><p><strong>{user?.name || '시스템'}</strong> · {activity.detail || activity.action}</p><time>{new Date(activity.createdAt).toLocaleString('ko-KR')}</time></div></article>; }) : <div className="issue-empty"><Clock3 size={28} /><p>아직 변경 이력이 없습니다.</p></div>}</div>}</div>
-  </aside></div>;
+    </aside></div>
+    {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
+  </>;
 }
 
 function LayersIcon() { return <span className="issue-subtask-icon">↳</span>; }

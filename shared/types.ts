@@ -386,6 +386,7 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export const ISSUE_BULK_EDIT_LIMIT = 100;
 export const WORKFLOW_STATUS_MIGRATION_LIMIT = 1_000;
 export interface WorkflowStatusMigrationPreviewInput {

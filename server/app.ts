@@ -18,6 +18,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
+import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -124,6 +125,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
   const documentContent=new DocumentContentService(store);
   const documentFollowUp=new DocumentFollowUpService(store);
+  const issueChildren = new IssueChildService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -939,6 +941,17 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const issue=store.transaction(()=>createIssueInTransaction(req,req.body));
     res.status(201).json(issue);
   });
+  app.post('/api/issues/:id/children', (req, res) => {
+    const result = issueChildren.create({ parentId: String(req.params.id), actorId: actor(req), body: req.body }, {
+      checkParentVersion: checkVersion,
+      create(parent, input) {
+        const issue = createIssueInTransaction(req, input);
+        activity(req, 'issue', parent.id, '하위 업무 생성', `${issue.key} ${issue.title}`);
+        return issue;
+      },
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  });
   app.post('/api/documents/:id/follow-up-issues',(req,res)=>{
     const actorId=actor(req);
     const result=documentFollowUp.create({documentId:String(req.params.id),actorId,body:req.body},{
@@ -1569,6 +1582,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const previousWorklogs=worklogs.clearForRestore();
       timeReservations.clearForRestore();
       documentFollowUp.clearForImport();
+      issueChildren.clearForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
       migrations.resetForNativeImport();
@@ -1637,6 +1651,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueChildCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});

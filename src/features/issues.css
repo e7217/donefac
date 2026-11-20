@@ -119,3 +119,14 @@
 }
 .issue-follow-up-error{display:grid;justify-items:start;gap:9px;padding:0 27px 14px}
 @media(max-width:700px){.issue-follow-up-error{padding:0 20px 14px}.issue-follow-up-passage{margin-inline:20px}}
+
+.issue-children-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+.issue-children-heading > h3 { margin: 0; }
+.issue-children-heading > .btn { margin-inline-start: auto; }
+.issue-children-completed { color: #546a5d; font-size: 11px; }

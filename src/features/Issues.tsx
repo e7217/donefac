@@ -11,6 +11,7 @@ import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
+import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
@@ -100,6 +101,7 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
+  const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const issues = projectIssues.filter(matchesIssue);
   const bulk = useIssueBulkEdit(props, issues);
   const projectSelected = data.projects.some(project => project.id === projectId);
@@ -287,7 +289,8 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
       return <tr key={issue.id} data-issue-id={issue.id} className={selected ? 'issue-bulk-selected' : undefined}>
         {bulk.active && <td className="issue-bulk-selection"><label className="issue-bulk-select-control"><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected}
           disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} /></label></td>}
-        <td><button className="issue-title-button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} />{issue.parentId && <span className="issue-child-mark">하위</span>}</button>
+        <td><button className="issue-title-button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} /></button>
+          <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
           <CustomFieldSummary data={data} issue={issue} limit={2} />{controls(issue, issues, index)}</td>
         <td><span className="issue-status-select"><StatusDot color={statusMeta(data, issue.projectId, issue.status).color} /><select aria-label={`${issue.key} 상태`} value={issue.status} disabled={Boolean(busy) || bulk.active} onChange={e => changeStatus(issue, e.target.value as IssueStatus)}>{allowedNextStatuses(data, issue).map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></span></td>
         <td><span className="issue-priority"><PriorityIcon value={issue.priority} />{PRIORITY[issue.priority]}</span></td>
@@ -312,7 +315,9 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
               <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
               <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}</span>
               <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
-            </button>{controls(issue, column, index)}
+            </button>
+            <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
+            {controls(issue, column, index)}
           </div>;
         })}{column.length === 0 && <div className="issue-column-empty">이 상태의 업무가 없습니다</div>}
       </section>;

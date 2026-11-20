@@ -17,6 +17,7 @@ import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
+import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { dayNumber, dependencyLabel, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
@@ -168,6 +169,7 @@ function ProjectGantt(props: GanttProps) {
     notify(`과부하를 줄이는 ${result.updated.length}개 업무의 일정을 적용했습니다.`);
   }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
+  const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const projectDependencyCount = useMemo(() => {
     const issueIds = new Set(projectIssues.map(issue => issue.id));
     return data.dependencies.reduce((count, dependency) =>
@@ -630,14 +632,17 @@ function ProjectGantt(props: GanttProps) {
         return <div data-issue-id={issue.id} className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
             <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
-            <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
-              aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
-              onClick={() => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssue(issue.id)}>
-              <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
-              <span><small>{issue.key} · <IssueTypeName data={data} issue={issue} /></small><strong title={issue.title}>{issue.title}</strong>
-                {endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>
-              {user && <span className="issue-avatar" style={{ background: user.color }} title={user.name}>{user.name.slice(0, 1)}</span>}
-            </button>
+            <div className="gantt-issue-cell">
+              <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
+                aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
+                onClick={() => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssue(issue.id)}>
+                <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
+                <span><small>{issue.key} · <IssueTypeName data={data} issue={issue} /></small><strong title={issue.title}>{issue.title}</strong>
+                  {endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>
+                {user && <span className="issue-avatar" style={{ background: user.color }} title={user.name}>{user.name.slice(0, 1)}</span>}
+              </button>
+              <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} disabled={busy || Boolean(linkPicker)} />
+            </div>
             <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy || Boolean(linkPicker)} onSave={(source, startDate, endDate) => saveDates(source, startDate, endDate)} />
           </div>
           <div className="gantt-row-timeline" style={{ width: timelineWidth }}>

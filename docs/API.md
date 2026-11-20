@@ -109,6 +109,12 @@ curl --fail-with-body \
 
 문서 본문 형식 6은 블록 노드 `callout`과 인라인 노드 `statusBadge`를 지원한다. `callout`은 `attrs: {variant, title}`과 하나 이상의 하위 블록을 받는다. `variant`는 `info`, `note`, `warning`, `tip`, `panel` 중 하나이고 선택 제목은 최대 300자다. `statusBadge`는 `attrs: {label, tone}`을 받는다. 표시 이름은 필수이며 최대 120자다. 색상은 `neutral`, `blue`, `green`, `amber`, `red`, `purple` 중 하나다. 이 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 6`을 보내야 한다. 제목과 같은 문서 속성만 바꿀 때는 생략할 수 있다. 자체 백업 형식 46은 현재 문서와 저장 이력의 두 노드를 보존한다.
 
+## 상위 업무에서 하위 업무 만들기
+
+브라우저의 `POST /api/issues/:id/children`에 `{requestId, expectedParentVersion, issue}`를 보낸다. `requestId`는 UUID v4다. `issue`에는 업무 생성과 같은 속성을 보낸다. `projectId`와 `parentId`는 현재 상위 업무에서 정해지며, 함께 보낼 경우 같은 ID여야 한다. 현재 프로젝트의 유형·워크플로·필수 속성을 검사한 뒤 하위 업무와 번호, 상위·하위 업무 변경 기록을 한 트랜잭션에 저장한다.
+
+최초 생성은 `201`과 `{issue, duplicate:false}`를 반환한다. 같은 작업자가 요청을 그대로 재시도하면 해당 하위 업무와 `200`, `duplicate:true`를 반환한다. 새 요청의 상위 업무 버전이 바뀌었거나, 재시도 대상 하위 업무가 삭제 또는 다른 상위 업무로 이동한 경우에는 `409`를 반환한다. 자체 백업은 업무의 `parentId`를 보존하고 복원 시 생성 요청 기록을 초기화한다.
+
 ## 업무 일괄 편집
 
 브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다.
