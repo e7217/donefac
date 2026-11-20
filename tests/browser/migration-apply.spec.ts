@@ -207,7 +207,7 @@ test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유�
     const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
     await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
     await expect(receipt.getByText('변경 업무 1', { exact: true })).toBeVisible();
-    await expect(receipt.getByText('현재 값을 유지할 필드 1', { exact: true })).toBeVisible();
+    await expect(receipt.getByText('현재 값을 유지할 기본 필드 1', { exact: true })).toBeVisible();
     const after = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.filter(issue => issue.projectId === projectId);
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: imported.id, key: imported.key, version: saved.version + 1, title: localTitle, description: nextDescription });
@@ -219,6 +219,118 @@ test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유�
     expect(repeated.canApply).toBe(false);
     await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
     await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+  } finally {
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 편집한 값을 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `JCF${id}`, targetKey = `TCF${id}`, instance = `jira-custom-fields-${id}`;
+  const originalTitle = '처음 이관한 Jira 제목', updatedTitle = '새 내보내기의 Jira 제목';
+  const remainingLabel = '남은 검토 건수', noteLabel = '검토 조건', referenceLabel = '기존 참고 사항';
+  const localNote = 'Teamspace에서 편집한 조건', sourceNote = 'Jira 원본에서 변경한 조건';
+  const issueSourceKey = `${sourceKey}-1`;
+  const exportJira = (next: boolean) => Buffer.from(JSON.stringify({
+    names: { customfield_100: next ? '새 원본의 남은 검토 건수' : remainingLabel, customfield_101: noteLabel, customfield_102: referenceLabel },
+    schema: { customfield_100: { type: 'number' }, customfield_101: { type: 'string' }, customfield_102: { type: 'string' } },
+    issues: [{ id: '100', key: issueSourceKey, fields: {
+      project: { id: '2020', key: sourceKey, name: `원본 프로젝트 ${sourceKey}` }, summary: next ? updatedTitle : originalTitle,
+      created: '2021-01-01T00:00:00Z', updated: next ? '2021-01-03T00:00:00Z' : '2021-01-02T00:00:00Z',
+      status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+      customfield_100: next ? 0 : 5, customfield_101: next ? sourceNote : '첫 검토 조건', customfield_102: next ? null : '배포 예약',
+    } }],
+  }));
+  const staged: LegacyPackageSummary[] = [];
+  try {
+    const initial = await upload(request, `jira-custom-original-${id}.json`, exportJira(false), instance);
+    staged.push(initial);
+    const { import: receipt } = await importIntoProject(request, initial, targetKey, `Jira 속성 이관 프로젝트 ${id}`);
+    const [projectId] = receipt.projectIds;
+    const initialWorkspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const original = initialWorkspace.issues.find(issue => issue.projectId === projectId)!;
+    const schema = initialWorkspace.issueSchemas?.find(value => value.projectId === projectId);
+    const remainingId = schema?.fields.find(field => field.name === remainingLabel)?.id;
+    const noteId = schema?.fields.find(field => field.name === noteLabel)?.id;
+    const referenceId = schema?.fields.find(field => field.name === referenceLabel)?.id;
+    expect(remainingId && noteId && referenceId).toBeTruthy();
+    expect(original.customFields).toMatchObject({ [remainingId!]: 5, [noteId!]: '첫 검토 조건', [referenceId!]: '배포 예약' });
+    const editResponse = await request.patch(`/api/issues/${original.id}`, { data: {
+      expectedVersion: original.version, customFields: { ...original.customFields, [noteId!]: localNote },
+    } });
+    expect(editResponse.ok(), await editResponse.text()).toBe(true);
+    const edited = await editResponse.json() as Issue;
+
+    const next = await upload(request, `jira-custom-next-${id}.json`, exportJira(true), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    const mode = settings.getByLabel('이관 방식', { exact: true });
+    await mode.selectOption('append');
+    const custom = settings.getByRole('checkbox', { name: '기존 Jira 업무의 사용자 정의 속성 변경분 반영', exact: true });
+    const standard = settings.getByRole('checkbox', { name: '기존 Jira 업무 변경분 반영', exact: true });
+    await expect(custom).not.toBeChecked();
+    await expect(standard).not.toBeChecked();
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await custom.check();
+    await settings.getByText('사용자 정의 속성 매핑', { exact: true }).click();
+    const mapping = settings.getByLabel('속성 매핑 새 원본의 남은 검토 건수', { exact: true });
+    await mapping.selectOption(remainingId!);
+    await mode.selectOption('new');
+    await expect(custom).toHaveCount(0);
+    await mode.selectOption('append');
+    await expect(custom).toBeChecked();
+    await expect(standard).not.toBeChecked();
+    await settings.getByText('사용자 정의 속성 매핑', { exact: true }).click();
+    await expect(mapping).toHaveValue(remainingId!);
+
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.appendTo).toMatchObject({ projectId, refreshCustomFields: true });
+    expect(plan.configuration.appendTo?.refreshExisting).toBeUndefined();
+    expect(plan.counts).toMatchObject({ issues: 0, updatedIssues: 1, updatedCustomFields: 2, conflictingCustomFields: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(review.getByText('사용자 정의 속성 반영 2', { exact: true })).toBeVisible();
+    const changes = review.getByRole('region', { name: '기존 Jira 업무 변경 검토', exact: true });
+    const numberChange = changes.getByRole('listitem', { name: remainingLabel, exact: true });
+    await expect(numberChange.getByText('Jira 값 반영', { exact: true })).toBeVisible();
+    await expect(numberChange.getByText('5', { exact: true })).toBeVisible();
+    await expect(numberChange.getByText('0', { exact: true })).toBeVisible();
+    const conflict = changes.getByRole('listitem', { name: noteLabel, exact: true });
+    await expect(conflict).toContainText(localNote);
+    await expect(conflict).toContainText(sourceNote);
+    await expect(conflict).toContainText('현재 값 유지');
+    const clear = changes.getByRole('listitem', { name: referenceLabel, exact: true });
+    await expect(clear).toContainText('Jira 값 반영');
+    await expect(clear.getByText('비어 있음', { exact: true })).toBeVisible();
+    await expect(changes.getByRole('listitem', { name: '제목', exact: true })).toHaveCount(0);
+    const bounds = await changes.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await acknowledge(review, plan);
+    const applyResponse = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', async dialog => { expect(dialog.message()).toContain('사용자 정의 속성 2건 반영'); await dialog.accept(); });
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applyResponse;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const details = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(details.getByText('사용자 정의 속성 반영 2', { exact: true })).toBeVisible();
+    await expect(details.getByText('현재 값을 유지할 사용자 정의 속성 1', { exact: true })).toBeVisible();
+    const updated = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.find(issue => issue.id === original.id)!;
+    expect(updated).toMatchObject({ title: originalTitle, key: original.key, version: edited.version + 1 });
+    expect(updated.customFields).toMatchObject({ [remainingId!]: 0, [noteId!]: localNote });
+    expect(updated.customFields?.[referenceId!] ?? null).toBeNull();
+
+    await selectPackage(settings, next.filename);
+    await mode.selectOption('append');
+    await custom.check();
+    await settings.getByText('사용자 정의 속성 매핑', { exact: true }).click();
+    await mapping.selectOption(remainingId!);
+    expect((await preview(page, settings)).canApply).toBe(false);
+    await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
   } finally {
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }

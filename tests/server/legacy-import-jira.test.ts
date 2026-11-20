@@ -43,9 +43,54 @@ test('CSV BOM, repeated headers, quoted multiline text and attachment URLs retai
   const data=parse('issues.csv',csv,new Map([['attachments/OLD/OLD-1/700',Buffer.from('file')]]));assert.equal(data.source.format,'jira-csv');assert.equal(find(data,'issue:10').title,'한글, "따옴표"\n두 번째 줄');assert.deepEqual((find(data,'issue:10').metadata.fields as Record<string,unknown>)['Custom field (영향)'],['높음','낮음']);const comments=data.records.filter(item=>item.kind==='comment');assert.equal(comments.length,2);assert.equal(comments[0].text,'첫 댓글;세미콜론');assert.equal(comments[1].text,'두 번째 댓글');assert.equal(comments[1].authorId,null);assert.equal(find(data,'attachment:700').metadata.bytesPresent,true);assert.equal(find(data,'option:csv:Status:열림').metadata.syntheticId,true);assert.ok(codes(data).has('CSV_HISTORY_NOT_PROVIDED'));assert.ok(codes(data).has('CSV_COMMENT_ATTRIBUTION_UNRESOLVED'));
 });
 
+test('Jira CSV records explicit blank custom columns and refuses to infer blanks from incomplete rows', () => {
+  const data = parse('custom-fields.csv', [
+    'Issue key,Issue id,Summary,Custom field (등급),Custom field (등급),Custom field (점수)',
+    'OLD-1,10,명시적으로 비운 값,,,',
+    'OLD-2,20,반복된 열의 값,높음,,0',
+    'OLD-3,30,일부 열이 빠진 행,높음',
+  ].join('\r\n'));
+  assert.equal(find(data, 'field:csv:Custom field (등급)').title, 'Custom field (등급)');
+  assert.equal(find(data, 'field:csv:Custom field (점수)').title, 'Custom field (점수)');
+  const headers = ['csv:Custom field (등급)', 'csv:Custom field (점수)'];
+  const blank = find(data, 'issue:10').metadata;
+  assert.deepEqual(blank.jiraSnapshotCustomFields, headers);
+  assert.equal(Object.hasOwn(blank.fields as object, 'Custom field (등급)'), false);
+  assert.equal(Object.hasOwn(blank.fields as object, 'Custom field (점수)'), false);
+  const filled = find(data, 'issue:20').metadata;
+  assert.deepEqual(filled.jiraSnapshotCustomFields, headers);
+  assert.equal((filled.fields as Record<string, unknown>)['Custom field (등급)'], '높음');
+  assert.equal((filled.fields as Record<string, unknown>)['Custom field (점수)'], '0');
+  assert.equal(find(data, 'issue:30').metadata.jiraSnapshotCustomFields, undefined);
+  assert.ok(data.diagnostics.some(item => item.code === 'CSV_COLUMN_COUNT_MISMATCH' && item.severity === 'error'));
+});
+
 test('REST JSON retains ADF, custom fields, actors, changelog and partial-page diagnostics without network requests',()=>{
   const data=parse('rest.json',JSON.stringify({startAt:50,maxResults:50,total:200,names:{customfield_100:'확인 여부'},schema:{customfield_100:{type:'boolean'}},issues:[{id:'10',key:'OLD-1',fields:{project:{id:'20',key:'OLD',name:'가상 프로젝트'},summary:'REST 업무',description:{type:'doc',version:1,content:[{type:'paragraph',content:[{type:'text',text:'ADF 원문'}]}]},reporter:{accountId:'actor-1',displayName:'이전 작성자',emailAddress:'actor@example.test'},status:{id:'1',name:'열림'},security:{id:'private',name:'비공개',credential:'NEVER_COPY_SECURITY'},customfield_100:false,customfield_101:{id:'choice-a',value:'높음'},vendorUnsupported:{password:'NEVER_COPY_VENDOR'},worklog:{startAt:0,total:2,worklogs:[{id:'70',author:{accountId:'actor-1'},comment:'작업 기록',started:'2020-01-01T00:00:00Z',timeSpentSeconds:0}]},comment:{startAt:0,total:3,comments:[{id:'30',author:{accountId:'actor-1'},body:'댓글',created:'2020-01-01T00:00:00Z'}]},attachment:[{id:'40',filename:'없음.bin',content:'https://jira.example.test/attachment/40/file',author:{accountId:'actor-1'}}],issuelinks:[{id:'50',type:{name:'Blocks'},outwardIssue:{id:'11',key:'OLD-2'}}]},changelog:{startAt:0,total:4,histories:[{id:'60',author:{accountId:'actor-1'},created:'2020-01-01T00:00:00Z',items:[{field:'status',from:'1',to:'5'}]}]}}]}));
   assert.equal(data.source.format,'jira-json');assert.equal(find(data,'issue:10').textFormat,'adf');assert.deepEqual((find(data,'issue:10').metadata.fields as Record<string,unknown>).security,{id:'private',name:'비공개',present:true});assert.ok(!JSON.stringify(data).includes('NEVER_COPY_SECURITY'));assert.ok(find(data,'issue:10').text.includes('ADF 원문'));assert.equal((find(data,'issue:10').metadata.fields as Record<string,unknown>).customfield_100,false);assert.equal(find(data,'field:customfield_100').title,'확인 여부');assert.equal(find(data,'option:customfield_101:choice-a').metadata.originalId,'choice-a');assert.equal(find(data,'history:60').authorId,'actor-1');assert.equal(find(data,'history:worklog:70').metadata.timeSpentSeconds,'0');assert.ok(codes(data).has('WORKLOGS_PARTIAL'));assert.ok(codes(data).has('JSON_FIELDS_NOT_NORMALIZED'));assert.ok(!JSON.stringify(data).includes('NEVER_COPY_VENDOR'));assert.ok(data.unsupported.some(item=>item.type==='json-field:vendorUnsupported'));assert.ok(codes(data).has('JSON_REST_DIALECT'));assert.ok(codes(data).has('ISSUES_PARTIAL'));assert.ok(codes(data).has('COMMENTS_PARTIAL'));assert.ok(codes(data).has('HISTORY_PARTIAL'));assert.ok(codes(data).has('ATTACHMENT_BYTES_MISSING'));
+});
+
+test('Jira JSON registers custom user identities without inferring users from ordinary fields', () => {
+  const data = parse('custom-users.json', JSON.stringify({
+    names: { customfield_100: '계정 담당', customfield_101: '서버 담당' },
+    schema: { customfield_100: { type: 'user' }, customfield_101: { custom: 'com.atlassian.jira.plugin.system.customfieldtypes:userpicker' } },
+    issues: [{ id: '10', key: 'OLD-1', fields: { summary: '사용자 필드',
+      customfield_100: { accountId: 'account-owner', displayName: '원본 담당자' },
+      customfield_101: { key: 'server-owner' },
+      customfield_102: { id: 'choice', name: '보통 옵션', value: '보통 옵션' },
+      customfield_103: 'ordinary-text',
+    } }],
+  }));
+  assert.deepEqual(data.records.filter(row => row.kind === 'identity').map(row => row.sourceId), ['account-owner', 'server-owner']);
+  assert.equal(find(data, 'identity:account-owner').title, '원본 담당자');
+  assert.ok(find(data, 'issue:10').references.some(ref => ref.kind === 'identity' && ref.sourceId === 'server-owner' && ref.relation === 'customFieldUser'));
+  assert.equal(find(data, 'option:customfield_102:choice').title, '보통 옵션');
+  const importers = parse('custom-values.json', JSON.stringify({ projects: [{ key: 'OLD', issues: [{ externalId: '20',
+    key: 'OLD-2', summary: '값 기록', customFieldValues: [{ fieldName: '생략' }, { fieldName: '비움', value: null }],
+  }] }] }));
+  const values = find(importers, 'issue:20').metadata.fields as Record<string, unknown>;
+  assert.equal(Object.hasOwn(values, 'named:생략'), false);
+  assert.equal(values['named:비움'], null);
 });
 
 test('Importers JSON is explicitly identified and preserves authored history, comments, custom data and top-level links',()=>{

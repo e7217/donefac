@@ -1,5 +1,5 @@
 import type { Express, Request } from 'express';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type User } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type User } from '../shared/types.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
@@ -41,7 +41,9 @@ function mapping<T>(raw: unknown, convert: (value: unknown) => T): Record<string
 export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppendConfiguration {
   const append = object(raw, '기존 프로젝트 추가 설정');
   const refresh = Object.hasOwn(append, 'refreshExisting');
-  if (Object.keys(append).length !== (refresh ? 5 : 4) || (refresh && append.refreshExisting !== true)) {
+  const custom = Object.hasOwn(append, 'refreshCustomFields');
+  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) || (refresh && append.refreshExisting !== true) ||
+      (custom && append.refreshCustomFields !== true)) {
     fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
   }
   return {
@@ -50,6 +52,7 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     issueTypes: mapping(append.issueTypes, value => string(value, '추가 대상 업무 유형', 200)),
     fields: mapping(append.fields, value => nullable(value, '추가 대상 필드', 200)),
     ...(refresh ? { refreshExisting: true } : {}),
+    ...(custom ? { refreshCustomFields: true } : {}),
   };
 }
 export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
@@ -96,6 +99,17 @@ function parseFieldHashes<Field extends string>(raw: unknown, fields: ReadonlySe
     hashes[name] = sha(value);
   }
   return hashes;
+}
+
+function parseJiraCustomFieldHashes(raw: unknown): JiraMigrationCustomFieldHashes {
+  const entries = Object.entries(object(raw, 'Jira 사용자 정의 필드 기준'));
+  if (!entries.length || entries.length > 100) fail(400, 'Jira 사용자 정의 필드 기준의 개수를 확인해 주세요.');
+  return Object.fromEntries(entries.map(([fieldId, item]) => {
+    const checkpoint = object(item, 'Jira 사용자 정의 필드 기준');
+    if (!/^[a-z][a-z0-9_-]{0,47}$/.test(fieldId) || ['constructor', 'prototype'].includes(fieldId) ||
+        Object.keys(checkpoint).length !== 2) fail(400, 'Jira 사용자 정의 필드 기준의 형식을 확인해 주세요.');
+    return [fieldId, { sourceFieldId: string(checkpoint.sourceFieldId, 'Jira 원본 필드', 500), hash: sha(checkpoint.hash) }];
+  }));
 }
 
 function parseIntegrity(raw: unknown, packages: SourceImport['packages']): SourceImportIntegrity | undefined {
@@ -361,7 +375,8 @@ export class SourcePreservationService {
       const expected = ({ project: 'project', issue: 'issue', page: 'document', comment: 'comment', revision: 'revision', attachment: 'attachment' } as Record<string, string>)[record.kind]; if (targetType !== null && targetType !== expected) fail(400, '원본 객체 종류와 적용 대상 종류가 다릅니다.');
       if (value.excluded !== undefined && (value.excluded !== true || targetType !== null)) fail(400, '제외된 원본은 적용 대상에 연결할 수 없습니다.');
       const jiraIssueFieldHashes = Object.hasOwn(value, 'jiraIssueFieldHashes') ? parseFieldHashes(value.jiraIssueFieldHashes, jiraIssueFields, 'Jira 업무 필드 기준') : undefined;
-      if (jiraIssueFieldHashes && (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' ||
+      const jiraCustomFieldHashes = Object.hasOwn(value, 'jiraCustomFieldHashes') ? parseJiraCustomFieldHashes(value.jiraCustomFieldHashes) : undefined;
+      if ((jiraIssueFieldHashes || jiraCustomFieldHashes) && (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' ||
           ownerType !== 'issue' || ownerId !== targetId || !targetProjectId)) fail(400, 'Jira 업무 필드 기준의 원본과 연결 대상을 확인해 주세요.');
       const confluencePageFieldHashes = Object.hasOwn(value, 'confluencePageFieldHashes')
         ? parseFieldHashes(value.confluencePageFieldHashes, confluencePageFields, 'Confluence 문서 필드 기준') : undefined;
@@ -369,6 +384,7 @@ export class SourcePreservationService {
           ownerType !== 'document' || ownerId !== targetId || !targetProjectId)) fail(400, 'Confluence 문서 필드 기준의 원본과 연결 대상을 확인해 주세요.');
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
+        ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
@@ -635,6 +651,12 @@ export class SourcePreservationService {
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');
+    if (receipt.configuration.appendTo?.refreshCustomFields !== true) {
+      const newIssueIds = new Set(prepared.issues.map(issue => issue.id));
+      if (data.records.some(record => record.jiraCustomFieldHashes && !newIssueIds.has(record.targetId!))) {
+        fail(400, '기존 Jira 업무의 사용자 정의 필드 기준에는 변경분 적용 설정이 필요합니다.');
+      }
+    }
     const measured = measureIncomingArchive(receipt, data.records);
     const totals = archiveTotals(measured.packages);
     if (measured.unmatchedRecords || data.versions.length !== totals.attachmentVersions ||

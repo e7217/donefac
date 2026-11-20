@@ -64,13 +64,26 @@ function csvRows(source:string,delimiter:string):string[][]{
 }
 function parseCsv(context:Context,path:string,source:string):void{
   const first=source.split(/\r?\n/,1)[0],delimiter=['\t',';',','].sort((a,b)=>first.split(b).length-first.split(a).length)[0],rows=csvRows(source.replace(/^\uFEFF/,''),delimiter),headers=rows.shift()?.map(value=>value.trim())||[];if(!headers.some(header=>/^(?:Issue key|Issue id|Key)$/i.test(header))){context.warn('CSV_ISSUE_IDENTIFIER_MISSING','Jira CSV의 Issue key/Issue id 열을 찾지 못했습니다.',null,path,'error');return;}
+  const customHeaders = [...new Set(headers.filter(name => /^Custom field\s*\(/i.test(name)))];
+  const customFieldIds = customHeaders.map(name => `csv:${name}`);
+  for (const name of customHeaders) context.field(`csv:${name}`, name, 'csv-unspecified');
   for(let rowIndex=0;rowIndex<rows.length;rowIndex++){const row=rows[rowIndex];if(row.every(value=>!value))continue;if(row.length!==headers.length)context.warn('CSV_COLUMN_COUNT_MISMATCH','CSV 행의 열 개수가 헤더와 다릅니다.',null,`${path}:${rowIndex+2}`,'error');const get=(...names:string[])=>row[headers.findIndex(header=>names.some(name=>header.toLowerCase()===name.toLowerCase()))]||'',key=get('Issue key','Key'),id=get('Issue id')||key||`csv:${path}:${rowIndex+2}`,projectId=get('Project id','Project key')||key.replace(/-\d+$/,'');if(projectId)context.ensure('project',projectId,{title:get('Project name')||get('Project key')||projectId,metadata:{key:get('Project key')||key.replace(/-\d+$/,'')}});const authorId=context.identity(get('Creator','Reporter')),assignee=context.identity(get('Assignee')),parent=get('Parent id','Parent');const metadata:Record<string,LegacyValue>={key,dialect:'search-csv',fields:{},jiraSnapshotFields:[...new Set(headers.map(header=>csvSnapshotFields.get(header.toLowerCase())).filter(field=>field!==undefined))]};const item=context.put('issue',id,{title:get('Summary'),containerId:projectId||null,parentId:parent||null,authorId,createdAt:context.date(get('Created'),`issue:${id}`),updatedAt:context.date(get('Updated'),`issue:${id}`),text:get('Description'),textFormat:'jira-wiki',metadata,references:[...ref('project',projectId,'project'),...ref('identity',authorId,'reporter'),...ref('identity',assignee,'assignee'),...ref('issue',parent,'parent')]});const fields=item.metadata.fields as Record<string,LegacyValue>;
+    if (row.length === headers.length && customFieldIds.length) item.metadata.jiraSnapshotCustomFields = customFieldIds;
     for(let column=0;column<headers.length;column++){const name=headers[column],value=row[column]||'';if(!value)continue;if(/^Comment$/i.test(name)){const parts=value.split(';'),structured=parts.length>=3;const commentId=`csv:${id}:comment:${column}`,actor=structured?context.identity(parts[1]):null;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:actor,createdAt:structured?context.date(parts[0],`comment:${commentId}`):null,text:structured?parts.slice(2).join(';'):value,textFormat:'jira-wiki',metadata:{sourceColumn:column,structured},references:[...ref('issue',id,'commentOn'),...ref('identity',actor,'author')]});if(!structured)context.warn('CSV_COMMENT_ATTRIBUTION_UNRESOLVED','댓글 원문은 보존했지만 작성자·시각 구분 형식을 확인하지 못했습니다.',item.id);}
       else if(/^Attachment$/i.test(name)){const parts=value.split(';'),uri=parts.at(-1)||'',filename=parts.length>=4?parts.slice(2,-1).join(';'):uri.split('/').at(-1)||value;context.attachment(`csv:${id}:attachment:${column}`,id,{name:filename,uri,attacher:parts.length>=4?parts[1]:'',created:parts.length>=4?parts[0]:''});}
-      else{const previous=Object.hasOwn(fields,name)?fields[name]:undefined;Object.defineProperty(fields,name,{value:previous===undefined?value:Array.isArray(previous)?[...previous,value]:[previous,value],enumerable:true,writable:true,configurable:true});if(/^Custom field\s*\(/i.test(name))context.field(`csv:${name}`,name,'csv-unspecified');if(/^(?:Status|Priority|Issue Type|Resolution|Component\/s|Fix Version\/s|Affects Version\/s)$/i.test(name)){const fieldId=`csv:${name}`;context.field(fieldId,name,'csv-label-only');const optionId=context.option(fieldId,value);item.references.push(...ref('option',optionId,name));}}
+      else{const previous=Object.hasOwn(fields,name)?fields[name]:undefined;Object.defineProperty(fields,name,{value:previous===undefined?value:Array.isArray(previous)?[...previous,value]:[previous,value],enumerable:true,writable:true,configurable:true});if(/^(?:Status|Priority|Issue Type|Resolution|Component\/s|Fix Version\/s|Affects Version\/s)$/i.test(name)){const fieldId=`csv:${name}`;context.field(fieldId,name,'csv-label-only');const optionId=context.option(fieldId,value);item.references.push(...ref('option',optionId,name));}}
     }
   }
   context.warn('CSV_HISTORY_NOT_PROVIDED','검색 CSV는 완전한 변경 이력이나 첨부 바이트를 보장하지 않습니다. 실제 제공된 댓글·첨부 열만 분석했습니다.',null,path);
+}
+
+function jiraCustomUser(context: Context, value: unknown, fieldType: string): string | null {
+  const profile = obj(value);
+  const stableId = typeof profile.accountId === 'string' && profile.accountId.trim();
+  const legacyId = [profile.key, profile.name, profile.username].some(id => typeof id === 'string' && id.trim());
+  const legacyProfile = [profile.displayName, profile.emailAddress].some(label => typeof label === 'string' && label.trim());
+  const typedUser = /(^|:)user(?:picker)?$/i.test(fieldType);
+  return stableId || legacyId && (legacyProfile || typedUser) ? context.identity(profile) : null;
 }
 
 function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean):void{
@@ -88,8 +101,28 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   if (Object.keys(jiraScheduleFields).length) item.metadata.jiraScheduleFields = jiraScheduleFields;
   if(fields.security!==undefined&&fields.security!==null){const security=obj(fields.security);values.security=typeof fields.security==='boolean'?fields.security:typeof fields.security==='object'?{...selected(security,['id','name']),present:true}:str(fields.security)?{name:str(fields.security),present:true}:null;}
   for(const name of ['status','issuetype','issueType','priority','resolution','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','watches'])if(fields[name]!==undefined){values[name]=jsonValue(fields[name]);if(['status','issuetype','issueType','priority','resolution'].includes(name)){const fieldId=`builtin:${name==='issueType'?'issuetype':name}`;context.field(fieldId,name,'jira-builtin');const optionId=context.option(fieldId,fields[name]);item.references.push(...ref('option',optionId,name));}}
-  for(const[name,value]of Object.entries(fields))if(/^customfield_\d+$/.test(name)){values[name]=jsonValue(value);context.field(name,name,'rest-custom-unspecified');item.references.push(...ref('field',name,'customField'));for(const option of Array.isArray(value)?value:[value])if(Object.hasOwn(obj(option),'value')){const optionId=context.option(name,option);item.references.push(...ref('option',optionId,'customOption'));}}
-  for(const raw of list(fields.customFieldValues)){const custom=obj(raw),fieldId=str(custom.fieldId||custom.id)||`named:${str(custom.fieldName)}`;context.field(fieldId,str(custom.fieldName)||fieldId,str(custom.fieldType));values[fieldId]=jsonValue(custom.value);item.references.push(...ref('field',fieldId,'customField'));}
+  for (const [name, value] of Object.entries(fields)) {
+    if (!/^customfield_\d+$/.test(name)) continue;
+    values[name] = jsonValue(value);
+    const field = context.field(name, name, 'rest-custom-unspecified');
+    item.references.push(...ref('field', name, 'customField'));
+    for (const option of Array.isArray(value) ? value : [value]) {
+      const identity = jiraCustomUser(context, option, str(field.metadata.fieldType));
+      if (identity) item.references.push(...ref('identity', identity, 'customFieldUser'));
+      else if (Object.hasOwn(obj(option), 'value')) item.references.push(...ref('option', context.option(name, option), 'customOption'));
+    }
+  }
+  for (const raw of list(fields.customFieldValues)) {
+    const custom = obj(raw), fieldId = str(custom.fieldId || custom.id) || `named:${str(custom.fieldName)}`;
+    const field = context.field(fieldId, str(custom.fieldName) || fieldId, str(custom.fieldType));
+    item.references.push(...ref('field', fieldId, 'customField'));
+    if (!Object.hasOwn(custom, 'value')) continue;
+    const value = custom.value;
+    values[fieldId] = jsonValue(value);
+    for (const profile of Array.isArray(value) ? value : [value]) {
+      item.references.push(...ref('identity', jiraCustomUser(context, profile, str(field.metadata.fieldType)), 'customFieldUser'));
+    }
+  }
   const commentEnvelope=obj(fields.comment),comments=importers?list(fields.comments):list(commentEnvelope.comments);
   if(Number(commentEnvelope.total)>comments.length||Number(commentEnvelope.startAt)>0)context.warn('COMMENTS_PARTIAL','REST 댓글 페이지 일부만 제공되었습니다.',item.id,path);
   for(let commentIndex=0;commentIndex<comments.length;commentIndex++){const comment=obj(comments[commentIndex]),commentId=str(comment.id)||`json:${id}:comment:${commentIndex}`,author=context.identity(comment.author),body=comment.body;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:author,createdAt:context.date(comment.created,`comment:${commentId}`),updatedAt:context.date(comment.updated,`comment:${commentId}`),text:typeof body==='object'&&body!==null?JSON.stringify(body):str(body),textFormat:typeof body==='object'&&body!==null?'adf':'jira-wiki',metadata:{visibility:jsonValue(comment.visibility||comment.properties||null)},references:[...ref('issue',id,'commentOn'),...ref('identity',author,'author')]});}

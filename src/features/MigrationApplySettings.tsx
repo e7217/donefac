@@ -14,7 +14,10 @@ const PAGE_SIZE = 50;
 const categoryLabels: Record<StatusCategory, string> = { backlog: '백로그', todo: '할 일', in_progress: '진행 중', review: '검토', done: '완료', cancelled: '취소' };
 const fieldLabels: Record<CustomFieldKind | 'archive', string> = { archive: '원본 보관만', text: '텍스트', number: '숫자', date: '날짜', select: '단일 선택', multi_select: '여러 선택', checkbox: '체크박스', user: '사용자', url: 'URL' };
 const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinkedAtlassianRecords: '원본 링크 미생성' };
-const jiraRefreshCountLabels = { updatedIssues: '변경 업무', updatedFields: '반영 필드', conflictingFields: '현재 값을 유지할 필드', skippedIssueUpdates: '변경을 건너뛴 업무' };
+const jiraRefreshCountLabels = {
+  updatedIssues: '변경 업무', updatedFields: '기본 필드 반영', conflictingFields: '현재 값을 유지할 기본 필드', skippedIssueUpdates: '변경을 건너뛴 업무',
+  updatedCustomFields: '사용자 정의 속성 반영', conflictingCustomFields: '현재 값을 유지할 사용자 정의 속성',
+};
 const confluenceRefreshCountLabels = {
   updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',
   newConfluenceAttachments: '기존 문서의 새 첨부', newConfluenceAttachmentVersions: '기존 첨부의 새 버전',
@@ -44,7 +47,8 @@ const destinationMode = (configuration: MigrationConfiguration | null | undefine
   configuration?.appendTo ? 'append' : configuration?.appendPagesTo ? 'append-pages' : 'new';
 type RefreshProduct = 'Jira' | 'Confluence';
 function refreshProduct(configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined {
-  if (configuration?.appendTo?.refreshExisting) return 'Jira';
+  const issues = configuration?.appendTo;
+  if (issues?.refreshExisting || issues?.refreshCustomFields) return 'Jira';
   const pages = configuration?.appendPagesTo;
   if (pages?.refreshExisting || pages?.refreshAttachments || pages?.refreshHistory) return 'Confluence';
 }
@@ -58,6 +62,7 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   const actions: string[] = [];
   if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
+  if (product === 'Jira' && counts.updatedCustomFields) actions.push(`사용자 정의 속성 ${counts.updatedCustomFields.toLocaleString()}건 반영`);
   if (product === 'Confluence') {
     const { newConfluenceAttachments, newConfluenceAttachmentVersions, newConfluenceComments, newConfluenceRevisions } = counts;
     if (newConfluenceAttachments) actions.push(`기존 문서에 새 첨부 ${newConfluenceAttachments.toLocaleString()}건 추가`);
@@ -198,7 +203,10 @@ function ActorMigration(props: FeatureProps) {
           </p>
           {issueDestination && <p>현재 프로젝트의 상태·유형·속성에 새 업무를 연결합니다. 이미 이관한 업무가 겹치면 미리보기에 표시합니다.</p>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무 변경분 반영">
-            이전 이관 이후 원본에서 바뀐 값만 검토합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 필드는 유지합니다.
+            제목, 상태, 담당자 등 기본 필드의 원본 변경을 검토합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 필드는 유지합니다.
+          </RefreshOption>}
+          {appendTo && issueDestination && options.fields.length > 0 && <RefreshOption value={appendTo} option="refreshCustomFields" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무의 사용자 정의 속성 변경분 반영">
+            아래 속성 매핑에 따라 변경된 원본 값을 비교합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 속성은 유지합니다.
           </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
             최신 원본의 제목과 본문을 현재 문서와 비교합니다. 팀에서 바꾼 제목이나 본문은 그대로 유지합니다.
@@ -346,7 +354,7 @@ type AppendMapping = NonNullable<MigrationConfiguration['appendTo']>;
 type PageAppendMapping = NonNullable<MigrationConfiguration['appendPagesTo']>;
 type MappingChoice = { id: string; label: string; detail?: string };
 
-type RefreshFlag = 'refreshExisting' | 'refreshAttachments' | 'refreshHistory';
+type RefreshFlag = 'refreshExisting' | 'refreshCustomFields' | 'refreshAttachments' | 'refreshHistory';
 function RefreshOption<Mapping extends Partial<Record<RefreshFlag, true>>>({ value, option = 'refreshExisting', onChange, label, children }: {
   value: Mapping; option?: RefreshFlag; onChange: (next: Mapping) => void; label: string; children: ReactNode;
 }) {
@@ -370,7 +378,10 @@ function JiraRefreshReview({ rows }: { rows: JiraMigrationIssueReview[] }) {
     <h4 id={titleId}>기존 Jira 업무 변경 검토</h4>
     <Paged title="기존 Jira 업무" items={rows} label={row => `${row.key} ${row.sourceKey}`} render={row => <div className="migration-refresh-entry">
       <h5>{row.key} <small>Jira {row.sourceKey}</small></h5>
-      <RefreshFields label={`${row.key} 필드 변경`} product="Jira" fields={row.fields} fieldLabels={jiraRefreshFieldLabels} />
+      <RefreshFields label={`${row.key} 필드 변경`} product="Jira" fields={[
+        ...row.fields.map(change => ({ ...change, id: `standard:${change.field}`, label: jiraRefreshFieldLabels[change.field] })),
+        ...(row.customFields ?? []).map(change => ({ ...change, id: `custom:${change.fieldId}` })),
+      ]} />
     </div>} />
   </section>;
 }
@@ -381,20 +392,22 @@ function ConfluenceRefreshReview({ rows, renderOriginal }: { rows: ConfluenceMig
     <h4 id={titleId}>기존 Confluence 문서 변경 검토</h4>
     <Paged title="기존 Confluence 문서" items={rows} label={row => `${row.title} ${row.sourceId}`} render={row => <article className="migration-refresh-entry" aria-label={row.title}>
       <h5>{row.title} <small>원본 페이지 {row.sourceId}</small></h5>
-      <RefreshFields label={`${row.title} 필드 변경`} product="Confluence" fields={row.fields} fieldLabels={confluenceRefreshFieldLabels} />
+      <RefreshFields label={`${row.title} 필드 변경`} product="Confluence" fields={row.fields.map(change => ({
+        ...change, id: change.field, label: confluenceRefreshFieldLabels[change.field],
+      }))} />
       {renderOriginal(row.recordId)}
     </article>} />
   </section>;
 }
 
-function RefreshFields<Field extends string>({ label, product, fields, fieldLabels }: {
-  label: string; product: RefreshProduct; fieldLabels: Record<Field, string>;
-  fields: { field: Field; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true }[];
+function RefreshFields({ label, product, fields }: {
+  label: string; product: RefreshProduct;
+  fields: { id: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true }[];
 }) {
   return <ul aria-label={label}>
-    {fields.map(change => <li key={change.field} aria-label={fieldLabels[change.field]}>
+    {fields.map(change => <li key={change.id} aria-label={change.label}>
       <div className="migration-refresh-field-heading">
-        <strong>{fieldLabels[change.field]}</strong>
+        <strong>{change.label}</strong>
         <span className={change.decision === 'apply' ? 'is-apply' : 'is-conflict'}>{change.decision === 'apply' ? `${product} 값 반영` : '현재 값 유지'}</span>
       </div>
       {change.formatOnly && <small className="migration-refresh-format">본문 서식 또는 구조가 변경되었습니다.</small>}

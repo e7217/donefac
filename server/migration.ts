@@ -26,6 +26,7 @@ const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
 const MAX_REUSED_FILE_BYTES = 256 * MiB;
 type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
+type JiraArchiveRow = { id: string; json: string; importId: string };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & { instanceKey: string; sourceProjectId: string };
 type PageAppendDestination = Pick<MigrationPageAppendContext, 'project' | 'sourceSpaceId' | 'sourceSpaceKey'> & { instanceKey: string };
 const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 프로젝트와 기존 추가 대상을 선택해 주세요.';
@@ -155,12 +156,13 @@ export class MigrationService {
       WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
       ORDER BY binding.source_alias`).all(instanceKey) as MigrationAppendContext['knownIssues'];
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
-    const refreshIssues = configuration.appendTo.refreshExisting
+    const refreshIssues = configuration.appendTo.refreshExisting || configuration.appendTo.refreshCustomFields
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, project.id, instanceKey, digest)
       : undefined;
     return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues, ...(refreshIssues ? { refreshIssues } : {}) };
   }
   private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'], projectId: string, instanceKey: string, digest: ReturnType<typeof createHash>): MigrationJiraRefreshCandidate[] {
+    const refreshCustomFields = configuration.appendTo?.refreshCustomFields === true;
     const live = new Map(knownIssues.filter(issue => issue.projectId === projectId).map(issue => [issue.alias, issue.issueId]));
     const excluded = new Set(configuration.excludedRecords);
     const selected = new Set<string>();
@@ -174,12 +176,16 @@ export class MigrationService {
     if (selected.size > MAX_REFRESH_ISSUES) fail(413, '기존 Jira 업무의 변경은 한 번에 1000개까지 검토할 수 있습니다. 패키지를 나누어 주세요.');
 
     const oldIssue = this.store.db.prepare('SELECT json FROM issues WHERE id=? AND project_id=?');
-    // Source import timestamps are captured at preview creation. A later refresh is prepared against
-    // the previously stored baseline, and a restore can insert archived rows in a different order.
-    const oldArchive = this.store.db.prepare(`SELECT archive.json, archive.import_id AS importId FROM source_records AS archive
+    const linkedArchives = `SELECT archive.id, archive.json, archive.import_id AS importId FROM source_records AS archive
       JOIN source_imports AS receipt ON receipt.id=archive.import_id
       WHERE archive.target_type='issue' AND archive.target_id=? AND archive.product='jira' AND archive.source_instance=? AND archive.kind='issue'
+        AND json_extract(archive.json,'$.targetProjectId')=?`;
+    // Each option advances only its own comparison baseline. Use receipt time so
+    // restored rows produce the same order regardless of their insertion order.
+    const latestArchive = this.store.db.prepare(`${linkedArchives} AND json_type(archive.json,?)='object'
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, archive.id DESC LIMIT 1`);
+    const initialArchive = this.store.db.prepare(`${linkedArchives}
+      ORDER BY julianday(json_extract(receipt.json,'$.createdAt')), archive.id LIMIT 1`);
     const receipts = new Map<string, SourceImport | undefined>();
     const candidates: MigrationJiraRefreshCandidate[] = [];
     let bytes = 0;
@@ -188,27 +194,39 @@ export class MigrationService {
       if (bytes > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Jira 원본이 64MiB를 넘습니다. 패키지를 나누어 주세요.');
       digest.update(json).update('\n');
     };
+    const readBaseline = (row: JiraArchiveRow, issueId: string): MigrationJiraRefreshCandidate['previous'] | undefined => {
+      include(row.json);
+      const archive = JSON.parse(row.json) as SourceRecordArchive;
+      if (!receipts.has(row.importId)) {
+        const receipt = this.store.get<SourceImport>('source_imports', row.importId);
+        if (receipt) include(JSON.stringify(receipt));
+        receipts.set(row.importId, receipt);
+      }
+      const receipt = receipts.get(row.importId);
+      const pkg = receipt?.packages.find(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' && pkg.source.instanceKey === instanceKey);
+      if (!receipt || !pkg || archive.targetId !== issueId || archive.targetProjectId !== projectId) return undefined;
+      return { archive, stagingId: pkg.stagingId, configuration: receipt.configuration };
+    };
 
     digest.update('\njira-refresh\n');
     for (const issueId of [...selected].sort()) {
       const current = oldIssue.get(issueId, projectId) as { json: string } | undefined;
-      const previous = oldArchive.get(issueId, instanceKey) as { json: string; importId: string } | undefined;
+      const standard = latestArchive.get(issueId, instanceKey, projectId, '$.jiraIssueFieldHashes') as JiraArchiveRow | undefined;
+      const custom = refreshCustomFields
+        ? latestArchive.get(issueId, instanceKey, projectId, '$.jiraCustomFieldHashes') as JiraArchiveRow | undefined : undefined;
+      const initial = !standard || (refreshCustomFields && !custom)
+        ? initialArchive.get(issueId, instanceKey, projectId) as JiraArchiveRow | undefined : undefined;
+      const previous = standard ?? initial;
+      const previousCustom = refreshCustomFields ? custom ?? initial : undefined;
       digest.update(JSON.stringify([issueId, Boolean(current), Boolean(previous)])).update('\n');
+      if (refreshCustomFields) digest.update(JSON.stringify([previous?.id ?? null, previousCustom?.id ?? null])).update('\n');
       if (!current || !previous) continue;
       include(current.json);
-      include(previous.json);
-      const archive = JSON.parse(previous.json) as SourceRecordArchive;
-      if (!receipts.has(previous.importId)) {
-        const receipt = this.store.get<SourceImport>('source_imports', previous.importId);
-        if (receipt) include(JSON.stringify(receipt));
-        receipts.set(previous.importId, receipt);
-      }
-      const receipt = receipts.get(previous.importId);
-      const pkg = receipt?.packages.find(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' && pkg.source.instanceKey === instanceKey);
-      if (!receipt || !pkg || archive.targetId !== issueId || archive.targetProjectId !== projectId) continue;
-      candidates.push({ issue: JSON.parse(current.json) as Issue, previous: {
-        archive, stagingId: pkg.stagingId, configuration: receipt.configuration,
-      } });
+      const standardBaseline = readBaseline(previous, issueId);
+      if (!standardBaseline) continue;
+      const customBaseline = previousCustom?.id === previous.id ? standardBaseline : previousCustom && readBaseline(previousCustom, issueId);
+      candidates.push({ issue: JSON.parse(current.json) as Issue, previous: standardBaseline,
+        ...(customBaseline ? { previousCustom: customBaseline } : {}) });
     }
     return candidates;
   }
@@ -560,10 +578,12 @@ export class MigrationService {
         const existingProject = source.product === 'jira' ? append?.project : appendPages?.project;
         const aliases = [record.sourceId];
         if (source.product === 'jira' && record.kind === 'issue' && typeof record.metadata.key === 'string') aliases.push(record.metadata.key);
+        const jiraCheckpoint = configuration.appendTo?.refreshExisting && row.jiraIssueFieldHashes ||
+          configuration.appendTo?.refreshCustomFields && row.jiraCustomFieldHashes;
         return aliases.some(alias => {
           const bound = binding.get(source.product, source.instanceKey, record.kind, alias) as { type: string; id: string } | undefined;
           if (!bound) return false;
-          if (source.product === 'jira' && record.kind === 'issue' && row.targetType === 'issue' && row.jiraIssueFieldHashes &&
+          if (source.product === 'jira' && record.kind === 'issue' && row.targetType === 'issue' && jiraCheckpoint &&
               bound.type === 'issue' && bound.id === row.targetId && refreshIssueIds.has(bound.id)) return false;
           if (source.product === 'confluence' && record.kind === 'page' && row.targetType === 'document' && row.confluencePageFieldHashes &&
               bound.type === 'document' && bound.id === row.targetId && refreshDocumentIds.has(bound.id)) return false;

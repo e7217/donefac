@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { buildMigrationOptions,buildMigrationPlan } from '../../server/migration-planner.js';
 import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
-import type { LegacyDataset,LegacyRecord,User } from '../../shared/types.js';
+import type { LegacyDataset,LegacyRecord,LegacyValue,User } from '../../shared/types.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
@@ -78,6 +78,118 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
   assert.deepEqual(bad.issueUpdates, []);
   assert.ok(bad.preview.notices.some(notice => notice.code === 'JIRA_REFRESH_FIELD_UNAVAILABLE' && notice.message.includes('설명')));
   assert.ok(bad.preview.notices.some(notice => notice.code === 'JIRA_REFRESH_FIELD_UNAVAILABLE' && notice.message.includes('라벨')));
+});
+
+test('Jira custom refresh uses proven initial mappings and the resulting field visibility', () => {
+  const textField = (id: string, title: string) => record('field', id, { title, metadata: { fieldType: 'text' } });
+  const numberField = (id: string) => record('field', id, { title: '점수', metadata: { fieldType: 'number' } });
+  const flag = record('field', 'customfield_101', { title: '계속 진행', metadata: { fieldType: 'boolean' } });
+  const date = record('field', 'customfield_102', { title: '확인일', metadata: { fieldType: 'date' } });
+  const conditional = textField('customfield_103', '진행 설명');
+  const local = textField('customfield_104', '검토 메모');
+  const omitted = textField('customfield_105', '빠진 항목');
+  const wrong = textField('customfield_106', '다른 원본');
+  const sourceIssue = (at: string, fields: Record<string, LegacyValue>, title = 'Jira 업무') => issue('1', {
+    title, updatedAt: at, metadata: { key: 'OLD-1', fields: { status: 'open', issuetype: 'bug', ...fields } },
+  });
+  const baselinePackage = pkg('jira', 'jira', [numberField('100'), flag, date, conditional, local, omitted,
+    sourceIssue(created, { '100': 0, customfield_101: false, customfield_102: '2020-01-31', customfield_103: '첫 설명',
+      customfield_104: '첫 메모', customfield_105: '초기 원문' })]);
+  const original = input([baselinePackage]);
+  const baseline = buildMigrationPlan(original);
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const canonical = baseline.issues[0], project = baseline.projects[0], workflow = baseline.workflows[0];
+  const schema = baseline.issueSchemas[0];
+  const [points, enable, verifyAt, detail, memo, missing] = ['점수', '계속 진행', '확인일', '진행 설명', '검토 메모', '빠진 항목']
+    .map(name => schema.fields.find(field => field.name === name)!.id);
+  schema.fields.find(field => field.id === detail)!.visibleWhen = { statusIds: [], fieldMatch: { fieldId: enable, value: true } };
+  const recorded = baseline.sourceRecords.find(row => row.targetId === canonical.id)!;
+  assert.equal(recorded.jiraCustomFieldHashes?.[points].sourceFieldId, '100');
+  const legacy = structuredClone(recorded);
+  delete legacy.jiraCustomFieldHashes;
+  const old = { archive: legacy, stagingId: baselinePackage.summary.id, configuration: original.configuration };
+  const edited = { ...canonical, customFields: { ...canonical.customFields, [memo]: '팀 편집' } };
+  const refresh = (name: string, incoming: LegacyRecord[], current = edited, previousCustom = old) => {
+    const delta = pkg(name, 'jira', incoming);
+    delta.dataset.source.instanceKey = baselinePackage.dataset.source.instanceKey;
+    const preview = input([delta]);
+    const maps: Record<string, string> = { customfield_100: points, customfield_101: enable, customfield_102: verifyAt,
+      customfield_103: detail, customfield_104: memo, customfield_105: missing, customfield_106: missing };
+    preview.configuration.appendTo = { projectId: project.id, refreshCustomFields: true, statuses: {}, issueTypes: {},
+      fields: Object.fromEntries(buildMigrationOptions([delta]).fields.map(option => [option.id, maps[option.sourceValue]])) };
+    preview.append = { project, workflow, schema, nextIssueNumber: 2, token: 'custom-preview',
+      knownIssues: [{ alias: '1', issueId: canonical.id, projectId: project.id }],
+      refreshIssues: [{ issue: current, previous: old, previousCustom }] };
+    return { plan: buildMigrationPlan(preview), configuration: preview.configuration, stagingId: delta.summary.id };
+  };
+  const newer = '2020-02-01T00:00:00Z';
+  const first = refresh('delta', [numberField('customfield_100'), flag, date, conditional, local, omitted, wrong,
+    sourceIssue(newer, { customfield_100: null, customfield_101: true, customfield_102: '2020-02-31', customfield_103: '새 설명',
+      customfield_104: 'Jira 새 메모', customfield_106: '반영하면 안 되는 값' }, 'Jira 변경 제목')]);
+  assert.equal(first.plan.preview.canApply, true, JSON.stringify(first.plan.preview.notices));
+  assert.deepEqual(first.plan.issueUpdates?.[0].changes, { customFields: { [points]: null, [enable]: true, [detail]: '새 설명' } });
+  assert.equal(first.plan.preview.counts.updatedCustomFields, 3);
+  assert.equal(first.plan.preview.counts.conflictingCustomFields, 1);
+  assert.equal(first.plan.preview.counts.updatedFields, 0);
+  assert.deepEqual(first.plan.preview.issueRefresh?.[0].customFields?.find(row => row.fieldId === memo),
+    { fieldId: memo, label: '검토 메모', current: '팀 편집', incoming: 'Jira 새 메모', decision: 'conflict' });
+  assert.ok(notices(first.plan).has('JIRA_REFRESH_CUSTOM_FIELD_ORIGIN_UNCONFIRMED'));
+  assert.ok(notices(first.plan).has('JIRA_REFRESH_CUSTOM_FIELD_UNAVAILABLE'));
+  const checkpoint = first.plan.sourceRecords.find(row => row.targetId === canonical.id)!;
+  assert.equal(checkpoint.jiraIssueFieldHashes, undefined);
+  assert.deepEqual(checkpoint.jiraCustomFieldHashes?.[missing], recorded.jiraCustomFieldHashes?.[missing]);
+  assert.deepEqual(checkpoint.jiraCustomFieldHashes?.[memo], recorded.jiraCustomFieldHashes?.[memo]);
+  const retryAt = '2020-02-02T00:00:00Z';
+  const retry = refresh('retry', [local, omitted, sourceIssue(retryAt, { customfield_104: 'Jira 새 메모', customfield_105: '돌아온 항목' })],
+    { ...canonical, customFields: { ...canonical.customFields, ...first.plan.issueUpdates?.[0].changes.customFields } },
+    { archive: checkpoint, stagingId: first.stagingId, configuration: first.configuration });
+  assert.deepEqual(retry.plan.issueUpdates?.[0].changes, { customFields: { [memo]: 'Jira 새 메모', [missing]: '돌아온 항목' } });
+  const hidden = refresh('hidden', [conditional, sourceIssue(newer, { customfield_103: '숨겨진 변경분' })]);
+  assert.equal(hidden.plan.preview.canApply, false);
+  assert.deepEqual(hidden.plan.issueUpdates, []);
+  assert.ok(notices(hidden.plan).has('JIRA_REFRESH_CUSTOM_FIELD_UNAVAILABLE'));
+});
+
+test('Jira CSV custom change review can populate and then clear an explicitly blank cell', () => {
+  const id = 'csv:Custom field (점수)';
+  const snapshot = (name: string, rows: string[]): MigrationPackage => {
+    const filename = `${name}.csv`;
+    const data = ['Issue id,Issue key,Project id,Project key,Summary,Created,Updated,Status,Issue Type,Custom field (점수)', ...rows].join('\r\n');
+    const source = pkg(name, 'jira', []);
+    source.dataset = parseJira(new Map([[filename, Buffer.from(data)]]), 'csv-custom');
+    source.summary = { ...source.summary, filename, source: source.dataset.source };
+    return source;
+  };
+  const one = (at: string, points: string) => `1,OLD-1,42,OLD,업무,${created},${at},Open,Task,${points}`;
+  const initial = snapshot('initial-blank', [one(created, ''), `2,OLD-2,42,OLD,참고 업무,${created},${created},Open,Task,1`]);
+  const configured = input([initial]);
+  const option = buildMigrationOptions([initial]).fields.find(option => option.sourceValue === id)!;
+  configured.configuration.fields[option.id] = 'number';
+  const imported = buildMigrationPlan(configured);
+  assert.equal(imported.preview.canApply, true, JSON.stringify(imported.preview.notices));
+  const canonical = imported.issues[0], project = imported.projects[0], workflow = imported.workflows[0], schema = imported.issueSchemas[0];
+  const field = schema.fields.find(field => field.name === option.label)!;
+  assert.equal(Object.hasOwn(canonical.customFields!, field.id), false);
+  const archive = imported.sourceRecords.find(row => row.targetId === canonical.id)!;
+  assert.equal(archive.jiraCustomFieldHashes?.[field.id].sourceFieldId, id);
+  const initialBaseline = { archive, stagingId: initial.summary.id, configuration: configured.configuration };
+  const refresh = (source: MigrationPackage, current = canonical, previousCustom = initialBaseline) => {
+    const next = input([source]);
+    const option = buildMigrationOptions([source]).fields.find(option => option.sourceValue === id)!;
+    next.configuration.appendTo = { projectId: project.id, refreshCustomFields: true,
+      statuses: {}, issueTypes: {}, fields: { [option.id]: field.id } };
+    next.append = { project, workflow, schema, nextIssueNumber: 3, token: 'csv-custom-preview',
+      knownIssues: [{ alias: '1', issueId: canonical.id, projectId: project.id }],
+      refreshIssues: [{ issue: current, previous: initialBaseline, previousCustom }] };
+    return buildMigrationPlan(next);
+  };
+  const filledSource = snapshot('filled', [one('2020-02-01T00:00:00Z', '0')]);
+  const filled = refresh(filledSource);
+  assert.deepEqual(filled.issueUpdates?.[0].changes.customFields, { [field.id]: 0 });
+  const checkpoint = filled.sourceRecords.find(row => row.targetId === canonical.id)!;
+  const cleared = refresh(snapshot('cleared', [one('2020-02-02T00:00:00Z', '')]), { ...canonical, customFields: { [field.id]: 0 } },
+    { archive: checkpoint, stagingId: filledSource.summary.id, configuration: filled.preview.configuration });
+  assert.deepEqual(cleared.issueUpdates?.[0].changes.customFields, { [field.id]: null });
 });
 
 test('pure planning merges selected containers, preserves typed zero/false and archives every original history/author exactly',()=>{

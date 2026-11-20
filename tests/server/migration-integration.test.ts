@@ -15,7 +15,7 @@ import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -273,6 +273,142 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   const next = await f.call<Issue>('/issues', 'POST', { projectId, title: '이관으로 번호가 소비되지 않는 팀 업무' });
   assert.equal(next.status, 201, JSON.stringify(next.data));
   assert.equal(next.data.key, 'SYNC-4');
+});
+
+test('Jira custom field refresh survives a legacy restore and advances independently of standard fields', async t => {
+  const origin = await fixture(), target = await fixture();
+  t.after(() => Promise.all([origin.close(), target.close()]));
+  const names = { customfield_100: '리스크', customfield_101: '기존 점수', customfield_102: '승인', customfield_103: '누락할 메모', customfield_104: '승인 점수' };
+  const kinds = { customfield_100: 'text', customfield_101: 'number', customfield_102: 'checkbox', customfield_103: 'text', customfield_104: 'number' } as const;
+  const upload = (f: MigrationFixture, name: string, day: number, description: string, customFields: Record<string, unknown>) => {
+    const issue = { id: '500', key: 'ORIG-1', fields: { project: { id: '10100', key: 'ORIG', name: '팀 Jira' },
+      summary: '팀 티켓', description, created: '2020-07-01T00:00:00Z', updated: `2020-07-0${day}T00:00:00Z`,
+      issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' }, ...customFields } };
+    return f.upload(Buffer.from(JSON.stringify({ names, issues: [issue] })), `${name}.json`, 'jira', 'synthetic-jira-custom-refresh');
+  };
+  const baseline = await upload(origin, 'jira-custom-initial', 2, '최초 설명', {
+    customfield_100: '중간', customfield_101: 3, customfield_102: false, customfield_103: '계속 유지', customfield_104: 9,
+  });
+  const initialConfig = await origin.configuration(baseline, 'CUST');
+  const initialOptions = (await origin.call<MigrationOptions>(`/migrations/options?packageId=${baseline.id}`)).data;
+  for (const field of initialOptions.fields) initialConfig.fields[field.id] = kinds[field.sourceValue as keyof typeof kinds];
+  const first = await origin.apply(await origin.preview(initialConfig));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[] };
+  const old = (await origin.call<Backup>('/export')).data;
+  const seeded = old.sourceRecords.find(row => row.record.kind === 'issue' && row.targetType === 'issue');
+  assert.equal(Object.keys(seeded?.jiraCustomFieldHashes ?? {}).length, 5);
+  old.schemaVersion = 42;
+  for (const row of old.sourceRecords) delete row.jiraCustomFieldHashes;
+  for (const receipt of old.sourceImports) delete receipt.integrity;
+  assert.equal((await target.call('/import', 'POST', { data: old })).status, 200);
+
+  const ticket = async () => (await target.call<WorkspaceSnapshot>('/workspace')).data.issues.find(row => row.projectId === projectId)!;
+  const schemaPath = `/projects/${projectId}/issue-schema`;
+  const schema = (await target.call<ProjectIssueSchema>(schemaPath)).data;
+  const ids = Object.fromEntries(schema.fields.map(field => [field.name, field.id]));
+  const [risk, score, approval, omitted, conditional] = Object.values(names).map(name => ids[name]);
+  const changedSchema = await target.call(schemaPath, 'PATCH', { ...schema, expectedVersion: schema.version, fields: schema.fields.map(field =>
+    field.id === conditional ? { ...field, visibleWhen: { statusIds: [], fieldMatch: { fieldId: approval, value: true } } } : field) });
+  assert.equal(changedSchema.status, 200, JSON.stringify(changedSchema.data));
+  const initial = await ticket();
+  assert.deepEqual(initial.customFields, { [risk]: '중간', [score]: 3, [approval]: false, [omitted]: '계속 유지', [conditional]: 9 });
+  const local = await target.call<Issue>(`/issues/${initial.id}`, 'PATCH', { expectedVersion: initial.version,
+    customFields: { ...initial.customFields, [risk]: '팀에서 결정한 리스크' } });
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+  const delta = await upload(target, 'jira-custom-delta', 3, '첫 변경 설명', {
+    customfield_100: 'Jira에서 변경한 리스크', customfield_101: null, customfield_102: true, customfield_104: 0,
+  });
+  async function settings(pkg: LegacyPackageSummary, kind: 'standard' | 'custom'): Promise<MigrationConfiguration> {
+    const options = (await target.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+    const append = options.appendTarget;
+    assert.equal(append?.projectId, projectId);
+    return { ...options.defaultConfiguration, appendTo: { projectId,
+      ...(kind === 'standard' ? { refreshExisting: true } : { refreshCustomFields: true }),
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, append!.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, append!.issueTypes.find(type => type.name === option.label)!.id])),
+      fields: Object.fromEntries(options.fields.map(option => [option.id, ids[option.label] ?? null])),
+    } };
+  }
+  const standard = await target.preview(await settings(delta, 'standard'));
+  assert.equal(standard.canApply, true, JSON.stringify(standard.notices));
+  assert.equal((await target.apply(standard)).status, 201);
+  assert.deepEqual((await ticket()).customFields, local.data.customFields);
+
+  const customConfig = await settings(delta, 'custom');
+  const invalid = await target.call('/migrations/preview', 'POST', { configuration: {
+    ...customConfig, appendTo: { ...customConfig.appendTo, refreshCustomFields: false },
+  } });
+  assert.equal(invalid.status, 400);
+  const review = await target.preview(customConfig);
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  assert.equal(review.counts.issues, 0);
+  assert.equal(review.counts.updatedCustomFields, 3);
+  assert.equal(review.counts.conflictingCustomFields, 1);
+  assert.deepEqual(review.issueRefresh?.[0].fields, []);
+  assert.deepEqual(Object.fromEntries(review.issueRefresh?.[0].customFields?.map(field => [field.fieldId, field.decision]) ?? []), {
+    [risk]: 'conflict', [score]: 'apply', [approval]: 'apply', [conditional]: 'apply',
+  });
+  const afterStandard = await ticket();
+  target.db.exec(`CREATE TRIGGER fail_jira_custom_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Jira custom receipt failure'); END;`);
+  try { assert.equal((await target.apply(review)).status, 500); }
+  finally { target.db.exec('DROP TRIGGER fail_jira_custom_receipt'); }
+  assert.deepEqual(await ticket(), afterStandard);
+  const stale = await target.preview(customConfig);
+  const applied = await target.apply(review);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal((await target.apply(review)).data.duplicate, true);
+  assert.equal((await target.apply(stale)).status, 409);
+  assert.equal((await ticket()).description, '첫 변경 설명');
+  assert.deepEqual((await ticket()).customFields, { [risk]: '팀에서 결정한 리스크', [score]: null, [approval]: true, [omitted]: '계속 유지', [conditional]: 0 });
+
+  const backup = (await target.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const checkpoint = backup.sourceRecords.find(row => row.sourceImportId === applied.data.import.id && row.targetType === 'issue');
+  assert.ok(checkpoint?.jiraCustomFieldHashes?.[score]);
+  assert.equal(checkpoint.jiraIssueFieldHashes, undefined);
+  assert.equal((await target.call('/import', 'POST', { data: { ...backup, schemaVersion: 42 } })).status, 400);
+  assert.equal((await target.call('/import', 'POST', { data: backup })).status, 200);
+  assert.equal((await target.preview(customConfig)).canApply, false);
+
+  const newer = await upload(target, 'jira-custom-follow-up', 4, '두 번째 변경 설명', { customfield_101: 7 });
+  const nextCustom = await target.preview(await settings(newer, 'custom'));
+  assert.equal(nextCustom.canApply, true, JSON.stringify(nextCustom.notices));
+  assert.equal(nextCustom.counts.updatedCustomFields, 1);
+  assert.equal((await target.apply(nextCustom)).status, 201);
+  assert.equal((await ticket()).customFields?.[score], 7);
+  assert.equal((await ticket()).description, '첫 변경 설명');
+  const nextStandard = await target.preview(await settings(newer, 'standard'));
+  assert.equal(nextStandard.canApply, true, JSON.stringify(nextStandard.notices));
+  assert.equal((await target.apply(nextStandard)).status, 201);
+  assert.equal((await ticket()).description, '두 번째 변경 설명');
+  assert.equal((await ticket()).customFields?.[score], 7);
+
+  const latestSchema = (await target.call<ProjectIssueSchema>(schemaPath)).data;
+  assert.equal((await target.call(schemaPath, 'PATCH', { ...latestSchema, expectedVersion: latestSchema.version,
+    fields: latestSchema.fields.map(field => field.id === score ? { ...field, required: true } : field),
+  })).status, 200);
+  const missing = await upload(target, 'jira-required-field-clear', 5, '필수값 검증', { customfield_101: null });
+  const blocked = await target.preview(await settings(missing, 'custom'));
+  assert.equal(blocked.canApply, false);
+  assert.ok(blocked.notices.some(notice => notice.code === 'JIRA_REFRESH_VALIDATION' && notice.message.includes(names.customfield_101)));
+  assert.equal((await ticket()).customFields?.[score], 7);
+
+  const both = await upload(target, 'jira-combined-refresh', 5, '함께 적용한 설명', { customfield_101: 8 });
+  const bothConfig = await settings(both, 'custom');
+  bothConfig.appendTo!.refreshExisting = true;
+  const combined = await target.preview(bothConfig);
+  const beforeCombined = await ticket();
+  assert.equal(combined.canApply, true, JSON.stringify(combined.notices));
+  assert.equal(combined.counts.updatedFields, 1);
+  assert.equal(combined.counts.updatedCustomFields, 1);
+  assert.equal((await target.apply(combined)).status, 201);
+  const afterCombined = await ticket();
+  assert.equal(afterCombined.version, beforeCombined.version + 1);
+  assert.equal(afterCombined.description, '함께 적용한 설명');
+  assert.equal(afterCombined.customFields?.[score], 8);
 });
 
 const gitlabPath = '/integrations/gitlab';

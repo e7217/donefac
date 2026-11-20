@@ -61,7 +61,7 @@ import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '..
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
-import { issueSearchText } from '../shared/issue-schema.js';
+import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ResourceLink, type SourceImport } from '../shared/types.js';
 
@@ -401,19 +401,34 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   sourcePreservation.registerRoutes(app);
   registerSourceReconciliationRoutes(app, { store, files, preservation: sourcePreservation, trash });
   const jiraRefreshFields = new Set<string>(JIRA_MIGRATION_ISSUE_FIELDS);
-  const prepareJiraRefresh = (update: MigrationJiraIssueUpdate, projectId: string) => {
+  const prepareJiraRefresh = (update: MigrationJiraIssueUpdate, projectId: string, allowStandard: boolean, allowCustom: boolean) => {
     const before = store.get<Issue>('issues', update.issueId);
     if (!before || before.projectId !== projectId || before.version !== update.expectedVersion) {
       return fail('이관을 검토하는 동안 업무가 변경되었습니다. 미리보기를 다시 만들어 주세요.', 409);
     }
-    const fields = Object.keys(update.changes);
-    if (!fields.length || fields.some(field => !jiraRefreshFields.has(field))) fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
+    const { customFields, ...changes } = update.changes;
+    const fields = Object.keys(changes);
+    if (fields.length && (!allowStandard || fields.some(field => !jiraRefreshFields.has(field)))) {
+      fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
+    }
+    if (customFields !== undefined && (!allowCustom || !customFields || typeof customFields !== 'object' || Array.isArray(customFields))) {
+      fail('Jira에서 반영할 사용자 정의 필드를 확인해 주세요.', 409);
+    }
+    const customIds = Object.keys(customFields ?? {});
+    if (!fields.length && !customIds.length) fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
+    const mergedFields = customIds.length ? { ...before.customFields, ...customFields } : before.customFields;
     let after: Issue;
-    try { after = validateIssue({ ...before, ...update.changes, version: before.version + 1, updatedAt: now() }, before); }
+    try { after = validateIssue({ ...before, ...changes, customFields: mergedFields, version: before.version + 1, updatedAt: now() }, before); }
     catch (error) {
       if (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
           error instanceof PlanningError || error instanceof WorkloadError) return fail(`${before.key} · ${error.message}`, error.status);
       throw error;
+    }
+    if (customIds.length) {
+      const schema = issueSchemas.get(projectId);
+      const visible = visibleIssueFieldIds(schema, after);
+      if (customIds.some(id => !visible.has(id))) return fail(`${before.key} · 표시 조건에 맞는 사용자 정의 필드를 확인해 주세요.`, 422);
+      for (const field of schema.fields) if (customIds.includes(field.id)) fields.push(field.name);
     }
     after.completedAt = done(after) ? (before.completedAt || after.updatedAt) : null;
     return { before, after, fields };
@@ -422,11 +437,13 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const updates = value.issueUpdates ?? [];
     if (!updates.length) return [];
     const projectId = value.append?.projectId;
-    if (!projectId || value.preview.configuration.appendTo?.refreshExisting !== true ||
+    const append = value.preview.configuration.appendTo;
+    const allowStandard = append?.refreshExisting === true, allowCustom = append?.refreshCustomFields === true;
+    if (!projectId || append?.projectId !== projectId || (!allowStandard && !allowCustom) ||
         new Set(updates.map(update => update.issueId)).size !== updates.length) {
       return fail('Jira에서 변경분을 반영할 프로젝트와 업무를 확인해 주세요.', 409);
     }
-    return updates.map(update => prepareJiraRefresh(update, projectId));
+    return updates.map(update => prepareJiraRefresh(update, projectId, allowStandard, allowCustom));
   };
   const confluenceRefreshFields = new Set<string>(CONFLUENCE_MIGRATION_DOCUMENT_FIELDS);
   const prepareConfluenceRefreshes = (value: PreparedMigration) => {
@@ -1333,6 +1350,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(data.schemaVersion<40&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshExisting!==undefined))fail('기존 Confluence 문서의 변경분을 반영한 영수증에는 schemaVersion 40 백업이 필요합니다.');
     if(data.schemaVersion<41&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshAttachments!==undefined))fail('기존 Confluence 문서의 첨부를 추가한 영수증에는 schemaVersion 41 백업이 필요합니다.');
     if(data.schemaVersion<42&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshHistory!==undefined))fail('기존 Confluence 문서의 댓글과 이력을 추가한 영수증에는 schemaVersion 42 백업이 필요합니다.');
+    if(data.schemaVersion<43&&(
+      (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshCustomFields!==undefined))||
+      (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraCustomFieldHashes')))
+    ))fail('Jira 사용자 정의 필드의 변경분 설정과 비교 기준에는 schemaVersion 43 백업이 필요합니다.');
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};

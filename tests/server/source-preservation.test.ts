@@ -106,6 +106,51 @@ test('native source validation rejects membership, identity, author, owner, vers
   } finally { f.close(); }
 });
 
+test('Jira custom field checkpoints round-trip and require a linked Jira issue and explicit refresh for existing issues', () => {
+  const f = fixture(); try {
+    const hashes = { project_code: { sourceFieldId: 'customfield_10010', hash: 'a'.repeat(64) } };
+    f.originalIssue.jiraCustomFieldHashes = hashes;
+    persist(f);
+    const saved = data(f);
+    const read = () => f.service.record(f.prepared.sourceImport.id, f.originalIssue.id);
+    assert.deepEqual(read().jiraCustomFieldHashes, hashes);
+    assert.deepEqual(f.service.validateImport(saved, f.context()).records.find(row => row.id === f.originalIssue.id)?.jiraCustomFieldHashes, hashes);
+
+    for (const bad of [[], {}, { project_code: { sourceFieldId: '', hash: 'a'.repeat(64) } },
+      { project_code: { sourceFieldId: 'customfield_10010', hash: 'invalid' } },
+      { project_code: { ...hashes.project_code, extra: 'value' } }, { constructor: hashes.project_code }]) {
+      const invalid = structuredClone(saved);
+      delete invalid.imports[0].integrity;
+      Object.assign(invalid.records.find(row => row.id === f.originalIssue.id)!, { jiraCustomFieldHashes: bad });
+      assert.throws(() => f.service.validateImport(invalid, f.context()), isError());
+    }
+    const wrongOwner = structuredClone(saved);
+    delete wrongOwner.imports[0].integrity;
+    wrongOwner.records.find(row => row.id === f.page.id)!.jiraCustomFieldHashes = hashes;
+    assert.throws(() => f.service.validateImport(wrongOwner, f.context()), isError());
+
+    const [pkg] = f.prepared.sourceImport.packages;
+    const newer = structuredClone(f.prepared), id = randomUUID();
+    newer.sourceImport = { ...newer.sourceImport, id, projectIds: [f.originalIssue.targetProjectId!], packages: [pkg], counts: {},
+      configuration: { ...newer.sourceImport.configuration, projects: [], packageIds: [pkg.stagingId],
+        appendTo: { projectId: f.originalIssue.targetProjectId!, statuses: {}, issueTypes: {}, fields: {} } } };
+    newer.issues = [];
+    newer.sourceRecords = [{ ...structuredClone(f.originalIssue), id: randomUUID(), sourceImportId: id,
+      jiraCustomFieldHashes: { project_code: { ...hashes.project_code, hash: 'b'.repeat(64) } } }];
+    newer.attachmentVersions = [];
+    newer.issueRelations = [];
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(newer)), isError());
+    assert.equal(f.service.hasImport(id), false);
+    Object.assign(newer.sourceImport.configuration.appendTo!, { refreshCustomFields: false });
+    assert.throws(() => f.store.transaction(() => f.service.persistPrepared(newer)), isError());
+    Object.assign(newer.sourceImport.configuration.appendTo!, { refreshCustomFields: true });
+    const receipt = f.store.transaction(() => f.service.persistPrepared(newer));
+    assert.equal(receipt.configuration.appendTo?.refreshCustomFields, true);
+    assert.deepEqual(f.service.record(id, newer.sourceRecords[0].id).jiraCustomFieldHashes, newer.sourceRecords[0].jiraCustomFieldHashes);
+    assert.deepEqual(read().jiraCustomFieldHashes, hashes);
+  } finally { f.close(); }
+});
+
 test('Confluence attachment extensions retain a validated source root and yield to manually added versions', () => {
   const f = fixture(); try {
     const anchor = f.prepared.attachments[0];

@@ -147,14 +147,17 @@ export interface MigrationAppendConfiguration {
   issueTypes: Record<string, string>;
   fields: Record<string, string | null>;
   refreshExisting?: true;
+  refreshCustomFields?: true;
 }
 export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
-export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>>;
+export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>> & { customFields?: Record<string, CustomFieldValue> };
 export type JiraMigrationIssueFieldHashes = Partial<Record<JiraMigrationIssueField, string>>;
+export type JiraMigrationCustomFieldHashes = Record<string, { sourceFieldId: string; hash: string }>;
 export interface JiraMigrationIssueReview {
   issueId: string; key: string; sourceKey: string;
   fields: { field: JiraMigrationIssueField; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
+  customFields?: { fieldId: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
 }
 export interface MigrationPageAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceSpaceId: string; sourceSpaceKey?: string;
@@ -219,6 +222,7 @@ export interface SourceRecordArchive {
   ownerType:'issue'|'document'|null;ownerId:string|null;
   excluded?:true;
   jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
+  jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }

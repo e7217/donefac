@@ -356,6 +356,12 @@ webhook-signature: v1,<Base64(HMAC-SHA256(key, id + "." + timestamp + "." + rawB
 
 `preview.issueRefresh`는 Teamspace 업무 키, 원래 Jira 업무 키와 각 필드의 현재 값·원본 값·반영 여부를 보여준다. `updatedIssues`, `updatedFields`, `conflictingFields`, `skippedIssueUpdates`에서 반영·충돌·건너뛴 업무 건수를 확인한다. 한 요청은 기존 티켓 1,000개와 비교에 쓰는 데이터 64MiB까지 지원한다. 워크플로 전이와 필수 필드를 검증하고, 적용 전 티켓이 수정되면 새 미리보기가 필요하다. 새 티켓 추가와 기존 티켓 갱신은 하나의 이관으로 적용할 수 있다. 형식 39 자체 백업은 변경분 이관 설정과 필드별 비교 기준을 보존한다.
 
+### 이미 이관한 Jira 업무에 사용자 정의 필드 변경분 반영
+
+`appendTo.refreshCustomFields: true`를 지정하고 `appendTo.fields`에서 원본 속성을 기존 Teamspace 필드 ID에 연결한다. 기본 필드 옵션과 개별 또는 함께 적용할 수 있다. 원본 속성의 식별자와 기존 매핑을 확인한 뒤 새 값을 이전 이관 기준 및 현재 값과 비교한다. 생략한 원본 값, 팀이 수정한 값, 이관 기준이나 현재 표시 조건을 확인할 수 없는 값은 보존한다.
+
+미리보기의 `issueRefresh[].customFields`는 현재 필드 이름·현재 값·원본 값·반영 여부를 반환한다. `updatedCustomFields`와 `conflictingCustomFields`에서 반영하고 보존할 필드 수를 확인한다. 같은 티켓의 기본 필드 및 사용자 정의 필드는 하나의 검증된 편집으로 저장된다. 형식 43 자체 백업은 기본 필드와 독립적으로 다음 비교에 사용할 사용자 정의 필드의 기준을 보존한다.
+
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
 선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.

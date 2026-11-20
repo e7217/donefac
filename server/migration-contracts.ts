@@ -5,6 +5,7 @@ export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyD
 export interface MigrationJiraRefreshCandidate {
   issue: Issue;
   previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration };
+  previousCustom?: MigrationJiraRefreshCandidate['previous'];
 }
 export interface MigrationJiraIssueUpdate {
   issueId: string;

@@ -1,7 +1,7 @@
 import { createHash,randomUUID } from 'node:crypto';
-import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
+import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
-import { defaultIssueSchema, fieldApplies } from '../shared/issue-schema.js';
+import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { contentReferences } from '../shared/document-nodes.js';
@@ -12,6 +12,7 @@ import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
+import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -223,6 +224,15 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
 
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
+type JiraCustomFieldOption = MigrationOptions['fields'][number];
+type JiraCustomFieldReview = NonNullable<JiraMigrationIssueReview['customFields']>[number];
+interface JiraCustomFieldConversion {
+  timezone: string;
+  stagingId: string;
+  users: MigrationConfiguration['users'];
+  previousValue?: CustomFieldValue;
+  originalMapping?: 'generated' | 'existing';
+}
 type KnownIssue = { issueId: string; projectId: string | null };
 type KnownPage = MigrationPageAppendContext['knownPages'][number];
 type ResolvedReference = { id: string; label: string; url?: string };
@@ -268,7 +278,7 @@ class Planner{
   private borrowedAttachmentVersions = new Map<string, AttachmentVersion>();
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
-  private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes: JiraMigrationIssueFieldHashes }>();
+  private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
   private missingHistoryPrimaryNotices: { message: string; entry?: Entry }[] = [];
@@ -479,16 +489,170 @@ class Planner{
     if (field === 'priority') label = PRIORITY[value as Issue['priority']];
     return label.length > 300 ? `${label.slice(0, 297)}…` : label;
   }
+  private jiraCustomSourceOptions(entry: Entry, explicitEmpty = false): JiraCustomFieldOption[] {
+    const options = this.fieldOptions.get(entry.pkg.summary.id);
+    const keys = Object.keys(fieldMap(entry.row));
+    const observed = entry.row.metadata.jiraSnapshotCustomFields;
+    if (explicitEmpty && Array.isArray(observed)) keys.push(...observed.filter((key): key is string => typeof key === 'string'));
+    return [...new Set(keys.map(name => options?.get(name)))].filter(
+      (option): option is JiraCustomFieldOption => option !== undefined && jiraCustomRawField(entry.row, option.sourceValue, explicitEmpty) !== undefined,
+    );
+  }
+  private initialJiraCustomFieldHashes(entry: Entry, issue: Issue): JiraMigrationCustomFieldHashes | undefined {
+    const definitions = this.schemas.get(issue.projectId)?.fields ?? [];
+    const mapping = this.configuration.appendTo?.fields;
+    const hashes: JiraMigrationCustomFieldHashes = {};
+    const seen = new Set<string>();
+    for (const option of this.jiraCustomSourceOptions(entry, true)) {
+      const fieldId = mapping ? mapping[option.id] : `f_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,option.sourceValue).slice(0,24)}`;
+      const field = definitions.find(field => field.id === fieldId);
+      if (!field || field.archived || !fieldApplies(field, issue.type) || !mapping && this.configuration.fields[option.id] !== field.kind) continue;
+      const canonical = issue.customFields && Object.hasOwn(issue.customFields, field.id) ? issue.customFields[field.id] : undefined;
+      const raw = jiraCustomRawField(entry.row, option.sourceValue);
+      const converted = canonical !== undefined && raw !== undefined;
+      const observedBlank = canonical === undefined && raw === undefined && jiraCustomRawField(entry.row, option.sourceValue, true) === null;
+      if (!converted && !observedBlank) continue;
+      if (seen.has(field.id)) { delete hashes[field.id]; continue; }
+      seen.add(field.id);
+      hashes[field.id] = { sourceFieldId: option.sourceValue, hash: jiraCustomValueDigest(field, canonical) };
+    }
+    return Object.keys(hashes).length ? hashes : undefined;
+  }
+  private originalJiraCustomFieldHashes(entry: Entry, previous: MigrationJiraRefreshCandidate['previous'],
+    definitions: ReadonlyMap<string, CustomFieldDefinition>): JiraMigrationCustomFieldHashes {
+    const { archive, configuration, stagingId } = previous;
+    if (archive.jiraCustomFieldHashes) {
+      return Object.fromEntries(Object.entries(archive.jiraCustomFieldHashes).filter(([fieldId]) => definitions.has(fieldId)));
+    }
+    const mappings = new Map<string, { field: CustomFieldDefinition; sourceFieldId: string; raw: LegacyValue }[]>();
+    const sourceFields = new Set(Object.keys(fieldMap(archive.record)).flatMap(name => [name, `csv:${name}`]));
+    const observed = archive.record.metadata.jiraSnapshotCustomFields;
+    if (Array.isArray(observed)) for (const sourceFieldId of observed) if (typeof sourceFieldId === 'string') sourceFields.add(sourceFieldId);
+    for (const sourceFieldId of sourceFields) {
+      const raw = jiraCustomRawField(archive.record, sourceFieldId, true);
+      if (raw === undefined) continue;
+      const archivedOptionId = optionId(stagingId, 'field', sourceFieldId);
+      const fieldId = configuration.appendTo ? configuration.appendTo.fields[archivedOptionId]
+        : `f_${hash(archive.source.product,archive.source.instanceKey,sourceFieldId).slice(0,24)}`;
+      const field = fieldId && definitions.get(fieldId);
+      if (!field || !configuration.appendTo && configuration.fields[archivedOptionId] !== field.kind) continue;
+      const values = mappings.get(field.id) ?? [];
+      values.push({ field, sourceFieldId, raw });
+      mappings.set(field.id, values);
+    }
+    const hashes: JiraMigrationCustomFieldHashes = {};
+    const conversion: JiraCustomFieldConversion = { timezone: configuration.timezone, stagingId, users: configuration.users,
+      originalMapping: configuration.appendTo ? 'existing' : 'generated' };
+    for (const candidates of mappings.values()) {
+      if (candidates.length !== 1) continue;
+      const [{ field, sourceFieldId, raw }] = candidates;
+      const value = this.convertField(entry, sourceFieldId, field, raw, conversion);
+      if (value !== undefined) hashes[field.id] = { sourceFieldId, hash: jiraCustomValueDigest(field, value) };
+    }
+    return hashes;
+  }
+  private reviewJiraCustomFields(entry: Entry, issue: Issue, changes: JiraMigrationIssueValues,
+    previous: MigrationJiraRefreshCandidate['previous'], definitions: ReadonlyMap<string, CustomFieldDefinition>):
+    { rows: JiraCustomFieldReview[]; hashes?: JiraMigrationCustomFieldHashes; updated: number; conflicts: number } {
+    const mapping = this.configuration.appendTo!;
+    const schema = this.input.append!.schema;
+    const hashes = this.originalJiraCustomFieldHashes(entry, previous, definitions);
+    const groups = new Map<string, JiraCustomFieldOption[]>();
+    for (const option of this.jiraCustomSourceOptions(entry, true)) {
+      const fieldId = mapping.fields[option.id];
+      if (!fieldId) continue;
+      const group = groups.get(fieldId) ?? [];
+      group.push(option);
+      groups.set(fieldId, group);
+    }
+    const currentValues = issue.customFields ?? {};
+    const eligible: { field: CustomFieldDefinition; sourceFieldId: string; value: CustomFieldValue; digest: string }[] = [];
+    const rows: JiraCustomFieldReview[] = [];
+    let reviewed = false, conflicts = 0;
+    const label = (field: CustomFieldDefinition, value: CustomFieldValue | undefined): string => {
+      const display = fieldValueLabel(field, value, this.input.users) || '비어 있음';
+      return display.length > 300 ? `${display.slice(0, 297)}…` : display;
+    };
+    const unavailable = (name: string) => this.notice('JIRA_REFRESH_CUSTOM_FIELD_UNAVAILABLE',
+      `원본 사용자 정의 필드 '${name}' 값을 확인하거나 현재 프로젝트의 필드에 매핑할 수 없어 기존 값을 보존합니다.`, 'warning', entry);
+    for (const [fieldId, options] of groups) {
+      const [option] = options;
+      const field = definitions.get(fieldId);
+      if (!field || field.archived || !fieldApplies(field, changes.type ?? issue.type) || options.length !== 1) {
+        unavailable(field?.name ?? option.label);
+        continue;
+      }
+      const sourceFieldId = option.sourceValue;
+      const raw = jiraCustomRawField(entry.row, sourceFieldId, true)!;
+      const before = Object.hasOwn(currentValues, fieldId) ? currentValues[fieldId] : undefined;
+      const value = this.convertField(entry, sourceFieldId, field, raw, { timezone: this.configuration.timezone,
+        stagingId: entry.pkg.summary.id, users: this.configuration.users, previousValue: before });
+      if (value === undefined) { unavailable(field.name); continue; }
+      const incomingDigest = jiraCustomValueDigest(field, value);
+      const currentDigest = jiraCustomValueDigest(field, before);
+      const checkpoint = Object.hasOwn(hashes, fieldId) ? hashes[fieldId] : undefined;
+      if (!checkpoint || jiraCustomSourceFieldId(checkpoint.sourceFieldId) !== jiraCustomSourceFieldId(sourceFieldId)) {
+        this.notice('JIRA_REFRESH_CUSTOM_FIELD_ORIGIN_UNCONFIRMED',
+          `사용자 정의 필드 '${field.name}'의 이전 원본 연결을 확인할 수 없어 기존 값을 보존합니다.`, 'warning', entry);
+        continue;
+      }
+      if (checkpoint.hash === incomingDigest || this.jiraCustomRawAlreadyReviewed(entry, previous, field, checkpoint, raw)) {
+        reviewed = true;
+        continue;
+      }
+      if (currentDigest === incomingDigest) {
+        hashes[fieldId] = { sourceFieldId, hash: incomingDigest };
+        reviewed = true;
+        continue;
+      }
+      if (currentDigest !== checkpoint.hash) {
+        rows.push({ fieldId, label: field.name, current: label(field, before), incoming: label(field, value), decision: 'conflict' });
+        conflicts++;
+        continue;
+      }
+      eligible.push({ field, sourceFieldId, value, digest: incomingDigest });
+    }
+    // Conditional fields use the values and workflow state that will actually be applied together.
+    const proposed = { ...issue, ...changes, customFields: { ...currentValues, ...Object.fromEntries(eligible.map(({ field, value }) => [field.id, value])) } };
+    const visible = visibleIssueFieldIds(schema, proposed);
+    const patch: Record<string, CustomFieldValue> = {};
+    for (const { field, sourceFieldId, value, digest } of eligible) {
+      if (!visible.has(field.id)) { unavailable(field.name); continue; }
+      rows.push({ fieldId: field.id, label: field.name, current: label(field, currentValues[field.id]), incoming: label(field, value), decision: 'apply' });
+      Object.defineProperty(patch, field.id, { value, enumerable: true });
+      hashes[field.id] = { sourceFieldId, hash: digest };
+      reviewed = true;
+    }
+    const updated = Object.keys(patch).length;
+    if (updated) changes.customFields = patch;
+    return { rows, ...(reviewed && Object.keys(hashes).length ? { hashes } : {}), updated, conflicts };
+  }
+  private jiraCustomRawAlreadyReviewed(entry: Entry, previous: MigrationJiraRefreshCandidate['previous'], field: CustomFieldDefinition,
+    checkpoint: JiraMigrationCustomFieldHashes[string], raw: LegacyValue): boolean {
+    const { archive, configuration, stagingId } = previous;
+    const candidates = jiraCustomSourceFieldAliases(checkpoint.sourceFieldId).map(sourceFieldId =>
+      ({ sourceFieldId, value: jiraCustomRawField(archive.record, sourceFieldId, true) })).filter(candidate => candidate.value !== undefined);
+    if (candidates.length !== 1 || JSON.stringify(candidates[0].value) !== JSON.stringify(raw)) return false;
+    const { sourceFieldId, value } = candidates[0];
+    const archivedOptionId = optionId(stagingId, 'field', sourceFieldId);
+    if (configuration.appendTo ? configuration.appendTo.fields[archivedOptionId] !== field.id : configuration.fields[archivedOptionId] !== field.kind) return false;
+    // A prior receipt can archive a conflicting incoming value while carrying the older canonical hash forward.
+    const previousValue = this.convertField(entry, sourceFieldId, field, value, { timezone: configuration.timezone, stagingId,
+      users: configuration.users, originalMapping: configuration.appendTo ? 'existing' : 'generated' });
+    return previousValue !== undefined && jiraCustomValueDigest(field, previousValue) === checkpoint.hash;
+  }
   private createJiraRefreshes(): void {
-    if (!this.configuration.appendTo?.refreshExisting || !this.input.append) return;
+    const mapping = this.configuration.appendTo;
+    if ((!mapping?.refreshExisting && !mapping?.refreshCustomFields) || !this.input.append) return;
     const append = this.input.append;
+    const definitions = new Map(append.schema.fields.map(field => [field.id, field]));
     const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
     const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
       .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
     const review: JiraMigrationIssueReview[] = [];
     const updates: NonNullable<PreparedMigration['issueUpdates']> = [];
     const seen = new Set<string>();
-    let updatedFields = 0, conflictingFields = 0, skippedIssueUpdates = 0;
+    let updatedFields = 0, conflictingFields = 0, updatedCustomFields = 0, conflictingCustomFields = 0, skippedIssueUpdates = 0;
     for (const entry of this.entries) {
       if (entry.row.kind !== 'issue' || !this.retainedEntries.has(entry.key)) continue;
       const sourceKey = string(entry.row.metadata.key) || entry.row.sourceId;
@@ -499,24 +663,31 @@ class Planner{
         this.notice('JIRA_REFRESH_ISSUE_UNAVAILABLE', '현재 업무 연결이나 접근 범위 또는 원본 자료를 확인할 수 없어 변경분은 적용하지 않습니다.', 'warning', entry);
         continue;
       }
-      const { issue, previous } = candidate;
+      const { issue, previous, previousCustom } = candidate;
       if (seen.has(issue.id)) {
         this.notice('JIRA_REFRESH_OVERLAPPING_ISSUE', '같은 기존 업무의 기록이 겹칩니다. 패키지에서 적용할 기록 하나를 남겨 주세요.', 'error', entry);
         continue;
       }
       seen.add(issue.id);
-      const oldTimestamp = sourceTimestamp(previous.archive.record.updatedAt, previous.configuration.timezone);
       const incomingTimestamp = sourceTimestamp(entry.row.updatedAt, this.configuration.timezone);
-      if (!oldTimestamp || !incomingTimestamp || incomingTimestamp <= oldTimestamp) {
+      const newer = (source: typeof previous) => {
+        const oldTimestamp = sourceTimestamp(source.archive.record.updatedAt, source.configuration.timezone);
+        return oldTimestamp !== null && incomingTimestamp !== null && incomingTimestamp > oldTimestamp;
+      };
+      const customBaseline = previousCustom ?? (previous.archive.jiraCustomFieldHashes ? previous : undefined);
+      const reviewStandard = mapping.refreshExisting === true && newer(previous);
+      const reviewCustom = mapping.refreshCustomFields === true && customBaseline !== undefined && newer(customBaseline);
+      if (!reviewStandard && !reviewCustom) {
         skippedIssueUpdates++;
         this.notice('JIRA_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 수정 시각을 확인할 수 없어 변경분은 적용하지 않습니다.', 'info', entry);
         continue;
       }
-      if ([previous.archive.record.updatedAt, entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
+      if ([reviewStandard ? previous.archive.record.updatedAt : null, reviewCustom ? customBaseline.archive.record.updatedAt : null,
+        entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
         this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);
       }
-      const values = this.jiraRefreshValues(entry);
-      const hashes = { ...this.originalJiraIssueDigests(previous) };
+      const values = reviewStandard ? this.jiraRefreshValues(entry) : {};
+      const hashes = reviewStandard ? { ...this.originalJiraIssueDigests(previous) } : {};
       const accepted: JiraMigrationIssueValues = {};
       const fields: JiraMigrationIssueReview['fields'] = [];
       let canCheckpoint = false;
@@ -548,16 +719,24 @@ class Planner{
           updatedFields++;
         } else conflictingFields++;
       }
-      if (fields.length) review.push({ issueId: issue.id, key: issue.key, sourceKey, fields });
+      const custom = reviewCustom ? this.reviewJiraCustomFields(entry, issue, accepted, customBaseline, definitions) : undefined;
+      if (custom) { updatedCustomFields += custom.updated; conflictingCustomFields += custom.conflicts; }
+      if (fields.length || custom?.rows.length) review.push({ issueId: issue.id, key: issue.key, sourceKey, fields,
+        ...(custom?.rows.length ? { customFields: custom.rows } : {}) });
       if (Object.keys(accepted).length) updates.push({ issueId: issue.id, expectedVersion: issue.version, changes: accepted });
-      if (canCheckpoint) this.jiraRefreshCheckpoints.set(entry.key, { issue, hashes });
+      if (canCheckpoint || custom?.hashes) this.jiraRefreshCheckpoints.set(entry.key, { issue,
+        ...(canCheckpoint ? { hashes } : {}), ...(custom?.hashes ? { customHashes: custom.hashes } : {}) });
     }
     if (conflictingFields) {
       this.notice('JIRA_REFRESH_LOCAL_CONFLICT', `팀에서 수정한 필드 ${conflictingFields}개를 보존합니다.`, 'warning', undefined, true);
     }
+    if (conflictingCustomFields) {
+      this.notice('JIRA_REFRESH_CUSTOM_FIELD_CONFLICT', `팀에서 수정한 사용자 정의 필드 ${conflictingCustomFields}개를 보존합니다.`, 'warning', undefined, true);
+    }
     this.result.preview.issueRefresh = review;
     this.result.issueUpdates = updates;
     Object.assign(this.result.preview.counts, { updatedIssues: updates.length, updatedFields, conflictingFields, skippedIssueUpdates });
+    if (mapping.refreshCustomFields) Object.assign(this.result.preview.counts, { updatedCustomFields, conflictingCustomFields });
   }
   private originalPage(sourceId: string): KnownPage | undefined {
     const append = this.input.appendPages;
@@ -987,26 +1166,64 @@ class Planner{
   }
   issueDate(value:unknown,entry:Entry):string|null{value=scalar(value);if(value===undefined||value===null||value==='')return null;const raw=string(value);if(isCalendarDate(raw))return raw;const timestamp=this.time(raw,entry,false);if(!timestamp)return null;const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:this.timezoneValid?this.configuration.timezone:'UTC',year:'numeric',month:'2-digit',day:'2-digit'}),parts=Object.fromEntries(formatter.formatToParts(new Date(timestamp)).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));return`${parts.year}-${parts.month}-${parts.day}`;}
   priority(value:unknown):Issue['priority']{value=scalar(value);const label=string(object(value).name||object(value).text||value);if(/urgent|highest|blocker|긴급/i.test(label))return'urgent';if(/high|critical|높음/i.test(label))return'high';if(/low|minor|trivial|낮음/i.test(label))return'low';return'medium';}
-  convertField(entry:Entry,sourceId:string,definition:CustomFieldDefinition,input:unknown):CustomFieldValue{
-    const unwrap=(value:unknown):unknown=>{const objectValue=object(value);for(const name of ['numbervalue','stringvalue','textvalue','datevalue'])if(Object.hasOwn(objectValue,name))return objectValue[name];return value;};let value=Array.isArray(input)?input.map(unwrap):unwrap(input);if(definition.kind!=='multi_select')value=scalar(value);if(value===null||value===undefined||value==='')return null;
-    const bad=()=>{this.notice('FIELD_VALUE_INVALID',`필드 '${definition.name}' 값을 선택한 ${definition.kind} 자료형으로 손실 없이 변환할 수 없습니다. 보관 방식을 선택하거나 매핑을 고쳐 주세요.`,'error',entry);return null;};
+  convertField(entry: Entry, sourceId: string, definition: CustomFieldDefinition, input: unknown): CustomFieldValue;
+  convertField(entry: Entry, sourceId: string, definition: CustomFieldDefinition, input: unknown,
+    refresh: JiraCustomFieldConversion): CustomFieldValue | undefined;
+  convertField(entry: Entry, sourceId: string, definition: CustomFieldDefinition, input: unknown,
+    refresh?: JiraCustomFieldConversion): CustomFieldValue | undefined {
+    const unwrap = (value: unknown): unknown => {
+      const field = object(value);
+      for (const name of ['numbervalue','stringvalue','textvalue','datevalue']) if (Object.hasOwn(field, name)) return field[name];
+      return value;
+    };
+    let value = Array.isArray(input) ? input.map(unwrap) : unwrap(input);
+    const empty = (value: unknown) => value === null || value === undefined || typeof value === 'string' && !value.trim();
+    if (refresh) {
+      if (Array.isArray(value)) value = value.filter(item => !empty(item));
+      if (empty(value) || Array.isArray(value) && !value.length) return null;
+    }
+    if (definition.kind !== 'multi_select') value = scalar(value);
+    if (value === null || value === undefined || value === '') return null;
+    const bad = () => {
+      if (refresh) return undefined;
+      this.notice('FIELD_VALUE_INVALID', `필드 '${definition.name}' 값을 선택한 ${definition.kind} 자료형으로 손실 없이 변환할 수 없습니다. 보관 방식을 선택하거나 매핑을 고쳐 주세요.`, 'error', entry);
+      return null;
+    };
     if(definition.kind==='text'){if(typeof value==='object')return bad();const result=string(value);return result.length<=20000?result:bad();}
     if(definition.kind==='number'){const result=typeof value==='number'?value:typeof value==='string'&&value.trim()!==''?Number(value):NaN;return Number.isFinite(result)?result:bad();}
     if(definition.kind==='checkbox'){if(value===true||value===false)return value;if(value==='true'||value==='1'||value===1)return true;if(value==='false'||value==='0'||value===0)return false;return bad();}
-    if(definition.kind==='date'){const raw=string(value);return isCalendarDate(raw)?raw:this.issueDate(raw,entry);}
-    if(definition.kind==='user'){const id=string(object(value).accountId||object(value).key||object(value).name||value),mapped=this.configuration.users[optionId(entry.pkg.summary.id,'identity',id)];return typeof mapped==='string'?mapped:bad();}
+    if (definition.kind === 'date') {
+      const raw = string(value);
+      if (!refresh) return isCalendarDate(raw) ? raw : this.issueDate(raw, entry);
+      const date = sourceCalendarDate(raw, refresh.timezone);
+      if (date && !refresh.originalMapping && jiraEnglishDate(raw)?.century) {
+        this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);
+      }
+      return date ?? bad();
+    }
+    if (definition.kind === 'user') {
+      const id = string(object(value).accountId || object(value).key || object(value).name || object(value).username || value);
+      const mapped = (refresh?.users ?? this.configuration.users)[optionId(refresh?.stagingId ?? entry.pkg.summary.id, 'identity', id)];
+      return typeof mapped === 'string' && (!refresh || this.input.users.some(user => user.id === mapped)) ? mapped : bad();
+    }
     if(definition.kind==='url'){try{const url=new URL(string(value));return['http:','https:'].includes(url.protocol)&&!url.username&&!url.password&&url.toString().length<=4000?url.toString():bad();}catch{return bad();}}
-    const choose = (raw: unknown): string | null => {
+    const choose = (raw: unknown): string | null | undefined => {
       const objectValue = object(raw), id = string(objectValue.id || objectValue.value || objectValue.name || raw);
       if (!id) return null;
       const direct = this.sourceEntry(entry, 'option', id)?.row;
       const original = direct?.containerId === sourceId ? direct : this.sourceEntry(entry, 'option', `${sourceId}:${id}`)?.row;
       const label = string(objectValue.value || objectValue.name) || original?.title || id;
       const optionId = `o_${hash(definition.id,id).slice(0,24)}`;
+      if (refresh?.originalMapping === 'generated') return optionId;
       if (this.input.append) {
         const keyed = definition.options.filter(option => option.id === id || option.id === optionId);
-        const matches = keyed.length ? keyed : definition.options.filter(option => option.name === label);
-        if (matches.length !== 1 || matches[0].archived) return bad();
+        const matches = keyed.length || refresh?.originalMapping === 'existing' ? keyed : definition.options.filter(option => option.name === label);
+        if (matches.length !== 1) return bad();
+        const { archived, id: matchedId } = matches[0];
+        if (archived && !refresh?.originalMapping) {
+          const previous = refresh?.previousValue;
+          if (Array.isArray(previous) ? !previous.includes(matchedId) : previous !== matchedId) return bad();
+        }
         return matches[0].id;
       }
       if (label.length > 120) return bad();
@@ -1014,7 +1231,13 @@ class Planner{
       if (definition.options.length > 200 || new Set(definition.options.map(option => option.name)).size !== definition.options.length) return bad();
       return optionId;
     };
-    if(definition.kind==='multi_select'){const values=Array.isArray(value)?value:[value],result=values.map(choose);return result.some(value=>value===null)?bad():[...new Set(result as string[])];}return Array.isArray(value)?bad():choose(value);
+    if (definition.kind === 'multi_select') {
+      const values = Array.isArray(value) ? value : [value];
+      const result = values.map(choose);
+      return result.some(value => value == null) ? bad() : [...new Set(result as string[])];
+    }
+    const result = Array.isArray(value) ? bad() : choose(value);
+    return result === null && refresh ? undefined : result;
   }
   private attachmentRoot(entry: Entry): Entry | null {
     const visited = new Set<string>();
@@ -1858,6 +2081,8 @@ class Planner{
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
       const issueHashes = issueCheckpoint?.hashes ??
         (createdIssue && entry.pkg.dataset.source.product === 'jira' ? jiraFieldDigests(createdIssue) : undefined);
+      const customHashes = issueCheckpoint?.customHashes ??
+        (createdIssue && entry.pkg.dataset.source.product === 'jira' ? this.initialJiraCustomFieldHashes(entry, createdIssue) : undefined);
       const createdPage = binding?.type === 'document' ? this.documentById.get(binding.id) : undefined;
       const pageHashes = pageCheckpoint?.hashes ??
         (createdPage && entry.pkg.dataset.source.product === 'confluence' ? confluencePageFieldDigests(createdPage) : undefined);
@@ -1868,6 +2093,7 @@ class Planner{
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
+        ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
       };
       if (entry.row.kind === 'project' || entry.row.kind === 'identity') {
@@ -1927,7 +2153,9 @@ class Planner{
       });
     }
     if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendTo?.refreshExisting) this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
+      if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
+      }
       else this.notice('APPEND_NO_NEW_ISSUES', '이 프로젝트에 추가할 새 Jira 업무가 없습니다.', 'error');
     }
     if (this.input.appendPages && !this.result.documents.length && !this.result.documentUpdates?.length && !this.result.confluenceAttachmentOwners?.length && !this.result.confluenceHistoryOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
