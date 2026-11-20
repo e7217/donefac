@@ -65,8 +65,8 @@ export function IssueTypeIcon({ type, size = 15, data, projectId }: { type: stri
 export function StatusDot({ color }: { color: string }) { return <span className="issue-status-dot" style={{ background: color }} />; }
 function PriorityIcon({ value }: { value: keyof typeof PRIORITY }) { return value === 'urgent' || value === 'high' ? <ArrowUp size={14} className={value === 'urgent' ? 'issue-priority-urgent' : 'issue-priority-high'} /> : value === 'low' ? <ArrowDown size={14} className="muted" /> : <span className="issue-priority-medium">=</span>; }
 
-export function Issues(props: FeatureProps) {
-  const { data, projectId, refresh, notify, openIssue } = props;
+export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) => void }) {
+  const { data, projectId, refresh, notify, openIssue, onOpenGantt } = props;
   const [view, setView] = useState<'list' | 'board'>('list');
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
@@ -267,7 +267,7 @@ export function Issues(props: FeatureProps) {
     /></fieldset>}
     <SavedViews projectId={projectId} actorId={props.actorId}
       current={{layout:view,filters}}
-      onApply={applySavedView} notify={notify} />
+      onApply={applySavedView} onOpenGantt={onOpenGantt} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>
     {order && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>

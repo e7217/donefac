@@ -13,6 +13,41 @@
   font-size: 12px;
 }
 
+.gantt-shared-view, .gantt-shared-view-warning {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 0 0 10px;
+  color: #43584e;
+  font-size: 12px;
+}
+
+.gantt-shared-view-select {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.gantt-shared-view-select > select {
+  width: 190px;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.gantt-shared-view-warning {
+  padding: 8px 12px;
+  border: 1px solid #e8d6ab;
+  border-radius: 8px;
+  background: #fff8e7;
+  color: #674f24;
+}
+
+.gantt-shared-view-warning > p { margin: 0; }
+
 .gantt-plan-row {
   --plan-color: #1f7465;
   --plan-tint: #deeee7;

@@ -10,7 +10,8 @@ import { DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, dependencyScheduleWarning, SCHE
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { ApiError, patch, post, remove } from '../lib/api';
-import { issueSearchText, requiredFieldLabels } from '../../shared/issue-schema';
+import { issueSearchText, projectIssueSchema, requiredFieldLabels } from '../../shared/issue-schema';
+import { createIssueViewMatcher } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
@@ -36,7 +37,12 @@ type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
-type GanttProps = FeatureProps & { initialPlanningId?: string | null; onOpenPlanning?: (id: string) => void };
+type GanttProps = FeatureProps & {
+  initialPlanningId?: string | null;
+  onOpenPlanning?: (id: string) => void;
+  ganttViewId?: string | null;
+  onChangeGanttView?: (id: string | null) => boolean;
+};
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type DependencyEditor = { dependency?: Dependency; prefill?: DependencyPrefill; opener: HTMLButtonElement };
 type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolean };
@@ -60,7 +66,7 @@ export function Gantt(props: GanttProps) {
 }
 
 function ProjectGantt(props: GanttProps) {
-  const { data, projectId, refresh, notify, openIssue, initialPlanningId } = props;
+  const { data, projectId, refresh, notify, openIssue, initialPlanningId, ganttViewId = null, onChangeGanttView } = props;
   const projectPlans = useMemo(() => (data.planningItems ?? []).filter(item => item.projectId === projectId), [data.planningItems, projectId]);
   const initialPlan = projectPlans.find(item => item.id === initialPlanningId);
   const [planningExpanded, setPlanningExpanded] = useState(Boolean(initialPlan));
@@ -71,6 +77,7 @@ function ProjectGantt(props: GanttProps) {
   const [query, setQuery] = useState('');
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectionViewId, setSelectionViewId] = useState(ganttViewId);
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
@@ -95,6 +102,12 @@ function ProjectGantt(props: GanttProps) {
     const date = initialPlan && (initialPlan.startDate || initialPlan.targetDate || initialPlan.endDate);
     return date ? windowForDate(date) : null;
   });
+  if (selectionViewId !== ganttViewId) {
+    setSelectionViewId(ganttViewId);
+    if (selected.size) setSelected(new Set());
+    if (shiftOpen) setShiftOpen(false);
+    if (autoOpen) setAutoOpen(false);
+  }
   const scrollRef = useRef<HTMLDivElement>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
@@ -160,21 +173,34 @@ function ProjectGantt(props: GanttProps) {
       count + Number(issueIds.has(dependency.predecessorId) && issueIds.has(dependency.successorId)), 0);
   }, [data.dependencies, projectIssues]);
   const hasProject = data.projects.some(project => project.id === projectId);
+  const sharedViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
+    .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [data.savedViews, projectId]);
+  const sharedView = sharedViews.find(view => view.id === ganttViewId);
+  const sharedViewUnavailable = ganttViewId !== null && !sharedView;
+  const matchSharedView = useMemo(() => {
+    if (!sharedView) return null;
+    const schemaData = { issueSchemas: data.issueSchemas, users: data.users };
+    return createIssueViewMatcher(sharedView.filters, schemaData, projectIssueSchema(schemaData, projectId));
+  }, [sharedView, data.issueSchemas, data.users, projectId]);
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
   const shiftPlan = planShift && (projectPlans.find(item => item.id === planShift.id) ?? planShift);
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
   const planningRows = planningExpanded ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
   const planStats = useMemo(() => planMembershipStats(projectPlans, projectIssues), [projectPlans, projectIssues]);
-  function visibleIssues(text: string, hideTerminal: boolean, scope?: PlanningItem) {
+  function locallyVisibleIssues(text: string, hideTerminal: boolean, scope?: PlanningItem) {
     const search = text.toLowerCase();
     return projectIssues.filter(issue => (!scope || issue[planningFields(scope.kind).idField] === scope.id) &&
       (!hideTerminal || !isTerminalStatus(data, issue.projectId, issue.status)) &&
       (!search || issueSearchText(data, issue).toLowerCase().includes(search)));
   }
-  const issues = visibleIssues(query, hideDone, planningScope);
+  function sharedViewRows(rows: Issue[]) {
+    if (sharedViewUnavailable) return [];
+    return matchSharedView ? rows.filter(matchSharedView) : rows;
+  }
+  const issues = sharedViewRows(locallyVisibleIssues(query, hideDone, planningScope));
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
   const milestones = useMemo(() => (data.milestones || []).filter(value => value.projectId === projectId), [data.milestones, projectId]);
-  const historicalIssues = planningScope ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
+  const historicalIssues = planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
   const historicalMilestones = baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
   const calendar = useMemo(() => data.calendars?.find(value => value.projectId === projectId) ?? defaultWorkCalendar(projectId), [data.calendars, projectId]);
   const calendarMath = useMemo(() => createCalendarMath(calendar), [calendar]);
@@ -208,6 +234,7 @@ function ProjectGantt(props: GanttProps) {
   const dayWidth = zoom === 'day' ? 32 : zoom === 'week' ? 15 : 6;
   const timelineWidth = range.days * dayWidth;
   const selectedIssues = issues.filter(i => selected.has(i.id));
+  const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope ? issues : [];
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
   const visibleProjectCounts = new Map<string, number>();
   for (const issue of issues) visibleProjectCounts.set(issue.projectId, (visibleProjectCounts.get(issue.projectId) ?? 0) + 1);
@@ -234,11 +261,11 @@ function ProjectGantt(props: GanttProps) {
     return ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6))) || canLeave();
   }
   function changeVisibility(nextQuery: string, nextHideDone: boolean) {
-    if (!canHideRows(visibleIssues(nextQuery, nextHideDone, planningScope))) return;
+    if (!canHideRows(sharedViewRows(locallyVisibleIssues(nextQuery, nextHideDone, planningScope)))) return;
     setQuery(nextQuery); setHideDone(nextHideDone);
   }
   function setPlanningFilter(only: boolean) {
-    if (canHideRows(visibleIssues(query, hideDone, only ? selectedPlan : undefined))) setLinkedOnly(only);
+    if (canHideRows(sharedViewRows(locallyVisibleIssues(query, hideDone, only ? selectedPlan : undefined)))) setLinkedOnly(only);
   }
   function scrollToDate(date: number, start: number, behavior: ScrollBehavior = 'auto') {
     const offset = (date - start) * dayWidth;
@@ -464,11 +491,25 @@ function ProjectGantt(props: GanttProps) {
         if (reservationsOpen && draftsRef.current.has(TIME_RESERVATIONS_DRAFT) && !canLeave()) return;
         setReservationsOpen(!reservationsOpen);
       }}><CalendarClock size={15} aria-hidden="true" />시간 배정</button>
-      <button className="btn" disabled={busy || !hasProject} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || Boolean(planningScope && !issues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
+      <button className="btn" disabled={busy || !hasProject} onClick={() => { if (canLeave()) setPasteOpen(true); }}><ClipboardPaste size={15} />일정 붙여넣기</button><button className="btn" disabled={busy || sharedViewUnavailable || Boolean(planningScope && !automaticScheduleIssues.length)} onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button><button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button><button className="btn btn-primary" onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={16} /> 업무 추가</button></div></div>
     {reservationsOpen && hasProject && <TimeReservations key={draftEpoch} projectId={projectId} issues={projectIssues}
       initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users}
       notify={notify} openIssue={openIssue} onDraftChange={trackReservationDraft} onChanged={refresh} />}
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{projectIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{projectIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{projectDependencyCount}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
+    {hasProject && onChangeGanttView && (sharedViews.length > 0 || sharedViewUnavailable) && <div className="gantt-shared-view">
+      <label className="gantt-shared-view-select">간트 공유 보기
+        <select className="field" value={ganttViewId ?? ''} disabled={busy} onChange={event => onChangeGanttView(event.target.value || null)}>
+          <option value="">공유 보기 없이 표시</option>
+          {sharedViewUnavailable && <option value={ganttViewId ?? ''}>열 수 없는 공유 보기</option>}
+          {sharedViews.map(view => <option key={view.id} value={view.id}>{view.name}</option>)}
+        </select>
+      </label>
+      {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+    </div>}
+    {sharedViewUnavailable && <div className="gantt-shared-view-warning">
+      <p role="status">이 프로젝트에서 공유 보기를 열 수 없습니다.</p>
+      {onChangeGanttView && <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => onChangeGanttView(null)}>공유 보기 해제</button>}
+    </div>}
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={zoom === key ? 'active' : ''} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       <button ref={analysisTrigger} className="btn" type="button" aria-expanded={analysisOpen} aria-controls={analysisOpen ? ANALYSIS_PANEL_ID : undefined} disabled={!hasProject} onClick={() => setAnalysisOpen(open => !open)}>
         <ChartNoAxesCombined size={15} aria-hidden="true" />일정 여유 분석
@@ -487,10 +528,15 @@ function ProjectGantt(props: GanttProps) {
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateAnalysisDate} />}
     {shiftOpen && <form className="gantt-shift-form" onSubmit={e => { e.preventDefault(); void requestPreview(selectedIssues.map(i => i.id), days, workingDays); }}><span><strong>{selectedIssues.length}개</strong> 업무를</span><input className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650" value={days} onChange={e => setDays(Number(e.target.value))} required /><span>일 이동</span><label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label><small>음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용</small><button className="btn btn-primary" type="submit" disabled={busy}>변경 미리보기</button><button className="issue-icon-button" type="button" onClick={() => setShiftOpen(false)} aria-label="일정 이동 닫기"><X size={16} /></button></form>}
-    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} projects={data.projects} users={data.users} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setCreateOpen(false); }} onCreated={async issue => {
-      await refresh(); setCreateOpen(false); setQuery(''); setHideDone(false);
-      if (planningScope && issue[planningFields(planningScope.kind).idField] !== planningScope.id) setLinkedOnly(false);
-      notify(`${issue.key} 업무를 간트에 추가했습니다.`);
+    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={projectId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={() => { if (canLeave()) setCreateOpen(false); }} onCreated={async issue => {
+      await refresh(); setCreateOpen(false);
+      if (sharedViewUnavailable || matchSharedView && !matchSharedView(issue)) {
+        notify(`${issue.key} 업무를 간트에 추가했습니다. 새 업무는 현재 공유 보기의 범위 밖에 있습니다.`);
+      } else {
+        setQuery(''); setHideDone(false);
+        if (planningScope && issue[planningFields(planningScope.kind).idField] !== planningScope.id) setLinkedOnly(false);
+        notify(`${issue.key} 업무를 간트에 추가했습니다.`);
+      }
     }} />}
     <GanttPlanningControls {...props} expanded={planningExpanded} onExpandedChange={expanded => {
       setPlanningExpanded(expanded);
@@ -581,12 +627,12 @@ function ProjectGantt(props: GanttProps) {
       {milestones.map(milestone => { const captured = baseline?.milestones.find(value => value.milestoneId === milestone.id); const delta = captured ? dayNumber(milestone.date) - dayNumber(captured.date) : null; return <div key={milestone.id} className="gantt-row gantt-milestone-row" data-milestone-id={milestone.id}><div className="gantt-left"><Diamond size={13} /><div className="gantt-milestone-name"><small>{milestone.status === 'reached' ? '달성' : '예정'} · 마일스톤</small><strong>{milestone.title}</strong>{delta !== null && <small>기준선 대비 {delta > 0 ? '+' : ''}{delta}일 · 달력일</small>}</div><button className="gantt-history-date" onClick={() => showDate(milestone.date)}>{milestone.date}</button>{captured ? <button className="gantt-history-date" onClick={() => showDate(captured.date)}>기준 {captured.date}</button> : <span />}</div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>{captured && !outside(captured.date) && <span className="gantt-milestone-diamond is-baseline" role="img" aria-label={`${captured.title} 마일스톤 기준선 ${captured.date}`} title={`기준선: ${captured.title} · ${captured.date}`} style={{ left: (dayNumber(captured.date) - range.start + .5) * dayWidth }} />}{!outside(milestone.date) ? <span className={`gantt-milestone-diamond ${milestone.status === 'reached' ? 'is-reached' : ''}`} role="img" aria-label={`${milestone.title} 마일스톤 ${milestone.date}`} title={`${milestone.title} · ${milestone.date}`} style={{ left: (dayNumber(milestone.date) - range.start + .5) * dayWidth }}><span>{milestone.title}</span></span> : <button className="gantt-jump-date" onClick={() => showDate(milestone.date)}>{milestone.date} · 마일스톤으로 이동 →</button>}</div></div>; })}
       {historicalMilestones.map(captured => <div key={`historical-milestone:${captured.milestoneId}`} className="gantt-row gantt-history-row"><div className="gantt-left"><Diamond size={12} /><div className="gantt-history-name"><small>삭제된 마일스톤 기록</small><strong>{captured.title}</strong></div><button className="gantt-history-date" onClick={() => showDate(captured.date)}>{captured.date}</button><span /></div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>{!outside(captured.date) ? <span className="gantt-milestone-diamond is-baseline is-historical" role="img" aria-label={`${captured.title} 삭제된 마일스톤 기준선 ${captured.date}`} style={{ left: (dayNumber(captured.date) - range.start + .5) * dayWidth }} /> : <button className="gantt-jump-date" onClick={() => showDate(captured.date)}>{captured.date} · 기준선 기록으로 이동 →</button>}</div></div>)}
       <button className="gantt-add-inline-row" style={{ width: LEFT_WIDTH }} onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={14} /> 이 간트에 업무 추가</button>
-      {issues.length === 0 && <div className="gantt-no-issues" style={{ width: LEFT_WIDTH }}><CalendarDays size={28} /><strong>표시할 업무가 없습니다</strong><span>업무를 만들거나 검색 조건을 변경하세요.</span></div>}
+      {issues.length === 0 && <div className="gantt-no-issues" style={{ width: LEFT_WIDTH }}><CalendarDays size={28} /><strong>표시할 업무가 없습니다</strong><span>{ganttViewId === null ? '업무를 만들거나 검색 조건을 변경하세요.' : '공유 보기나 검색 조건을 변경하세요.'}</span></div>}
     </div></div>
     {baseline && <details className="gantt-baseline-records"><summary>기준선 업무 기록 {baseline.issues.length}개 · 캡처된 이름과 날짜 확인</summary><div><table><thead><tr><th>기준선 업무</th><th>시작일</th><th>종료일</th><th>현재 상태</th></tr></thead><tbody>{baseline.issues.map(captured => <tr key={captured.issueId}><td><small>{captured.key}</small><strong>{captured.title}</strong></td><td><button disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button></td><td><button disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></td><td>{projectIssues.some(issue => issue.id === captured.issueId) ? '현재 업무 있음' : '삭제된 업무 기록'}</td></tr>)}</tbody></table></div></details>}
     {scheduleWarnings.length > 0 && <div className="gantt-current-warnings" role="status"><AlertCircle size={16} /><div><strong>일정 의존성 확인</strong>{scheduleWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="issue-icon-button" onClick={() => setScheduleWarnings([])} aria-label="경고 닫기"><X size={14} /></button></div>}
     <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span><span><span className="gantt-legend-line" />선행 → 후행</span><span><span className="gantt-legend-today" />오늘</span><span><Diamond size={12} />마일스톤</span><span><span className="gantt-nonworking-key" />비근무일</span>{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
-    <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row"><button onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button><button className="btn btn-ghost" disabled={busy} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button></div>) : <div className="gantt-bottom-empty"><Check size={17} />모든 업무에 일정이 잡혀 있습니다.</div>}</section>
+    <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row"><button onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button><button className="btn btn-ghost" disabled={busy} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button></div>) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
       <section className="gantt-bottom-card" aria-label="업무 연결 목록">
         <div className="gantt-bottom-heading">
           <h3><Link2 size={16} />업무 연결 <span>{dependencies.length}</span></h3>
@@ -611,7 +657,7 @@ function ProjectGantt(props: GanttProps) {
     {preview && <div className="issue-modal-overlay"><section className="gantt-preview-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={() => setPreview(null)} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
       <WorkloadPreviewSummary data={data} projectId={projectId} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
       {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}{previewError && <div className="issue-form-error gantt-preview-error" role="alert">{previewError}<br />미리보기와 입력 내용은 유지됩니다. 취소 후 최신 일정을 확인하고 다시 조정하세요.</div>}<div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div><footer><span className="muted">적용 후 마지막 변경을 되돌릴 수 있습니다.</span><button className="btn btn-ghost" onClick={() => setPreview(null)} disabled={busy}>취소</button><button className="btn btn-primary" disabled={busy || !preview.changes.length} onClick={() => applyChanges(preview)}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button></footer></section></div>}
-    {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={(selectedIssues.length || !planningScope ? selectedIssues : issues).map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
+    {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={automaticScheduleIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
     {pasteOpen && <SchedulePasteDialog
       projectId={projectId} notify={notify} onDraftChange={trackDraft} onClose={() => setPasteOpen(false)}
       onApplied={async result => {
@@ -735,7 +781,7 @@ function PlanningTimelineRow({ item, selected, stats, range, dayWidth, showDate,
   </div>;
 }
 
-function InlineIssueForm({ data, projectId, projects, users, initialPlan, onClose, onCreated, onDraftChange }: { data:FeatureProps['data']; projectId: string; projects: Project[]; users: User[]; initialPlan?: PlanningItem; onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft }) {
+function InlineIssueForm({ data, projectId, projects, users, sharedViewActive, initialPlan, onClose, onCreated, onDraftChange }: { data:FeatureProps['data']; projectId: string; projects: Project[]; users: User[]; sharedViewActive: boolean; initialPlan?: PlanningItem; onClose: () => void; onCreated: (issue: Issue) => Promise<void>; onDraftChange: TrackDraft }) {
   const [title, setTitle] = useState('');
   const [type, setType] = useState(() => initialIssueType(data, projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || ''));
   const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
@@ -762,7 +808,7 @@ function InlineIssueForm({ data, projectId, projects, users, initialPlan, onClos
     catch (err) { setError(errorMessage(err)); } finally { setSaving(false); }
   }
   return <form className="gantt-inline-create" aria-label="간트에서 업무 만들기" onSubmit={submit} onChange={() => setTouched(true)}>
-    <div className="gantt-inline-create-heading"><div><strong><Plus size={15} /> 간트에 업무 추가</strong><span>날짜는 나중에 정해도 괜찮아요. 저장하면 같은 간트에 표시됩니다.</span></div><button className="issue-icon-button" type="button" onClick={onClose} disabled={saving} aria-label="간트 업무 추가 닫기"><X size={17} /></button></div>
+    <div className="gantt-inline-create-heading"><div><strong><Plus size={15} /> 간트에 업무 추가</strong><span>{sharedViewActive ? '공유 보기 조건에 맞는 업무가 이 간트에 표시됩니다.' : '날짜는 나중에 정해도 괜찮아요. 저장하면 같은 간트에 표시됩니다.'}</span></div><button className="issue-icon-button" type="button" onClick={onClose} disabled={saving} aria-label="간트 업무 추가 닫기"><X size={17} /></button></div>
     <div className="gantt-create-fields"><label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} disabled={saving} /></label><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} disabled={saving} ariaLabel="추가할 업무 유형" /></label><label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)} disabled={saving}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} disabled={saving} /></label><label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} disabled={saving} /></label>{(!projectId || projectId === 'all') && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} disabled={saving} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}</div>
     <div className="issue-form-grid">
       <label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} disabled={saving} /></label>

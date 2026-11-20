@@ -43,6 +43,7 @@ const navigation = [
 
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
+  ganttViewId?: string | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   teamOverviewFilters?: TeamOverviewFilters;
 };
@@ -53,6 +54,7 @@ function routeHash(route: WorkspaceRoute) {
     (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
   const query = new URLSearchParams();
   if (route.issueId) query.set('issue', route.issueId);
+  if (route.view === 'gantt' && route.ganttViewId) query.set('savedView', route.ganttViewId);
   if (route.view === 'documents' && route.documentId && route.publication) {
     query.set('publication', route.publication.kind);
     query.set('revision', route.publication.revisionId);
@@ -88,6 +90,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
   const planningId = (view === 'planning' || view === 'gantt') && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
+  const ganttViewId = view === 'gantt' ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
@@ -98,7 +101,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     memberId: teamMember && snapshot.users.some(member => member.id === teamMember) ? teamMember : '',
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
   } : undefined;
-  return { projectId, view, documentId, issueId, reportId, planningId, publicationTab, publication, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, reportId, planningId, ganttViewId, publicationTab, publication, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -112,6 +115,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
+  const [ganttViewId, setGanttViewId] = useState<string | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
@@ -162,6 +166,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setGanttViewId(route.ganttViewId ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
     const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
@@ -204,6 +209,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const navigate = (nextView: View, nextProject = projectId, nextDoc?: string) => {
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
+      ganttViewId: nextView === 'gantt' && view === 'gantt' && nextProject === projectId ? ganttViewId : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
   };
   const openIssue = (id: string) => {
@@ -213,7 +219,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (requestRoute({
       projectId:view === 'teamoverview' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
-      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, publicationTab, issueId:id, teamOverviewFilters,
+      reportId:sameProject ? reportId : null, planningId:sameProject ? planningId : null, ganttViewId:sameProject ? ganttViewId : null,
+      publicationTab, issueId:id, teamOverviewFilters,
     })) setSearchOpen(false);
   };
   const openPlanIn = (nextView: 'planning' | 'gantt', id: string) =>
@@ -325,8 +332,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             openProject={(id, destination) => navigate(destination,id)}/>
         </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
-        {view === 'issues' && <Issues {...props}/>}
-        {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} onOpenPlanning={id => openPlanIn('planning',id)}/>}
+        {view === 'issues' && <Issues {...props} onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,ganttViewId:id})}/>}
+        {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} ganttViewId={ganttViewId} onOpenPlanning={id => openPlanIn('planning',id)}
+          onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,ganttViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink}/></Suspense>}
@@ -338,7 +346,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {!project && view !== 'trash' && view !== 'teamoverview' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,publicationTab,teamOverviewFilters,issueId:null})}/>}
+    {issueId && data.issues.some(i => i.id === issueId) && <IssuePanel key={`${issueId}:${actorId}`} {...props} issueId={issueId} onClose={() => requestRoute({projectId,view,documentId,reportId,planningId,ganttViewId,publicationTab,teamOverviewFilters,issueId:null})}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
