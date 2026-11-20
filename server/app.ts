@@ -675,9 +675,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>validateIssue(proposed,before)});
-  workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity});
+  workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity,planningItems:projectId=>planning.forProject(projectId)});
   issueSchemas.registerRoutes(app,{actor,activity});
-  planning.registerRoutes(app,{actor,activity,validateIssue});apiKeys.registerManagementRoutes(app,{actor,activity});
+  planning.registerRoutes(app,{actor,activity,validateIssue,findSavedViewReference:item=>savedViews.findPlanningItemReference(item)});apiKeys.registerManagementRoutes(app,{actor,activity});
   calendars.registerRoutes(app,{actor,activity});
   app.get('/api/projects/:projectId/workload-capacity',(req,res)=>{
     if(Object.keys(req.query).length)return fail('가용 시간 조회 조건을 확인해 주세요.');
@@ -1373,7 +1373,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       value&&typeof value==='object'&&'filters' in value&&value.filters&&typeof value.filters==='object'&&
       'fieldFilter' in value.filters&&value.filters.fieldFilter!=null
     ))fail('사용자 정의 필드 조건을 포함한 보기는 schemaVersion 13이 필요합니다.');
-    const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas);
+    if (data.schemaVersion < 47 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'planning')
+    )) fail('계획·일정 조건을 포함한 보기는 schemaVersion 47이 필요합니다.');
+    const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
     const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };

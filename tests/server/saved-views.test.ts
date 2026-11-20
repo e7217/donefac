@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import type { PlanningItem, PlanningKind, SavedView } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
   const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-views-'));
@@ -27,6 +28,12 @@ async function fixture(directory?: string) {
   };
 }
 const definition = {projectId:'project-neo',name:'검토 업무',layout:'board',filters:{query:' 오류 ',status:'review',assigneeId:'user-seo',type:'버그'}};
+
+async function addPlanningItem(f: Awaited<ReturnType<typeof fixture>>, kind: PlanningKind, name: string, projectId = definition.projectId): Promise<PlanningItem> {
+  const created = await f.request('/planning-items', 'POST', {projectId, kind, name});
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  return created.data;
+}
 
 test('saved views preserve real filters across reload and enforce version-safe shared edits',async()=>{
   const f=await fixture();let reopened:Awaited<ReturnType<typeof fixture>>|undefined;
@@ -70,4 +77,118 @@ test('native backup preserves saved view definitions and rejects bad restore ato
     const restored=list.find((view:{id:string})=>view.id===created.data.id);assert.equal(restored.name,definition.name);assert.deepEqual(restored.filters,definition.filters);assert.ok(restored.version>2);
     assert.equal((await f.request('/views/'+restored.id,'PATCH',{expectedVersion:2,name:'이전 편집'})).status,409);
   }finally{await f.close();rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('shared planning filters validate exact project and kind, allow archived plans and prevent deleting references', async () => {
+  const f = await fixture();
+  try {
+    const cycle = await addPlanningItem(f, 'cycle', '필터로 참조할 사이클');
+    const release = await addPlanningItem(f, 'release', '필터로 참조할 릴리스');
+    const foreign = await addPlanningItem(f, 'cycle', cycle.name, 'project-team');
+    const planning = {cycleId: cycle.id, moduleId: null, releaseId: release.id, dates: {mode: 'overlap', from: '2024-02-29', to: '2024-03-01'}};
+    const filters = {...definition.filters, planning};
+    for (const invalid of [null, [], {sprintId: cycle.id}, {cycleId: 'unknown'}, {cycleId: foreign.id}, {cycleId: release.id},
+      {dates: {mode: 'overlap'}}, {dates: {mode: 'due', from: '2025-02-29'}},
+      {dates: {mode: 'due', from: '2026-02-02', to: '2026-02-01'}}, {dates: {mode: 'planned', from: '2026-01-01'}}]) {
+      const rejected = await f.request('/views', 'POST', {...definition, filters: {...filters, planning: invalid}});
+      assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    }
+    const created = await f.request('/views', 'POST', {...definition, filters});
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.deepEqual(created.data.filters, filters);
+    const viewPath = `/views/${created.data.id}`;
+    const wrongPlan = await f.request(viewPath, 'PATCH', {expectedVersion: 1, filters: {...filters, planning: {releaseId: cycle.id}}});
+    assert.equal(wrongPlan.status, 400);
+
+    const planPath = `/planning-items/${cycle.id}`;
+    const deletion = await f.request(`${planPath}?expectedVersion=${cycle.version}`, 'DELETE');
+    assert.equal(deletion.status, 409);
+    assert.equal(deletion.data.details.viewId, created.data.id);
+    const archived = await f.request(planPath, 'PATCH', {expectedVersion: cycle.version, status: 'archived', name: '같은 ID의 보관 사이클'});
+    assert.equal(archived.status, 200);
+    assert.equal(archived.data.status, 'archived');
+    const renamed = await f.request(viewPath, 'PATCH', {expectedVersion: 1, name: '보관 사이클 보기', filters: definition.filters});
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(renamed.data.filters, filters);
+    assert.equal((await f.request(`${planPath}?expectedVersion=${archived.data.version}`, 'DELETE')).status, 409);
+    assert.equal((await f.request(`/planning-items/${release.id}?expectedVersion=${release.version}`, 'DELETE')).status, 409);
+
+    const cleared = await f.request(viewPath, 'PATCH', {expectedVersion: renamed.data.version, filters: {...definition.filters, planning: {}}});
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(cleared.data.filters, definition.filters);
+    assert.equal((await f.request(`${planPath}?expectedVersion=${archived.data.version}`, 'DELETE')).status, 200);
+    assert.equal((await f.request(`/planning-items/${release.id}?expectedVersion=${release.version}`, 'DELETE')).status, 200);
+  } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
+});
+
+test('native restore validates planning views against the imported workspace and protects legacy format boundaries', async () => {
+  const f = await fixture();
+  try {
+    const plan = await addPlanningItem(f, 'module', '백업에 저장할 모듈');
+    const filters = {...definition.filters, planning: {moduleId: plan.id, dates: {mode: 'needs_dates'}}};
+    const created = await f.request('/views', 'POST', {...definition, filters});
+    assert.equal(created.status, 201);
+    const {data: backup} = await f.request('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    const viewPath = `/views/${created.data.id}`;
+    assert.equal((await f.request(viewPath, 'PATCH', {expectedVersion: 1, name: '현재 보기', filters: {...definition.filters, planning: {}}})).status, 200);
+    assert.equal((await f.request(`/planning-items/${plan.id}?expectedVersion=${plan.version}`, 'DELETE')).status, 200);
+
+    const downgraded = await f.request('/import', 'POST', {data: {...backup, schemaVersion: 46}});
+    assert.equal(downgraded.status, 400);
+    assert.match(downgraded.data.error, /schemaVersion 47/);
+    const withoutPlan = {...backup, planningItems: backup.planningItems.filter((item: PlanningItem) => item.id !== plan.id)};
+    assert.equal((await f.request('/import', 'POST', {data: withoutPlan})).status, 400);
+    const afterFailure = (await f.request(`/views?projectId=${plan.projectId}`)).data[0] as SavedView;
+    assert.equal(afterFailure.name, '현재 보기');
+    assert.deepEqual(afterFailure.filters, definition.filters);
+    assert.equal((await f.request(`/planning-items/${plan.id}`)).status, 404);
+
+    assert.equal((await f.request('/import', 'POST', {data: backup})).status, 200);
+    const restored = (await f.request(`/views?projectId=${plan.projectId}`)).data[0] as SavedView;
+    assert.deepEqual(restored.filters, filters);
+    assert.ok(restored.version > afterFailure.version);
+    assert.equal((await f.request(`/planning-items/${plan.id}`)).status, 200);
+    assert.equal((await f.request(`/planning-items/${plan.id}?expectedVersion=${plan.version}`, 'DELETE')).status, 409);
+
+    const oldShape = {...backup, schemaVersion: 46, savedViews: [{...backup.savedViews[0], filters: definition.filters}]};
+    assert.equal((await f.request('/import', 'POST', {data: oldShape})).status, 200);
+    assert.deepEqual((await f.request(`/views?projectId=${plan.projectId}`)).data[0].filters, definition.filters);
+  } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
+});
+
+test('custom field reporting uses saved planning membership and date overlap for its issue population', async () => {
+  const f = await fixture();
+  try {
+    const cycle = await addPlanningItem(f, 'cycle', '집계할 사이클');
+    const schemaPath = `/projects/${cycle.projectId}/issue-schema`;
+    const {data: schema} = await f.request(schemaPath);
+    const saved = await f.request(schemaPath, 'PATCH', {...schema, expectedVersion: schema.version, fields: [...schema.fields, {
+      id: 'planning-report-test', name: '일정용 점수', kind: 'number', description: '', required: false,
+      archived: false, issueTypes: [], options: [],
+    }]});
+    assert.equal(saved.status, 200, JSON.stringify(saved.data));
+    const create = async (title: string, startDate: string, endDate: string, cycleId: string | null) => {
+      const issue = await f.request('/issues', 'POST', {projectId: cycle.projectId, title, startDate, endDate, cycleId, customFields: {'planning-report-test': 3}});
+      assert.equal(issue.status, 201, JSON.stringify(issue.data));
+      return issue.data.id as string;
+    };
+    const included = await create('범위의 시작일을 포함한 업무', '2025-12-30', '2026-01-01', cycle.id);
+    await create('같은 계획이지만 범위 밖인 업무', '2026-01-03', '2026-01-04', cycle.id);
+    await create('범위에는 들지만 다른 계획의 업무', '2026-01-01', '2026-01-01', null);
+    const view = await f.request('/views', 'POST', {...definition, filters: {
+      query: '', type: 'all', status: 'all', assigneeId: 'all', planning: {cycleId: cycle.id, dates: {mode: 'overlap', from: '2026-01-01', to: '2026-01-02'}},
+    }});
+    assert.equal(view.status, 201);
+    const path = `/projects/${cycle.projectId}/field-breakdown`;
+    const selection = {fieldId: 'planning-report-test', savedViewId: view.data.id};
+    const report = await f.request(path, 'POST', selection);
+    assert.equal(report.status, 200, JSON.stringify(report.data));
+    assert.equal(report.data.totalIssues, 1);
+    const bucket = report.data.groups.find((group: {kind: string}) => group.kind === 'value');
+    assert.equal(bucket.count, 1);
+    const drilldown = await f.request(`${path}/issues`, 'POST', {...selection, revision: report.data.revision, bucketId: bucket.id});
+    assert.equal(drilldown.status, 200);
+    assert.deepEqual(drilldown.data.issues.map((item: {id: string}) => item.id), [included]);
+  } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });

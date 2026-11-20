@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
-import type { Project, ProjectIssueSchema, SavedView, SavedViewState, User } from '../shared/types.js';
+import type { IssueViewPlanningFilter, PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewState, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
+import { IssueViewPlanningFilterError, parseIssueViewPlanningFilter } from '../shared/issue-view.js';
+import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
 import { Store } from './store.js';
 
@@ -14,7 +16,7 @@ const string = (value: unknown, name: string, max: number, empty = false) => {
   if (typeof value !== 'string' || value.length > max || (!empty && !value.trim())) return fail(`${name}을(를) 확인해주세요.`);
   return empty ? value : value.trim();
 };
-function state(value: unknown, schema: ProjectIssueSchema, users: User[]): SavedViewState {
+function state(value: unknown, schema: ProjectIssueSchema, users: User[], planningItems: readonly PlanningItem[], previousPlanning?: IssueViewPlanningFilter): SavedViewState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('보기 설정은 객체여야 합니다.');
   const v = value as Record<string, unknown>;
   if (!['list', 'board'].includes(v.layout as string)) return fail('목록 또는 보드 보기만 저장할 수 있습니다.');
@@ -26,7 +28,15 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[]): Saved
   const type = string(filters.type, '유형 필터', 80);
   if (type !== 'all' && !schema.issueTypes.some(value => value.id === type)) return fail('지원하지 않는 업무 유형 필터입니다.');
   const fieldFilter = filters.fieldFilter == null ? undefined : parseIssueFieldFilter(filters.fieldFilter, schema, users);
-  return { layout: v.layout as SavedViewState['layout'], filters: { query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}) } };
+  try {
+    const planning = parseIssueViewPlanningFilter(Object.hasOwn(filters, 'planning') ? filters.planning : previousPlanning, schema.projectId, planningItems);
+    return { layout: v.layout as SavedViewState['layout'], filters: {
+      query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}),
+    } };
+  } catch (error) {
+    if (error instanceof IssueViewPlanningFilterError) return fail(error.message, error.status);
+    throw error;
+  }
 }
 const validTime = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 // Match SQLite's NOCASE collation, which folds ASCII letters only.
@@ -44,6 +54,11 @@ export class SavedViewService {
     ); CREATE INDEX IF NOT EXISTS saved_views_project ON saved_views(project_id);`);
   }
   all(): SavedView[] { return this.store.all<SavedView>('saved_views'); }
+  findPlanningItemReference(item: PlanningItem): Pick<SavedView, 'id' | 'name'> | undefined {
+    const path = `$.filters.planning.${planningFields(item.kind).idField}`;
+    return this.store.db.prepare(`SELECT id,name FROM saved_views
+      WHERE project_id=? AND json_extract(json,?)=? ORDER BY name LIMIT 1`).get(item.projectId, path, item.id) as Pick<SavedView, 'id' | 'name'> | undefined;
+  }
   private project(id: unknown) {
     if (typeof id !== 'string' || !this.store.get('projects', id)) return fail('프로젝트를 찾을 수 없습니다.', 404);
     return id;
@@ -55,7 +70,7 @@ export class SavedViewService {
   private validateAssignee(view: SavedViewState, users: User[]) {
     if (!['all', 'none'].includes(view.filters.assigneeId) && !users.some(u => u.id === view.filters.assigneeId)) return fail('담당자 필터의 팀원을 찾을 수 없습니다.');
   }
-  validateImport(values: unknown, projects: Project[], users: User[], issueSchemas: ProjectIssueSchema[] = []): SavedView[] {
+  validateImport(values: unknown, projects: Project[], users: User[], issueSchemas: ProjectIssueSchema[] = [], planningItems: readonly PlanningItem[] = []): SavedView[] {
     if (!Array.isArray(values) || values.length > 5000) return fail('저장된 보기 목록을 확인해주세요.');
     const ids = new Set<string>();
     const names = new Set<string>();
@@ -69,7 +84,7 @@ export class SavedViewService {
       if (ids.has(id) || names.has(nameKey(projectId, name))) return fail('저장된 보기의 ID 또는 이름이 중복됩니다.');
       ids.add(id); names.add(nameKey(projectId, name));
       if (!Number.isSafeInteger(value.version) || value.version < 1 || !validTime(value.createdAt) || !validTime(value.updatedAt)) return fail('저장된 보기의 버전 또는 작성 시간이 올바르지 않습니다.');
-      const selected = state(value, issueSchemas.find(schema => schema.projectId === projectId) || defaultIssueSchema(projectId), users);
+      const selected = state(value, issueSchemas.find(schema => schema.projectId === projectId) || defaultIssueSchema(projectId), users, planningItems);
       this.validateAssignee(selected, users);
       return { id, projectId, name, authorId, ...selected, version: value.version, createdAt: value.createdAt, updatedAt: value.updatedAt };
     });
@@ -85,6 +100,7 @@ export class SavedViewService {
   registerRoutes(app: Express, hooks: {
     actor: (request: Request) => string;
     activity: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => unknown;
+    planningItems: (projectId: string) => readonly PlanningItem[];
   }) {
     const route = (handler: (req: Request, res: Response) => unknown) => (req: Request, res: Response, next: NextFunction) => {
       try { handler(req, res); }
@@ -102,7 +118,7 @@ export class SavedViewService {
       const view = this.store.transaction(() => {
         const projectId = this.project(req.body.projectId);
         const users = this.store.all<User>('users');
-        const selected = state(req.body, this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId), users);
+        const selected = state(req.body, this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId), users, hooks.planningItems(projectId));
         this.validateAssignee(selected, users);
         const now = new Date().toISOString();
         const view: SavedView = { id: randomUUID(), projectId, name: string(req.body.name, '보기 이름', 80), ...selected, authorId: hooks.actor(req), version: 1, createdAt: now, updatedAt: now };
@@ -119,7 +135,7 @@ export class SavedViewService {
         if (req.body.expectedVersion !== old.version) return fail('다른 작업자가 보기를 변경했습니다. 다시 불러온 뒤 저장해주세요.', 409);
         if ('projectId' in req.body && req.body.projectId !== old.projectId) return fail('보기의 프로젝트는 변경할 수 없습니다.');
         const users = this.store.all<User>('users');
-        const selected = state({ ...old, ...req.body }, this.issueSchemas?.get(old.projectId) || defaultIssueSchema(old.projectId), users);
+        const selected = state({ ...old, ...req.body }, this.issueSchemas?.get(old.projectId) || defaultIssueSchema(old.projectId), users, hooks.planningItems(old.projectId), old.filters.planning);
         this.validateAssignee(selected, users);
         const updated: SavedView = { ...old, ...selected, name: 'name' in req.body ? string(req.body.name, '보기 이름', 80) : old.name, version: old.version + 1, updatedAt: new Date().toISOString() };
         this.put(updated);

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import type { Issue, Project, ProjectIssueSchema, SavedView, SavedViewState, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, Issue, PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewState, WorkspaceSnapshot } from '../../shared/types';
 
 async function createView(request: APIRequestContext, projectId: string, name: string, filters: SavedViewState['filters']) {
   const response = await request.post('/api/views', { data: { projectId, name, layout: 'list', filters } });
@@ -166,5 +166,163 @@ test('360px에서 업무 공유 보기의 조건을 간트에 적용하고 주�
         await request.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`);
       }
     }
+  }
+});
+
+test('릴리스와 일정 조건을 공유 보기에 저장해 보드·간트·문서에서 같은 업무를 본다', async ({page, request}) => {
+  test.setTimeout(85_000);
+  const prefix = `릴리스 일정 ${randomUUID().slice(0, 8)}`;
+  const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const projectId = workspace.projects[0].id;
+  const items: PlanningItem[] = [];
+  const issues: Issue[] = [];
+  const views: string[] = [];
+  let document: DocPage | undefined;
+  async function plan(kind: PlanningItem['kind']) {
+    const response = await request.post('/api/planning-items', { data: {projectId, kind, name: `${prefix} ${kind}`} });
+    expect(response.status(), await response.text()).toBe(201);
+    const item = await response.json() as PlanningItem;
+    items.push(item);
+    return item;
+  }
+
+  try {
+    const release = await plan('release');
+    const cycle = await plan('cycle');
+    const schedule = { startDate: '2020-03-08', endDate: '2020-03-10' };
+    const fixtures = [
+      { title: `${prefix} 기간 경계`, releaseId: release.id, ...schedule },
+      { title: `${prefix} 다른 사이클`, releaseId: release.id, cycleId: cycle.id, ...schedule },
+      { title: `${prefix} 기간 밖`, releaseId: release.id, startDate: '2020-03-26', endDate: '2020-03-27', dueDate: '2020-03-10' },
+      { title: `${prefix} 종료 미정`, releaseId: release.id, startDate: '2020-03-10' },
+      { title: `${prefix} 릴리스 미지정`, ...schedule },
+    ];
+    for (const fields of fixtures) {
+      const response = await request.post('/api/issues', { data: {projectId, ...fields} });
+      expect(response.status(), await response.text()).toBe(201);
+      issues.push(await response.json() as Issue);
+    }
+    const [overlapMatch, , , incomplete] = issues;
+    const incompleteView = await createView(request, projectId, `${prefix} 미정 보기`, {
+      query: prefix, status: 'all', assigneeId: 'all', type: 'all',
+      planning: {releaseId: release.id, dates: {mode: 'needs_dates'}},
+    });
+    views.push(incompleteView.id);
+
+    await page.setViewportSize({width: 360, height: 820});
+    await page.goto(`/#/${projectId}/issues`);
+    await page.getByRole('textbox', {name: '업무 검색', exact: true}).fill(prefix);
+    await page.getByRole('button', {name: '계획·일정 필터', exact: true}).click();
+    const filter = page.getByRole('region', {name: '계획·일정 필터', exact: true});
+    await filter.getByRole('combobox', {name: '릴리스 필터', exact: true}).selectOption(`plan:${release.id}`);
+    await filter.getByRole('combobox', {name: '사이클 필터', exact: true}).selectOption('none');
+    await filter.getByRole('combobox', {name: '일정 조건', exact: true}).selectOption('overlap');
+    const firstDay = filter.getByLabel('조회 시작일', {exact: true});
+    const lastDay = filter.getByLabel('조회 종료일', {exact: true});
+    await firstDay.fill('2020-03-19');
+    await lastDay.fill('2020-03-18');
+    await filter.getByRole('button', {name: '적용', exact: true}).click();
+    await expect(filter.getByRole('alert')).toBeVisible();
+    await firstDay.fill('2020-03-10');
+    await filter.getByRole('button', {name: '적용', exact: true}).click();
+    const list = page.locator('.issue-table');
+    await expect(list.getByText(overlapMatch.title, {exact: true})).toBeVisible();
+    for (const excluded of issues.slice(1)) await expect(list.getByText(excluded.title, {exact: true})).toHaveCount(0);
+    await page.getByRole('button', {name: '보드', exact: true}).click();
+    const cards = page.locator('.issue-board-card');
+    await expect(cards).toHaveCount(1);
+    await expect(cards.first()).toContainText(overlapMatch.title);
+
+    await page.getByRole('button', {name: '현재 보기 저장', exact: true}).click();
+    const dialog = page.getByRole('dialog', {name: '업무 보기 저장', exact: true});
+    await dialog.getByLabel('보기 이름', {exact: true}).fill(`${prefix} 겹침 보기`);
+    const save = page.waitForResponse(response => response.url().endsWith('/api/views') && response.request().method() === 'POST');
+    await dialog.getByRole('button', {name: '저장', exact: true}).click();
+    const savedResponse = await save;
+    expect(savedResponse.status(), await savedResponse.text()).toBe(201);
+    const saved = await savedResponse.json() as SavedView;
+    views.push(saved.id);
+    expect(saved.layout).toBe('board');
+    expect(saved.filters.planning).toEqual({cycleId: null, releaseId: release.id, dates: {mode: 'overlap', from: '2020-03-10', to: '2020-03-18'}});
+    await page.reload();
+    const viewPicker = page.getByRole('combobox', {name: '저장된 업무 보기', exact: true});
+    await viewPicker.selectOption(saved.id);
+    await expect(cards).toHaveCount(1);
+    await expect(cards.first()).toContainText(overlapMatch.title);
+
+    await page.getByRole('button', {name: '간트에서 열기', exact: true}).click();
+    const ganttPath = `#/${projectId}/gantt`;
+    await expect.poll(() => new URL(page.url()).hash).toBe(`${ganttPath}?savedView=${saved.id}`);
+    const gantt = page.getByRole('region', {name: '간트 차트', exact: true});
+    await expect(gantt.locator('.gantt-row[data-issue-id]')).toHaveCount(1);
+    await expect(gantt.getByRole('button', {name: `${overlapMatch.key} 일정 이동`, exact: true})).toBeVisible();
+    const windowStart = page.getByLabel('간트 표시 시작일', {exact: true});
+    await expect(windowStart).toHaveValue('2020-03-03');
+    const criteria = page.getByRole('list', {name: '간트에 적용된 계획·일정 조건'});
+    await expect(criteria).toContainText(release.name);
+    await expect(criteria).toContainText('사이클 미지정');
+    await page.getByRole('button', {name: '오늘 중심', exact: true}).click();
+    await expect(windowStart).not.toHaveValue('2020-03-03');
+    await page.getByRole('button', {name: '보기 기간으로 이동', exact: true}).click();
+    await expect(windowStart).toHaveValue('2020-03-03');
+
+    const ganttViewPicker = page.getByRole('combobox', {name: '간트 공유 보기', exact: true});
+    await ganttViewPicker.selectOption(incompleteView.id);
+    const incompleteRow = gantt.locator(`[data-issue-id="${incomplete.id}"]`);
+    await expect(incompleteRow).toBeVisible();
+    const endDate = incompleteRow.getByLabel(`${incomplete.key} 종료일`, {exact: true});
+    await endDate.fill('2020-03-16');
+    const scheduleSaved = page.waitForResponse(response => response.url().endsWith('/api/schedule/apply') && response.request().method() === 'POST');
+    await endDate.press('Enter');
+    const scheduled = await scheduleSaved;
+    expect(scheduled.ok(), await scheduled.text()).toBe(true);
+    await expect(gantt.locator('.gantt-row[data-issue-id]')).toHaveCount(0);
+    await expect(criteria).toContainText('일정 미정');
+
+    const documentResponse = await request.post('/api/documents', {data: {projectId, title: `${prefix} 회의록`, content: {
+      type: 'doc', content: [{type: 'issueList', attrs: {projectId, savedViewId: saved.id, label: saved.name}}],
+    }}});
+    expect(documentResponse.status(), await documentResponse.text()).toBe(201);
+    document = await documentResponse.json() as DocPage;
+    await page.goto(`/#/${projectId}/documents`);
+    await page.reload();
+    await page.getByRole('button', {name: new RegExp(`${document.title} 초안$`)}).click();
+    await expect(page.getByRole('textbox', {name: '문서 제목', exact: true})).toHaveValue(document.title);
+    const issueList = page.getByRole('region', {name: '업무 목록', exact: true});
+    await expect(issueList).toContainText(overlapMatch.title);
+    await expect(issueList).toContainText(incomplete.title);
+    await expect(issueList).not.toContainText(issues[1].title);
+    await expect(issueList).not.toContainText(issues[2].title);
+
+    await page.goto(`/#/${projectId}/issues`);
+    await viewPicker.selectOption(saved.id);
+    await page.getByRole('button', {name: '계획·일정 필터', exact: true}).click();
+    await lastDay.fill('2020-03-20');
+    const declined = page.waitForEvent('dialog').then(dialog => dialog.dismiss());
+    await viewPicker.selectOption(incompleteView.id);
+    await declined;
+    await expect(viewPicker).toHaveValue(saved.id);
+    await expect(lastDay).toHaveValue('2020-03-20');
+    await filter.getByRole('button', {name: '조건 지우기', exact: true}).click();
+    await expect(cards).toHaveCount(issues.length);
+    await page.getByRole('button', {name: '보기 수정', exact: true}).click();
+    const updated = page.waitForResponse(response => response.url().endsWith(`/api/views/${saved.id}`) && response.request().method() === 'PATCH');
+    await page.getByRole('dialog', {name: '저장된 보기 수정', exact: true}).getByRole('button', {name: '저장', exact: true}).click();
+    const updatedResponse = await updated;
+    expect(updatedResponse.ok(), await updatedResponse.text()).toBe(true);
+    expect((await updatedResponse.json() as SavedView).filters.planning).toBeUndefined();
+  } finally {
+    if (document) {
+      const response = await request.delete(`/api/documents/${document.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json()).trashEntryId}`);
+    }
+    for (const view of await (await request.get(`/api/views?projectId=${projectId}`)).json() as SavedView[]) {
+      if (views.includes(view.id)) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+    }
+    for (const issue of issues) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json()).trashEntryId}`);
+    }
+    for (const item of items) await request.delete(`/api/planning-items/${item.id}?expectedVersion=${item.version}`);
   }
 });

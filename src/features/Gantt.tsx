@@ -13,6 +13,7 @@ import { ApiError, patch, post, remove } from '../lib/api';
 import { issueSearchText, projectIssueSchema, requiredFieldLabels } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
+import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
@@ -177,11 +178,11 @@ function ProjectGantt(props: GanttProps) {
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [data.savedViews, projectId]);
   const sharedView = sharedViews.find(view => view.id === ganttViewId);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
-  const matchSharedView = useMemo(() => {
-    if (!sharedView) return null;
-    const schemaData = { issueSchemas: data.issueSchemas, users: data.users };
-    return createIssueViewMatcher(sharedView.filters, schemaData, projectIssueSchema(schemaData, projectId));
-  }, [sharedView, data.issueSchemas, data.users, projectId]);
+  const sharedPlanningFilter = sharedView?.filters.planning;
+  const sharedPlanningLabels = issuePlanningFilterLabels(sharedPlanningFilter, projectPlans);
+  const sharedDateFilter = sharedPlanningFilter?.dates;
+  const overlapAnchor = sharedDateFilter?.mode === 'overlap' ? sharedDateFilter.from ?? sharedDateFilter.to : undefined;
+  const matchSharedView = sharedView ? createIssueViewMatcher(sharedView.filters, data, projectIssueSchema(data, projectId)) : null;
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
   const shiftPlan = planShift && (projectPlans.find(item => item.id === planShift.id) ?? planShift);
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
@@ -226,10 +227,12 @@ function ProjectGantt(props: GanttProps) {
     const start = Math.min(today - 7, ...dates) - 2, end = Math.max(today + 35, ...dates) + 3;
     return { start, end, days: end - start + 1 };
   })();
-  const defaultRangeStart = clampWindowStart(extent.days <= MAX_TIMELINE_DAYS ? extent.start : dayNumber(todayDate()) - 9);
+  const defaultRangeStart = overlapAnchor
+    ? dayNumber(windowForDate(overlapAnchor))
+    : clampWindowStart(extent.days <= MAX_TIMELINE_DAYS ? extent.start : dayNumber(todayDate()) - 9);
   const requestedStart = windowStart ? dayNumber(windowStart) : defaultRangeStart;
   const rangeStart = Number.isFinite(requestedStart) ? clampWindowStart(requestedStart) : defaultRangeStart;
-  const rangeDays = windowStart || extent.days > MAX_TIMELINE_DAYS ? MAX_TIMELINE_DAYS : Math.min(MAX_TIMELINE_DAYS, extent.days);
+  const rangeDays = windowStart || overlapAnchor || extent.days > MAX_TIMELINE_DAYS ? MAX_TIMELINE_DAYS : extent.days;
   const range = { start: rangeStart, end: rangeStart + rangeDays - 1, days: rangeDays };
   const dayWidth = zoom === 'day' ? 32 : zoom === 'week' ? 15 : 6;
   const timelineWidth = range.days * dayWidth;
@@ -253,7 +256,11 @@ function ProjectGantt(props: GanttProps) {
     return predecessor && successor ? [{ dependency, predecessor, successor }] : [];
   });
   const unscheduled = issues.filter(i => !i.startDate || !i.endDate);
-  const ticks = useMemo(() => Array.from({ length: range.days }, (_, index) => { const day = range.start + index; const date = new Date(day * 86_400_000); return { day, date, iso: isoDay(day), index, weekday: date.getUTCDay() }; }), [range.start, range.days]);
+  const ticks = Array.from({ length: rangeDays }, (_, index) => {
+    const day = rangeStart + index;
+    const date = new Date(day * 86_400_000);
+    return { day, date, iso: isoDay(day), index, weekday: date.getUTCDay() };
+  });
   const todayPosition = (dayNumber(todayDate()) - range.start) * dayWidth;
   const chartRowCount = planningRows.length + issues.length + historicalIssues.length + milestones.length + historicalMilestones.length;
   function canHideRows(nextIssues: Issue[]) {
@@ -505,6 +512,9 @@ function ProjectGantt(props: GanttProps) {
         </select>
       </label>
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+      {sharedPlanningLabels.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 계획·일정 조건">
+        {sharedPlanningLabels.map(label => <li key={label}>{label}</li>)}
+      </ul>}
     </div>}
     {sharedViewUnavailable && <div className="gantt-shared-view-warning">
       <p role="status">이 프로젝트에서 공유 보기를 열 수 없습니다.</p>
@@ -556,7 +566,26 @@ function ProjectGantt(props: GanttProps) {
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}
     <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 변경 후 미리보기</span><span>날짜 입력 후 Enter로 저장 · Esc로 최신 날짜 · 핸들은 ← → 키도 지원해요.</span></div>
-    <div className="gantt-window-controls"><span>표시 범위</span><button className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button><input className="field" type="date" aria-label="간트 표시 시작일" min="0000-01-01" max="9999-12-31" value={isoDay(range.start)} onChange={event => { if (event.target.value) setWindowStart(event.target.value); }} /><span>— {isoDay(range.end)}</span><button className="btn btn-ghost" aria-label="간트 다음 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start + 60)))}>→</button><button className="btn btn-ghost" onClick={() => { setWindowStart(null); scrollToDate(dayNumber(todayDate()), defaultRangeStart, 'smooth'); }}>오늘 중심</button><small>최대 {MAX_TIMELINE_DAYS}일 표시 · 범위 밖 기록은 행의 날짜로 이동하세요.</small></div>
+    <div className="gantt-window-controls">
+      <span>표시 범위</span>
+      <button type="button" className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button>
+      <input className="field" type="date" aria-label="간트 표시 시작일" min="0000-01-01" max="9999-12-31" value={isoDay(range.start)}
+        onChange={event => { if (event.target.value) setWindowStart(event.target.value); }} />
+      <span>— {isoDay(range.end)}</span>
+      <button type="button" className="btn btn-ghost" aria-label="간트 다음 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start + 60)))}>→</button>
+      <button type="button" className="btn btn-ghost" onClick={() => {
+        if (overlapAnchor) showDate(todayDate());
+        else {
+          setWindowStart(null);
+          scrollToDate(dayNumber(todayDate()), defaultRangeStart, 'smooth');
+        }
+      }}>오늘 중심</button>
+      {overlapAnchor && <button type="button" className="btn btn-ghost" onClick={() => {
+        setWindowStart(null);
+        scrollToDate(dayNumber(overlapAnchor), defaultRangeStart);
+      }}>보기 기간으로 이동</button>}
+      <small>최대 {MAX_TIMELINE_DAYS}일 표시 · 범위 밖 기록은 행의 날짜로 이동하세요.</small>
+    </div>
     {workloadView === 'project' && <ProjectWorkload key={draftEpoch} {...props} startDate={isoDay(range.start)} endDate={isoDay(range.end)}
       onDraftChange={trackDraft} onBeforeLevel={canOpenWorkloadLevel} scheduleBusy={busy} onScheduleApplied={onWorkloadLevelApplied}
       levelIssueIds={selectedIssues.map(issue=>issue.id)} />}

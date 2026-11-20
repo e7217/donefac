@@ -1,0 +1,166 @@
+'use client';
+
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { CalendarRange, Check } from 'lucide-react';
+import { parseIssueViewPlanningFilter } from '../../shared/issue-view';
+import type { IssueViewPlanningFilter, PlanningItem } from '../../shared/types';
+import { afterAcceptedNavigation } from '../lib/navigation';
+import { ISSUE_FILTER_DATE_LABELS, ISSUE_FILTER_PLAN_KINDS, issuePlanningFilterLabels } from './issue-planning-filter-labels';
+import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
+import './issue-planning-filters.css';
+
+type Selections = Pick<IssueViewPlanningFilter, 'cycleId' | 'moduleId' | 'releaseId'>;
+type DateMode = keyof typeof ISSUE_FILTER_DATE_LABELS;
+type Draft = Selections & { mode: DateMode; from: string; to: string };
+
+const hasDateRange = (mode: DateMode) => mode === 'overlap' || mode === 'due';
+const choice = (id: string | null | undefined) => id === undefined ? 'all' : id === null ? 'none' : `plan:${id}`;
+
+function fromFilter(value: IssueViewPlanningFilter | undefined): Draft {
+  const dates = value?.dates;
+  const range = dates?.mode === 'overlap' || dates?.mode === 'due' ? dates : undefined;
+  return {
+    cycleId: value?.cycleId, moduleId: value?.moduleId, releaseId: value?.releaseId,
+    mode: dates?.mode ?? 'all', from: range?.from ?? '', to: range?.to ?? '',
+  };
+}
+
+function equalDraft(a: Draft, b: Draft): boolean {
+  return a.cycleId === b.cycleId && a.moduleId === b.moduleId && a.releaseId === b.releaseId && a.mode === b.mode
+    && (!hasDateRange(a.mode) || (a.from === b.from && a.to === b.to));
+}
+
+export function IssuePlanningFilters({ projectId, planningItems, value, onApply }: {
+  projectId: string;
+  planningItems: readonly PlanningItem[];
+  value: IssueViewPlanningFilter | undefined;
+  onApply: (filter: IssueViewPlanningFilter | undefined) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(() => fromFilter(value));
+  const [error, setError] = useState('');
+  const panelId = useId();
+  const toggle = useRef<HTMLButtonElement>(null);
+  const dirty = useRef(false);
+  const labels = issuePlanningFilterLabels(value, planningItems);
+
+  const discard = useCallback(() => {
+    dirty.current = false;
+    setError('');
+    setOpen(false);
+  }, []);
+
+  useEffect(() => {
+    function guard(event: Event) {
+      if (event.defaultPrevented || !dirty.current) return;
+      if (!window.confirm('적용하지 않은 계획·일정 조건을 버리고 이동할까요?')) event.preventDefault();
+      else afterAcceptedNavigation(event, discard);
+    }
+    function unload(event: BeforeUnloadEvent) {
+      if (!dirty.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    }
+    window.addEventListener('teamspace:navigate', guard);
+    window.addEventListener('beforeunload', unload);
+    return () => {
+      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('beforeunload', unload);
+    };
+  }, [discard]);
+
+  function update(change: Partial<Draft>) {
+    const next = { ...draft, ...change };
+    dirty.current = !equalDraft(next, fromFilter(value));
+    setDraft(next);
+    setError('');
+  }
+
+  function close() {
+    discard();
+    toggle.current?.focus({ preventScroll: true });
+  }
+
+  function cancel() {
+    if (!dirty.current || window.confirm('적용하지 않은 계획·일정 조건을 버리고 닫을까요?')) close();
+  }
+
+  function apply(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const selections: Selections = {};
+    for (const kind of ISSUE_FILTER_PLAN_KINDS) {
+      const field = PLAN_ID_FIELDS[kind];
+      if (draft[field] !== undefined) selections[field] = draft[field];
+    }
+    const dates = draft.mode === 'all' ? undefined : hasDateRange(draft.mode) ? {
+      mode: draft.mode, ...(draft.from ? { from: draft.from } : {}), ...(draft.to ? { to: draft.to } : {}),
+    } : { mode: draft.mode };
+    try {
+      onApply(parseIssueViewPlanningFilter({ ...selections, ...(dates ? { dates } : {}) }, projectId, planningItems));
+      close();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '계획·일정 조건을 확인하세요.');
+    }
+  }
+
+  return <div className="issue-planning-filters">
+    <div className="issue-planning-filters-bar">
+      <button ref={toggle} className={`btn ${labels.length ? 'is-filtered' : 'btn-ghost'}`} type="button"
+        aria-expanded={open} aria-controls={panelId} onClick={() => {
+          if (open) cancel();
+          else { setDraft(fromFilter(value)); setOpen(true); }
+        }}><CalendarRange size={16} aria-hidden="true" />계획·일정 필터</button>
+      {labels.length > 0 && <ul className="issue-planning-filter-labels" aria-label="적용된 계획·일정 조건">
+        {labels.map(label => <li key={label}>{label}</li>)}
+      </ul>}
+    </div>
+    <section id={panelId} className="issue-planning-filter-panel" aria-label="계획·일정 필터" hidden={!open}
+      onKeyDown={event => {
+        if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancel();
+      }}>
+      {open && <form noValidate onSubmit={apply}>
+        <div className="issue-planning-filter-grid">
+          {ISSUE_FILTER_PLAN_KINDS.map(kind => {
+            const field = PLAN_ID_FIELDS[kind];
+            const selectedId = draft[field];
+            const options = planningItems.filter(item => item.projectId === projectId && item.kind === kind);
+            return <label key={kind}>{PLAN_LABELS[kind]}
+              <select className="field" aria-label={`${PLAN_LABELS[kind]} 필터`} value={choice(selectedId)}
+                onChange={event => {
+                  const selected = event.target.value;
+                  update({ [field]: selected === 'all' ? undefined : selected === 'none' ? null : selected.slice('plan:'.length) });
+                }}>
+                <option value="all">전체</option>
+                <option value="none">미지정</option>
+                {selectedId && !options.some(item => item.id === selectedId) && <option value={choice(selectedId)}>현재 항목 없음</option>}
+                {options.map(item => <option key={item.id} value={choice(item.id)}>{item.name}{item.status === 'archived' ? ' (보관됨)' : ''}</option>)}
+              </select>
+            </label>;
+          })}
+          <label>일정 조건
+            <select className="field" aria-label="일정 조건" value={draft.mode} onChange={event => update({ mode: event.target.value as DateMode })}>
+              {Object.entries(ISSUE_FILTER_DATE_LABELS).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
+            </select>
+          </label>
+          {hasDateRange(draft.mode) && <>
+            <label>조회 시작일<input type="date" className="field" value={draft.from} aria-describedby={`${panelId}-range`}
+              onChange={event => update({ from: event.target.value })} /></label>
+            <label>조회 종료일<input type="date" className="field" value={draft.to} aria-describedby={`${panelId}-range`}
+              onChange={event => update({ to: event.target.value })} /></label>
+          </>}
+        </div>
+        {hasDateRange(draft.mode) && <p id={`${panelId}-range`} className="issue-planning-filter-hint">날짜는 하나 이상 입력하세요. 입력한 날짜도 범위에 포함합니다.</p>}
+        {draft.mode === 'needs_dates' && <p className="issue-planning-filter-hint">계획 시작일과 종료일을 확인해야 하는 업무를 표시합니다.</p>}
+        {error && <p className="issue-planning-filter-error" role="alert">{error}</p>}
+        <footer>
+          <button className="btn btn-ghost" type="button" onClick={cancel}>편집 취소</button>
+          <button className="btn btn-ghost" type="button" onClick={() => { onApply(undefined); close(); }}>조건 지우기</button>
+          <button className="btn btn-primary" type="submit"><Check size={16} aria-hidden="true" />적용</button>
+        </footer>
+      </form>}
+    </section>
+  </div>;
+}

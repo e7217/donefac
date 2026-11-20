@@ -38,6 +38,24 @@
   text-overflow: ellipsis;
 }
 
+.gantt-shared-view-criteria {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-shared-view-criteria > li {
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #edf4ef;
+  overflow-wrap: anywhere;
+}
+
 .gantt-shared-view-warning {
   padding: 8px 12px;
   border: 1px solid #e8d6ab;

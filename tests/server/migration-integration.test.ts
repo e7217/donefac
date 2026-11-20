@@ -1647,7 +1647,7 @@ test('Confluence panels and status badges survive import, collaborative snapshot
   type Backup = WorkspaceSnapshot & { schemaVersion: number; collabStates: { documentId: string; schemaVersion: number }[] };
   const { data: backup, status: exported } = await f.call<Backup>('/export');
   assert.equal(exported, 200);
-  assert.equal(backup.schemaVersion, 46);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const oldEnvelope = await f.call<{error: string}>('/import', 'POST', {data: {...backup, schemaVersion: 45}});
   assert.equal(oldEnvelope.status, 400);
   assert.match(oldEnvelope.data.error, /schemaVersion 46/u);

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
-import type { Issue, PlanningItem, PlanningKind, PlanningStatus, PlanScheduleDates, Project, User } from '../shared/types.js';
+import type { Issue, PlanningItem, PlanningKind, PlanningStatus, PlanScheduleDates, Project, SavedView, User } from '../shared/types.js';
 import { planningFields, PLANNING_META } from '../shared/planning-helpers.js';
 import { Store } from './store.js';
 
@@ -35,7 +35,12 @@ function blankItem(projectId:string,kind:PlanningKind,label:string,timestamp:str
   return{id:randomUUID(),projectId,kind,name:label,description:'',status:'planned',ownerId:null,startDate:null,endDate:null,targetDate:null,version:1,createdAt:timestamp,updatedAt:timestamp};
 }
 type PlanFields=Pick<Issue,'cycle'|'module'|'release'|'cycleId'|'moduleId'|'releaseId'>;
-type Hooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown;validateIssue:(next:Issue,previous?:Issue)=>unknown};
+type Hooks = {
+  actor: (request: Request) => string;
+  activity: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => unknown;
+  validateIssue: (next: Issue, previous?: Issue) => unknown;
+  findSavedViewReference: (item: PlanningItem) => Pick<SavedView, 'id' | 'name'> | undefined;
+};
 
 /** Independent planning metadata; memberships never move dates or transition workflow states. */
 export class PlanningService{
@@ -45,6 +50,10 @@ export class PlanningService{
     UNIQUE(project_id,kind,name)
   );CREATE INDEX IF NOT EXISTS planning_items_project_kind ON planning_items(project_id,kind);`);}
   all():PlanningItem[]{return this.store.all<PlanningItem>('planning_items');}
+  forProject(projectId: string): PlanningItem[] {
+    const rows = this.store.db.prepare('SELECT json FROM planning_items WHERE project_id=? ORDER BY rowid').all(projectId) as { json: string }[];
+    return rows.map(row => JSON.parse(row.json) as PlanningItem);
+  }
   private get(id:unknown):PlanningItem{if(typeof id!=='string')fail('계획 항목 ID를 확인해 주세요.');return this.store.get<PlanningItem>('planning_items',id)||fail('계획 항목을 찾을 수 없습니다.',404);}
   private put(item:PlanningItem){this.store.db.prepare('INSERT INTO planning_items(id,project_id,kind,name,json) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,kind=excluded.kind,name=excluded.name,json=excluded.json').run(item.id,item.projectId,item.kind,item.name,JSON.stringify(item));}
   private project(id:unknown){if(typeof id!=='string'||!this.store.get('projects',id))fail('프로젝트를 찾을 수 없습니다.',404);return id;}
@@ -132,7 +141,7 @@ export class PlanningService{
   }
   registerRoutes(app:Express,hooks:Hooks):void{
     const route=(handler:(req:Request,res:Response)=>unknown)=>(req:Request,res:Response,next:NextFunction)=>{try{handler(req,res);}catch(error){if(error instanceof PlanningError)return res.status(error.status).json({error:error.message,details:error.details});if(String((error as Error)?.message).includes('planning_items.project_id, planning_items.kind, planning_items.name'))return res.status(409).json({error:'같은 종류와 이름의 계획 항목이 이미 있습니다.'});next(error);}};
-    app.get('/api/planning-items',route((req,res)=>{const projectId=this.project(req.query.projectId),kind=req.query.kind;if(kind!==undefined&&!kinds.includes(kind as PlanningKind))fail('계획 종류를 확인해 주세요.');res.json(this.all().filter(item=>item.projectId===projectId&&(kind===undefined||item.kind===kind)).sort((a,b)=>a.name.localeCompare(b.name,'ko')));}));
+    app.get('/api/planning-items',route((req,res)=>{const projectId=this.project(req.query.projectId),kind=req.query.kind;if(kind!==undefined&&!kinds.includes(kind as PlanningKind))fail('계획 종류를 확인해 주세요.');res.json(this.forProject(projectId).filter(item=>kind===undefined||item.kind===kind).sort((a,b)=>a.name.localeCompare(b.name,'ko')));}));
     app.get('/api/planning-items/:id',route((req,res)=>res.json(this.get(req.params.id))));
     app.post('/api/planning-items',route((req,res)=>{
       hooks.actor(req);const timestamp=now(),item=this.parse({id:randomUUID(),projectId:req.body.projectId,kind:req.body.kind,name:req.body.name,description:Object.hasOwn(req.body,'description')?req.body.description:'',status:Object.hasOwn(req.body,'status')?req.body.status:'planned',ownerId:req.body.ownerId??null,startDate:req.body.startDate??null,endDate:req.body.endDate??null,targetDate:req.body.targetDate??null,version:1,createdAt:timestamp,updatedAt:timestamp});
@@ -145,7 +154,23 @@ export class PlanningService{
         hooks.activity(req,'planning',item.id,`${PLANNING_META[item.kind].label} 변경`,item.name);return item;
       });res.json(updated);
     }));
-    app.delete('/api/planning-items/:id',route((req,res)=>{hooks.actor(req);this.store.transaction(()=>{const item=this.get(req.params.id);version(Number(req.query.expectedVersion),item.version);if(this.store.all<Issue>('issues').some(issue=>kinds.some(kind=>issue[planningFields(kind).idField]===item.id)))fail('업무가 연결된 계획 항목은 삭제할 수 없습니다. 연결을 해제하거나 보관해 주세요.',409);this.store.remove('planning_items',item.id);hooks.activity(req,'planning',item.id,`${PLANNING_META[item.kind].label} 삭제`,item.name);});res.json({ok:true});}));
+    app.delete('/api/planning-items/:id', route((req, res) => {
+      hooks.actor(req);
+      this.store.transaction(() => {
+        const item = this.get(req.params.id);
+        version(Number(req.query.expectedVersion), item.version);
+        if (this.store.all<Issue>('issues').some(issue => kinds.some(kind => issue[planningFields(kind).idField] === item.id))) {
+          fail('업무가 연결된 계획 항목은 삭제할 수 없습니다. 연결을 해제하거나 보관해 주세요.', 409);
+        }
+        const view = hooks.findSavedViewReference(item);
+        if (view) {
+          fail(`저장된 보기 ‘${view.name}’에서 이 계획을 사용 중입니다. 보기에서 조건을 지우거나 계획을 보관해 주세요.`, 409, { viewId: view.id });
+        }
+        this.store.remove('planning_items', item.id);
+        hooks.activity(req, 'planning', item.id, `${PLANNING_META[item.kind].label} 삭제`, item.name);
+      });
+      res.json({ ok: true });
+    }));
     app.post('/api/planning-items/:id/issues',route((req,res)=>{
       hooks.actor(req);const assignments=req.body.assignments;if(!Array.isArray(assignments)||!assignments.length||assignments.length>1000)fail('배정할 업무는 1~1000개여야 합니다.');const seen=new Set();
       for(const value of assignments){const a=object(value);if(typeof a.issueId!=='string'||seen.has(a.issueId)||typeof a.assigned!=='boolean'||!Number.isSafeInteger(a.expectedVersion)||a.expectedVersion<1)fail('중복되지 않은 업무 ID·버전·배정 여부가 필요합니다.');seen.add(a.issueId);}

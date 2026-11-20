@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
-import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueFieldFilter, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type SavedViewState } from '../../shared/types';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
@@ -10,6 +10,7 @@ import { CustomFieldSummary, IssueTypeName } from './CustomFields';
 import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
+import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
@@ -23,6 +24,7 @@ type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
 type BoardDrop = IssuePlacement & { status: IssueStatus };
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
+type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning'>;
 
 function IssueOrderControls({ issue, previous, next, busy, move }: {
   issue: Issue; previous?: Issue; next?: Issue; busy: boolean;
@@ -72,13 +74,14 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
   const [status, setStatus] = useState('all');
   const [assignee, setAssignee] = useState('all');
   const [type, setType] = useState('all');
-  const [projectFieldFilters, setProjectFieldFilters] = useState(() => new Map<string, IssueFieldFilter>());
-  const [fieldEditorEpoch, setFieldEditorEpoch] = useState(0);
-  const fieldFilter = projectFieldFilters.get(projectId);
+  const [projectFilters, setProjectFilters] = useState(() => new Map<string, ProjectFilters>());
+  const [filterEditorEpoch, setFilterEditorEpoch] = useState(0);
+  const { fieldFilter, planning } = projectFilters.get(projectId) ?? {};
+  const planningItems = data.planningItems ?? [];
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
   const filters = useMemo(() => ({
-    query,status,assigneeId:assignee,type,...(fieldFilter ? {fieldFilter} : {}),
-  }), [query,status,assignee,type,fieldFilter]);
+    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
+  }), [query, status, assignee, type, fieldFilter, planning]);
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,
   }, schema), [filters,data.issueSchemas,data.users,schema]);
@@ -102,11 +105,12 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
   const projectSelected = data.projects.some(project => project.id === projectId);
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
   const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter);
-  function updateFieldFilter(value: IssueFieldFilter | undefined) {
-    setProjectFieldFilters(previous => {
+  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning);
+  function updateProjectFilters(change: ProjectFilters) {
+    setProjectFilters(previous => {
       const next = new Map(previous);
-      if (value) next.set(projectId, value);
+      const filters = { ...previous.get(projectId), ...change };
+      if (filters.fieldFilter || filters.planning) next.set(projectId, filters);
       else next.delete(projectId);
       return next;
     });
@@ -117,14 +121,14 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
     setType(value.filters.type);
-    updateFieldFilter(value.filters.fieldFilter);
-    setFieldEditorEpoch(epoch => epoch + 1);
+    updateProjectFilters({ fieldFilter: value.filters.fieldFilter, planning: value.filters.planning });
+    setFilterEditorEpoch(epoch => epoch + 1);
   }
   function clearFilters() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
-    updateFieldFilter(undefined);
-    setFieldEditorEpoch(epoch => epoch + 1);
+    updateProjectFilters({ fieldFilter: undefined, planning: undefined });
+    setFilterEditorEpoch(epoch => epoch + 1);
   }
   function closeBulkEdit() {
     if (bulk.close()) bulkToggle.current?.focus({ preventScroll: true });
@@ -261,11 +265,14 @@ export function Issues(props: FeatureProps & { onOpenGantt?: (viewId: string) =>
         disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
       {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
-    {!isAll(projectId) && (schema.fields.length > 0 || fieldFilter) && <fieldset className="issue-bulk-filter-controls" disabled={bulk.locked}><IssueFieldFilters
-      key={`${projectId}:${fieldEditorEpoch}`} schema={schema} users={data.users} value={fieldFilter}
-      onApply={updateFieldFilter} notify={notify}
-    /></fieldset>}
-    <SavedViews projectId={projectId} actorId={props.actorId}
+    {projectSelected && <fieldset className="issue-bulk-filter-controls" disabled={bulk.locked}>
+      {(schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters
+        key={`fields:${projectId}:${filterEditorEpoch}`} schema={schema} users={data.users} value={fieldFilter}
+        onApply={value => updateProjectFilters({ fieldFilter: value })} notify={notify} />}
+      <IssuePlanningFilters key={`planning:${projectId}:${filterEditorEpoch}`} projectId={projectId} planningItems={planningItems}
+        value={planning} onApply={value => updateProjectFilters({ planning: value })} />
+    </fieldset>}
+    <SavedViews projectId={projectId} actorId={props.actorId} planningItems={planningItems}
       current={{layout:view,filters}}
       onApply={applySavedView} onOpenGantt={onOpenGantt} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results"><span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span><span className="muted">{view === 'board' ? order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경' : '업무를 선택해 상세 내용을 확인하세요'}</span></div>

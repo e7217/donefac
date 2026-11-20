@@ -2,14 +2,16 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Bookmark, Check, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import type { SavedView, SavedViewState } from '../../shared/types';
+import type { PlanningItem, SavedView, SavedViewState } from '../../shared/types';
 import { api, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import './saved-views.css';
 
 type Props = {
   projectId: string;
   actorId: string;
+  planningItems: readonly PlanningItem[];
   current: SavedViewState;
   onApply: (view: SavedViewState) => void;
   onOpenGantt?: (viewId: string) => void;
@@ -21,7 +23,7 @@ export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, current, onApply, onOpenGantt, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, planningItems, current, onApply, onOpenGantt, onViewsChanged, notify}: Props) {
   const [views, setViews] = useState<SavedView[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -98,7 +100,11 @@ function ProjectSavedViews({projectId, current, onApply, onOpenGantt, onViewsCha
   const save = async (event: React.FormEvent) => {
     event.preventDefault();if (busy || !editing) return;setBusy(true);setDialogError('');
     try {
-      const value = editing === 'update' && selected ? await patch<SavedView>(`/views/${selected.id}`, {name,...current,expectedVersion:selected.version}) : await post<SavedView>('/views', {projectId,name,...current});
+      const value = editing === 'update' && selected
+        ? await patch<SavedView>(`/views/${selected.id}`, {
+          name, ...current, filters: { ...current.filters, planning: current.filters.planning ?? {} }, expectedVersion: selected.version,
+        })
+        : await post<SavedView>('/views', {projectId, name, ...current});
       if (mounted.current) {setViews(previous => [...previous.filter(view => view.id !== value.id), value].sort((a,b) => a.name.localeCompare(b.name,'ko')));setSelectedId(value.id);setEditing(null);setError('');notify('업무 보기를 저장했습니다.');}
       await refreshWorkspace();
     } catch (error) {
@@ -139,9 +145,11 @@ function ProjectSavedViews({projectId, current, onApply, onOpenGantt, onViewsCha
     </div>}
     {editing && <div className="modal-backdrop"><form className="modal-card saved-view-dialog" role="dialog" aria-modal="true" aria-labelledby="saved-view-title" onSubmit={save}>
       <div className="card-heading"><h2 id="saved-view-title">{editing === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
-      <p className="muted">적용된 검색어·상태·담당자·유형·사용자 정의 필드 조건과 {current.layout === 'board' ? '보드' : '목록'} 화면을 프로젝트의 공유 보기로 저장합니다.</p>
+      <p className="muted">적용된 검색어와 필터를 {current.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
-      <div className="saved-view-definition"><span>{current.layout === 'board' ? '보드' : '목록'}</span><span>{current.filters.status === 'all' ? '모든 상태' : `상태: ${current.filters.status}`}</span>{current.filters.query && <span>검색: {current.filters.query}</span>}{current.filters.type !== 'all' && <span>유형: {current.filters.type}</span>}{current.filters.fieldFilter && <span>사용자 정의 필드 {current.filters.fieldFilter.rules.length}개</span>}</div>
+      <div className="saved-view-definition"><span>{current.layout === 'board' ? '보드' : '목록'}</span><span>{current.filters.status === 'all' ? '모든 상태' : `상태: ${current.filters.status}`}</span>{current.filters.query && <span>검색: {current.filters.query}</span>}{current.filters.type !== 'all' && <span>유형: {current.filters.type}</span>}{current.filters.fieldFilter && <span>사용자 정의 필드 {current.filters.fieldFilter.rules.length}개</span>}
+        {issuePlanningFilterLabels(current.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
+      </div>
       {dialogError && <p className="error-text" role="alert">{dialogError}</p>}
       {conflicted && <button type="button" className="btn" disabled={busy} onClick={async () => {
         if (!window.confirm('입력한 보기 이름을 버리고 최신 보기 설정을 적용할까요?')) return;
