@@ -6,10 +6,11 @@ import {
   supportsCollaborationSchema,
   type CollaborationCursorSelection,
   type CollaborationPeer,
+  type CollaborationSchemaVersion,
   type CollaborationServerMessage,
   type CollaborationSession,
 } from '../../shared/collaboration';
-import { documentNodeSchemaVersion, MAX_DOCUMENT_ISSUE_LISTS } from '../../shared/document-nodes';
+import { documentNodeSchemaVersion, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS } from '../../shared/document-nodes';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
 
@@ -33,7 +34,7 @@ const sameSelection = (a: CollaborationCursorSelection | null, b: CollaborationC
   a === b || (a !== null && b !== null && a.anchor === b.anchor && a.head === b.head);
 /** A known old cache is rendered only after validation in a disposable document.
  * Its original bytes remain untouched until an explicit discard or saved copy. */
-function validateLegacyPending(update: string, schemaVersion: 1 | 2 | 3): Uint8Array {
+function validateLegacyPending(update: string, schemaVersion: Exclude<CollaborationSchemaVersion, typeof COLLABORATION_SCHEMA>): Uint8Array {
   if (typeof update !== 'string' || !update.length || update.length > Math.ceil(MAX_CACHE_STATE / 3) * 4) throw new Error('편집 보관 데이터 크기가 올바르지 않습니다.');
   const bytes = decodeBytes(update);
   if (bytes.length > MAX_CACHE_STATE || encodeBytes(bytes) !== update) throw new Error('편집 보관 데이터 형식이 올바르지 않습니다.');
@@ -58,7 +59,7 @@ function validateLegacyPending(update: string, schemaVersion: 1 | 2 | 3): Uint8A
     };
     const referenceId = (id: unknown): id is string => typeof id === 'string' && Boolean(id.trim()) && id.length <= 200 && !/[\u0000-\u001f\u007f]/.test(id);
     const referenceLabel = (label: unknown) => label === undefined || typeof label === 'string' && label.length <= 300;
-    let count = 0, issueListCount = 0;
+    let count = 0, issueBlockCount = 0;
     const check = (value: unknown, depth: number) => {
       if (++count > 30000 || depth > 60) throw new Error('문서 중첩 한도를 초과했습니다.');
       const node = object(value);
@@ -70,10 +71,11 @@ function validateLegacyPending(update: string, schemaVersion: 1 | 2 | 3): Uint8A
           throw new Error('보관한 참조 블록의 대상 또는 이름이 올바르지 않습니다.');
         }
       }
-      if (node.type === 'issueList') {
-        if (++issueListCount > MAX_DOCUMENT_ISSUE_LISTS || !referenceId(attrs.projectId)
-          || (attrs.savedViewId != null && !referenceId(attrs.savedViewId)) || !referenceLabel(attrs.label)) {
-          throw new Error('보관한 업무 목록의 대상 또는 이름이 올바르지 않습니다.');
+      if (node.type === 'issueList' || node.type === 'issueSummary') {
+        if (++issueBlockCount > MAX_DOCUMENT_ISSUE_BLOCKS || !referenceId(attrs.projectId)
+          || (attrs.savedViewId != null && !referenceId(attrs.savedViewId)) || !referenceLabel(attrs.label)
+          || (node.type === 'issueSummary' && attrs.groupBy !== undefined && !isIssueSummaryGroupBy(attrs.groupBy))) {
+          throw new Error('보관한 업무 목록 또는 업무 현황의 대상·이름·집계 기준이 올바르지 않습니다.');
         }
       }
       if (node.marks !== undefined && !Array.isArray(node.marks)) throw new Error('문서 서식이 올바르지 않습니다.');

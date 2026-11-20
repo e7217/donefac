@@ -326,7 +326,7 @@ export interface ProjectWorklogReport {
   days: { date: string; minutes: number; entries: number }[];
 }
 export interface RichContent { type: string; content?: RichContent[]; text?: string; attrs?: Record<string, unknown>; marks?: {type: string; attrs?: Record<string, unknown>}[] }
-export interface ContentReference { type: 'issue' | 'document'; id: string; kind: 'reference' | 'include'; label: string }
+export interface ContentReference { type: 'issue' | 'document'; id: string; kind: 'reference' | 'include'; label: string; revisionId?: string }
 export interface DocPage {
   id: string; projectId: string | null; parentId: string | null; title: string;
   content: RichContent; plainText: string; icon: string; status: 'draft' | 'published';

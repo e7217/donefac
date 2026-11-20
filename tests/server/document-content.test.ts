@@ -14,13 +14,15 @@ import { DocumentContentService,DocumentContentError } from '../../server/docume
 import { CollaborationService,CollaborationError } from '../../server/collaboration.js';
 import { createEditorSchema } from '../../shared/editor-schema.js';
 import { COLLABORATION_SCHEMA,type CollaborationServerMessage } from '../../shared/collaboration.js';
-import type { DocPage,Issue,RichContent } from '../../shared/types.js';
+import { contentReferences, documentContentSchemaVersion, documentRevisionIncludes } from '../../shared/document-nodes.js';
+import type { DocPage,DocRevision,Issue,RichContent } from '../../shared/types.js';
 
 const now='2026-11-16T00:00:00.000Z',schema=createEditorSchema();
 const body=(text='원본'):RichContent=>({type:'doc',content:[{type:'paragraph',content:text?[{type:'text',text}]:undefined}]});
 const ref=(type:string,id:string,label=''):RichContent=>({type,attrs:{[type==='issueReference'?'issueId':'documentId']:id,label}});
 const issueList=():RichContent=>({type:'issueList',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무'}});
 const issueSummary=():RichContent=>({type:'issueSummary',attrs:{projectId:'project-test',savedViewId:null,label:'검증할 업무 현황',groupBy:'priority'}});
+const pinnedInclude=():RichContent=>({type:'documentRevisionInclude',attrs:{documentId:'doc-b',revisionId:'revision-test',label:'검증할 문서 버전'}});
 const document=(id:string,content=body()):DocPage=>({id,projectId:'project-test',parentId:null,title:id,content,plainText:'원본',icon:'📄',status:'draft',version:1,authorId:'user-test',createdAt:now,updatedAt:now});
 function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-document-content-')),store=new Store(dir);store.put('users',{id:'user-test',name:'문서 담당',email:'doc@example.test',color:'#668899'});store.put('projects',{id:'project-test',key:'DOC',name:'문서',description:'',color:'#668899',createdAt:now});
@@ -66,7 +68,7 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 through v3 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades v1 through v4 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
@@ -75,13 +77,16 @@ test('startup upgrades v1 through v3 rooms atomically, preserving Yjs bytes and 
     const b=insertState(f.store,'doc-b',{type:'doc',content:[ref('documentReference','doc-c','두 번째 원본')]},2);
     f.store.put('documents',document('doc-d'));
     const d=insertState(f.store,'doc-d',{type:'doc',content:[issueList()]},3);
+    f.store.put('documents',document('doc-e'));
+    const e=insertState(f.store,'doc-e',{type:'doc',content:[issueSummary()]},4);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
     request.run('doc-d',d.epoch,'old-request-v3','old-hash');
+    request.run('doc-e',e.epoch,'old-request-v4','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -121,7 +126,17 @@ test('one invalid persisted room prevents every migration write, and legacy impo
       const summarized=document('doc-c',f.contents.normalize({type:'doc',content:[issueSummary()]}).content);
       const richState={...current,state:encode(summarized.content).toString('base64')};
       assert.equal(service.validateImport([richState],[summarized])[0].schemaVersion,COLLABORATION_SCHEMA);
+      assert.equal(service.validateImport([{...richState,schemaVersion:4}],[summarized])[0].schemaVersion,COLLABORATION_SCHEMA);
       assert.throws(()=>service.validateImport([{...richState,schemaVersion:3}],[summarized]),(error:unknown)=>error instanceof CollaborationError&&error.code==='SCHEMA_MISMATCH');
+      const pinned = document('doc-c', f.contents.normalize({type:'doc', content:[pinnedInclude()]}).content);
+      const pinnedState = {...current, state:encode(pinned.content).toString('base64')};
+      const revisionOwner = (id: string) => id === 'revision-test' ? 'doc-b' : undefined;
+      assert.equal(documentContentSchemaVersion(pinned.content), 5);
+      assert.deepEqual(documentRevisionIncludes(pinned.content), [{documentId:'doc-b', revisionId:'revision-test'}]);
+      assert.deepEqual(contentReferences(pinned.content), [{type:'document', id:'doc-b', kind:'include', label:'검증할 문서 버전', revisionId:'revision-test'}]);
+      assert.equal(service.validateImport([pinnedState], [pinned], undefined, revisionOwner)[0].schemaVersion, COLLABORATION_SCHEMA);
+      assert.throws(()=>service.validateImport([{...pinnedState,schemaVersion:4}], [pinned], undefined, revisionOwner),
+        (error:unknown)=>error instanceof CollaborationError&&error.code==='SCHEMA_MISMATCH');
       f.store.transaction(()=>{f.store.put('documents',legacyDoc);service.replaceImported(valid);});assert.ok(service.session('doc-a').document.plainText.includes('기존 형식'));
     }finally{service.close();}
   }finally{f.close();}
@@ -147,11 +162,11 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('live updates validate references/includes before durable ACK and reject v1 through v3 protocol clients',async()=>{
+test('live updates validate references/includes before durable ACK and reject v1 through v4 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{
     const session=service.enable('doc-a',1,'user-test');
-    for(const schemaVersion of [1,2,3]){
+    for(const schemaVersion of [1,2,3,4]){
       const old=new Peer(url);
       peers.push(old);
       await once(old.ws,'open');
@@ -164,7 +179,34 @@ test('live updates validate references/includes before durable ACK and reject v1
       const before=service.exportStates()[0];const invalidDoc=prosemirrorJSONToYDoc(schema,{type:'doc',content:[ref('documentInclude','doc-a')]},'default');let invalidUpdate:Uint8Array;try{invalidUpdate=Y.encodeStateAsUpdate(invalidDoc);}finally{invalidDoc.destroy();}
       peer.send({type:'update',epoch:session.epoch,requestId:'invalid-cycle',update:Buffer.from(invalidUpdate).toString('base64')});assert.equal((await peer.next('error')).code,'INCLUDE_CYCLE');assert.deepEqual(service.exportStates()[0],before);assert.equal(service.session('doc-a').document.version,session.document.version);assert.equal((f.store.db.prepare('SELECT COUNT(*) n FROM collaboration_requests').get() as {n:number}).n,0);
       const bad=new Y.XmlElement('documentReference');bad.setAttribute('documentId','missing-doc');bad.setAttribute('label','없음');let update:Uint8Array|undefined;ydoc.on('update',value=>{update=value;});ydoc.getXmlFragment('default').insert(1,[bad]);peer.send({type:'update',epoch:session.epoch,requestId:'missing-target',update:Buffer.from(update!).toString('base64')});assert.equal((await peer.next('error')).code,'REFERENCE_NOT_FOUND');assert.deepEqual(service.exportStates()[0],before);
-      const clean=new Y.Doc();Y.applyUpdate(clean,Buffer.from(welcome.update,'base64'));try{const reference=new Y.XmlElement('documentReference');reference.setAttribute('documentId','doc-b');reference.setAttribute('label','관련 설계');let accepted:Uint8Array|undefined;clean.on('update',value=>{accepted=value;});clean.getXmlFragment('default').insert(1,[reference]);peer.send({type:'update',epoch:session.epoch,requestId:'valid-reference',update:Buffer.from(accepted!).toString('base64')});const ack=await peer.next('ack');assert.equal(ack.requestId,'valid-reference');assert.ok(ack.document.plainText.includes('관련 설계'));assert.equal(JSON.stringify(ack.document.content),JSON.stringify(f.contents.normalize(yDocToProsemirrorJSON(clean,'default')).content));assert.equal(service.session('doc-a').document.version,session.document.version+1);}finally{clean.destroy();}
+      const clean=new Y.Doc();Y.applyUpdate(clean,Buffer.from(welcome.update,'base64'));
+      try {
+        const reference = new Y.XmlElement('documentReference');
+        reference.setAttribute('documentId','doc-b');
+        reference.setAttribute('label','관련 설계');
+        let accepted:Uint8Array|undefined;
+        clean.on('update',value=>{accepted=value;});
+        clean.getXmlFragment('default').insert(1,[reference]);
+        peer.send({type:'update',epoch:session.epoch,requestId:'valid-reference',update:Buffer.from(accepted!).toString('base64')});
+        const ack = await peer.next('ack');
+        assert.equal(ack.requestId,'valid-reference');
+        assert.ok(ack.document.plainText.includes('관련 설계'));
+        assert.equal(JSON.stringify(ack.document.content),JSON.stringify(f.contents.normalize(yDocToProsemirrorJSON(clean,'default')).content));
+        assert.equal(service.session('doc-a').document.version,session.document.version+1);
+
+        const revision: DocRevision = {id:'revision-test',documentId:'doc-b',version:1,title:'고정할 설계',content:body(),
+          plainText:'원본',authorId:'user-test',createdAt:now,summary:'합성 저장본'};
+        f.store.put('revisions', revision);
+        const pin = new Y.XmlElement('documentRevisionInclude');
+        for (const [key, value] of Object.entries(pinnedInclude().attrs!)) pin.setAttribute(key, String(value));
+        clean.getXmlFragment('default').insert(2,[pin]);
+        peer.send({type:'update',epoch:session.epoch,requestId:'valid-pin',update:Buffer.from(accepted!).toString('base64')});
+        const pinnedAck = await peer.next('ack');
+        assert.equal(pinnedAck.requestId,'valid-pin');
+        assert.deepEqual(pinnedAck.document.content.content?.at(-1), pinnedInclude());
+        assert.match(pinnedAck.document.plainText, /revision-test/);
+        assert.deepEqual(service.session('doc-a').document, pinnedAck.document);
+      } finally { clean.destroy(); }
     }finally{ydoc.destroy();}
   }finally{for(const peer of peers)peer.ws.terminate();service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));f.close();}
 });

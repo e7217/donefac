@@ -145,10 +145,11 @@ export class ApiKeyService {
     }
     if (type === 'document' && Object.hasOwn(body, 'content')) {
       const { content } = normalizeDocumentContent(body.content);
-      const historical = new Set(previous && 'content' in previous ? contentReferences(previous.content).map(reference => `${reference.type}:${reference.kind}:${reference.id}`) : []);
+      const referenceKey = ({ type, kind, id, revisionId }: ReturnType<typeof contentReferences>[number]) => JSON.stringify([type, kind, id, revisionId]);
+      const historical = new Set(previous && 'content' in previous ? contentReferences(previous.content).map(referenceKey) : []);
       for (const reference of contentReferences(content)) {
         const table = reference.type === 'issue' ? 'issues' : 'documents';
-        if (!this.store.get(table, reference.id) && historical.has(`${reference.type}:${reference.kind}:${reference.id}`)) continue;
+        if (!this.store.get(table, reference.id) && historical.has(referenceKey(reference))) continue;
         this.resource(key, table, reference.id);
       }
       for (const { projectId } of documentIssueBlocks(content)) this.allowedProject(key, projectId);

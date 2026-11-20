@@ -35,7 +35,7 @@ const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : '문서 검토 상태를 처리하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 
-/** Includes are stored references, not snapshots of their mutable target bodies. */
+/** Resolve live includes to their saved labels while keeping immutable revision includes readable. */
 function snapshotContent(node: RichContent): RichContent {
   if (node.type === 'issueSummary') {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';

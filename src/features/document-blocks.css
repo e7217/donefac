@@ -74,3 +74,60 @@
 }
 .doc-issue-summary-pages > span { margin-right: auto; padding: 0 3px; color: #546d60; font-size: 11px; }
 .doc-issue-summary-pages .btn { min-height: 30px; padding: 4px 7px; font-size: 11px; }
+
+.doc-pinned-include .doc-reference-card:focus-visible {
+  outline: 2px solid #167563;
+  outline-offset: -3px;
+}
+
+.doc-pinned-message {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #526c5e;
+}
+
+.doc-pinned-message [role='alert'] {
+  color: #9a3835;
+  margin: 0 0 4px;
+}
+
+.doc-pinned-reference {
+  border-left: 2px solid #c9ddd2;
+  color: #496458;
+  padding-left: 9px;
+}
+
+.doc-revision-chooser-source {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  padding: 0 20px 9px;
+  color: #385447;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.doc-revision-chooser-source button {
+  flex-shrink: 0;
+}
+
+.doc-revision-chooser-pages {
+  border-top: 1px solid #e3ede7;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+}
+
+.doc-reference-results > button > time {
+  color: #536d5c;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+@media (max-width: 440px) {
+  .doc-revision-chooser-source { padding-inline: 12px; }
+  .doc-reference-results > button > time { display: none; }
+}

@@ -14,7 +14,8 @@ import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
-import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks } from './document-content.js';
+import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validatePinnedDocumentRevisions } from './document-content.js';
+import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
@@ -81,6 +82,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 5 && backupVersion < 26) fail('문서 버전 포함 블록은 schemaVersion 26 백업이 필요합니다.');
   if (version >= 4 && backupVersion < 22) fail('업무 현황 블록은 schemaVersion 22 백업이 필요합니다.');
   if (version >= 2 && backupVersion < 7) fail('참조·포함·접기 블록은 schemaVersion 7 백업이 필요합니다.');
   if (version >= 3 && backupVersion < 20) fail('업무 목록 블록은 schemaVersion 20 백업이 필요합니다.');
@@ -552,10 +554,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if (bodyChanged) {
         const existingSchema = documentContentSchemaVersion(old.content);
         const clientSchema = req.body.contentSchemaVersion;
-        if (existingSchema === 4 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && JSON.stringify(d.content) !== JSON.stringify(old.content)) {
-          fail('업무 현황이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: 4 });
+        if (existingSchema >= 4 && clientSchema !== existingSchema && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && JSON.stringify(d.content) !== JSON.stringify(old.content)) {
+          const block = existingSchema === 5 ? '고정 버전 포함 블록' : '업무 현황';
+          fail(`${block}이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.`, 409, { currentVersion: old.version, contentSchemaVersion: existingSchema });
         }
-        if (existingSchema === 3 && clientSchema !== 3 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && documentContentSchemaVersion(d.content) < 3) {
+        if (existingSchema === 3 && clientSchema !== 3 && clientSchema !== 4 && clientSchema !== DOCUMENT_CONTENT_SCHEMA_VERSION && documentContentSchemaVersion(d.content) < 3) {
           fail('업무 목록이 있는 문서입니다. 최신 편집기를 열어 본문을 다시 확인해 주세요.', 409, { currentVersion: old.version, contentSchemaVersion: 3 });
         }
       }
@@ -732,13 +735,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.status(201).json(head);
   });
-  const serveAttachment=(a:Attachment,req:Request,res:Response)=>{
+  const serveAttachment=(a:Attachment,req:Request,res:Response,inline=req.query.inline==='1')=>{
     let bytes:Buffer;
     try{bytes=files.read(a);}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못했습니다.',503);}
-    const inline=req.query.inline==='1';if(inline&&!['image/png','image/jpeg','image/gif','image/webp'].includes(sniffMime(bytes!)))fail('이 파일 형식은 인라인으로 표시할 수 없습니다.',415);
+    if(inline&&!['image/png','image/jpeg','image/gif','image/webp'].includes(sniffMime(bytes!)))fail('이 파일 형식은 인라인으로 표시할 수 없습니다.',415);
     const encoded=encodeURIComponent(a.filename).replace(/['()*]/g,c=>`%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     res.set({'Content-Type':inline?sniffMime(bytes!):'application/octet-stream','Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encoded}`,'Content-Length':String(bytes!.length),'X-Content-Type-Options':'nosniff','Cache-Control':'private, no-cache','ETag':`"${a.sha256}"`});res.end(bytes!);
   };
+  registerDocumentIncludeRevisionRoutes(app, store, (attachment, req, res) => serveAttachment(attachment, req, res, true));
   app.get('/api/attachments/:id/content',(req,res)=>{
     const id=String(req.params.id);
     const attachment=store.get<Attachment>('attachments',id) || get<AttachmentVersion>('attachment_versions',id);
@@ -891,11 +895,6 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
     const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
-    const firstDocument = importedDocuments[0];
-    documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
-      { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets });
-    validateDocumentIssueBlocks([...importedDocuments.slice(1), ...importedRevisions].map(value => value.content), issueBlockTargets, { allowMissing: true });
-    const importedCollaboration=collaboration.validateImport(data.schemaVersion>=3?data.collabStates:[],data.documents,issueBlockTargets);
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
@@ -937,15 +936,26 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:data.comments,revisions:data.revisions,attachments:[...data.attachments,...archiveAttachments]});
     const versionById=new Map(importedSources.versions.map(version=>[version.id,version]));
+    const archivedDocuments = importedTrash.filter(entry => entry.resourceType === 'document');
     for(const entry of importedTrash){
       entry.attachmentVersions=entry.attachmentVersions.map(version=>versionById.get(version.id)!);
-      if(entry.resourceType==='document'){
-        entry.resource=importDocument(entry.resource);
-        entry.revisions=entry.revisions.map(importDocument);
-        validateDocumentIssueBlocks([entry.resource, ...entry.revisions].map(value => value.content), issueBlockTargets, { allowMissing: true });
-        if(entry.collaboration)collaboration.validateImport([entry.collaboration],[entry.resource],issueBlockTargets);
-        if(entry.publication)[entry.publication]=documentPublication.validateRestore([entry.publication],[entry.resource],data.users,entry.revisions,data.exportedAt);
-      }
+    }
+    for (const entry of archivedDocuments) {
+      entry.resource = importDocument(entry.resource);
+      entry.revisions = entry.revisions.map(importDocument);
+    }
+    const revisionOwners = new Map([...importedRevisions, ...archivedDocuments.flatMap(entry => entry.revisions)].map(revision => [revision.id, revision.documentId]));
+    const revisionOwner = (id: string) => revisionOwners.get(id);
+    const firstDocument = importedDocuments[0];
+    documentContent.validate(firstDocument?.id || uid(), firstDocument?.content || { type: 'doc', content: [{ type: 'paragraph' }] }, undefined,
+      { allowMissing: true, documents: importedDocuments, issues: data.issues, issueBlockTargets, revisionOwner });
+    const allImportedContent = [...importedDocuments, ...importedRevisions, ...archivedDocuments.flatMap(entry => [entry.resource, ...entry.revisions])].map(value => value.content);
+    validateDocumentIssueBlocks(allImportedContent, issueBlockTargets, { allowMissing: true });
+    validatePinnedDocumentRevisions(allImportedContent, revisionOwner, { allowMissing: true });
+    const importedCollaboration = collaboration.validateImport(data.schemaVersion >= 3 ? data.collabStates : [], importedDocuments, issueBlockTargets, revisionOwner);
+    for (const entry of archivedDocuments) {
+      if (entry.collaboration) collaboration.validateImport([entry.collaboration], [entry.resource], issueBlockTargets, revisionOwner);
+      if (entry.publication) [entry.publication] = documentPublication.validateRestore([entry.publication], [entry.resource], data.users, entry.revisions, data.exportedAt);
     }
     const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(
       data.worklogs,data.projects,data.issues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],

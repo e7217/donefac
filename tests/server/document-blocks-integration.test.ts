@@ -15,12 +15,14 @@ type Backup=WorkspaceSnapshot&{schemaVersion:number;collabStates:{documentId:str
 const p=(text:string):RichContent=>({type:'paragraph',content:[{type:'text',text}]});
 const body=(...content:RichContent[]):RichContent=>({type:'doc',content});
 const reference=(type:'issueReference'|'documentReference'|'documentInclude',id:string,label:string):RichContent=>({type,attrs:{[type==='issueReference'?'issueId':'documentId']:id,label}});
+const pinnedInclude=(documentId:string,revisionId:string,label:string):RichContent=>({type:'documentRevisionInclude',attrs:{documentId,revisionId,label}});
 const issueList = (projectId: string, savedViewId: string | null, label: string): RichContent => ({type:'issueList',attrs:{projectId,savedViewId,label}});
 const issueSummary = (projectId: string, savedViewId: string | null, groupBy: string, label = '회의에서 볼 현황'): RichContent => ({
   type:'issueSummary', attrs:{projectId,savedViewId,groupBy,label},
 });
 const details:RichContent={type:'details',content:[{type:'detailsSummary',content:[{type:'text',text:'검토 <기준>',marks:[{type:'bold'}]}]},{type:'detailsContent',content:[p('접혀 있어도 보존할 결정')]}]};
 async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document-integration-'));const service=createApp({dataDir:dir});const server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;return{
+  base,
   async call<T=Record<string,unknown>>(path:string,method='GET',data?:unknown,token?:string,actorId='user-min'){const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{'X-Actor-Id':actorId})},...(data===undefined?{}:{body:JSON.stringify(data)})});return{status:response.status,data:await response.json() as T};},
   async close(){service.close();await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(dir,{recursive:true,force:true});},
 };}
@@ -66,13 +68,128 @@ test('native schema7 restores macro JSON and CRDT state with missing targets; in
     const target=await make(f,'사라질 원문'),source=await make(f,'포함 기록',body(reference('documentInclude',target.id,'보관할 제목'),details));
     const enabled=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration/enable`,'POST',{expectedVersion:source.version})).data;
     await f.call(`/documents/${target.id}?expectedVersion=1`,'DELETE');
-    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,25);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,COLLABORATION_SCHEMA);
+    const backup=(await f.call<Backup>('/export')).data;assert.equal(backup.schemaVersion,26);assert.equal(backup.collabStates.find(state=>state.documentId===source.id)!.schemaVersion,COLLABORATION_SCHEMA);
     const current=await snapshot(f),bad=structuredClone(backup);bad.documents.find(document=>document.id===source.id)!.content=body(reference('documentInclude',source.id,'순환'));
     assert.equal((await f.call('/import','POST',{data:bad})).status,422);assert.deepEqual(await snapshot(f),current);
     const downgraded={...backup,schemaVersion:6};assert.equal((await f.call('/import','POST',{data:downgraded})).status,400);assert.deepEqual(await snapshot(f),current);
     assert.equal((await f.call('/import','POST',{data:backup})).status,200);const restored=(await f.call<CollaborationSession>(`/documents/${source.id}/collaboration`)).data;assert.deepEqual(restored.document.content,enabled.document.content);assert.notEqual(restored.epoch,enabled.epoch);assert.ok(restored.document.version>enabled.document.version);
     assert.equal((await f.call('/import','POST',{data:legacy})).status,200);assert.equal((await snapshot(f)).documents.length,legacy.documents.length);
   }finally{await f.close();}
+});
+
+test('pinned includes keep one saved revision through live edits and trash, then keep a missing reference after purge',async()=>{
+  const f=await fixture();
+  try {
+    const source=await make(f,'설계 승인 당시 제목',body(p('승인한 설계 본문')));
+    const foreign=await make(f,'다른 프로젝트 문서',body(p('다른 문서 본문')),'project-team');
+    const originals=(await f.call<DocRevision[]>(`/documents/${source.id}/revisions`)).data;
+    const [approved]=originals;
+    const [foreignRevision]=(await f.call<DocRevision[]>(`/documents/${foreign.id}/revisions`)).data;
+    const definition=pinnedInclude(source.id,approved.id,approved.title);
+    const hosted=await make(f,'설계 결정 기록',body(p('결정의 근거'),definition));
+    assert.equal(documentContentSchemaVersion(hosted.content),5);
+    assert.deepEqual(contentReferences(hosted.content),[{type:'document',kind:'include',id:source.id,revisionId:approved.id,label:approved.title}]);
+    assert.match(hosted.plainText,new RegExp(approved.id));
+    const detailPath=`/documents/${source.id}/include-revisions/${approved.id}`;
+
+    for(const invalid of [pinnedInclude(source.id,foreignRevision.id,'다른 문서 버전'),pinnedInclude(source.id,'missing-revision','없는 버전')]){
+      assert.equal((await f.call('/documents','POST',{projectId:'project-neo',title:'저장할 수 없는 문서',content:body(invalid)})).status,422);
+    }
+    const key=(await f.call<ApiKeyCreated>('/api-keys','POST',{name:'고정 버전 자동화 검증',access:'write',projectIds:['project-neo']})).data;
+    assert.equal((await f.call('/v1'+detailPath,'GET',undefined,key.token)).status,403);
+    assert.equal((await f.call('/v1/documents','POST',{projectId:'project-neo',title:'범위 밖 고정',content:body(pinnedInclude(foreign.id,foreignRevision.id,'외부'))},key.token)).status,403);
+    assert.equal((await f.call(`/documents/${hosted.id}`,'PATCH',{expectedVersion:hosted.version,contentSchemaVersion:4,content:body(p('구형 편집기'))})).status,409);
+
+    // A live inclusion may point back to the host. The pin displays a saved body instead of expanding a live cycle.
+    const changed=await f.call<DocPage>(`/documents/${source.id}`,'PATCH',{
+      expectedVersion:source.version,title:'수정한 제목',content:body(p('바뀐 본문'),reference('documentInclude',hosted.id,'결정 근거'),definition),
+    });
+    assert.equal(changed.status,200,JSON.stringify(changed.data));
+    assert.deepEqual((await f.call<DocRevision>(detailPath)).data,approved);
+    const deleted=await f.call<{trashEntryId:string}>(`/documents/${source.id}`,'DELETE',{expectedVersion:changed.data.version});
+    assert.equal(deleted.status,200);
+    assert.equal((await f.call(`/documents/${source.id}/include-revisions`)).status,404);
+    assert.deepEqual((await f.call<DocRevision>(detailPath)).data,approved);
+    assert.equal((await f.call(`/trash/${deleted.data.trashEntryId}`,'DELETE')).status,200);
+    assert.equal((await f.call(detailPath)).status,404);
+    const edit=await f.call<DocPage>(`/documents/${hosted.id}`,'PATCH',{
+      expectedVersion:hosted.version,contentSchemaVersion:5,content:body(p('보관 기록에 추가'),definition),
+    });
+    assert.equal(edit.status,200,JSON.stringify(edit.data));
+    assert.deepEqual(edit.data.content.content?.at(-1),definition);
+    assert.equal((await f.call(`/documents/${hosted.id}`,'PATCH',{
+      expectedVersion:edit.data.version,contentSchemaVersion:5,content:body(reference('documentInclude',source.id,'삭제된 실시간 원문')),
+    })).status,422);
+  } finally{await f.close();}
+});
+
+test('native schema 26 preserves pinned revisions and archived sources and rejects mismatched owners before replacing data',async()=>{
+  const f=await fixture();
+  try {
+    const source=await make(f,'보관할 승인 문서',body(p('보관할 원문 내용')));
+    const alternate=await make(f,'다른 원문');
+    const originalImage=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8v8AAAAASUVORK5CYII=','base64');
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=','base64');
+    const upload=await fetch(f.base+`/attachments?resourceType=document&resourceId=${source.id}&filename=approved.png`,{
+      method:'POST',headers:{'Content-Type':'application/octet-stream','X-Actor-Id':'user-min'},body:new Uint8Array(originalImage),
+    });
+    assert.equal(upload.status,201);
+    const {id:attachmentRoot}=await upload.json() as {id:string};
+    const appended=await fetch(f.base+`/attachments/${attachmentRoot}/versions?expectedVersionId=${attachmentRoot}&filename=approved-v2.png`,{
+      method:'POST',headers:{'Content-Type':'application/octet-stream','X-Actor-Id':'user-min'},body:new Uint8Array(png),
+    });
+    assert.equal(appended.status,201);
+    const {currentVersionId:attachmentId}=await appended.json() as {currentVersionId:string};
+    assert.notEqual(attachmentId,attachmentRoot);
+    const saved=await f.call<DocPage>(`/documents/${source.id}`,'PATCH',{
+      expectedVersion:source.version,content:body(p('보관할 원문과 그림'),{type:'image',attrs:{src:`/api/attachments/${attachmentId}/content?inline=1`,alt:'승인용 그림'}}),
+    });
+    assert.equal(saved.status,200);
+    const [revision,earlier]=(await f.call<DocRevision[]>(`/documents/${source.id}/revisions`)).data;
+    const imageRoute=(id:string,fileId=attachmentId)=>f.base+`/documents/${source.id}/include-revisions/${id}/images/${fileId}`;
+    const checkImage=async()=>{
+      const image=await fetch(imageRoute(revision.id));
+      assert.equal(image.status,200);
+      assert.equal(image.headers.get('Content-Type'),'image/png');
+      assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
+    };
+    for(const path of [imageRoute(earlier.id),imageRoute(revision.id,attachmentRoot)]){
+      const unreferenced=await fetch(path);
+      assert.equal(unreferenced.status,404);
+      await unreferenced.arrayBuffer();
+    }
+    await checkImage();
+    const [wrong]=(await f.call<DocRevision[]>(`/documents/${alternate.id}/revisions`)).data;
+    const content=body(pinnedInclude(source.id,revision.id,revision.title));
+    const host=await make(f,'참조 버전이 고정된 문서',content);
+    const enabled=await f.call<CollaborationSession>(`/documents/${host.id}/collaboration/enable`,'POST',{expectedVersion:host.version});
+    assert.equal(enabled.status,200);
+    const archival=await f.call<{trashEntryId:string}>(`/documents/${source.id}`,'DELETE',{expectedVersion:saved.data.version});
+    assert.equal(archival.status,200);
+    await checkImage();
+    const backup=(await f.call<Backup & {revisions:DocRevision[]}>('/export')).data;
+    assert.equal(backup.schemaVersion,26);
+    const before=await snapshot(f);
+    const damaged=structuredClone(backup);
+    damaged.revisions.find(value=>value.documentId===host.id)!.content=body(pinnedInclude(source.id,wrong.id,'소유자가 다른 저장본'));
+    const rejected=await f.call<{error:string}>('/import','POST',{data:damaged});
+    assert.equal(rejected.status,422);
+    assert.match(rejected.data.error,/해당 문서/u);
+    const downgrade=await f.call<{error:string}>('/import','POST',{data:{...backup,schemaVersion:25}});
+    assert.equal(downgrade.status,400);
+    assert.match(downgrade.data.error,/schemaVersion 26/u);
+    assert.deepEqual(await snapshot(f),before);
+
+    assert.equal((await f.call('/import','POST',{data:backup})).status,200);
+    const restored=(await f.call<CollaborationSession>(`/documents/${host.id}/collaboration`)).data;
+    assert.equal(restored.schemaVersion,COLLABORATION_SCHEMA);
+    assert.notEqual(restored.epoch,enabled.data.epoch);
+    assert.deepEqual(restored.document.content,content);
+    assert.deepEqual((await f.call<DocRevision>(`/documents/${source.id}/include-revisions/${revision.id}`)).data,revision);
+    await checkImage();
+    assert.equal((await f.call(`/trash/${archival.data.trashEntryId}/restore`,'POST')).status,200);
+    assert.deepEqual((await f.call<DocRevision>(`/documents/${source.id}/include-revisions/${revision.id}`)).data,revision);
+  } finally{await f.close();}
 });
 
 test('document Markdown preserves reference destinations and folded content without expanding live includes',()=>{
@@ -139,7 +256,7 @@ test('native backup protects document issue lists in history and trash and resto
     assert.equal(changed.status, 200);
     const before = await snapshot(f);
     const live = (await f.call<Backup>('/export')).data;
-    assert.equal(live.schemaVersion, 25);
+    assert.equal(live.schemaVersion, 26);
     assert.equal((await f.call('/import', 'POST', {data:{...live,schemaVersion:19}})).status, 400);
     assert.deepEqual(await snapshot(f), before);
 
@@ -262,7 +379,7 @@ test('native schema22 preserves issue summaries in active bodies, revisions and 
     const definition = issueSummary('project-neo', null, 'priority');
     const source = await make(f, '현황을 기록한 회의록', body(p('검토할 범위'), definition));
     const active = (await f.call<Backup>('/export')).data;
-    assert.equal(active.schemaVersion, 25);
+    assert.equal(active.schemaVersion, 26);
     assert.equal((await f.call('/import', 'POST', {data:{...active,schemaVersion:21}})).status, 400);
 
     const changed = await f.call<DocPage>(`/documents/${source.id}`, 'PATCH', {

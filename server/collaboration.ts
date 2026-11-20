@@ -230,11 +230,11 @@ export class CollaborationService {
     return state?{documentId:state.documentId,epoch:state.epoch,schemaVersion:state.schemaVersion,state:state.state.toString('base64')}:null;
   }
   exportStates():CollaborationExport[]{return(this.store.db.prepare('SELECT document_id FROM collaboration_documents').all() as {document_id:string}[]).map(row=>this.exportState(row.document_id)!);}
-  validateImport(value:unknown,documents:DocPage[],issueBlockTargets?:IssueBlockTargets):State[]{
+  validateImport(value:unknown,documents:DocPage[],issueBlockTargets?:IssueBlockTargets,revisionOwner?:(id:string)=>string|undefined):State[]{
     if(!Array.isArray(value)||value.length>100000)invalid('공동 편집 상태 목록이 필요합니다.');
     const normalizedDocuments=documents.map(document=>({...document,...normalizeContent(document.content)}));
     const documentsById=new Map(normalizedDocuments.map(document=>[document.id,document]));
-    if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[],issueBlockTargets}));}
+    if(normalizedDocuments.length){const document=normalizedDocuments[0];contentOperation(()=>this.documentContent.validate(document.id,document.content,document.content,{allowMissing:true,documents:normalizedDocuments,issues:[],issueBlockTargets,revisionOwner}));}
     const seen = new Set<string>();
     return value.map(item => {
       if (!item || typeof item.documentId !== 'string' || seen.has(item.documentId) || !supportsCollaborationSchema(item.schemaVersion)

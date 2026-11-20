@@ -5,7 +5,8 @@ import { createPortal } from 'react-dom';
 import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, GitCompareArrows, History, List, RotateCcw, X } from 'lucide-react';
 import type { DocRevision, RichContent, User } from '../../shared/types';
 import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffUnit } from '../../shared/document-diff';
-import { ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { ReadonlyDocumentContent } from './DocumentBlocks';
 import './document-history.css';
 
 export interface DocumentHistoryProps {
@@ -20,7 +21,7 @@ export interface DocumentHistoryProps {
   saving?: boolean;
 }
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
+const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
 const PAGE_SIZE = 60;
 
 export function DocumentHistory({ revisions, loading, error, current, users, onRestore, restoreDisabled, onSaveCopy, saving = false }: DocumentHistoryProps) {
@@ -30,13 +31,20 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
   const [afterId, setAfterId] = useState('current');
   const ordered = [...revisions].sort((a, b) => b.version - a.version || b.createdAt.localeCompare(a.createdAt));
   const preview = ordered.find(value => value.id === previewId);
+  const previewHasPins = preview && contentReferences(preview.content).some(reference => reference.revisionId);
   const dirtyLabel = current.dirty ? '현재 미저장 초안' : '현재 편집본';
   function openCompare(revision?: DocRevision) { setBeforeId((revision || ordered[1] || ordered[0])?.id || ''); setAfterId('current'); setCompareOpen(true); }
   return <div className="document-history">
     <div className="docs-panel-heading"><h3>문서 변경 이력</h3><p>저장된 버전끼리 비교하거나 현재 편집 내용과 차이를 확인하세요.</p><button className="btn btn-ghost document-compare-open" disabled={!ordered.length || loading} onClick={() => openCompare()}><GitCompareArrows size={14} />버전 비교</button></div>
     {current.dirty && <div className="docs-history-hint">현재 편집을 저장한 후 이전 버전으로 복구할 수 있어요. 비교에서는 미저장 초안도 확인할 수 있습니다.{onSaveCopy && <button disabled={saving} onClick={() => void onSaveCopy()}>편집을 새 문서로 보관</button>}</div>}
     {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}{error && <p className="docs-panel-error" role="alert">{error}</p>}
-    {preview ? <div className="docs-history-preview"><button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>버전 {preview.version}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time><span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}<button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button><button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button></div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>버전 {revision.version}{revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
+    {preview ? <div className="docs-history-preview">
+      <button className="docs-history-back" onClick={() => setPreviewId(null)}><ArrowLeft size={13} />이력 목록</button><strong>버전 {preview.version}</strong><h4>{preview.title}</h4><time>{when(preview.createdAt)} · {users.find(user => user.id === preview.authorId)?.name || '팀원'}</time>
+      {previewHasPins ? <><span className="document-history-preview-label">본문 미리보기</span><ReadonlyDocumentContent content={preview.content} documentId={preview.documentId} mode="history" /></> : <>
+        <span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}
+      </>}
+      <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button><button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>
+    </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>버전 {revision.version}{revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
     {!loading && !error && !ordered.length && <p className="docs-panel-muted">저장된 이력이 없습니다.</p>}
     {compareOpen && typeof document !== 'undefined' && createPortal(<Comparison revisions={ordered} current={current} beforeId={beforeId} afterId={afterId} setBeforeId={setBeforeId} setAfterId={setAfterId} onClose={() => setCompareOpen(false)} />, document.body)}
   </div>;
@@ -116,7 +124,8 @@ function metadataSummary(unit: DocumentDiffUnit): { lines: SummaryLine[]; additi
   if (marks.length > 8) additional += marks.length - 8;
   if (unit.nodeType === 'heading') attribute('level', '제목 단계');
   if (unit.nodeType === 'image') { attribute('src', '이미지 주소', true); attribute('alt', '대체 텍스트', true); attribute('title', '이미지 설명'); attribute('width', '너비'); attribute('height', '높이'); }
-  if (['issueReference', 'documentReference', 'documentInclude'].includes(unit.nodeType)) { attribute(unit.nodeType === 'issueReference' ? 'issueId' : 'documentId', '참조 대상 ID', true); attribute('label', '저장된 이름', true); }
+  if (['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(unit.nodeType)) { attribute(unit.nodeType === 'issueReference' ? 'issueId' : 'documentId', '참조 대상 ID', true); attribute('label', '저장된 이름', true); }
+  if (unit.nodeType === 'documentRevisionInclude') attribute('revisionId', '고정 버전 ID', true);
   if (unit.nodeType === 'issueList' || unit.nodeType === 'issueSummary') {
     attribute('projectId', '프로젝트 ID', true);
     attribute('savedViewId', '공유 보기 ID', true, value => value ?? '프로젝트 전체');

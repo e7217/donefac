@@ -58,6 +58,12 @@ export function contentMarkdown(node: RichContent): string {
     case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
     case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
     case 'documentInclude': return `> 문서 포함: [${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
+    case 'documentRevisionInclude': {
+      const documentId = encodeURIComponent(String(node.attrs?.documentId || ''));
+      const revisionId = encodeURIComponent(String(node.attrs?.revisionId || ''));
+      const label = String(node.attrs?.label || '문서').replace(/\s+/g, ' ').replace(/([\\`*_\[\]<>])/g, '\\$1');
+      return `> 문서 버전 포함 · ${label} · 문서 ID ${documentId} · 버전 ID ${revisionId}\n\n`;
+    }
     case 'issueList':
     case 'issueSummary': {
       const projectId = String(node.attrs?.projectId || '');

@@ -4,17 +4,19 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 4;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 5;
 export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
 export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
 export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
   status: '상태', assignee: '담당자', priority: '우선순위',
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
+const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string): DocumentSchemaVersion {
+  if (nodeType === 'documentRevisionInclude') return 5;
   if (nodeType === 'issueSummary') return 4;
   if (nodeType === 'issueList') return 3;
   return versionTwoNodes.has(nodeType) ? 2 : 1;
@@ -87,6 +89,18 @@ function referenceNode(name: string, idAttribute: string, label: string) {
 export const IssueReference = referenceNode('issueReference', 'issueId', '업무 참조');
 export const DocumentReference = referenceNode('documentReference', 'documentId', '문서 참조');
 export const DocumentInclude = referenceNode('documentInclude', 'documentId', '문서 포함');
+export const DocumentRevisionInclude = referenceNode('documentRevisionInclude', 'documentId', '문서 버전 포함').extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      revisionId: {
+        default: '',
+        parseHTML: element => element.getAttribute('data-revision-id') || '',
+        renderHTML: attributes => ({ 'data-revision-id': attributes.revisionId }),
+      },
+    };
+  },
+});
 function issueBlockNode(name: 'issueList' | 'issueSummary', label: string) {
   return Node.create({
     name, group: 'block', atom: true, selectable: true, draggable: true,
@@ -122,17 +136,32 @@ export const DetailsContent = Node.create({
   name: 'detailsContent', content: 'block+', defining: true,
   parseHTML() { return [{ tag: 'div[data-teamspace-details-content]' }]; }, renderHTML() { return ['div', { 'data-teamspace-details-content': '' }, 0]; },
 });
-export function documentNodeExtensions() { return [IssueReference, DocumentReference, DocumentInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent]; }
+export function documentNodeExtensions() { return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent]; }
+
+export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {
+  const revisions: { documentId: string; revisionId: string }[] = [];
+  for (const node of documentNodes(content)) {
+    if (node.type !== 'documentRevisionInclude') continue;
+    const { documentId, revisionId } = node.attrs || {};
+    if (typeof documentId === 'string' && documentId && typeof revisionId === 'string' && revisionId) {
+      revisions.push({ documentId, revisionId });
+    }
+  }
+  return revisions;
+}
 
 /** Stored references only; included documents are deliberately not expanded. */
 export function contentReferences(content: RichContent): ContentReference[] {
   const references: ContentReference[] = [];
   for (const node of documentNodes(content)) {
-    if (['issueReference', 'documentReference', 'documentInclude'].includes(node.type)) {
-      const type = node.type === 'issueReference' ? 'issue' : 'document';
-      const id = node.attrs?.[type === 'issue' ? 'issueId' : 'documentId'];
-      if (typeof id === 'string' && id) references.push({ type, id, kind: node.type === 'documentInclude' ? 'include' : 'reference', label: typeof node.attrs?.label === 'string' ? node.attrs.label : '' });
-    }
+    if (!referenceNodes.has(node.type)) continue;
+    const type = node.type === 'issueReference' ? 'issue' : 'document';
+    const id = node.attrs?.[type === 'issue' ? 'issueId' : 'documentId'];
+    if (typeof id !== 'string' || !id) continue;
+    const pinned = node.type === 'documentRevisionInclude';
+    const revisionId = pinned && typeof node.attrs?.revisionId === 'string' ? node.attrs.revisionId : undefined;
+    references.push({ type, id, kind: pinned || node.type === 'documentInclude' ? 'include' : 'reference',
+      label: typeof node.attrs?.label === 'string' ? node.attrs.label : '', ...(revisionId ? { revisionId } : {}) });
   }
   return references;
 }
@@ -140,9 +169,10 @@ export function contentReferences(content: RichContent): ContentReference[] {
 export function documentPlainText(node: RichContent): string {
   if (node.type === 'text') return node.text || '';
   if (node.type === 'hardBreak') return '\n';
-  if (['issueReference', 'documentReference', 'documentInclude'].includes(node.type)) {
+  if (referenceNodes.has(node.type)) {
     const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');
     const label = String(node.attrs?.label || id);
+    if (node.type === 'documentRevisionInclude') return `[문서 버전 포함: ${label} (${id} @ ${String(node.attrs?.revisionId || '')})]`;
     return `[${node.type === 'issueReference' ? '업무' : node.type === 'documentInclude' ? '문서 포함' : '문서'}: ${label} (${id})]`;
   }
   if (node.type === 'issueList' || node.type === 'issueSummary') {

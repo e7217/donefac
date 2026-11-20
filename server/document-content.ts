@@ -1,7 +1,8 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
-import { contentReferences, documentIssueBlocks, documentPlainText, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS, type DocumentIssueBlockTarget } from '../shared/document-nodes.js';
+import { contentReferences, documentIssueBlocks, documentPlainText, documentRevisionIncludes, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS, type DocumentIssueBlockTarget } from '../shared/document-nodes.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
+import { includeRevisionOwner } from './document-include-revisions.js';
 
 export const MAX_DOCUMENT_BYTES=8*1024*1024;
 const schema=createEditorSchema();
@@ -29,10 +30,11 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     for(const value of Array.isArray(node.marks)?node.marks:[]){const mark=object(value);if(typeof mark.type!=='string'||!schema.marks[mark.type])invalid('지원하지 않는 문서 서식입니다.');const attributes=attrs(mark.attrs,schema.marks[mark.type].spec.attrs);if(mark.type==='link'&&typeof attributes.href==='string'&&/^(?:javascript|vbscript|data):/i.test(attributes.href.trim()))invalid('지원하지 않는 링크 형식입니다.');}
     if(node.type==='image'&&typeof attributes.src==='string'&&!/^(?:https?:\/\/|\/)/i.test(attributes.src))invalid('이미지는 http(s) 또는 첨부파일 주소를 사용해 주세요.');
     if(node.type==='heading'&&(typeof attributes.level!=='number'||![1,2,3].includes(attributes.level)))invalid('제목 단계는 1~3이어야 합니다.');
-    if(['issueReference','documentReference','documentInclude'].includes(node.type)){
+    if(['issueReference','documentReference','documentInclude','documentRevisionInclude'].includes(node.type)){
       const key=node.type==='issueReference'?'issueId':'documentId',id=attributes[key];
       if(!referenceId(id))invalid('참조 대상 ID는 1~200자여야 합니다.');
       if(!referenceLabel(attributes.label))invalid('참조 이름은 300자 이하여야 합니다.');
+      if(node.type==='documentRevisionInclude'&&!referenceId(attributes.revisionId))invalid('포함할 문서 저장본 ID는 1~200자여야 합니다.');
     }
     if (node.type === 'issueList' || node.type === 'issueSummary') {
       const label = node.type === 'issueList' ? '업무 목록' : '업무 현황';
@@ -77,22 +79,41 @@ export function validateDocumentIssueBlocks(contents: Iterable<RichContent>, tar
   }
 }
 
-export interface DocumentValidationOptions{allowMissing?:boolean;documents?:DocPage[];issues?:Issue[];issueBlockTargets?:IssueBlockTargets}
+type RevisionOwnerLookup = (revisionId: string) => string | undefined;
+const pinnedRevisionKey = (pin: { documentId: string; revisionId: string }) => JSON.stringify([pin.documentId, pin.revisionId]);
+
+export function validatePinnedDocumentRevisions(contents: Iterable<RichContent>, ownerOf: RevisionOwnerLookup, {
+  allowMissing = false, previousContent,
+}: { allowMissing?: boolean; previousContent?: RichContent } = {}): void {
+  const previous = new Set(previousContent ? documentRevisionIncludes(previousContent).map(pinnedRevisionKey) : []);
+  const owners = new Map<string, string | undefined>();
+  for (const content of contents) for (const pin of documentRevisionIncludes(content)) {
+    if (!owners.has(pin.revisionId)) owners.set(pin.revisionId, ownerOf(pin.revisionId));
+    const owner = owners.get(pin.revisionId);
+    if (owner !== undefined && owner !== pin.documentId) invalid('포함하려는 저장본이 해당 문서의 버전이 아닙니다.', 422, 'INCLUDE_REVISION_MISMATCH');
+    if (owner === undefined && !allowMissing && !previous.has(pinnedRevisionKey(pin))) {
+      invalid('포함할 문서 저장본을 찾을 수 없습니다.', 422, 'REFERENCE_NOT_FOUND');
+    }
+  }
+}
+
+export interface DocumentValidationOptions{allowMissing?:boolean;documents?:DocPage[];issues?:Issue[];issueBlockTargets?:IssueBlockTargets;revisionOwner?:RevisionOwnerLookup}
 export class DocumentContentService{
   constructor(private readonly store:Store){}
   normalize(value:unknown){return normalizeDocumentContent(value);}
   validate(documentId:string,content:RichContent,previousContent?:RichContent,options:DocumentValidationOptions={}):void{
     const documents=options.documents??this.store.all<DocPage>('documents'),issues=options.issues??this.store.all<Issue>('issues');
     const documentIds=new Set([...documents.map(document=>document.id),documentId]),issueIds=new Set(issues.map(issue=>issue.id));
-    const previous=new Set(contentReferences(previousContent||{type:'doc'}).map(reference=>`${reference.type}:${reference.kind}:${reference.id}`));
-    for(const reference of contentReferences(content))if(!(reference.type==='issue'?issueIds:documentIds).has(reference.id)&&!options.allowMissing&&!previous.has(`${reference.type}:${reference.kind}:${reference.id}`))invalid(`참조 대상을 찾을 수 없습니다: ${reference.id}`,422,'REFERENCE_NOT_FOUND');
+    const previous=new Set(contentReferences(previousContent||{type:'doc'}).filter(reference=>!reference.revisionId).map(reference=>`${reference.type}:${reference.kind}:${reference.id}`));
+    for(const reference of contentReferences(content))if(!reference.revisionId&&!(reference.type==='issue'?issueIds:documentIds).has(reference.id)&&!options.allowMissing&&!previous.has(`${reference.type}:${reference.kind}:${reference.id}`))invalid(`참조 대상을 찾을 수 없습니다: ${reference.id}`,422,'REFERENCE_NOT_FOUND');
+    validatePinnedDocumentRevisions([content], options.revisionOwner ?? (id => includeRevisionOwner(this.store, id)), { allowMissing: options.allowMissing, previousContent });
     validateDocumentIssueBlocks([content], options.issueBlockTargets ?? {
       hasProject: id => Boolean(this.store.get('projects', id)),
       viewProject: id => this.store.get<SavedView>('saved_views', id)?.projectId,
     }, { allowMissing: options.allowMissing, previousContent });
     const contents=new Map(documents.map(document=>[document.id,document.content]));contents.set(documentId,content);
     const incoming=new Map([...contents.keys()].map(id=>[id,0])),edges=new Map<string,string[]>();
-    for(const[id,body]of contents){const targets=[...new Set(contentReferences(body).filter(reference=>reference.kind==='include'&&contents.has(reference.id)).map(reference=>reference.id))];edges.set(id,targets);for(const target of targets)incoming.set(target,incoming.get(target)!+1);}
+    for(const[id,body]of contents){const targets=[...new Set(contentReferences(body).filter(reference=>reference.kind==='include'&&!reference.revisionId&&contents.has(reference.id)).map(reference=>reference.id))];edges.set(id,targets);for(const target of targets)incoming.set(target,incoming.get(target)!+1);}
     const ready=[...incoming].filter(([,degree])=>degree===0).map(([id])=>id);let visited=0;
     for(let cursor=0;cursor<ready.length;cursor++){const id=ready[cursor];visited++;for(const target of edges.get(id)||[]){const degree=incoming.get(target)!-1;incoming.set(target,degree);if(degree===0)ready.push(target);}}
     if(visited!==contents.size)invalid('문서 포함 블록은 자기 자신이나 순환 관계를 포함할 수 없습니다.',422,'INCLUDE_CYCLE');

@@ -87,18 +87,22 @@ test('형식 2에서 지원하지 않는 새 업무 목록 보관본은 원본 �
   expect((await canonical(f)).plainText).toBe(f.serverText);
 });
 
-test('형식 3의 오프라인 편집을 업무 목록과 함께 사본으로 보관한다', async ({page,upgrade:f}) => {
-  const text = '형식 3에서 연결 없이 작성한 회의 메모';
-  const list: RichContent = {type:'issueList',attrs:{projectId:f.document.projectId,savedViewId:null,label:'형식 3에 저장한 업무 범위'}};
+for (const { version, nodeType, blockLabel } of [
+  { version: 3, nodeType: 'issueList', blockLabel: '업무 목록' },
+  { version: 4, nodeType: 'issueSummary', blockLabel: '업무 현황' },
+] as const) test(`형식 ${version}의 오프라인 편집을 ${blockLabel}과 함께 사본으로 보관한다`, async ({page,upgrade:f}) => {
+  const text = `형식 ${version}에서 연결 없이 작성한 회의 메모`;
+  const block: RichContent = {type:nodeType,attrs:{projectId:f.document.projectId,savedViewId:null,label:`형식 ${version}에 저장한 업무 범위`,
+    ...(nodeType === 'issueSummary' ? { groupBy: 'priority' } : {})}};
   const previous = await canonical(f);
   const oldEpoch = randomUUID();
-  const selected = cacheKey(f.actors[0],f.document.id,oldEpoch,3);
-  const entries = {[selected]:cache(oldEpoch,legacyUpdate(text,[list]),'2099-01-01T00:00:00.000Z',3)};
+  const selected = cacheKey(f.actors[0],f.document.id,oldEpoch,version);
+  const entries = {[selected]:cache(oldEpoch,legacyUpdate(text,[block]),'2099-01-01T00:00:00.000Z',version)};
   await open(page,f,entries);
   const recovery = page.locator('.docs-live-prose');
   await expect(recovery).toHaveAttribute('contenteditable','false');
   await expect(recovery).toContainText(text);
-  await expect(recovery.getByRole('region',{name:'업무 목록',exact:true})).toBeVisible();
+  await expect(recovery.getByRole('region',{name:blockLabel,exact:true})).toBeVisible();
   expect(await stored(page)).toEqual(entries);
 
   const copying = page.waitForResponse(response => response.url().endsWith('/api/documents') && response.request().method() === 'POST');
@@ -107,7 +111,7 @@ test('형식 3의 오프라인 편집을 업무 목록과 함께 사본으로 �
   expect(result.status(),await result.text()).toBe(201);
   const copied = await result.json() as DocPage;
   expect(copied.id).not.toBe(f.document.id);
-  expect(copied.content.content).toContainEqual(list);
+  expect(copied.content.content).toContainEqual(block);
   expect(copied.plainText).toContain(text);
   await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(copied.title);
   expect(await stored(page)).toEqual({});
