@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
-import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
+import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
 import { AUTOMATION_TRIGGERS,branchMatches,sortedAutomationRules } from '../shared/automation.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
-import { defaultWorkflow } from '../shared/workflow-helpers.js';
+import { allowedNextStatuses,defaultWorkflow } from '../shared/workflow-helpers.js';
 import type { Store } from './store.js';
+
+const ISSUE_RUN_PAGE_SIZE = 20;
 
 export class AutomationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomationError(status,message,details);}
@@ -41,10 +43,40 @@ export class AutomationService{
   constructor(private readonly store:Store,private readonly hooks:AutomationHooks){
     store.db.exec(`CREATE TABLE IF NOT EXISTS automation_rules(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,actor_id TEXT NOT NULL REFERENCES users(id),json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,event_id TEXT NOT NULL,issue_id TEXT NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,occurred_at TEXT,outcome TEXT NOT NULL,json TEXT NOT NULL,UNIQUE(event_id,issue_id));
-      CREATE INDEX IF NOT EXISTS automation_runs_issue_time ON automation_runs(issue_id,occurred_at);`);
+      CREATE INDEX IF NOT EXISTS automation_runs_issue_time ON automation_runs(issue_id,occurred_at);
+      CREATE INDEX IF NOT EXISTS automation_runs_issue ON automation_runs(issue_id);`);
   }
   all():AutomationRule[]{return sortedAutomationRules(this.store.all<AutomationRule>('automation_rules'));}
   runs(projectId?:string,limit=100):AutomationRun[]{if(projectId&&!this.store.get('projects',projectId))fail('프로젝트를 찾을 수 없습니다.',404);if(!Number.isSafeInteger(limit)||limit<1||limit>500)fail('실행 기록 개수는 1~500이어야 합니다.');const rows=this.store.db.prepare(`SELECT json FROM automation_runs ${projectId?'WHERE project_id=?':''} ORDER BY rowid DESC LIMIT ?`).all(...(projectId?[projectId,limit]:[limit])) as {json:string}[];return rows.map(row=>JSON.parse(row.json) as AutomationRun);}
+  issueRuns(issueId: string, before?: unknown): IssueAutomationRunPage {
+    const issue = this.store.get<Issue>('issues', issueId);
+    if (!issue) fail('업무를 찾을 수 없습니다.', 404);
+    const params: (string | number)[] = [issueId];
+    if (before !== undefined) {
+      if (typeof before !== 'string' || !before || before.length > 200) fail('자동화 실행 기록의 위치를 확인해 주세요.');
+      const anchor = this.store.db.prepare('SELECT rowid FROM automation_runs WHERE issue_id=? AND id=?')
+        .get(issueId, before) as { rowid: number } | undefined;
+      if (!anchor) fail('자동화 실행 기록의 위치가 변경되었습니다. 처음부터 다시 불러와 주세요.');
+      params.push(anchor.rowid);
+    }
+    params.push(ISSUE_RUN_PAGE_SIZE + 1);
+    const rows = this.store.db.prepare(`SELECT json FROM automation_runs WHERE issue_id=?${before === undefined ? '' : ' AND rowid<?'}
+      ORDER BY rowid DESC LIMIT ?`).all(...params) as { json: string }[];
+    const items = rows.slice(0, ISSUE_RUN_PAGE_SIZE).map(row => JSON.parse(row.json) as AutomationRun);
+    const latest = this.store.db.prepare(`SELECT json FROM automation_runs WHERE issue_id=? AND project_id=?
+      AND outcome IN ('changed','no_op','blocked') AND occurred_at IS NOT NULL ORDER BY occurred_at DESC,rowid DESC LIMIT 1`)
+      .get(issueId, issue.projectId) as { json: string } | undefined;
+    const run = latest ? JSON.parse(latest.json) as AutomationRun : undefined;
+    const workflow = { workflows: [this.workflow(issue.projectId)] };
+    const canReview = run?.outcome === 'blocked' && run.fromStatus === issue.status && run.toStatus !== issue.status &&
+      allowedNextStatuses(workflow, issue).some(status => status.id === run.toStatus);
+    return {
+      issueVersion: issue.version,
+      items,
+      nextCursor: rows.length > ISSUE_RUN_PAGE_SIZE ? items[items.length - 1].id : null,
+      latestBlockedRunId: canReview ? run.id : null,
+    };
+  }
   private get(id:string):AutomationRule{return this.store.get<AutomationRule>('automation_rules',id)||fail('자동화 규칙을 찾을 수 없습니다.',404);}
   private workflow(projectId:string):ProjectWorkflow{return this.store.get<ProjectWorkflow>('workflows',projectId)||defaultWorkflow(projectId);}
   private schema(projectId:string):ProjectIssueSchema{return this.store.get<ProjectIssueSchema>('issue_schemas',projectId)||defaultIssueSchema(projectId);}
@@ -124,7 +156,18 @@ export class AutomationService{
         this.hooks.commitChange(rule,issue,next,event);
         prepared.afterStatusChange?.(rule,event);
       });
-      const run:AutomationRun={...prepared.outcome,id:randomUUID(),eventId:event.id,ruleId:rule.id,projectId:issue.projectId,actorId:rule.actorId,createdAt:new Date().toISOString(),occurredAt:validTime(event.occurredAt)?new Date(event.occurredAt).toISOString():null};
+      const statuses = this.workflow(issue.projectId).statuses;
+      const run: AutomationRun = {
+        ...prepared.outcome, id: randomUUID(), eventId: event.id, ruleId: rule.id, projectId: issue.projectId,
+        actorId: rule.actorId, createdAt: new Date().toISOString(),
+        occurredAt: validTime(event.occurredAt) ? new Date(event.occurredAt).toISOString() : null,
+        context: {
+          ruleName: rule.name, trigger: event.trigger, gitlabBaseUrl: base, gitlabProjectId: event.gitlabProjectId,
+          objectKind: event.objectKind, objectId: event.objectId, branch: event.branch,
+          fromStatusLabel: statuses.find(status => status.id === issue.status)?.label ?? issue.status,
+          toStatusLabel: statuses.find(status => status.id === rule.toStatusId)?.label ?? rule.toStatusId,
+        },
+      };
       this.store.db.prepare('INSERT INTO automation_runs(id,event_id,issue_id,project_id,occurred_at,outcome,json) VALUES(?,?,?,?,?,?,?)').run(run.id,event.id,issueId,issue.projectId,run.occurredAt,run.outcome,JSON.stringify(run));result.push(run);
     }
     return result;
@@ -152,6 +195,11 @@ export class AutomationService{
     app.patch('/api/automation-rules/:id',(req,res)=>{const actorId=hooks.actor(req);res.json(this.save(String(req.params.id),req.body,req.body.expectedVersion,actorId,rule=>hooks.activity(req,'project',rule.projectId,'자동화 규칙 변경',rule.name)));});
     app.delete('/api/automation-rules/:id',(req,res)=>{hooks.actor(req);const expected=req.body?.expectedVersion??(req.query.expectedVersion===undefined?undefined:Number(req.query.expectedVersion));this.remove(String(req.params.id),expected,rule=>hooks.activity(req,'project',rule.projectId,'자동화 규칙 삭제',rule.name));res.json({ok:true});});
     app.get('/api/automation-runs',(req,res)=>res.json(this.runs(req.query.projectId===undefined?undefined:this.project(req.query.projectId),req.query.limit===undefined?100:Number(req.query.limit))));
+    app.get('/api/issues/:id/automation-runs', (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).some(key => key !== 'before')) fail('자동화 실행 기록의 위치를 확인해 주세요.');
+      res.json(this.issueRuns(req.params.id, req.query.before));
+    });
     app.post('/api/automation/preview',(req,res)=>res.json(this.preview(req.body,hooks.actor(req))));
   }
 }

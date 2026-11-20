@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, Check, ChevronRight, Clock3, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import { PRIORITY, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -20,6 +20,7 @@ import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
+import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
@@ -97,6 +98,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
   const [dependencyBusy, setDependencyBusy] = useState(false);
+  const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
   const dependencyDraftRef = useRef(false);
   const dependencyOpener = useRef<HTMLButtonElement | null>(null);
@@ -281,6 +283,22 @@ function IssuePanelContent(props: IssuePanelProps) {
     : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
       ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
   function update<K extends keyof Issue>(key: K, value: Issue[K]) { setDraft(previous => previous ? { ...previous, [key]: value } : previous); }
+  function canPrepareAutomationStatus(run: AutomationRun) {
+    return Boolean(issue && draft && baseDraft && !conflict && !saving && !dependencyBusy && !commenting &&
+      draft.version === issue.version && baseDraft.status === issue.status && draft.status === baseDraft.status &&
+      run.issueId === issue.id && run.projectId === issue.projectId && run.outcome === 'blocked' && run.fromStatus === issue.status &&
+      run.toStatus !== issue.status && nextStatuses.some(status => status.id === run.toStatus));
+  }
+  function prepareAutomationStatus(run: AutomationRun) {
+    if (!canPrepareAutomationStatus(run)) return;
+    if (savingRef.current || dependencyBusyRef.current || gitlabDraft.current?.pending || childDraft.current?.pending) {
+      notify('현재 작업을 저장한 뒤 상태를 편집해 주세요.', 'error');
+      return;
+    }
+    update('status', run.toStatus);
+    setError('');
+    statusField.current?.focus();
+  }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError('');
@@ -434,7 +452,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         <label className="issue-form-label">제목<input aria-label="제목" className="field issue-title-input" value={draft.title} onChange={e => update('title', e.target.value)} maxLength={300} required /></label>
         <label className="issue-form-label">설명<textarea aria-label="설명" className="field issue-description-input" value={draft.description} onChange={e => update('description', e.target.value)} placeholder="배경, 목표, 완료 조건을 적어주세요." rows={5} /></label>
         <div className="issue-properties"><div className="issue-section-caption">속성</div><div className="issue-form-grid">
-          <label className="issue-form-label">상태<select aria-label="상태" className="field" value={draft.status} onChange={e => update('status', e.target.value as Issue['status'])}>{!nextStatuses.some(status => status.id === draft.status) && <option value={draft.status} disabled>{statusMeta(data,draft.projectId,draft.status).label} (현재 허용되지 않음)</option>}{nextStatuses.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}</select></label>
+          <label className="issue-form-label">상태<select ref={statusField} aria-label="상태" className="field" value={draft.status} onChange={e => update('status', e.target.value as Issue['status'])}>{!nextStatuses.some(status => status.id === draft.status) && <option value={draft.status} disabled>{statusMeta(data,draft.projectId,draft.status).label} (현재 허용되지 않음)</option>}{nextStatuses.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}</select></label>
           <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={draft.projectId} value={draft.type} existingType={baseDraft?.type} onChange={value => update('type', value)} /></label>
           <label className="issue-form-label">우선순위<select aria-label="우선순위" className="field" value={draft.priority} onChange={e => update('priority', e.target.value as Issue['priority'])}>{Object.entries(PRIORITY).map(([key, name]) => <option key={key} value={key}>{name}</option>)}</select></label>
           <label className="issue-form-label">담당자<select aria-label="담당자" className="field" value={draft.assigneeId || ''} onChange={e => update('assigneeId', e.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
@@ -531,6 +549,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} links={gitlabLinks} refresh={refresh} notify={notify}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} />
+      <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}
+        canPrepareStatus={canPrepareAutomationStatus} onPrepareStatus={prepareAutomationStatus} />
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments">
         <h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>

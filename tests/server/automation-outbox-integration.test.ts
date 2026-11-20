@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, GitlabWebhookStatus, Issue, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationRule, AutomationRun, GitlabWebhookStatus, Issue, IssueAutomationRunPage, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -45,27 +45,66 @@ test('preview and webhook honor the same required-field workflow without creatin
     await configure(f);assert.equal((await f.call('/issues/issue-1','PATCH',{expectedVersion:f.observer.get<Issue>('issues','issue-1')!.version,dueDate:null})).status,200);await endpoint(f);const workflow=(await f.call('/projects/project-neo/workflow')).data;workflow.transitions.find((edge:any)=>edge.from==='in_progress'&&edge.to==='done').requiredFields=['dueDate'];assert.equal((await f.call('/projects/project-neo/workflow','PATCH',{...workflow,expectedVersion:workflow.version})).status,200);
     const saved=await rule(f);const preview=await f.call('/automation/preview','POST',{rule:saved,issueIds:['issue-1'],sample:{trigger:'merge_request.merged',gitlabProjectId:42,branch:'feature/NEO-1'}});assert.equal(preview.status,200);assert.equal(preview.data.outcomes[0].outcome,'blocked');assert.equal((await f.call('/automation-runs')).data.length,0);
     const before=f.observer.get<Issue>('issues','issue-1')!;assert.equal((await hook(f)).status,200);assert.deepEqual(f.observer.get('issues','issue-1'),before);assert.equal((await f.call('/automation-runs')).data[0].outcome,'blocked');assert.equal((await f.call('/webhook-deliveries')).data.length,0);
+    const path='/issues/issue-1/automation-runs';
+    const page=await f.call<IssueAutomationRunPage>(path);
+    assert.equal(page.status,200);
+    const [blocked]=page.data.items;
+    assert.equal(page.data.latestBlockedRunId,blocked.id);
+    assert.match(blocked.reason,/필수/);
+    assert.deepEqual(blocked.context && [blocked.context.ruleName,blocked.context.trigger,blocked.context.objectId],
+      ['병합 후 완료','merge_request.merged','101']);
+    assert.equal((await f.call(`${path}?before=${blocked.id}&before=${blocked.id}`)).status,400);
+    assert.equal((await f.call('/issues/missing/automation-runs')).status,404);
+    assert.equal((await f.call('/issues/issue-1','PATCH',{expectedVersion:before.version,status:'done',dueDate:'2030-02-01'},{'X-Actor-Id':'user-jun'})).status,200);
+    const resolved=(await f.call<IssueAutomationRunPage>(path)).data;
+    assert.equal(resolved.latestBlockedRunId,null);
+    assert.deepEqual(resolved.items,[blocked]);
   }finally{await f.close();}
 });
 
-test('native8 exports definitions only and restores disabled rules with operational outbox reset',async()=>{
+test('native automation backup restores execution history and disabled rules with operational outbox reset',async()=>{
   const f=await fixture();try{
     await configure(f);const destination=await endpoint(f);const saved=await rule(f);assert.equal((await hook(f)).status,200);const backup=(await f.call('/export')).data;assert.equal(backup.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);assert.equal(backup.automationRules[0].id,saved.id);
     const serialized=JSON.stringify(backup);for(const privateValue of [destination.secret,destination.endpoint.url,'integration-secret','webhook_endpoints','webhook_deliveries'])assert.ok(!serialized.includes(privateValue));
     assert.equal(Object.hasOwn(backup, 'gitlabWebhookDeliveries'), false);
-    assert.equal((await f.call('/import','POST',{data:backup})).status,200);const restored=(await f.call<AutomationRule[]>('/automation-rules')).data[0];assert.equal(restored.enabled,false);assert.equal(restored.enabledAt,null);assert.ok(restored.version>saved.version);assert.equal((await f.call('/automation-runs')).data.length,0);assert.equal((await f.call('/webhook-endpoints')).data.length,0);assert.equal((await f.call('/webhook-deliveries')).data.length,0);assert.equal(f.observer.db.prepare('SELECT COUNT(*) AS total FROM webhook_events').get()!.total,0);
+    const history=await f.call<AutomationRun[]>('/automation-runs');
+    assert.equal(history.data.length,1);
+    const [run]=history.data;
+    assert.deepEqual(backup.automationRuns,history.data);
+    assert.equal(run.context?.gitlabBaseUrl,'http://gitlab.synthetic.test');
+    const oldFormat=await f.call<{error:string}>('/import','POST',{data:{...backup,schemaVersion:63}});
+    assert.equal(oldFormat.status,400);
+    assert.match(oldFormat.data.error,/schemaVersion 64/);
+    for(const automationRuns of [
+      [run,{...run,id:randomUUID()}], [{...run,id:'a'.repeat(201)}],
+      [{...run,context:{...run.context,gitlabBaseUrl:'https://token:secret@gitlab.synthetic.test'}}],
+    ]){
+      assert.equal((await f.call('/import','POST',{data:{...backup,automationRuns}})).status,400);
+      assert.deepEqual((await f.call('/automation-runs')).data,history.data);
+      assert.equal((await f.call('/webhook-endpoints')).data.length,1);
+    }
+    assert.equal((await f.call('/import','POST',{data:backup})).status,200);const restored=(await f.call<AutomationRule[]>('/automation-rules')).data[0];assert.equal(restored.enabled,false);assert.equal(restored.enabledAt,null);assert.ok(restored.version>saved.version);
+    assert.deepEqual((await f.call<IssueAutomationRunPage>('/issues/issue-1/automation-runs')).data,
+      {items:[run],nextCursor:null,latestBlockedRunId:null,issueVersion:f.observer.get<Issue>('issues','issue-1')!.version});
+    assert.equal((await f.call('/webhook-endpoints')).data.length,0);assert.equal((await f.call('/webhook-deliveries')).data.length,0);assert.equal(f.observer.db.prepare('SELECT COUNT(*) AS total FROM webhook_events').get()!.total,0);
     assert.deepEqual((await f.call<GitlabWebhookStatus>('/integrations/gitlab/webhook-status')).data.repositories, [{ repositoryId: 42, lastDelivery: null }]);
     assert.equal((await f.call('/integrations/gitlab')).data.webhookSecretConfigured,true);
-    const legacy={...backup,schemaVersion:7};delete legacy.automationRules;assert.equal((await f.call('/import','POST',{data:legacy})).status,200);assert.equal((await f.call('/automation-rules')).data.length,0);
+    const olderRun={...run};delete olderRun.context;
+    assert.equal((await f.call('/import','POST',{data:{...backup,automationRuns:[olderRun]}})).status,200);
+    assert.deepEqual((await f.call('/automation-runs')).data,[olderRun]);
+    const legacy={...backup,schemaVersion:7};delete legacy.automationRules;delete legacy.automationRuns;
+    assert.equal((await f.call('/import','POST',{data:legacy})).status,200);
+    assert.equal((await f.call('/automation-rules')).data.length,0);
+    assert.deepEqual((await f.call('/automation-runs')).data,[]);
   }finally{await f.close();}
 });
 
 test('late native import validation failure rolls back rule, destination, queue and config generation',async()=>{
   const f=await fixture();try{
     await configure(f);await endpoint(f);await rule(f);await hook(f);const backup=(await f.call('/export')).data;
-    const before={rules:(await f.call('/automation-rules')).data,endpoints:(await f.call('/webhook-endpoints')).data,deliveries:(await f.call('/webhook-deliveries')).data,settings:(await f.call('/integrations/gitlab')).data,generation:f.observer.setting('outboundWebhookGeneration')};
+    const before={rules:(await f.call('/automation-rules')).data,history:(await f.call('/automation-runs')).data,endpoints:(await f.call('/webhook-endpoints')).data,deliveries:(await f.call('/webhook-deliveries')).data,settings:(await f.call('/integrations/gitlab')).data,generation:f.observer.setting('outboundWebhookGeneration')};
     backup.dependencies.push({id:randomUUID(),predecessorId:'missing-issue',successorId:'issue-1',type:'FS',lagDays:0});assert.equal((await f.call('/import','POST',{data:backup})).status,404);
-    assert.deepEqual((await f.call('/automation-rules')).data,before.rules);assert.deepEqual((await f.call('/webhook-endpoints')).data,before.endpoints);assert.deepEqual((await f.call('/webhook-deliveries')).data,before.deliveries);assert.deepEqual((await f.call('/integrations/gitlab')).data,before.settings);assert.equal(f.observer.setting('outboundWebhookGeneration'),before.generation);
+    assert.deepEqual((await f.call('/automation-rules')).data,before.rules);assert.deepEqual((await f.call('/automation-runs')).data,before.history);assert.deepEqual((await f.call('/webhook-endpoints')).data,before.endpoints);assert.deepEqual((await f.call('/webhook-deliveries')).data,before.deliveries);assert.deepEqual((await f.call('/integrations/gitlab')).data,before.settings);assert.equal(f.observer.setting('outboundWebhookGeneration'),before.generation);
   }finally{await f.close();}
 });
 

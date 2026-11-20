@@ -9,7 +9,7 @@ import { AutomationService,AutomationError } from '../../server/automation.js';
 import { WorkflowService } from '../../server/workflows.js';
 import { IssueSchemaService } from '../../server/issue-schema.js';
 import { branchMatches,sortedAutomationRules } from '../../shared/automation.js';
-import type { AutomationEvent,AutomationRule,Issue,Project,ProjectIssueSchema,User } from '../../shared/types.js';
+import type { AutomationEvent,AutomationRule,AutomationRun,Issue,Project,ProjectIssueSchema,User } from '../../shared/types.js';
 
 const timestamp=new Date().toISOString();
 const project:Project={id:'project-auto',name:'자동화 검증',key:'AUTO',color:'#668899',description:'',createdAt:timestamp};
@@ -57,6 +57,97 @@ test('workflow/custom requirements block the chosen rule without fallback, while
     const runs=f.process(event());assert.equal(runs[0].outcome,'blocked');assert.equal(runs[0].ruleId,rule.id);assert.notEqual(runs[0].ruleId,fallback.id);assert.ok(runs[0].reason.includes('승인 기록'));assert.deepEqual(f.store.get('issues','issue-a'),before);
     f.store.put('issues',{...before,customFields:{approval:'검토 완료'}});assert.equal(f.process(event())[0].outcome,'changed');assert.equal(f.store.get<Issue>('issues','issue-a')!.status,'done');
   }finally{f.close();}
+});
+
+test('ticket history keeps execution context, paginates within one ticket and reads context-free runs', () => {
+  const f = fixture();
+  try {
+    const rule = f.create({ name: '이전 규칙 이름' });
+    const workflow = f.workflows.get(project.id);
+    const savedWorkflow = f.workflows.save(project.id, {
+      ...workflow,
+      statuses: workflow.statuses.map(status => status.id === 'done' ? { ...status, label: '이전 종료 이름' } : status),
+      fieldRules: [{ issueType: '*', statusId: 'done', requiredFields: ['description'] }],
+    }, workflow.version);
+    const source = event();
+    const [blocked] = f.process(source);
+    assert.equal(blocked.outcome, 'blocked');
+    assert.deepEqual(blocked.context, {
+      ruleName: rule.name,
+      trigger: source.trigger,
+      gitlabBaseUrl: rule.gitlabBaseUrl,
+      gitlabProjectId: source.gitlabProjectId,
+      objectKind: source.objectKind,
+      objectId: source.objectId,
+      branch: source.branch,
+      fromStatusLabel: workflow.statuses.find(status => status.id === 'todo')?.label,
+      toStatusLabel: '이전 종료 이름',
+    });
+    f.service.save(rule.id, { name: '현재 규칙 이름' }, rule.version, users[0].id);
+    f.workflows.save(project.id, {
+      ...savedWorkflow,
+      statuses: savedWorkflow.statuses.map(status => status.id === 'done' ? { ...status, label: '현재 종료 이름' } : status),
+    }, savedWorkflow.version);
+
+    const [anotherIssue] = f.process(event({ issueIds: ['issue-b'], disposition: 'unverified', objectId: '' }));
+    assert.equal(anotherIssue.context?.objectId, '');
+    for (let count = 0; count < 20; count++) f.process(event({ disposition: 'stale' }));
+    const page = f.service.issueRuns('issue-a');
+    assert.equal(page.items.length, 20);
+    assert.ok(page.items.every(run => run.issueId === 'issue-a' && run.outcome === 'ignored'));
+    assert.equal(page.latestBlockedRunId, blocked.id);
+    assert.equal(page.nextCursor, page.items.at(-1)?.id);
+    const last = f.service.issueRuns('issue-a', page.nextCursor);
+    assert.deepEqual(last, { issueVersion: 1, items: [blocked], nextCursor: null, latestBlockedRunId: blocked.id });
+    assert.equal(last.items[0].context?.ruleName, '이전 규칙 이름');
+    assert.equal(last.items[0].context?.toStatusLabel, '이전 종료 이름');
+    rejects(() => f.service.issueRuns('issue-a', anotherIssue.id));
+    rejects(() => f.service.issueRuns('issue-a', [page.nextCursor, page.nextCursor]));
+    rejects(() => f.service.issueRuns('issue-a', 'missing-run'));
+    rejects(() => f.service.issueRuns('issue-missing'), 404);
+
+    const legacy: AutomationRun = { ...blocked };
+    delete legacy.context;
+    f.store.db.prepare('UPDATE automation_runs SET json=? WHERE id=?').run(JSON.stringify(legacy), legacy.id);
+    assert.deepEqual(f.service.issueRuns('issue-a', page.nextCursor).items, [legacy]);
+  } finally { f.close(); }
+});
+
+test('only the newest relevant blocked run is eligible when the current workflow still allows it', () => {
+  const f = fixture();
+  try {
+    f.create();
+    const workflow = f.workflows.get(project.id);
+    const requirements = f.workflows.save(project.id, {
+      ...workflow, fieldRules: [{ issueType: '*', statusId: 'done', requiredFields: ['description'] }],
+    }, workflow.version);
+    const nextTime = Date.now() + 5_000;
+    const [newer] = f.process(event({ occurredAt: new Date(nextTime).toISOString() }));
+    const [older] = f.process(event({ occurredAt: new Date(nextTime - 1_000).toISOString() }));
+    assert.equal(older.outcome, 'blocked');
+    assert.equal(f.service.issueRuns('issue-a').latestBlockedRunId, newer.id);
+    const [tied] = f.process(event({ occurredAt: newer.occurredAt }));
+    assert.equal(f.service.issueRuns('issue-a').latestBlockedRunId, tied.id);
+
+    const current = f.store.get<Issue>('issues', 'issue-a')!;
+    f.store.put('issues', { ...current, status: 'in_progress', version: current.version + 1 });
+    const moved = f.service.issueRuns('issue-a');
+    assert.equal(moved.latestBlockedRunId, null);
+    assert.equal(moved.issueVersion, current.version + 1);
+    f.store.put('issues', current);
+    const restricted = f.workflows.save(project.id, {
+      ...requirements, transitions: requirements.transitions.filter(edge => edge.from !== 'todo' || edge.to !== 'done'),
+    }, requirements.version);
+    assert.equal(f.service.issueRuns('issue-a').latestBlockedRunId, null);
+    f.workflows.save(project.id, { ...restricted, transitions: requirements.transitions }, restricted.version);
+    f.store.put('issues', { ...current, description: '필수 속성 작성 완료' });
+    assert.equal(f.process(event({ occurredAt: new Date(nextTime + 1_000).toISOString() }))[0].outcome, 'changed');
+    // Historical blocked events remain in the log even after a newer outcome and a manual status change.
+    f.store.put('issues', current);
+    const history = f.service.issueRuns('issue-a');
+    assert.equal(history.latestBlockedRunId, null);
+    assert.ok(history.items.some(run => run.id === tied.id));
+  } finally { f.close(); }
 });
 
 test('freshness, activation tolerance, cross-object ordering and equal-time conflicts protect newer intent',()=>{

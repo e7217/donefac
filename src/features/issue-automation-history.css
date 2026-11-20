@@ -1,0 +1,42 @@
+.issue-automation-heading,
+.issue-automation-transition,
+.issue-automation-meta,
+.issue-automation-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+}
+
+.issue-automation-heading { justify-content: space-between; margin-bottom: 8px; }
+.issue-automation-heading > h3 { margin: 0; }
+.issue-automation-history .btn { min-height: 32px; }
+
+.issue-automation-runs { list-style: none; margin: 0; padding: 0; }
+.issue-automation-runs > li {
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  padding: 12px 0;
+}
+
+.issue-automation-transition { font-size: 12px; }
+.issue-automation-transition strong { min-width: 0; }
+.issue-automation-outcome {
+  background: #eef2ee;
+  border-radius: 5px;
+  color: #4c6251;
+  flex: none;
+  font-size: 11px;
+  padding: 3px 7px;
+}
+.issue-automation-outcome[data-outcome='blocked'] { background: #fff2ed; color: #9a4934; }
+.issue-automation-outcome[data-outcome='changed'] { background: #e7f4e8; color: #376843; }
+
+.issue-automation-reason { font-size: 12px; line-height: 1.65; margin: 7px 0 5px; }
+.issue-automation-context,
+.issue-automation-meta { color: #54665a; font-size: 11px; line-height: 1.55; }
+.issue-automation-context { display: grid; gap: 3px; }
+.issue-automation-meta { margin-top: 5px; }
+.issue-automation-actions { margin-top: 8px; }
+.issue-automation-actions .btn { text-decoration: none; }
+.issue-automation-older { margin-top: 8px; }

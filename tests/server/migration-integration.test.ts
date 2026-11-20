@@ -919,21 +919,27 @@ test('explicit repository routes match imported Jira keys only for their selecte
   assert.deepEqual(newest.data.runs, []);
   assert.deepEqual(await readIssue(targetB.id), targetB);
 
-  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; automationRuns?: AutomationRun[] }>('/export');
   assert.equal(backup.status, 200);
   assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
   assert.equal(Object.hasOwn(backup.data, 'jiraRoutes'), false, 'The mapping is local GitLab connection configuration.');
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 34 } })).status, 400);
-  assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
-  assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data.jiraRoutes, otherRoute);
-  const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
-  assert.deepEqual(restored, backup.data.gitlabLinks);
   const legacy = structuredClone(backup.data);
   legacy.schemaVersion = 34;
+  delete legacy.automationRuns;
+  assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+  assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data.jiraRoutes, otherRoute);
+  const savedHistory = backup.data.automationRuns;
+  assert.ok(savedHistory);
+  assert.ok(savedHistory.some(run => run.issueId === targetA.id && run.context?.objectId === '401'));
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, [...savedHistory].reverse());
+  const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
+  assert.deepEqual(restored, backup.data.gitlabLinks);
   for (const link of legacy.gitlabLinks) delete link.originalJiraKey;
   assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
   assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks, legacy.gitlabLinks);
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
 
   assert.equal((await f.call('/import', 'POST', { data: baseline.data })).status, 200);
   const reset = (await f.call<GitlabSettings>(gitlabPath)).data;

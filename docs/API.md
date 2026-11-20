@@ -311,6 +311,8 @@ curl --fail-with-body \
 
 트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`다. MR의 update/approval 이벤트와 push는 상태 자동화를 실행하지 않는다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 다른 규칙으로 넘어가거나 연쇄 실행하지 않는다. 이미 도착 상태이면 업무 버전은 바꾸지 않는다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
 
+브라우저용 `GET /api/issues/:id/automation-runs`는 해당 티켓에 저장된 최근 실행을 20건씩 반환한다. `nextCursor`를 `before`로 보내 이전 기록을 연다. `issueVersion`은 조회 시점의 티켓 버전이고, `latestBlockedRunId`는 가장 최근 유효 실행이 차단됐으며 현재 출발 상태와 전이가 맞을 때 표시한다. 새 실행의 `context`에 저장소·객체·브랜치, 규칙 이름과 당시 상태 표시 이름을 담는다. 목표 상태를 사용한 편집은 일반 티켓 저장 API의 버전·전이·필수 필드 검사를 거친다.
+
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
 
 `webhook-status`는 `settingsVersion`과 `repositories`를 반환한다. 각 저장소에 `repositoryId`와 `lastDelivery`가 들어간다. `lastDelivery`는 인증된 수신이 없으면 `null`이다. 수신이 있으면 `event`, `authentication`, 서버의 `receivedAt`, `duplicate`, 업무 연결 반영 수 `linked`, 자동화 기록 수 `automationRuns`를 포함한다. 자동화 기록 수에는 차단이나 무시 결과도 포함될 수 있다. 원문, 헤더, 비밀값은 수신 요약에 저장하지 않는다. 주소나 웹훅 인증값을 바꾸면 요약을 초기화하고, 저장소 제거와 Jira 매핑 변경은 해당 저장소에만 적용한다. 읽기 토큰 변경은 수신 요약을 유지한다. 별도 물리 복원은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.

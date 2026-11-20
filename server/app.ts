@@ -31,6 +31,7 @@ import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from
 import { IssueOrderError, IssueOrderService } from './issue-order.js';
 import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
 import { AutomationService, AutomationError } from './automation.js';
+import { exportAutomationRunHistory, restoreAutomationRunHistory, validateAutomationRunHistory } from './automation-run-backup.js';
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError, branchObjectId } from './gitlab-integration.js';
@@ -1633,7 +1634,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1687,6 +1688,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
+    if(data.schemaVersion<64&&data.automationRuns!==undefined&&(!Array.isArray(data.automationRuns)||data.automationRuns.length)){
+      fail('GitLab 상태 자동화 실행 기록을 포함한 백업은 schemaVersion 64가 필요합니다.');
+    }
+    const importedAutomationRuns=data.schemaVersion>=64?validateAutomationRunHistory(data.automationRuns,data.projects,data.users,data.exportedAt):[];
     if(data.schemaVersion<32&&data.issueAssignmentRules!==undefined&&(!Array.isArray(data.issueAssignmentRules)||data.issueAssignmentRules.length)){
       fail('담당자 자동 배정 규칙을 포함한 백업은 schemaVersion 32가 필요합니다.');
     }
@@ -1942,6 +1947,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
       automation.replaceImported(importedAutomation,previousAutomation);
+      restoreAutomationRunHistory(store,importedAutomationRuns);
       issueAssignments.replaceImported(importedAssignments,previousAssignments);
       planning.replaceImported(importedPlanning.items,previousPlanning);
       calendars.replaceImported(importedCalendars,previousCalendars);

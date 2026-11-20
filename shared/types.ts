@@ -951,9 +951,16 @@ export interface AutomationOutcome {
   issueId: string; key: string; title: string; fromStatus: string; toStatus: string;
   outcome: 'changed' | 'no_op' | 'blocked' | 'ignored'; reason: string;
 }
+export interface AutomationRunContext {
+  ruleName: string; trigger: GitlabAutomationTrigger; gitlabBaseUrl: string; gitlabProjectId: number;
+  objectKind: 'merge_request' | 'pipeline'; objectId: string; branch: string;
+  fromStatusLabel: string; toStatusLabel: string;
+}
 export interface AutomationRun extends AutomationOutcome {
   id: string; eventId: string; ruleId: string; projectId: string; actorId: string; createdAt: string; occurredAt: string | null;
+  context?: AutomationRunContext;
 }
+export interface IssueAutomationRunPage { issueVersion: number; items: AutomationRun[]; nextCursor: string | null; latestBlockedRunId: string | null }
 export interface AutomationPreview { outcomes: AutomationOutcome[]; warnings: string[] }
 export interface IssueAssignmentRuleInput {
   name: string;
