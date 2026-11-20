@@ -303,3 +303,192 @@ test('preview only reuses a saved token on its own URL and rejects settings chan
     assert.deepEqual(links(f), []);
   } finally { held?.end(); await mock.close(); f.close(); }
 });
+
+test('opt-in history preview and sync link keyed branches and explicit recent commits using canonical repository addresses', async () => {
+  const f = fixture();
+  const token = 'synthetic-history-read-token';
+  const branch = 'feature/NEO-1-history';
+  const branchSha = commitSha('a'), keyedSha = commitSha('b'), nonKeyedSha = commitSha('c');
+  const time = '2026-01-02T03:04:05.000Z';
+  const calls: { path: string; method: string | undefined; token: string | string[] | undefined }[] = [];
+  const mock = await mockServer((path, res, req) => {
+    calls.push({ path, method: req.method, token: req.headers['private-token'] });
+    const url = new URL(path, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/forge/api/v4/projects/42') {
+      res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo', web_url: 'https://git.example.test/wrong/repo' }));
+    } else if (url.pathname.endsWith('/repository/branches')) {
+      res.end(JSON.stringify([
+        { name: branch, commit: { id: branchSha } },
+        { name: 'release/ABSENT-3', commit: { id: nonKeyedSha } },
+        { name: 'feature/NEO-3?invalid', commit: { id: nonKeyedSha } },
+      ]));
+    } else if (url.pathname.endsWith('/repository/commits')) {
+      res.end(JSON.stringify([
+        { id: keyedSha, title: 'NEO-2 existing commit', message: 'NEO-2 existing commit', committed_date: time,
+          web_url: 'https://git.example.test/wrong/repo/-/commit/' + keyedSha },
+        { id: nonKeyedSha, title: 'Recent commit with no ticket key', message: 'Changes to the default branch', ref: branch, committed_date: time },
+        { id: commitSha('d'), title: 'ABSENT-4 no local issue', message: 'ABSENT-4', committed_date: time },
+        { id: 'not-a-sha', title: 'NEO-3 invalid commit', message: 'NEO-3', committed_date: time },
+      ]));
+    } else res.end('[]');
+  });
+  try {
+    const baseUrl = `${mock.url}/forge`;
+    const original = f.configure({ baseUrl, token });
+    const issues = f.store.all('issues');
+    const preview = await f.service.previewSync({ expectedVersion: original.version, includeHistory: true });
+    assert.equal(preview.repositories[0].status, 'ok');
+    assert.ok(Number(preview.counts.branches) >= 1 && Number(preview.counts.commits) >= 1);
+    assert.deepEqual(preview.candidates.map(({ kind, issueKey, action }) => [kind, issueKey, action]).sort(), [
+      ['branch', 'NEO-1', 'create'], ['commit', 'NEO-2', 'create'],
+    ]);
+    assert.deepEqual(f.service.settings(), original);
+    assert.deepEqual(links(f), []);
+    assert.deepEqual(f.store.all('gitlab_push_cursors'), []);
+    assert.ok(calls.every(call => call.method === 'GET' && call.token === token));
+    assert.equal(JSON.stringify(preview).includes(token), false);
+    assert.ok(calls.some(call => call.path === '/forge/api/v4/projects/42'));
+    const requested = calls.map(call => new URL(call.path, mock.url));
+    const branches = requested.find(url => url.pathname.endsWith('/repository/branches'));
+    const commits = requested.find(url => url.pathname.endsWith('/repository/commits'));
+    assert.equal(branches?.searchParams.get('page'), '1');
+    assert.equal(branches?.searchParams.get('per_page'), '100');
+    assert.equal(commits?.searchParams.get('all'), 'true');
+    assert.equal(commits?.searchParams.get('per_page'), '100');
+
+    const applied = await f.service.sync(undefined, { includeHistory: true });
+    assert.equal(applied.linked, 2);
+    assert.equal(applied.historyCounts?.branches, preview.counts.branches);
+    assert.equal(applied.historyCounts?.commits, preview.counts.commits);
+    const stored = links(f);
+    const storedBranch = stored.find(link => link.kind === 'branch')!;
+    const storedCommit = stored.find(link => link.kind === 'commit')!;
+    assert.equal(storedBranch.issueId, 'issue-1');
+    assert.equal(storedBranch.sourceSha, branchSha);
+    assert.equal(storedBranch.sourceBranch, branch);
+    assert.equal(storedBranch.branchObservationSource, 'sync');
+    assert.equal(storedBranch.webUrl, `${baseUrl}/team/repo/-/tree/${encodeURIComponent(branch)}`);
+    assert.equal(storedCommit.issueId, 'issue-2');
+    assert.equal(storedCommit.sourceSha, keyedSha);
+    assert.ok(!storedCommit.sourceBranch);
+    assert.equal(storedCommit.webUrl, `${baseUrl}/team/repo/-/commit/${keyedSha}`);
+    assert.equal((await f.service.sync(undefined, { includeHistory: true })).linked, 0);
+    assert.deepEqual(links(f), stored);
+    assert.deepEqual(f.store.all('issues'), issues);
+    assert.deepEqual(f.events, []);
+
+    // Native restore of a read observation must leave the first authenticated push authoritative.
+    f.store.transaction(() => f.service.resetForImport(stored));
+    const pushed = pushPayload(branch, commitSha('e'), branchSha, [{ id: keyedSha, message: 'NEO-2 existing commit', timestamp: time }]);
+    pushed.project.path_with_namespace = 'team/repo';
+    const result = f.service.webhook(request(pushed, { 'X-Gitlab-Event': 'Push Hook' }));
+    assert.equal(result.linked, 2);
+    const afterPush = links(f);
+    const authoritative = afterPush.find(link => link.id === storedBranch.id)!;
+    assert.equal(authoritative.branchObservationSource, undefined);
+    assert.equal(authoritative.sourceSha, branchSha);
+    assert.equal(afterPush.find(link => link.id === storedCommit.id)?.sourceBranch, branch);
+    assert.equal(afterPush.length, 2);
+    assert.deepEqual(f.events, []);
+  } finally { await mock.close(); f.close(); }
+});
+
+test('an authenticated deletion between reading and saving a GitLab history snapshot stays authoritative', async () => {
+  const f = fixture();
+  const branch = 'feature/NEO-1-history-race';
+  const branchSha = commitSha('a'), zero = commitSha('0');
+  const advertisedBranches = [{ name: branch, commit: { id: branchSha } }];
+  let held: ServerResponse | undefined;
+  let hold = true;
+  let announce = () => {};
+  const entered = new Promise<void>(resolve => { announce = resolve; });
+  const mock = await mockServer((path, res) => {
+    const url = new URL(path, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/forge/api/v4/projects/42') {
+      res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo' }));
+    } else if (url.pathname.endsWith('/repository/branches')) {
+      if (hold) { held = res; announce(); }
+      else res.end(JSON.stringify(advertisedBranches));
+    } else res.end('[]');
+  });
+  try {
+    f.configure({ baseUrl: `${mock.url}/forge` });
+    const pending = f.service.sync(undefined, { includeHistory: true });
+    await Promise.race([entered, pending.then(() => assert.fail('The branch read must be in flight'))]);
+    await assert.rejects(f.service.sync(undefined, { includeHistory: true }),
+      (error: unknown) => error instanceof GitlabIntegrationError && error.status === 409);
+    const initial = pushPayload(branch, zero, branchSha);
+    initial.project.path_with_namespace = 'team/repo';
+    assert.equal(f.service.webhook(request(initial)).linked, 1);
+    const removed = pushPayload(branch, branchSha, zero);
+    removed.project.path_with_namespace = 'team/repo';
+    assert.equal(f.service.webhook(request(removed)).linked, 1);
+    const tombstone = links(f)[0];
+    assert.equal(tombstone.state, 'deleted');
+
+    hold = false;
+    held!.end(JSON.stringify(advertisedBranches));
+    assert.equal((await pending).linked, 0);
+    assert.deepEqual(links(f), [tombstone]);
+    assert.equal((await f.service.sync(undefined, { includeHistory: true })).linked, 0);
+    assert.deepEqual(links(f), [tombstone]);
+    assert.deepEqual(f.events, []);
+  } finally { held?.end(); await mock.close(); f.close(); }
+});
+
+test('GitLab project identity and settings version guard history before writing branch and commit links', async () => {
+  const f = fixture();
+  const branchSha = commitSha('a');
+  let servedProjectId = 99;
+  let hold = false;
+  let failCommits = false;
+  let held: ServerResponse | undefined;
+  let announce = () => {};
+  const entered = new Promise<void>(resolve => { announce = resolve; });
+  const mock = await mockServer((path, res) => {
+    const url = new URL(path, 'http://127.0.0.1');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/forge/api/v4/projects/42') {
+      res.end(JSON.stringify({ id: servedProjectId, path_with_namespace: 'team/repo' }));
+    } else if (url.pathname.endsWith('/repository/branches')) {
+      if (hold) { held = res; announce(); }
+      else res.end(JSON.stringify([{ name: 'feature/NEO-1-cas', commit: { id: branchSha } }]));
+    } else if (url.pathname.endsWith('/repository/commits') && failCommits) {
+      res.writeHead(503).end(JSON.stringify({ message: 'synthetic remote body' }));
+    } else if (url.pathname.endsWith('/merge_requests')) {
+      res.end(JSON.stringify([{ id: 101, iid: 7, title: 'NEO-1 merge request', web_url: 'https://git.example.test/mr/7' }]));
+    } else res.end('[]');
+  });
+  try {
+    const original = f.configure({ baseUrl: `${mock.url}/forge` });
+    const rejectSync = (status: number) => (error: unknown) => error instanceof GitlabIntegrationError && error.status === status;
+    const identityPreview = await f.service.previewSync({ expectedVersion: original.version, includeHistory: true });
+    assert.equal(identityPreview.repositories[0].status, 'error');
+    assert.equal(identityPreview.repositories[0].error?.stage, 'project');
+    assert.deepEqual(identityPreview.candidates, []);
+    await assert.rejects(f.service.sync(undefined, { includeHistory: true }), rejectSync(502));
+    assert.deepEqual(links(f), []);
+
+    servedProjectId = 42;
+    failCommits = true;
+    await assert.rejects(f.service.sync(undefined, { includeHistory: true }), rejectSync(502));
+    assert.deepEqual(links(f), []);
+    assert.deepEqual(f.store.all('gitlab_push_cursors'), []);
+    assert.equal(JSON.stringify(f.service.settings()).includes('synthetic remote body'), false);
+
+    failCommits = false;
+    hold = true;
+    const pending = f.service.sync(undefined, { includeHistory: true });
+    const stale = assert.rejects(pending, rejectSync(409));
+    await Promise.race([entered, pending.then(() => assert.fail('The history read must be in flight'))]);
+    const changed = f.configure({ expectedVersion: original.version, projectIds: [99] });
+    held!.end(JSON.stringify([{ name: 'feature/NEO-1-cas', commit: { id: branchSha } }]));
+    await stale;
+    assert.deepEqual(f.service.settings(), changed);
+    assert.deepEqual(links(f), []);
+    assert.deepEqual(f.store.all('gitlab_push_cursors'), []);
+    assert.deepEqual(f.events, []);
+  } finally { held?.end(); await mock.close(); f.close(); }
+});

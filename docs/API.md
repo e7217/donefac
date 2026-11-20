@@ -184,8 +184,8 @@ curl --fail-with-body \
 | --- | --- |
 | `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전 |
 | `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명 변경 |
-| `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인의 티켓 연결 후보 확인 |
-| `POST /api/integrations/gitlab/sync` | MR·파이프라인 읽기 동기화, 상태 자동화 실행 없음 |
+| `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인 및 선택한 저장소 이력의 티켓 연결 후보 확인 |
+| `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
 | `POST /api/automation-rules` | 규칙 생성 |
@@ -207,9 +207,13 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 
 ### MR 생성 전 브랜치·커밋
 
-GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키를 찾는다. 새 커밋이 없는 브랜치도 연결하며 커밋의 제목이나 본문에 키가 있으면 그 키를 사용한다. 커밋 자체에 키가 없으면 브랜치 키를 사용한다. GitLab은 큰 푸시에서 최근 20개 커밋만 웹훅에 싣는다. 수동 동기화의 조회 대상은 MR과 파이프라인이다. [GitLab Push 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#push-events)
+미리보기와 동기화에 `{includeHistory:true}`를 보내면 각 GitLab 저장소의 브랜치 최대 500개와 최근 커밋 최대 100개를 함께 읽는다. 브랜치는 이름의 티켓 키를, 커밋은 제목이나 메시지에 적힌 티켓 키를 사용한다. 미리보기의 `counts.branches`·`counts.commits`와 저장소별 `historyLimits`는 조회 건수와 한도 도달 여부를 표시한다. 동기화 결과의 `historyCounts`에는 전체 저장소의 건수를 합산한다. `historyLimits`의 각 값은 하나 이상의 저장소가 해당 조회 한도에 도달하면 `true`가 된다. [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#list-repository-branches), [GitLab 커밋 조회](https://docs.gitlab.com/api/commits/#list-repository-commits)
+
+GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키를 찾는다. 새 커밋이 없는 브랜치도 연결하며 커밋의 제목이나 본문에 키가 있으면 그 키를 사용한다. 커밋 자체에 키가 없으면 브랜치 키를 사용한다. GitLab은 큰 푸시에서 최근 20개 커밋만 웹훅에 싣는다. [GitLab Push 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#push-events)
 
 브랜치가 이어지는 변경은 이전 SHA와 다음 SHA로 확인한다. 중간 이벤트가 빠지면 마지막으로 이어진 브랜치 상태를 유지하고, 이미 받은 커밋은 이력에 남긴다. 삭제된 브랜치는 마지막 확인 SHA와 `deleted` 상태를 보존한다. 자체 백업 형식 24는 활성 티켓과 휴지통의 브랜치 관측을 보존한다.
+
+수동 조회로 확인한 브랜치 링크는 `branchObservationSource: 'sync'`를 포함한다. 자체 백업 형식 28에서 활성 티켓과 휴지통의 수동 조회 출처를 보존한다. 이후 인증된 푸시가 같은 브랜치를 갱신하면 링크 ID를 유지한 채 웹훅 관측을 사용한다. 브랜치 삭제는 인증된 푸시에서 확인한다. 수동 동기화는 개발 활동 링크만 저장한다.
 
 `GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
 

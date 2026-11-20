@@ -332,7 +332,7 @@ test('real REST staging blocks restricted worklogs, preserves archive-only reaso
 
     const backup = await f.call<Backup>('/export');
     assert.equal(backup.status, 200);
-    assert.equal(backup.data.schemaVersion, 27);
+    assert.equal(backup.data.schemaVersion, 28);
     const raw = backup.data.worklogs.find((value) => value.id === entry.id);
     assert.ok(raw);
     assert.equal(raw.durationSeconds, 91);
@@ -480,7 +480,7 @@ test('Importers long worklogs preserve more than one day of exact seconds while 
     assert.equal(manual.status, 400, JSON.stringify(manual.data));
     assert.equal((await f.list(issue.id)).totalEntries, 1);
     const backup = (await f.call<Backup>('/export')).data;
-    assert.equal(backup.schemaVersion, 27);
+    assert.equal(backup.schemaVersion, 28);
     assert.equal(backup.worklogs.find((value) => value.id === entry.id)?.durationSeconds, seconds);
     assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
     const after = (await f.list(issue.id)).entries[0];

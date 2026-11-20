@@ -55,7 +55,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { PRIORITY, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult } from '../shared/types.js';
+import { PRIORITY, type Issue, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type IssueRelation, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -345,7 +345,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     prepareChange:(before,status)=>{const next=validateIssue({...before,status,version:before.version+1,updatedAt:now()},before);next.completedAt=done(next)?(before.completedAt||now()):null;return next;},
     commitChange:(rule,before,next,event)=>{store.put('issues',next);store.put('activities',{id:uid(),resourceType:'issue',resourceId:next.id,actorId:rule.actorId,action:'GitLab 자동화 상태 변경',detail:`${before.status} → ${next.status} · ${rule.name} · ${event.id}`,createdAt:now()});},
   });
-  const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{processEvent:event=>automation.processEvent(event),onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next)});
+  const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{
+    processEvent:event=>automation.processEvent(event),
+    onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next),
+    findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
+  });
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
   sourcePreservation.registerRoutes(app);
@@ -1010,6 +1014,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
     }
     if (!data.gitlabLinks.every(isRestorableGitlabLink)) fail('GitLab 연결 데이터를 확인해 주세요.');
+    if (data.schemaVersion <28 && (data.gitlabLinks.some((link:GitlabLink) => link.branchObservationSource==='sync') ||
+        importedTrash.some(entry => entry.gitlabLinks.some(link => link.branchObservationSource==='sync')))) {
+      fail('GitLab 수동 조회로 확인한 브랜치 연결에는 schemaVersion 28 백업이 필요합니다.');
+    }
     const importedDependencies=data.dependencies as Dependency[];
     const archivedDependencies=importedTrash.flatMap(entry=>entry.dependencies);
     if(data.schemaVersion<21&&(importedDependencies.some(value=>value.type!=='FS')||archivedDependencies.some(value=>value.type!=='FS'))){

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,7 +12,7 @@ import { createApp } from '../../server/app.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import type {
   ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentPublicationView,
-  GitlabLink, GitlabSettings, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
+  GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
   TrashResourceType, TrashRestoreResult, WorklogEntry, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -32,6 +33,8 @@ type Backup = WorkspaceSnapshot & {
   reportingLedger: ReportingLedgerData;
   trashEntries?: unknown[];
 };
+type GitlabBackup = Omit<Backup, 'trashEntries'> & { trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
+const branchInTrash = (backup: GitlabBackup, entry: TrashEntrySummary) => backup.trashEntries.find(row => row.id === entry.id)?.gitlabLinks.find(link => link.kind === 'branch');
 
 async function open(dataDir: string) {
   const runtime = createApp({ dataDir, outboundWorker: false });
@@ -156,8 +159,6 @@ test('native schema 24 retains live and trashed GitLab branches and rejects malf
   const liveHead = 'a'.repeat(40);
   const archivedHead = 'b'.repeat(40);
   const observedHead = 'c'.repeat(40);
-  type GitlabBackup = Omit<Backup, 'trashEntries'> & { trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
-  const branchInTrash = (backup: GitlabBackup, entry: TrashEntrySummary) => backup.trashEntries.find(row => row.id === entry.id)?.gitlabLinks.find(link => link.kind === 'branch');
   assert.equal((await push(live, zero, liveHead)).linked, 1);
   assert.equal((await push(archived, zero, archivedHead)).linked, 1);
   const beforeBranchDeletion = await archive(f, 'issue', archived);
@@ -183,7 +184,7 @@ test('native schema 24 retains live and trashed GitLab branches and rejects malf
   assert.deepEqual(afterBranchDeletion.gitlabLinks.find(link => link.issueId === archived.id), deleted);
   const entry = await archive(f, 'issue', restoredIssue);
   const backup = await f.call<GitlabBackup>('/export');
-  assert.equal(backup.schemaVersion, 27);
+  assert.equal(backup.schemaVersion, 28);
   const liveLink = backup.gitlabLinks.find(link => link.issueId === live.id && link.kind === 'branch')!;
   const archiveRow = backup.trashEntries.find(row => row.id === entry.id)!;
   const archivedLink = archiveRow.gitlabLinks.find(link => link.issueId === archived.id && link.kind === 'branch')!;
@@ -232,6 +233,76 @@ test('native schema 24 retains live and trashed GitLab branches and rejects malf
   assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.id === liveLink.id), liveLink);
   await restore(f, entry);
   assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.id === archivedLink.id), archivedLink);
+});
+
+test('schema 28 preserves GitLab observations for the first authenticated deletion after restoring trash', async t => {
+  const f = await fixture(t);
+  const issue = await makeIssue(f, '조회로 처음 연결한 GitLab 브랜치');
+  const branch = `work/${issue.key}`;
+  const sampledHead = 'a'.repeat(40), removedHead = 'b'.repeat(40), zero = '0'.repeat(40);
+  const mock = createServer((req, res) => {
+    const path = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+    res.setHeader('Content-Type', 'application/json');
+    if (path === '/forge/api/v4/projects/42') res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/engine' }));
+    else if (path.endsWith('/repository/branches')) res.end(JSON.stringify([{ name: branch, commit: { id: sampledHead } }]));
+    else res.end('[]');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  t.after(() => new Promise<void>(resolve => {
+    mock.close(() => resolve());
+    mock.closeAllConnections();
+  }));
+  const address = mock.address();
+  assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}/forge`;
+  const webhookSecret = 'synthetic-native-branch-history-test';
+  const settings = await f.call<GitlabSettings>('/integrations/gitlab');
+  await f.call('/integrations/gitlab', 'PATCH', { expectedVersion: settings.version, baseUrl, projectIds: [42], webhookSecret });
+  const history = await f.call<GitlabSyncResult>('/integrations/gitlab/sync', 'POST', { includeHistory: true });
+  assert.equal(history.linked, 1);
+  assert.deepEqual(history.historyCounts, { branches: 1, commits: 0 });
+  const live = await workspace(f);
+  const sampled = live.gitlabLinks.find(link => link.issueId === issue.id);
+  assert.ok(sampled);
+  assert.equal(sampled.sourceSha, sampledHead);
+  assert.equal(sampled.branchObservationSource, 'sync');
+  const liveBackup = await f.call<GitlabBackup>('/export');
+  assert.equal(liveBackup.schemaVersion, 28);
+  assert.deepEqual(liveBackup.gitlabLinks.find(link => link.id === sampled.id), sampled);
+  const unsupportedLive = await f.call<{error: string}>('/import', 'POST', { data: { ...liveBackup, schemaVersion: 27 } }, 400);
+  assert.match(unsupportedLive.error, /28/);
+  assert.deepEqual(await workspace(f), live);
+
+  const entry = await archive(f, 'issue', issue);
+  const backup = await f.call<GitlabBackup>('/export');
+  assert.equal(backup.schemaVersion, 28);
+  assert.ok(!backup.gitlabLinks.some(link => link.id === sampled.id));
+  assert.deepEqual(branchInTrash(backup, entry), sampled);
+  const archived = await workspace(f);
+  const unsupportedTrash = await f.call<{error: string}>('/import', 'POST', { data: { ...backup, schemaVersion: 27 } }, 400);
+  assert.match(unsupportedTrash.error, /28/);
+  assert.deepEqual(await workspace(f), archived);
+  assert.deepEqual(branchInTrash(await f.call<GitlabBackup>('/export'), entry), sampled);
+  await f.call('/import', 'POST', { data: backup });
+
+  const response = await f.request('/integrations/gitlab/webhook', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Gitlab-Token': webhookSecret, 'X-Gitlab-Event': 'Push Hook', 'webhook-id': randomUUID() },
+    body: JSON.stringify({
+      object_kind: 'push', project_id: 42, ref: `refs/heads/${branch}`, before: removedHead, after: zero,
+      checkout_sha: null, commits: [], total_commits_count: 0,
+      project: { id: 42, path_with_namespace: 'team/engine' },
+    }),
+  });
+  assert.equal(response.status, 200, await response.text());
+  const deleted = branchInTrash(await f.call<GitlabBackup>('/export'), entry);
+  assert.equal(deleted?.state, 'deleted');
+  assert.equal(deleted?.sourceSha, removedHead);
+  assert.equal(deleted?.id, sampled.id);
+  assert.equal(deleted?.branchObservationSource, undefined);
+  await restore(f, entry);
+  assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.issueId === issue.id), deleted);
 });
 
 async function bytes(f: Fixture, path: string, expected: Buffer) {
@@ -483,7 +554,7 @@ test('native schema 17 retains invisible archived bytes, rejects damage, and can
   const fileIds = [original.id, latest.currentVersionId].sort();
   assert.deepEqual(readdirSync(path).sort(), fileIds);
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 27);
+  assert.equal(backup.schemaVersion, 28);
   assert.equal(backup.trashEntries?.length, 1);
   assert.ok(!backup.documents.some(value => value.id === doc.id));
   assert.ok(!backup.attachments.some(value => value.id === original.id));

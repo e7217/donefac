@@ -136,6 +136,14 @@ export class TrashService {
       WHERE json_extract(version.value,'$.id')=? AND json_type(version.value,'$.localRevision')='integer'
         AND json_extract(version.value,'$.localRevision')>=2 LIMIT 1`).get(id));
   }
+  findGitlabBranchLink(cursorId: string): GitlabLink | undefined {
+    const row = this.store.db.prepare(`SELECT link.value AS json
+      FROM trash_entries, json_each(trash_entries.json,'$.gitlabLinks') AS link
+      WHERE resource_type='issue' AND json_extract(link.value,'$.kind')='branch'
+        AND json_extract(link.value,'$.id')=? || ':' || resource_id
+      ORDER BY deleted_at DESC LIMIT 1`).get(cursorId) as {json: string} | undefined;
+    return row && JSON.parse(row.json) as GitlabLink;
+  }
   remove(id: string): void {
     this.assertTransaction();
     this.store.remove('trash_entries', id);

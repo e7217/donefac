@@ -10,6 +10,12 @@
 
 .development-page .data-actions{flex-wrap:wrap}
 .gitlab-token-note{margin:0;color:#71542a}
+.gitlab-history-option{margin:12px 0 16px;padding:10px 12px;border:1px solid #dae8e1;border-radius:6px;background:#f9fbfa}
+.gitlab-history-option label{display:flex;align-items:center;gap:8px;color:#274c3c;font-size:14px;font-weight:600}
+.gitlab-history-option input{flex:0 0 auto;margin:0}
+.gitlab-history-option p,.gitlab-history-result p{margin:4px 0 0}
+.gitlab-history-result{margin-top:10px;color:#375649;font-size:14px}
+.gitlab-history-limits{color:#71542a}
 .gitlab-preview{grid-column:1/-1;padding:20px;color:#375649;font-size:14px;line-height:1.6}
 @media(min-width:901px){.development-page>.integration-grid>.integration-guide{grid-column:2;grid-row:1}}
 .gitlab-preview .card-heading h2{display:flex;gap:8px;align-items:center}

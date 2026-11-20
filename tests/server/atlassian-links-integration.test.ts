@@ -118,7 +118,7 @@ test('linked Jira and Confluence metadata is fetched on demand from the configur
   assert.ok(!(await deleted.text()).includes('제거된 링크의 원본 제목'));
 });
 
-test('external links suffice without remote setup and survive trash and schema 27 backup, with rollback on invalid restore', async t => {
+test('external links suffice without remote setup and survive trash and native backup, with rollback on invalid restore', async t => {
   const {call} = await appFixture(t,scratch(t));
   const issue = await call<Issue>('/issues','POST',{projectId:'project-neo',title:'이관 기간 업무 연결'},201);
   const document = await call<DocPage>('/documents','POST',{projectId:'project-neo',title:'이관 기간 문서 연결'},201);
@@ -133,14 +133,14 @@ test('external links suffice without remote setup and survive trash and schema 2
   await call(targetRoute('issue',issue.id),'GET',undefined,404);
   await call(previewRoute(jira.id),'GET',undefined,404);
   const backup = await call<Export>('/export');
-  assert.equal(backup.schemaVersion,27);
+  assert.equal(backup.schemaVersion,28);
   assert.deepEqual(new Set(backup.atlassianLinks.map(link=>link.id)),new Set([jira.id,confluence.id]));
 
   const damaged = {...backup,atlassianLinks:backup.atlassianLinks.map(link=>link.id===jira.id?{...link,targetId:'missing-issue'}:link)};
   await call('/import','POST',{data:damaged},400);
   await call('/import','POST',{data:{...backup,schemaVersion:26}},400);
   assert.deepEqual(await call(targetRoute('document',document.id)),[confluence]);
-  await call('/import','POST',{data:backup});
+  await call('/import','POST',{data:{...backup,schemaVersion:27}});
   await call(`/trash/${archive.trashEntryId}/restore`,'POST');
   assert.deepEqual(await call(targetRoute('issue',issue.id)),[jira]);
   const again = await call<{trashEntryId:string}>(`/issues/${issue.id}`,'DELETE');

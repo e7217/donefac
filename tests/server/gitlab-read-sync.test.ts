@@ -40,6 +40,109 @@ test('GitLab read scans preserve a configured subpath and cap MR pages and pipel
   assert.equal(result.mergeRequests.length, 1_000);
   assert.deepEqual(result.mergeRequests.at(-1), { id: 1_000 });
   assert.equal(result.pipelines.length, 50);
+  assert.equal(Object.hasOwn(result, 'history'), false);
+});
+
+test('optional repository history uses bounded numeric project paths and never follows remote pagination links', async t => {
+  const paths: string[] = [];
+  const token = 'synthetic-history-token';
+  let outsideRequests = 0;
+  const outside = await upstream(t, (_request, response) => {
+    outsideRequests++;
+    response.end('[]');
+  });
+  const origin = await upstream(t, (request, response) => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], token);
+    paths.push(request.url!);
+    const url = new URL(request.url!, 'http://localhost');
+    response.setHeader('Content-Type', 'application/json');
+    response.setHeader('Link', `<${outside}/different-project>; rel="next"`);
+    response.setHeader('X-Next-Page', '99');
+    if (url.pathname.endsWith('/42')) {
+      response.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repository' }));
+    } else if (url.pathname.endsWith('/branches')) {
+      const offset = (Number(url.searchParams.get('page')) - 1) * 100;
+      response.end(JSON.stringify(Array.from({ length: 100 }, (_, index) => ({ name: `branch-${offset + index + 1}` }))));
+    } else if (url.pathname.endsWith('/commits')) {
+      response.end(JSON.stringify(Array.from({ length: 100 }, (_, index) => ({ id: `commit-${index + 1}` }))));
+    } else response.end('[]');
+  });
+  const basePath = '/gitlab/api/v4/projects/42';
+  const result = await readGitlabSyncProject({ baseUrl: `${origin}/gitlab/`, token }, 42, { includeHistory: true });
+  assert.deepEqual(paths, [
+    basePath,
+    ...Array.from({ length: 5 }, (_, index) => `${basePath}/repository/branches?per_page=100&page=${index + 1}`),
+    `${basePath}/repository/commits?all=true&per_page=100`,
+    `${basePath}/merge_requests?scope=all&per_page=100&page=1`,
+    `${basePath}/pipelines?per_page=50`,
+  ]);
+  assert.equal(outsideRequests, 0);
+  assert.deepEqual(result.history?.project, { id: 42, path_with_namespace: 'team/repository' });
+  assert.equal(result.history?.branches.length, 500);
+  assert.deepEqual(result.history?.branches.at(-1), { name: 'branch-500' });
+  assert.equal(result.history?.commits.length, 100);
+  assert.equal(result.history?.branchesLimited, true);
+  assert.equal(result.history?.commitsLimited, true);
+});
+
+test('optional history stops after a short branch page and detects partial and oversized objects', async t => {
+  const paths: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    paths.push(request.url!);
+    const url = new URL(request.url!, 'http://localhost');
+    response.setHeader('Content-Type', 'application/json');
+    const projectId = url.pathname.split('/').at(-1);
+    if (projectId === '42' || projectId === '43' || projectId === '44') {
+      response.end(JSON.stringify({ id: Number(projectId) }));
+    } else if (url.pathname.endsWith('/branches')) {
+      response.end(url.pathname.includes('/43/') ? '[[]]' : '[{"name":"feature/TEAM-1"}]');
+    } else if (url.pathname.endsWith('/commits') && url.pathname.includes('/44/')) {
+      response.end(JSON.stringify(Array.from({ length: 101 }, () => ({ id: 'example' }))));
+    } else response.end('[]');
+  });
+
+  const connection = { baseUrl: origin };
+  const result = await readGitlabSyncProject(connection, 42, { includeHistory: true });
+  assert.deepEqual(result.history, {
+    project: { id: 42 }, branches: [{ name: 'feature/TEAM-1' }], commits: [], branchesLimited: false, commitsLimited: false,
+  });
+  assert.equal(paths.filter(path => path.includes('/branches?')).length, 1);
+  await assert.rejects(readGitlabSyncProject(connection, 44, { includeHistory: true }), (error: unknown) =>
+    error instanceof GitlabReadError && error.stage === 'commits' && error.code === 'invalid-response');
+  await assert.rejects(readGitlabSyncProject(connection, 43, { includeHistory: true }), (error: unknown) =>
+    error instanceof GitlabReadError && error.stage === 'branches' && error.code === 'invalid-response');
+});
+
+test('optional history requires an exact numeric project response and denies branch redirects', async t => {
+  const seen: string[] = [];
+  const syntheticToken = 'example-history-secret';
+  let redirectedRequests = 0;
+  const destination = await upstream(t, (_request, response) => {
+    redirectedRequests++;
+    response.end('[]');
+  });
+  const origin = await upstream(t, (request, response) => {
+    seen.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url?.endsWith('/41')) response.end('{"id":"41"}');
+    else if (request.url?.endsWith('/42')) response.end('{"id":43}');
+    else if (request.url?.endsWith('/43')) response.end('{"id":43}');
+    else {
+      response.writeHead(302, { Location: `${destination}/${syntheticToken}` });
+      response.end(syntheticToken);
+    }
+  });
+  const connection = { baseUrl: origin, token: syntheticToken };
+  for (const projectId of [41, 42]) {
+    await assert.rejects(readGitlabSyncProject(connection, projectId, { includeHistory: true }), (error: unknown) =>
+      error instanceof GitlabReadError && error.stage === 'project' && error.code === 'invalid-response');
+  }
+  await assert.rejects(readGitlabSyncProject(connection, 43, { includeHistory: true }), (error: unknown) =>
+    error instanceof GitlabReadError && error.stage === 'branches' && error.code === 'http' && error.httpStatus === 302 &&
+      !error.message.includes(syntheticToken) && !error.message.includes(destination));
+  assert.deepEqual(seen, [41, 42, 43].map(id => `/api/v4/projects/${id}`).concat('/api/v4/projects/43/repository/branches?per_page=100&page=1'));
+  assert.equal(redirectedRequests, 0);
 });
 
 test('GitLab read errors report their stage and status without forwarding redirects or exposing upstream text', async t => {

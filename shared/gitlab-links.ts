@@ -11,6 +11,8 @@ export function isGitlabBranchName(value: unknown): value is string {
 export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
+  if (Object.hasOwn(link, 'branchObservationSource') &&
+      (link.kind !== 'branch' || link.branchObservationSource !== 'sync' || link.state !== 'active')) return false;
   if (link.kind !== 'branch') {
     return typeof link.kind === 'string' && ['merge_request', 'commit', 'pipeline'].includes(link.kind) && Number.isInteger(link.projectId) &&
       typeof link.webUrl === 'string' && /^https?:\/\//.test(link.webUrl);

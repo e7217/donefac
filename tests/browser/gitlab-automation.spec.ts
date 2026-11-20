@@ -212,3 +212,110 @@ test('360px 티켓에서 MR 전에 GitLab 브랜치와 커밋을 확인하고 �
     }
   }
 });
+
+test('360px에서 기존 GitLab 이력을 선택해 브랜치와 커밋을 미리 보고 업무에 연결한다', async ({ page, request }) => {
+  const workspace = async () => (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
+  const settings = async () => (await (await request.get('/api/integrations/gitlab')).json()) as GitlabSettings;
+  const { projects: [project] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const created = await request.post('/api/issues', { data: { projectId: project.id, title: `기존 개발 이력 ${randomUUID()}` } });
+  expect(created.status()).toBe(201);
+  const issue = await created.json() as Issue;
+  const token = `synthetic-history-read-${randomUUID()}`;
+  const branch = `feature/${issue.key}-initial`;
+  const head = 'c'.repeat(40);
+  const title = 'Previous implementation';
+  const at = new Date(Date.now() - 14 * 86_400_000).toISOString();
+  const reads: { path: string; method?: string; token?: string | string[] }[] = [];
+  let commitsUnavailable = true;
+  const mock = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    reads.push({ path, method: req.method, token: req.headers['private-token'] });
+    res.setHeader('Content-Type', 'application/json');
+    const apiPath = '/forge/api/v4/projects/42';
+    const commit = { id: head, title, message: `${title}\n\nRelated ${issue.key}`, committed_date: at, web_url: commitUrl };
+    if (path === apiPath) res.end(JSON.stringify({ id: 42, web_url: projectUrl, default_branch: 'main' }));
+    else if (path === `${apiPath}/repository/branches`) res.end(JSON.stringify([{ name: branch, web_url: branchUrl, commit }]));
+    else if (path === `${apiPath}/repository/commits`) {
+      if (commitsUnavailable) { res.statusCode = 503; res.end('{}'); }
+      else res.end(JSON.stringify([commit]));
+    }
+    else if (path === `${apiPath}/merge_requests` || path === `${apiPath}/pipelines`) res.end('[]');
+    else { res.statusCode = 404; res.end('{}'); }
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const baseUrl = `http://127.0.0.1:${(mock.address() as { port: number }).port}/forge`;
+  const projectUrl = `${baseUrl}/team/engine`;
+  const branchUrl = `${projectUrl}/-/tree/${encodeURIComponent(branch)}`;
+  const commitUrl = `${projectUrl}/-/commit/${head}`;
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/development`);
+    await page.getByLabel('GitLab 주소', { exact: true }).fill(baseUrl);
+    await page.getByLabel(/GitLab 프로젝트 ID/).fill('42');
+    await page.getByLabel(/읽기 API 토큰/).fill(token);
+    const history = page.getByRole('checkbox', { name: '기존 브랜치·커밋 포함', exact: true });
+    await expect(history).not.toBeChecked();
+    await history.check();
+    const runPreview = async () => {
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === '/api/integrations/gitlab/sync-preview');
+      await page.getByRole('button', { name: '연결 미리보기', exact: true }).click();
+      return response;
+    };
+    const result = page.getByRole('region', { name: 'GitLab 연결 미리보기', exact: true });
+    expect((await runPreview()).ok()).toBeTruthy();
+    await expect(result.getByRole('region', { name: '저장소 42', exact: true })).toContainText('커밋 조회 실패');
+    commitsUnavailable = false;
+    const preview = await runPreview();
+    expect(preview.ok(), await preview.text()).toBeTruthy();
+    expect(preview.request().postDataJSON()).toMatchObject({ includeHistory: true });
+    const summary = result.getByLabel('미리보기 집계');
+    await expect(summary).toContainText('조회 브랜치 1');
+    await expect(summary).toContainText('조회 커밋 1');
+    const candidates = result.getByRole('region', { name: '티켓 연결 후보', exact: true });
+    await expect(candidates.getByRole('listitem').filter({ hasText: branch })).toContainText('브랜치');
+    await expect(candidates.getByRole('listitem').filter({ hasText: title })).toContainText('커밋');
+    const bounds = await result.boundingBox();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    expect(await settings()).toEqual(original);
+    expect((await workspace()).gitlabLinks.filter(link => link.issueId === issue.id)).toHaveLength(0);
+
+    await history.uncheck();
+    await expect(result).toHaveCount(0);
+    await history.check();
+    const savedResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/integrations/gitlab' && response.request().method() === 'PATCH');
+    await page.getByRole('button', { name: '연결 설정 저장', exact: true }).click();
+    const saved = await savedResponse;
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+    const runs = await (await request.get('/api/automation-runs')).json();
+    const syncResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/integrations/gitlab/sync');
+    await page.getByRole('button', { name: '지금 동기화', exact: true }).click();
+    const sync = await syncResponse;
+    expect(sync.ok(), await sync.text()).toBeTruthy();
+    expect(sync.request().postDataJSON()).toEqual({ includeHistory: true });
+    await expect(page.getByRole('status', { name: '기존 개발 이력 동기화 결과', exact: true })).toContainText('브랜치 1개 · 커밋 1개 조회');
+    const activity = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
+    await expect(activity.getByRole('region', { name: '브랜치', exact: true }).getByRole('link', { name: new RegExp(issue.key) })).toHaveAttribute('href', branchUrl);
+    await expect(activity.getByRole('region', { name: '커밋', exact: true }).getByRole('link', { name: new RegExp(title) })).toHaveAttribute('href', commitUrl);
+    expect((await workspace()).issues.find(value => value.id === issue.id)).toMatchObject({ status: issue.status, version: issue.version });
+    expect(await (await request.get('/api/automation-runs')).json()).toEqual(runs);
+    expect(reads.filter(read => read.path.endsWith('/repository/branches'))).toHaveLength(3);
+    expect(reads.filter(read => read.path.endsWith('/repository/commits'))).toHaveLength(3);
+    expect(reads.every(read => read.method === 'GET' && read.token === token)).toBeTruthy();
+  } finally {
+    try {
+      const current = await settings();
+      if (current.baseUrl === baseUrl) {
+        const cleared = await request.patch('/api/integrations/gitlab', { data: { expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '' } });
+        expect(cleared.ok(), await cleared.text()).toBeTruthy();
+      }
+      await request.delete(`/api/issues/${issue.id}`);
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
+    }
+  }
+});

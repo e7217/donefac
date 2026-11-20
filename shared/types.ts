@@ -439,21 +439,28 @@ export interface NotificationSubscription {
   targetId: string;
 }
 export interface NotificationSubscriptionState { subscribed: boolean }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string }
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null }
 export interface GitlabSyncPreviewCounts {
   mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;
   create: number; update: number; unchanged: number;
+  branches?: number; commits?: number;
 }
 export interface GitlabSyncPreviewCandidate {
-  projectId: number; kind: 'merge_request' | 'pipeline'; objectId: string; title: string; state: string;
+  projectId: number; kind: GitlabLink['kind']; objectId: string; title: string; state: string;
   issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged';
+}
+export interface GitlabHistoryLimits { branches: boolean; commits: boolean }
+export interface GitlabSyncResult {
+  ok: true; scanned: number; linked: number; settings: GitlabSettings; notice: string;
+  historyCounts?: { branches: number; commits: number }; historyLimits?: GitlabHistoryLimits;
 }
 export interface GitlabSyncPreview {
   settingsVersion: number; baseUrl: string; projectIds: number[];
   repositories: {
     projectId: number; status: 'ok' | 'error'; counts: GitlabSyncPreviewCounts;
-    error: { stage: 'merge-requests' | 'pipelines'; httpStatus: number | null; message: string } | null;
+    error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits'; httpStatus: number | null; message: string } | null;
+    historyLimits?: GitlabHistoryLimits;
   }[];
   counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
 }
