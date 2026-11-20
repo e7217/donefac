@@ -1,26 +1,18 @@
-import { createHash } from 'node:crypto';
 import type { Issue } from '../shared/types.js';
+import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
 type Receipt = { actorId: string; projectId: string; fingerprint: string; issueId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
 
-const uuidV4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-
 export class IssueCreationError extends Error {
   constructor(public status: number, message: string, public details: { reason: CreationReason }) { super(message); }
 }
 
 function fingerprint(input: IssueInput): string {
-  // The actor is checked separately after the authentication middleware resolves it.
-  const payload = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'requestId' && key !== 'actorId'));
-  try {
-    const canonical = JSON.stringify(payload, (_key, value: unknown) => value !== null && typeof value === 'object' && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
-      : value);
-    return createHash('sha256').update(canonical).digest('hex');
-  } catch {
+  try { return creationRequestFingerprint(input); }
+  catch {
     throw new IssueCreationError(400, '업무 생성 입력 형식을 확인해 주세요.', { reason: 'invalid_request_body' });
   }
 }
@@ -42,7 +34,7 @@ export class IssueCreationService {
       return { issue: this.store.transaction(create), duplicate: false };
     }
     const requestId = input.requestId;
-    if (typeof requestId !== 'string' || !uuidV4.test(requestId)) {
+    if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
       throw new IssueCreationError(400, '업무 생성 요청 ID를 확인해 주세요.', { reason: 'invalid_request_id' });
     }
     const id = requestId.toLowerCase();

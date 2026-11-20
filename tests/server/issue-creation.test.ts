@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, Issue, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
+import { documentSectionHash, markdownImportSectionId } from '../../shared/document-sections.js';
+import type { ApiKeyCreated, DocPage, DocRevision, Issue, WebhookEndpointCreated, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actorId = 'user-seo';
@@ -170,4 +171,71 @@ test('public API creation retries retain the fixed actor and enforce write and p
   const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(workspace.issues.filter(value => value.title === input.title), [issue]);
   assert.equal(workspace.activities.find(value => value.resourceId === issue.id && value.action === '티켓 생성')?.actorId, actorId);
+});
+
+test('document create retries bind imported section links once with one draft and one revision', async t => {
+  const { call, observer, restart } = await fixture(t);
+  const sectionId = markdownImportSectionId(1), missingSectionId = markdownImportSectionId(2);
+  const input = {
+    requestId: randomUUID(), projectId: null, title: 'Markdown 배포 안내',
+    content: { type: 'doc', content: [
+      { type: 'paragraph', content: [
+        { type: 'text', text: '배포 절 열기', marks: [{ type: 'link', attrs: { href: `#${sectionId}` } }] },
+        { type: 'text', text: '일치하지 않는 링크', marks: [{ type: 'link', attrs: { href: `#${missingSectionId}` } }] },
+      ] },
+      { type: 'heading', attrs: { level: 2, sectionId }, content: [{ type: 'text', text: '배포' }] },
+    ] },
+  };
+  const before = Number(observer.prepare('SELECT COUNT(*) AS n FROM documents').get()?.n);
+  await call('/documents', 'POST', { ...input, requestId: '' }, 400);
+  const retries = await Promise.all([
+    call<DocPage>('/documents', 'POST', input, [200, 201]),
+    call<DocPage>('/documents', 'POST', { ...input, requestId: input.requestId.toUpperCase() }, [200, 201]),
+  ]);
+  assert.deepEqual(retries.map(row => row.status).sort(), [200, 201]);
+  const document = retries[0].data;
+  assert.deepEqual(retries[1].data, document);
+  assert.equal(document.status, 'draft');
+  assert.deepEqual(document.content.content?.[0].content?.map(row => row.marks?.[0].attrs?.href),
+    [documentSectionHash(document.id, sectionId), `#${missingSectionId}`]);
+  assert.equal(Number(observer.prepare('SELECT COUNT(*) AS n FROM documents').get()?.n), before + 1);
+  const { data: revisions } = await call<DocRevision[]>(`/documents/${document.id}/revisions`);
+  assert.equal(revisions.length, 1);
+  assert.deepEqual(revisions[0].content, document.content);
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  assert.equal(workspace.activities.filter(row => row.resourceId === document.id && row.action === '문서 생성').length, 1);
+  assert.equal((await call<Failure>('/documents', 'POST', { ...input, title: '변경한 입력' }, 409)).data.details.reason, 'request_conflict');
+  assert.equal((await call<Failure>('/documents', 'POST', input, 409, assigneeId)).data.details.reason, 'request_conflict');
+  await restart();
+  assert.deepEqual((await call<DocPage>('/documents', 'POST', input)).data, document);
+});
+
+test('document request receipts roll back with creation and follow trash and native replacement', async t => {
+  const { call, observer } = await fixture(t);
+  const input = { requestId: randomUUID(), projectId, title: '재시도 문서' };
+  observer.exec("CREATE TRIGGER fail_document_receipt BEFORE INSERT ON document_creation_requests BEGIN SELECT RAISE(ABORT,'synthetic document receipt failure'); END");
+  try {
+    await call('/documents', 'POST', input, 500);
+    assert.equal((await call<WorkspaceSnapshot>('/workspace')).data.documents.some(row => row.title === input.title), false);
+  } finally { observer.exec('DROP TRIGGER fail_document_receipt'); }
+  const { data: document } = await call<DocPage>('/documents', 'POST', input, 201);
+  const { data: { trashEntryId } } = await call<{ trashEntryId: string }>(`/documents/${document.id}?expectedVersion=${document.version}`, 'DELETE');
+  const unavailable = async () => assert.equal((await call<Failure>('/documents', 'POST', input, 409)).data.details.reason, 'result_unavailable');
+  await unavailable();
+  await call(`/trash/${trashEntryId}/restore`, 'POST', {});
+  assert.equal((await call<DocPage>('/documents', 'POST', input)).data.id, document.id);
+  const backup = (await call<WorkspaceSnapshot>('/export')).data;
+  assert.equal(JSON.stringify(backup).includes(input.requestId), false);
+  await call('/import', 'POST', { data: backup });
+  await unavailable();
+  const legacy = await call<DocPage>('/documents', 'POST', { projectId, title: input.title }, 201);
+  assert.notEqual(legacy.data.id, document.id);
+
+  const { data: key } = await call<ApiKeyCreated>('/api-keys', 'POST', {
+    name: '문서 생성 키', projectIds: [projectId], access: 'write', expiresAt: null,
+  }, 201);
+  const apiInput = { ...input, requestId: randomUUID(), title: '자동화로 저장한 문서' };
+  const { data: created } = await call<DocPage>('/v1/documents', 'POST', apiInput, 201, assigneeId, key.token);
+  assert.deepEqual((await call<DocPage>('/v1/documents', 'POST', apiInput, 200, assigneeId, key.token)).data, created);
+  assert.equal(created.authorId, actorId);
 });

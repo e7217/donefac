@@ -17,6 +17,7 @@ import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentLabelListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
+import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
@@ -146,6 +147,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const documentSelectionComments=new DocumentSelectionCommentService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
+  const documentCreation = new DocumentCreationService(store);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const subscriptions=new NotificationSubscriptionsService(store);
@@ -1042,13 +1044,22 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });res.json({ok:true,trashEntryId:archived.id});
   });
   app.post('/api/documents',(req,res)=>{
-    const timestamp=now(), authorId=actor(req);
-    const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,
-      ...(Object.hasOwn(req.body,'labels')?{labels:req.body.labels}:{}),
-      content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},
-      plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
-    store.transaction(()=>{validateDocument(d);store.put('documents',d);revision(d,authorId,'최초 작성');activity(req,'document',d.id,'문서 생성',d.title);notifyDocumentCreated(d);});
-    res.status(201).json(d);
+    const authorId = actor(req);
+    const result = documentCreation.create(authorId, req.body, () => {
+      const timestamp=now();
+      const d:DocPage={id:uid(),projectId:req.body.projectId??null,parentId:req.body.parentId??null,title:req.body.title,
+        ...(Object.hasOwn(req.body,'labels')?{labels:req.body.labels}:{}),
+        content:Object.hasOwn(req.body,'content')?req.body.content:{type:'doc',content:[{type:'paragraph'}]},
+        plainText:'',icon:req.body.icon||'📄',status:req.body.status||'draft',version:1,authorId,createdAt:timestamp,updatedAt:timestamp};
+      validateDocument(d);
+      bindImportedDocumentSections(d);
+      store.put('documents',d);
+      revision(d,authorId,'최초 작성');
+      activity(req,'document',d.id,'문서 생성',d.title);
+      notifyDocumentCreated(d);
+      return d;
+    });
+    res.status(result.duplicate ? 200 : 201).json(result.document);
   });
   app.post('/api/documents/:id/move-preview',(req,res)=>{
     res.set('Cache-Control','no-store').json(documentTreeMove.preview(req.params.id,actor(req),req.body));
@@ -1785,6 +1796,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentSelectionComments.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      documentCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
       outbound.resetForImport();
       migrations.resetForNativeImport();
@@ -1865,7 +1877,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentCreationError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError)return res.status(error.status).json({error:error.message,details:error.details});

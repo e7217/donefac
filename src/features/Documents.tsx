@@ -6,7 +6,7 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
-  ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronRight,
+  ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
   Code2, FileCheck2, FileClock, FilePlus2, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
@@ -24,6 +24,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
+import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
@@ -36,6 +37,7 @@ import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevisi
 import { statusMeta } from '../../shared/workflow-helpers';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { isDocumentPreservedByNavigation } from '../lib/navigation';
+import { newRequestId } from '../lib/request-id';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
@@ -70,6 +72,7 @@ const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${ac
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
+type MarkdownCreation = { actorId: string; body: string; documentId?: string };
 const documentMetadata = (page: Pick<DocPage, 'title' | 'status' | 'parentId' | 'labels'>): DocumentMetadata => ({
   title: page.title, status: page.status, parentId: page.parentId, labels: page.labels ?? [],
 });
@@ -134,6 +137,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [newTitle, setNewTitle] = useState('');
   const [newTemplate, setNewTemplate] = useState('blank');
   const [creating, setCreating] = useState(false);
+  const creatingRequest = useRef(false);
+  const newTitleCustomized = useRef(false);
+  const [markdownPreview, setMarkdownPreview] = useState<MarkdownImportPreview | null>(null);
+  const [markdownCreation, setMarkdownCreation] = useState<MarkdownCreation | null>(null);
+  const [markdownCreateError, setMarkdownCreateError] = useState('');
+  const importingMarkdown = newTemplate === 'markdown';
+  const createLocked = creating || Boolean(markdownCreation);
   const [exportOpen, setExportOpen] = useState(false);
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
@@ -418,7 +428,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) { rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = ''; }
+      if (creatingRequest.current || draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) { rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', handler);
     return () => { window.removeEventListener('beforeunload', handler); rememberDraft(draftRef.current); rememberComment(); };
@@ -434,7 +444,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         }
         return;
       }
-      if (savingRef.current) {
+      if (savingRef.current || creatingRequest.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
       } else if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
@@ -511,7 +521,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen) return;
+      if (issueDrawerOpen || newOpen) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen) void saveDraft();
@@ -520,7 +530,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen]);
+  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -610,28 +620,84 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setNewProject(parent ? parent.projectId || '' : projectId === 'all' ? '' : projectId);
     setNewTemplate(template);
     setNewTitle(template === 'blank' ? '' : DOCUMENT_TEMPLATES.find(item => item.id === template)?.name || '');
+    newTitleCustomized.current = false;
+    setMarkdownPreview(null);
+    setMarkdownCreation(null);
+    setMarkdownCreateError('');
     setNewOpen(true);
+  }
+
+  function closeCreateDocument() {
+    setNewOpen(false);
+    setMarkdownPreview(null);
+    setMarkdownCreation(null);
+    setMarkdownCreateError('');
+  }
+
+  function chooseDocumentTemplate(template: string) {
+    if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle) || importingMarkdown && !newTitleCustomized.current) {
+      setNewTitle(DOCUMENT_TEMPLATES.find(item => item.id === template && item.id !== 'blank')?.name || '');
+      newTitleCustomized.current = false;
+    }
+    setNewTemplate(template);
+    setMarkdownPreview(null);
+    setMarkdownCreateError('');
+  }
+
+  function reviewMarkdown(preview: MarkdownImportPreview | null, fileTitle = '') {
+    setMarkdownPreview(preview);
+    setMarkdownCreateError('');
+    if (preview && !newTitleCustomized.current) {
+      setNewTitle((preview.suggestedTitle || fileTitle).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240).toWellFormed());
+    }
   }
 
   async function createDocument(event: React.FormEvent) {
     event.preventDefault();
-    if (creating || !newTitle.trim()) return;
-    if (listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
+    if (creatingRequest.current || !newTitle.trim() || importingMarkdown && !markdownPreview) return;
+    if (!markdownCreation && listDrafts.current.size && !window.confirm(LIST_DRAFT_DISCARD_MESSAGE)) return;
+    if (markdownCreation && !markdownCreation.documentId && markdownCreation.actorId !== activeActorRef.current) {
+      setMarkdownCreateError('저장을 시작한 작업자로 전환한 뒤 다시 확인해 주세요.');
+      return;
+    }
+    creatingRequest.current = true;
     setCreating(true);
+    setMarkdownCreateError('');
+    let documentId = markdownCreation?.documentId;
     try {
       const parent = data.documents.find(page => page.id === newParent);
-      const result = await post<DocPage>('/documents', {
+      const payload = {
         title: newTitle.trim(), projectId: parent ? parent.projectId : newProject || null,
-        parentId: newParent || null, content: templateContent(newTemplate),
+        parentId: newParent || null, content: importingMarkdown && markdownPreview ? markdownPreview.content : templateContent(newTemplate),
         status: 'draft', icon: DOCUMENT_TEMPLATES.find(item => item.id === newTemplate)?.icon || '📄',
-      });
+      };
+      if (importingMarkdown && !documentId) {
+        const request = markdownCreation ?? { actorId, body: JSON.stringify({ ...payload, requestId: newRequestId() }) };
+        setMarkdownCreation(request);
+        const result = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body });
+        documentId = result.id;
+        setMarkdownCreation({ ...request, documentId });
+      } else if (!importingMarkdown) {
+        documentId = (await post<DocPage>('/documents', payload)).id;
+      }
       rememberDraft(draftRef.current);
+      if (importingMarkdown) rememberComment();
       await refresh();
-      setNewOpen(false);
-      onSelectDocument(result.id);
+      if (documentId) onSelectDocument(documentId);
+      closeCreateDocument();
       notify('새 문서를 만들었습니다.', 'success');
-    } catch (error) { notify(error instanceof Error ? error.message : '문서를 만들지 못했습니다.', 'error'); }
-    finally { setCreating(false); }
+    } catch (error) {
+      if (!importingMarkdown) notify(error instanceof Error ? error.message : '문서를 만들지 못했습니다.', 'error');
+      else if (documentId) setMarkdownCreateError('문서는 저장됐습니다. 다시 열어 최신 목록을 불러오세요.');
+      else if (!markdownCreation && error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 409) {
+        setMarkdownCreation(null);
+        setMarkdownCreateError(error.message);
+      } else if (error instanceof ApiError && error.status === 409) setMarkdownCreateError(error.message);
+      else setMarkdownCreateError('저장 결과를 확인할 수 없습니다. 같은 요청으로 다시 확인해 주세요.');
+    } finally {
+      creatingRequest.current = false;
+      setCreating(false);
+    }
   }
 
   async function submitComment(event: React.FormEvent) {
@@ -1189,6 +1255,52 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}
-    {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !creating) setNewOpen(false); }}><form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}><div className="docs-modal-header"><div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div><button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={() => setNewOpen(false)}><X size={19} /></button></div><label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?" value={newTitle} onChange={event => setNewTitle(event.target.value)} required maxLength={240} /></label><div className="docs-template-grid">{DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id} onClick={() => { setNewTemplate(template.id); if (!newTitle || DOCUMENT_TEMPLATES.some(item => item.name === newTitle)) setNewTitle(template.id === 'blank' ? '' : template.name); }}><span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}</button>)}</div><div className="docs-location-fields"><label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent)} value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}><option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="docs-modal-label">상위 문서<select className="field" value={newParent} onChange={event => setNewParent(event.target.value)}><option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label></div><div className="docs-modal-footer"><button className="btn btn-ghost" type="button" disabled={creating} onClick={() => setNewOpen(false)}>취소</button><button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating}>{creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />} 문서 만들기</button></div></form></div>}
+    {newOpen && <div className="docs-modal-backdrop" onMouseDown={event => {
+      if (event.target === event.currentTarget && !creatingRequest.current) closeCreateDocument();
+    }}>
+      <form className="docs-create-modal" role="dialog" aria-modal="true" aria-labelledby="docs-create-title" onSubmit={createDocument}
+        onKeyDown={event => {
+          if (event.key === 'Escape' && !event.nativeEvent.isComposing && !creatingRequest.current) closeCreateDocument();
+        }}>
+        <div className="docs-modal-header">
+          <div><div className="docs-eyebrow">NEW DOCUMENT</div><h2 id="docs-create-title">새 문서 만들기</h2></div>
+          <button type="button" className="btn btn-ghost docs-icon-button" aria-label="닫기" disabled={creating} onClick={closeCreateDocument}><X size={19} /></button>
+        </div>
+        <label className="docs-modal-label">문서 제목<input autoFocus className="field" placeholder="어떤 이야기를 기록할까요?"
+          value={newTitle} onChange={event => { newTitleCustomized.current = true; setNewTitle(event.target.value); }}
+          required maxLength={240} disabled={createLocked} /></label>
+        {importingMarkdown ? <>
+          <div className="docs-markdown-mode"><h3>Markdown 가져오기</h3><button className="btn btn-ghost" type="button" disabled={createLocked}
+            onClick={() => chooseDocumentTemplate('blank')}><ChevronLeft size={15} aria-hidden="true" /> 템플릿으로 변경</button></div>
+          <DocumentMarkdownImport preview={markdownPreview} onPreview={reviewMarkdown} disabled={createLocked} />
+        </> : <div className="docs-template-grid">
+          {DOCUMENT_TEMPLATES.map(template => <button type="button" className={newTemplate === template.id ? 'is-selected' : ''} key={template.id}
+            disabled={creating} onClick={() => chooseDocumentTemplate(template.id)}>
+            <span>{template.icon}</span><strong>{template.name}</strong><small>{template.description}</small>{newTemplate === template.id && <Check size={14} />}
+          </button>)}
+          <button type="button" aria-label="Markdown 가져오기" disabled={creating} onClick={() => chooseDocumentTemplate('markdown')}>
+            <span aria-hidden="true"><ArrowDownToLine size={18} /></span><strong>Markdown 가져오기</strong><small>파일 또는 붙여넣기</small>
+          </button>
+        </div>}
+        <div className="docs-location-fields">
+          <label className="docs-modal-label">공간<select className="field" disabled={Boolean(newParent) || createLocked}
+            value={newProject} onChange={event => { setNewProject(event.target.value); setNewParent(''); }}>
+            <option value="">팀 공통 문서</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select></label>
+          <label className="docs-modal-label">상위 문서<select className="field" value={newParent} disabled={createLocked} onChange={event => setNewParent(event.target.value)}>
+            <option value="">최상위에 만들기</option>{data.documents.filter(page => page.projectId === (newProject || null)).map(page => <option key={page.id} value={page.id}>{page.title}</option>)}
+          </select></label>
+        </div>
+        {markdownCreateError && <p className="error-text docs-markdown-message" role="alert">{markdownCreateError}</p>}
+        <div className="docs-modal-footer">
+          <button className="btn btn-ghost" type="button" disabled={creating} onClick={closeCreateDocument}>취소</button>
+          <button className="btn btn-primary" type="submit" disabled={!newTitle.trim() || creating || importingMarkdown && !markdownPreview}>
+            {creating ? <Loader2 size={14} className="docs-spin" /> : <Plus size={14} />}
+            {importingMarkdown && creating ? '저장 중…' : markdownCreation?.documentId ? '저장한 문서 열기'
+              : markdownCreation ? '저장 다시 확인' : importingMarkdown ? 'Markdown 문서 만들기' : '문서 만들기'}
+          </button>
+        </div>
+      </form>
+    </div>}
   </section></DocumentAnnotationProvider></DocumentBlocksProvider>;
 }
