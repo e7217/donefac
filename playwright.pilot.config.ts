@@ -11,6 +11,7 @@ if (url.protocol !== (team ? 'https:' : 'http:') || url.hostname !== '127.0.0.1'
 export default defineConfig({
   ...base,
   testDir: team ? './tests/team-pilot' : './tests/ops',
+  testMatch: '**/*.spec.ts',
   use: {
     ...base.use,
     baseURL: url.origin,

@@ -792,6 +792,13 @@ export interface GitlabLink { id: string; issueId: string; projectId: number; ii
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[] }
+export interface GitlabRepositoryCandidate { id: number; name: string; pathWithNamespace: string; webUrl: string }
+export interface GitlabRepositorySearch {
+  settingsVersion: number;
+  page: number;
+  hasNextPage: boolean;
+  repositories: GitlabRepositoryCandidate[];
+}
 export interface GitlabWebhookDelivery {
   event: 'push' | 'tag_push' | 'merge_request' | 'pipeline' | 'other';
   authentication: 'secret-token' | 'signing-token';

@@ -1,12 +1,12 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import type { Store } from './store.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -900,6 +900,46 @@ export class GitlabIntegrationService{
     return current;
   }
 
+  private draftReadToken(input: Obj, address: string, saved: RawSettings): string | null {
+    if (Object.hasOwn(input, 'token')) return credential(input.token);
+    return address === saved.baseUrl && saved.token ? this.store.unseal(saved.token) : null;
+  }
+
+  async searchRepositories(value: unknown, signal?: AbortSignal): Promise<GitlabRepositorySearch> {
+    const input = record(value);
+    if (Object.keys(input).some(key => !['expectedVersion', 'baseUrl', 'token', 'query', 'page'].includes(key))) {
+      fail('지원하지 않는 GitLab 저장소 검색 요청입니다.');
+    }
+    const saved = this.raw();
+    assertSettingsVersion(input.expectedVersion, saved.version);
+    const address = Object.hasOwn(input, 'baseUrl') ? baseUrl(input.baseUrl) : saved.baseUrl;
+    if (!address) fail('GitLab 주소를 입력해 주세요.');
+    const query = typeof input.query === 'string' && input.query.isWellFormed() && !/\p{Cc}/u.test(input.query) ? input.query.trim() : '';
+    if (!query || query.length > 200) fail('GitLab 저장소 검색어를 1~200자로 입력해 주세요.');
+    const page = Object.hasOwn(input, 'page') ? input.page : 1;
+    if (typeof page !== 'number' || !Number.isSafeInteger(page) || page < 1 || page > GITLAB_REPOSITORY_SEARCH_MAX_PAGE) {
+      fail('GitLab 저장소 검색 페이지를 1~20 사이로 지정해 주세요.');
+    }
+    const token = this.draftReadToken(input, address, saved);
+    if (token && query.includes(token)) fail('GitLab 저장소 검색어를 확인해 주세요.');
+    signal?.throwIfAborted();
+    const result = await readGitlabRepositorySearch({ baseUrl: address, token }, query, page, signal).catch(error => {
+      signal?.throwIfAborted();
+      assertSettingsVersion(saved.version, this.raw().version);
+      if (error instanceof GitlabRepositoryQueryError) fail(error.message);
+      if (error instanceof GitlabReadError) {
+        const message = error.httpStatus === 401 || error.httpStatus === 403
+          ? 'GitLab 저장소를 읽을 수 없습니다. 읽기 토큰과 접근 권한을 확인해 주세요.'
+          : 'GitLab 저장소 검색에 실패했습니다. 주소와 연결 상태를 확인해 주세요.';
+        fail(message, 502);
+      }
+      throw error;
+    });
+    signal?.throwIfAborted();
+    assertSettingsVersion(saved.version, this.raw().version);
+    return { settingsVersion: saved.version, page, ...result };
+  }
+
   private async readRepositories(connection: SyncConnection, options: ReadOptions): Promise<ProjectReadOutcome[]> {
     const reads: ProjectReadOutcome[] = [];
     for (const projectId of connection.projectIds) {
@@ -925,7 +965,7 @@ export class GitlabIntegrationService{
     const repositories='projectIds'in input?projectIds(input.projectIds):saved.projectIds;
     if(!address||!repositories.length)fail('GitLab 주소와 저장소 ID를 입력해 주세요.');
     const jiraRoutes=this.submittedJiraRoutes(input,saved,address,repositories);
-    const token='token'in input?credential(input.token):address===saved.baseUrl&&saved.token?this.store.unseal(saved.token):null;
+    const token=this.draftReadToken(input,address,saved);
     const connection={baseUrl:address,projectIds:repositories,jiraRoutes,token,version:saved.version};
     const reads=await this.readRepositories(connection,{signal,includeHistory});
     const candidates:GitlabSyncPreviewCandidate[]=[],counts=emptyCounts(includeHistory),issues=this.syncIssues(),instance=this.instance(connection);
@@ -1035,6 +1075,18 @@ export class GitlabIntegrationService{
         hooks.activity(req,'issue',issueId,'GitLab 수동 연결 해제',linkDetail(link));
       });
       res.set('Cache-Control','no-store').json({ok:true});
+    });
+    app.post('/api/integrations/gitlab/repository-search', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      hooks.actor(req);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.searchRepositories(req.body, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
     });
     app.post('/api/integrations/gitlab/sync-preview',async(req,res)=>{
       hooks.actor(req);

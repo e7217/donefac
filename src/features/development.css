@@ -42,6 +42,20 @@
 .gitlab-preview-candidates small{color:#537367}
 .gitlab-preview-target{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}
 .gitlab-preview-target .text-link{text-align:left;overflow-wrap:anywhere}
+.gitlab-repository-picker{display:grid;gap:8px;min-width:0;padding:10px 12px;border:1px solid #dae8e1;border-radius:6px;background:#f9fbfa}
+.gitlab-repository-picker h3{margin:0;color:#274c3c;font-size:14px;font-weight:650}
+.gitlab-repository-picker p{margin:0;overflow-wrap:anywhere}
+.gitlab-repository-search-controls{display:flex;align-items:end;gap:8px;flex-wrap:wrap}
+.gitlab-repository-search-controls label{flex:1 1 170px;min-width:0}
+.gitlab-repository-search-controls input{width:100%;min-width:0}
+.gitlab-repository-search-results{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.gitlab-repository-search-results li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px;border:1px solid #e5ece7;border-radius:5px;background:white}
+.gitlab-repository-search-results button{flex:0 0 auto}
+.gitlab-repository-search-results button[aria-disabled="true"]{opacity:.55;cursor:default}
+.gitlab-repository-result-name{min-width:0;overflow-wrap:anywhere;line-height:1.4}
+.gitlab-repository-result-name a{display:block;color:#274c3c;font-size:14px;font-weight:600;text-decoration:underline;text-underline-offset:.15em}
+.gitlab-repository-result-name small{display:block;color:#537367;font-size:12px}
+.gitlab-repository-search-pages{display:flex;justify-content:center;align-items:center;gap:8px;flex-wrap:wrap}
 .gitlab-jira-routes{padding:10px 12px;border:1px solid #dae8e1;border-radius:6px;background:#f9fbfa;min-width:0}
 .gitlab-jira-routes h3{margin:0;color:#274c3c;font-size:14px;font-weight:650}
 .gitlab-jira-routes p{margin:4px 0;overflow-wrap:anywhere}

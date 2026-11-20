@@ -7,6 +7,7 @@ import { api, ApiError, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { GitlabRepositoryPicker } from './GitlabRepositoryPicker';
 import { GitlabWebhookStatusPanel } from './GitlabWebhookStatusPanel';
 import { WebhookSettings } from './WebhookSettings';
 import './development.css';
@@ -18,6 +19,7 @@ const draftOf=(settings:GitlabSettings):Draft=>({...empty,baseUrl:settings.baseU
 type PreviewState = { state: 'loading' } | { state: 'failed'; error: string } | { state: 'ready'; result: GitlabSyncPreview; jiraRoutes: GitlabJiraRoute[] };
 type SyncRun = { settingsVersion: number; includeHistory: boolean; repositories: GitlabSyncRepositoryResult[] };
 type JiraSources = { items: GitlabJiraSource[]; loading: boolean; error: string };
+const maxGitlabRepositories = 100;
 function HistoryLimitNote({ limits }: { limits?: GitlabHistoryLimits }) {
   const capped = [limits?.branches && '브랜치 500개', limits?.commits && '커밋 100개'].filter(Boolean);
   return capped.length > 0 && <p className="help-text gitlab-history-limits">{capped.join(' · ')} 조회 한도에 도달했습니다.</p>;
@@ -26,7 +28,7 @@ function HistoryLimitNote({ limits }: { limits?: GitlabHistoryLimits }) {
 function readProjectIds(input: string): number[] {
   const projectIds = input.split(',').map(value => value.trim()).filter(Boolean).map(Number);
   if (projectIds.some(id => !Number.isSafeInteger(id) || id < 1)) throw new Error('프로젝트 ID는 쉼표로 구분된 양의 정수로 입력해 주세요.');
-  if (projectIds.length > 100 || new Set(projectIds).size !== projectIds.length) throw new Error('중복되지 않은 저장소 ID를 최대 100개까지 입력해 주세요.');
+  if (projectIds.length > maxGitlabRepositories || new Set(projectIds).size !== projectIds.length) throw new Error(`중복되지 않은 저장소 ID를 최대 ${maxGitlabRepositories}개까지 입력해 주세요.`);
   return projectIds;
 }
 
@@ -57,6 +59,7 @@ export function Development(props:FeatureProps){
   const [includeHistory, setIncludeHistory] = useState(false);
   const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [jiraSources, setJiraSources] = useState<JiraSources>({ items: [], loading: true, error: '' });
+  const [repositorySearchRevision, setRepositorySearchRevision] = useState(0);
   const previewRequest = useRef<AbortController | null>(null);
   const jiraSourcesRequest = useRef<AbortController | null>(null);
   const connectionForm = useRef<HTMLFormElement>(null);
@@ -71,7 +74,8 @@ export function Development(props:FeatureProps){
     previewRequest.current = null;
     setPreview(null);
   }, []);
-  const accept=useCallback((value:GitlabSettings)=>{clearPreview();setSyncRun(null);setSettings(value);const next=draftOf(value);setDraft(next);setBaseline(next);dirtyRef.current=false;setError('');},[clearPreview]);
+  const clearRepositorySearch = useCallback(() => setRepositorySearchRevision(value => value + 1), []);
+  const accept=useCallback((value:GitlabSettings)=>{clearPreview();clearRepositorySearch();setSyncRun(null);setSettings(value);const next=draftOf(value);setDraft(next);setBaseline(next);dirtyRef.current=false;setError('');},[clearPreview,clearRepositorySearch]);
   useEffect(()=>{alive.current=true;let cancelled=false;void api<GitlabSettings>('/integrations/gitlab').then(value=>{if(!cancelled)accept(value);}).catch(e=>{if(!cancelled)setError((e as Error).message);});return()=>{cancelled=true;alive.current=false;previewRequest.current?.abort();previewRequest.current=null;};},[accept]);
   const loadJiraSources = useCallback(async () => {
     jiraSourcesRequest.current?.abort();
@@ -90,18 +94,25 @@ export function Development(props:FeatureProps){
     return () => { window.clearTimeout(scheduled); jiraSourcesRequest.current?.abort(); };
   }, [loadJiraSources]);
   useEffect(()=>{
-    const guard=(event:Event)=>{if(event.defaultPrevented)return;if(pending.current){event.preventDefault();notify('GitLab 요청이 끝난 뒤 이동해 주세요.','error');}else if(dirtyRef.current){if(!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?'))event.preventDefault();else afterAcceptedNavigation(event,()=>{clearPreview();setDraft(baseline);dirtyRef.current=false;setError('');});}};
+    const guard=(event:Event)=>{if(event.defaultPrevented)return;if(pending.current){event.preventDefault();notify('GitLab 요청이 끝난 뒤 이동해 주세요.','error');}else if(dirtyRef.current){if(!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?'))event.preventDefault();else afterAcceptedNavigation(event,()=>{clearPreview();clearRepositorySearch();setDraft(baseline);dirtyRef.current=false;setError('');});}};
     const unload=(event:BeforeUnloadEvent)=>{if(pending.current||dirtyRef.current){event.preventDefault();event.returnValue='';}};
     window.addEventListener('teamspace:navigate',guard);window.addEventListener('beforeunload',unload);
     return()=>{window.removeEventListener('teamspace:navigate',guard);window.removeEventListener('beforeunload',unload);};
-  },[baseline,clearPreview,notify]);
+  },[baseline,clearPreview,clearRepositorySearch,notify]);
   function edit<K extends keyof Draft>(key: K, value: Draft[K]) {
     clearPreview();
+    if (key === 'baseUrl' || key === 'token') clearRepositorySearch();
     setDraft(previous => {
       const next = { ...previous, [key]: value };
       if (key === 'baseUrl' && normalizedAddress(next.baseUrl) !== normalizedAddress(previous.baseUrl)) next.jiraRoutes = [];
       return next;
     });
+  }
+  function addRepository(repositoryId: number) {
+    const ids = readProjectIds(draft.ids);
+    if (ids.includes(repositoryId)) return;
+    if (ids.length >= maxGitlabRepositories) throw new Error(`최대 ${maxGitlabRepositories}개까지 저장소를 선택할 수 있습니다.`);
+    edit('ids', [...ids, repositoryId].join(', '));
   }
   function updateJiraRoute(repositoryId: number, projectId: string, jiraInstanceKey = '') {
     const other = draft.jiraRoutes.filter(route => route.repositoryId !== repositoryId);
@@ -193,11 +204,13 @@ export function Development(props:FeatureProps){
     <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
       <label className="form-label">GitLab 주소<input type="url" className="field" placeholder="https://gitlab.example.com" value={draft.baseUrl} onChange={e=>edit('baseUrl',e.target.value)}/></label>
       {missingRoutesAfterAddressEdit && <p className="help-text gitlab-token-note" role="status">주소가 바뀌어 Jira 원본 연결 범위를 비웠습니다. 새 저장소에서 사용할 범위를 선택하세요.</p>}
-      <label className="form-label">GitLab 프로젝트 ID<input className="field" placeholder="예: 12, 34" value={draft.ids} onChange={e=>edit('ids',e.target.value)}/><span className="help-text">GitLab 프로젝트 설정의 숫자 ID를 입력하세요.</span></label>
-      {repositoryIds.length > 0 && <JiraRouteSettings repositoryIds={repositoryIds} routes={draft.jiraRoutes} sources={jiraSources}
-        projects={props.data.projects} onRetry={() => void loadJiraSources()} onChange={updateJiraRoute} />}
       <label className="form-label">읽기 API 토큰<input type="password" autoComplete="new-password" className="field" placeholder={retainsToken?'저장된 토큰 유지 · 변경할 때만 입력':'선택 · read_api 권한의 토큰'} value={draft.token} onChange={e=>edit('token',e.target.value)}/></label>
       {settings?.tokenConfigured && !retainsToken && !draft.token && <p className="help-text gitlab-token-note">새 주소에서 인증하려면 읽기 토큰을 입력하세요. 빈칸으로 저장하면 기존 읽기 토큰이 지워집니다.</p>}
+      {settings && <GitlabRepositoryPicker key={`${settings.version}:${repositorySearchRevision}`} baseUrl={draft.baseUrl}
+        token={draft.token} settingsVersion={settings.version} selectedIds={repositoryIds} maxRepositories={maxGitlabRepositories} onAdd={addRepository} />}
+      <label className="form-label">GitLab 프로젝트 ID<input className="field" placeholder="예: 12, 34" value={draft.ids} onChange={e=>edit('ids',e.target.value)}/><span className="help-text">저장소를 선택하거나 숫자 ID를 직접 입력하세요.</span></label>
+      {repositoryIds.length > 0 && <JiraRouteSettings repositoryIds={repositoryIds} routes={draft.jiraRoutes} sources={jiraSources}
+        projects={props.data.projects} onRetry={() => void loadJiraSources()} onChange={updateJiraRoute} />}
       <label className="form-label">웹훅 Secret Token<input type="password" autoComplete="new-password" className="field" placeholder={settings?.webhookSecretConfigured?'저장된 비밀값 유지':'웹훅 인증에 사용할 비밀값'} value={draft.secret} onChange={e=>edit('secret',e.target.value)}/></label>
       <label className="form-label">웹훅 Signing Token<input type="password" autoComplete="new-password" className="field" placeholder={settings?.signingTokenConfigured?'저장된 서명 키 유지':'선택 · GitLab에서 발급한 whsec_ 서명 키'} value={draft.signingToken} onChange={e=>edit('signingToken',e.target.value)}/><span className="help-text">GitLab에서 제공하는 인증 방식에 맞춰 Secret Token 또는 Signing Token을 설정하세요.</span></label>
       <div className="gitlab-history-option">

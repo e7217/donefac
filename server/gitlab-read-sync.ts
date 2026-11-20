@@ -1,4 +1,5 @@
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
+import type { GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
@@ -24,6 +25,8 @@ const PIPELINE_PAGE_SIZE = 50;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
 const COMMIT_PAGE_SIZE = 100;
+const REPOSITORY_SEARCH_PAGE_SIZE = 20;
+export const GITLAB_REPOSITORY_SEARCH_MAX_PAGE = 20;
 
 const stageNames: Record<GitlabReadStage, string> = {
   'merge-requests': 'MR',
@@ -50,11 +53,14 @@ export class GitlabManualUrlError extends Error {
   readonly status = 400;
 }
 
+export class GitlabRepositoryQueryError extends Error {}
+
 function isReadObject(value: unknown): value is GitlabReadObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function readJson(url: URL, headers: Record<string, string>, stage: GitlabReadStage, parentSignal?: AbortSignal): Promise<unknown> {
+async function readJson(url: URL, headers: Record<string, string>, stage: GitlabReadStage, parentSignal?: AbortSignal,
+  receiveHeaders?: (headers: Headers) => void): Promise<unknown> {
   const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const signal = parentSignal ? AbortSignal.any([parentSignal, deadline]) : deadline;
   try {
@@ -85,7 +91,11 @@ async function readJson(url: URL, headers: Record<string, string>, stage: Gitlab
       }
     } finally { reader.releaseLock(); }
 
-    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size))); }
+    try {
+      const data: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size)));
+      receiveHeaders?.(response.headers);
+      return data;
+    }
     catch { throw new GitlabReadError(stage, 'invalid-response'); }
   } catch (error) {
     if (error instanceof GitlabReadError) throw error;
@@ -93,8 +103,9 @@ async function readJson(url: URL, headers: Record<string, string>, stage: Gitlab
   }
 }
 
-async function readPage(url: URL, headers: Record<string, string>, stage: GitlabReadStage, maxRows: number, signal?: AbortSignal): Promise<GitlabReadObject[]> {
-  const payload = await readJson(url, headers, stage, signal);
+async function readPage(url: URL, headers: Record<string, string>, stage: GitlabReadStage, maxRows: number, signal?: AbortSignal,
+  receiveHeaders?: (headers: Headers) => void): Promise<GitlabReadObject[]> {
+  const payload = await readJson(url, headers, stage, signal, receiveHeaders);
   if (!Array.isArray(payload) || payload.length > maxRows || !payload.every(isReadObject)) {
     throw new GitlabReadError(stage, 'invalid-response');
   }
@@ -128,17 +139,24 @@ async function readRepositoryHistory(projectUrl: URL, projectId: number, headers
   };
 }
 
-function projectReadRequest({ baseUrl, token }: Connection, projectId: number, stage: GitlabReadStage) {
+function projectsReadRequest({ baseUrl, token }: Connection, stage: GitlabReadStage) {
   let base: URL;
   try { base = new URL(baseUrl); }
   catch { throw new GitlabReadError(stage, 'network'); }
-  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || !Number.isSafeInteger(projectId) || projectId < 1) {
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
     throw new GitlabReadError(stage, 'network');
   }
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers['PRIVATE-TOKEN'] = token;
-  const projectUrl = new URL(base);
-  projectUrl.pathname = `${base.pathname.replace(/\/+$/, '')}/api/v4/projects/${projectId}`;
+  const projectsUrl = new URL(base);
+  projectsUrl.pathname = `${base.pathname.replace(/\/+$/, '')}/api/v4/projects`;
+  return { base, headers, projectsUrl };
+}
+
+function projectReadRequest(connection: Connection, projectId: number, stage: GitlabReadStage) {
+  if (!Number.isSafeInteger(projectId) || projectId < 1) throw new GitlabReadError(stage, 'network');
+  const { base, headers, projectsUrl: projectUrl } = projectsReadRequest(connection, stage);
+  projectUrl.pathname += `/${projectId}`;
   return { base, headers, projectUrl };
 }
 
@@ -171,6 +189,72 @@ function gitlabPageAddress(raw: unknown, base: URL, allowSuffix: boolean) {
 function gitlabPathInScope(pathname: string, scope: string) {
   const path = canonicalPath(pathname);
   return path && path.startsWith(`${scope}/`) ? path : null;
+}
+
+function searchedRepository(project: GitlabReadObject, base: URL): GitlabRepositoryCandidate {
+  const { id, name, path_with_namespace: pathWithNamespace, web_url: rawWebUrl, archived } = project;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 || typeof name !== 'string' ||
+      !name.trim() || name.length > 512 || !name.isWellFormed() || /\p{Cc}/u.test(name) ||
+      typeof pathWithNamespace !== 'string' || (archived !== undefined && typeof archived !== 'boolean')) {
+    throw new GitlabReadError('project', 'invalid-response');
+  }
+  const canonical = gitlabRepositoryUrl(base.href, { path_with_namespace: pathWithNamespace });
+  const address = gitlabPageAddress(rawWebUrl, base, false);
+  const path = address && gitlabPathInScope(address.pathname, address.scope);
+  if (!canonical || !path || path !== canonicalPath(canonical.pathname) || canonical.href.length > 4000) {
+    throw new GitlabReadError('project', 'invalid-response');
+  }
+  return { id, name: name.trim(), pathWithNamespace, webUrl: canonical.href };
+}
+
+export async function readGitlabRepositorySearch(
+  connection: Connection, query: string, page: number, signal?: AbortSignal,
+): Promise<Pick<GitlabRepositorySearch, 'repositories' | 'hasNextPage'>> {
+  const { base, headers, projectsUrl } = projectsReadRequest(connection, 'project');
+  const exact = query.includes('/');
+  let rows: GitlabReadObject[];
+  let nextPage: string | null = null;
+  let links: string | null = null;
+  if (exact) {
+    if (page !== 1 || !gitlabRepositoryUrl(base.href, { path_with_namespace: query })) {
+      throw new GitlabRepositoryQueryError('저장소 경로는 그룹/저장소 형식으로 입력해 주세요.');
+    }
+    projectsUrl.pathname += `/${encodeURIComponent(query)}`;
+    try {
+      const project = await readJson(projectsUrl, headers, 'project', signal);
+      if (!isReadObject(project) || project.path_with_namespace !== query) throw new GitlabReadError('project', 'invalid-response');
+      rows = [project];
+    } catch (error) {
+      if (!(error instanceof GitlabReadError) || error.httpStatus !== 404) throw error;
+      rows = [];
+    }
+  } else {
+    projectsUrl.search = new URLSearchParams({ search: query, search_namespaces: 'true', simple: 'true', archived: 'false',
+      order_by: 'id', sort: 'asc', per_page: String(REPOSITORY_SEARCH_PAGE_SIZE), page: String(page) }).toString();
+    rows = await readPage(projectsUrl, headers, 'project', REPOSITORY_SEARCH_PAGE_SIZE, signal, responseHeaders => {
+      nextPage = responseHeaders.get('x-next-page');
+      links = responseHeaders.get('link');
+    });
+  }
+
+  const ids = new Set<number>();
+  const paths = new Set<string>();
+  const repositories: GitlabRepositoryCandidate[] = [];
+  const token = connection.token;
+  const encodedToken = token ? encodeURIComponent(token) : '';
+  for (const row of rows) {
+    if (row.archived === true) continue;
+    const repository = searchedRepository(row, base);
+    if (ids.has(repository.id) || paths.has(repository.pathWithNamespace)) throw new GitlabReadError('project', 'invalid-response');
+    ids.add(repository.id);
+    paths.add(repository.pathWithNamespace);
+    if (token && [repository.name, repository.pathWithNamespace, repository.webUrl].some(value =>
+      value.includes(token) || value.includes(encodedToken))) continue;
+    repositories.push(repository);
+  }
+  const reportedNext = nextPage !== null ? nextPage === String(page + 1)
+    : links !== null ? /(?:^|;)\s*rel="?next"?(?=\s*[,;]|\s*$)/i.test(links) : rows.length === REPOSITORY_SEARCH_PAGE_SIZE;
+  return { repositories, hasNextPage: !exact && page < GITLAB_REPOSITORY_SEARCH_MAX_PAGE && reportedNext };
 }
 
 function manualPage(raw: unknown, base: URL, allowSuffix: boolean): ManualPage | null {

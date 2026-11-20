@@ -275,6 +275,7 @@ curl --fail-with-body \
 | `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전·저장한 `jiraRoutes` |
 | `GET /api/integrations/gitlab/jira-sources` | Jira 원본 키를 보관한 `{projectId, jiraInstanceKey}` 목록 |
 | `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명과 `jiraRoutes` 변경 |
+| `POST /api/integrations/gitlab/repository-search` | 저장 전 주소와 읽기 토큰으로 프로젝트 이름·네임스페이스 검색 또는 전체 경로 조회 |
 | `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인 및 선택한 저장소 이력의 티켓 연결 후보 확인 |
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
@@ -286,6 +287,8 @@ curl --fail-with-body \
 | `GET /api/automation-runs?projectId=...&limit=100` | 최근 실행·차단·무시 이유, 최대500건 |
 
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
+
+**저장소 검색**은 `{expectedVersion,query,page?,baseUrl?,token?}`을 받는다. 검색어는 1~200자이고 페이지는 1~20이다. 프로젝트 이름이나 그룹 이름으로 검색하면 페이지당 최대 20개를 응답한다. `group/subgroup/repository`처럼 전체 경로를 입력하면 첫 페이지에서 해당 프로젝트를 조회한다. 보관된 저장소는 제외한다. 입력한 주소가 저장한 주소와 같을 때만 생략한 읽기 토큰을 재사용한다. 결과는 `settingsVersion`, `page`, `hasNextPage`와 검증한 저장소의 `id`, `name`, `pathWithNamespace`, `webUrl`을 담는다. GitLab에는 읽기 요청을 보내며 Teamspace 연결 설정·업무·활동을 저장하지 않는다. [GitLab Projects API](https://docs.gitlab.com/api/projects/#list-all-projects)
 
 **연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`, `jiraRoutes`를 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
 

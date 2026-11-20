@@ -115,12 +115,18 @@ async function rejectSocket(url, headers, status) {
 
 async function verifyIntegrations(session, anonymous, origin) {
   const gitlabPath = '/api/integrations/gitlab';
+  const repositorySearchPath = `${gitlabPath}/repository-search`;
   const webhookStatusPath = `${gitlabPath}/webhook-status`;
   const settings = await (await call(session, 'GET', gitlabPath, 200)).json();
-  await call(session, 'PATCH', gitlabPath, 200, {
+  const savedSettings = await (await call(session, 'PATCH', gitlabPath, 200, {
     headers: { Origin: origin },
     data: { expectedVersion: settings.version, baseUrl: 'https://gitlab.example.test', projectIds: [42], webhookSecret: gitlabSecret },
-  });
+  })).json();
+  const searchWithoutQuery = { expectedVersion: savedSettings.version, query: '' };
+  await call(anonymous, 'POST', repositorySearchPath, 401, { headers: { Origin: origin }, data: searchWithoutQuery });
+  await call(session, 'POST', repositorySearchPath, 403, { headers: { Origin: 'https://other.example.test' }, data: searchWithoutQuery });
+  const invalidSearch = await call(session, 'POST', repositorySearchPath, 400, { headers: { Origin: origin }, data: searchWithoutQuery });
+  assert.equal(invalidSearch.headers()['cache-control'], 'no-store');
   const webhook = { object_kind: 'merge_request', project: { id: 42 }, object_attributes: {
     id: 102, iid: 8, title: 'NEO-2 파일럿 웹훅', state: 'opened', url: 'https://gitlab.example.test/mr/8',
   } };
@@ -154,6 +160,8 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'GET', '/api/workspace', 401, { headers: bearer });
   await call(anonymous, 'GET', webhookStatusPath, 401, { headers: bearer });
   await call(anonymous, 'GET', '/api/v1/integrations/gitlab/webhook-status', 403, { headers: bearer });
+  await call(anonymous, 'POST', repositorySearchPath, 401, { headers: { ...bearer, Origin: origin }, data: searchWithoutQuery });
+  await call(anonymous, 'POST', '/api/v1/integrations/gitlab/repository-search', 403, { headers: bearer, data: searchWithoutQuery });
 
   const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
   await call(anonymous, 'GET', `/api${findings}`, 401);

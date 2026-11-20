@@ -412,7 +412,9 @@ const gitlab = createServer((request, response) => {
   const url = new URL(request.url, project);
   const projectEndpoint = '/api/v4/projects/42';
   let payload;
-  if (url.pathname === projectEndpoint) {
+  if (url.pathname === '/api/v4/projects' && url.searchParams.get('search') === 'platform') {
+    payload = [{ id: 42, name: 'Pilot Repository', web_url: project, path_with_namespace: 'platform/pilot' }];
+  } else if (url.pathname === projectEndpoint) {
     payload = { id: 42, web_url: project, path_with_namespace: 'platform/pilot' };
   } else if (url.pathname === `${projectEndpoint}/repository/branches/${encodeURIComponent(manualBranchName)}`) {
     payload = { name: manualBranchName, commit: { id: manualCommitSha } };
@@ -720,11 +722,21 @@ async function runStandardPilot() {
   const settings = await (await call(pilot.url,'/integrations/gitlab')).json();
   const syntheticWebhookSecret = `pilot-webhook-${randomUUID()}`;
   const gitlabBase = `http://127.0.0.1:${gitlab.address().port}`;
-  const jiraRoutes = [{repositoryId:42,projectId:sourceAudit.issue.projectId,jiraInstanceKey:'pilot-jira'}];
+  const search = await call(pilot.url, '/integrations/gitlab/repository-search', {
+    method: 'POST', body: { expectedVersion: settings.version, baseUrl: gitlabBase, token: syntheticToken, query: 'platform', page: 1 },
+  });
+  assert.equal(search.headers.get('cache-control'), 'no-store');
+  const discovery = await search.json();
+  assert.deepEqual(discovery.repositories, [{ id: 42, name: 'Pilot Repository', pathWithNamespace: 'platform/pilot', webUrl: `${gitlabBase}/platform/pilot` }]);
+  assert.deepEqual(await (await call(pilot.url, '/integrations/gitlab')).json(), settings);
+  const readsAfterDiscovery = authenticatedReads;
+  assert.equal(readsAfterDiscovery, 1);
+  const [repository] = discovery.repositories;
+  const jiraRoutes = [{repositoryId:repository.id,projectId:sourceAudit.issue.projectId,jiraInstanceKey:'pilot-jira'}];
   const gitlabIssuePath = `/issues/${sourceAudit.issue.id}/gitlab-links`;
   const gitlabLinksPath = `${gitlabIssuePath}?kind=merge_request`;
   const gitlabSettings = await (await call(pilot.url,'/integrations/gitlab',{
-    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:gitlabBase,projectIds:[42],token:syntheticToken,webhookSecret:syntheticWebhookSecret,jiraRoutes},
+    method:'PATCH',body:{expectedVersion:settings.version,baseUrl:gitlabBase,projectIds:[repository.id],token:syntheticToken,webhookSecret:syntheticWebhookSecret,jiraRoutes},
   })).json();
   const gitlabWebhook = {
     method: 'POST', headers: { 'X-Gitlab-Token': syntheticWebhookSecret, 'Idempotency-Key': randomUUID() },
@@ -882,7 +894,7 @@ async function runStandardPilot() {
   assert.equal(updatedMigratedIssue.version, restoredAudit.issue.version + 1);
   const restoredSync = await (await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(restoredSync.linked,0);
-  assert.equal(authenticatedReads,8);
+  assert.equal(authenticatedReads - readsAfterDiscovery, 8);
   await stop(copy);
   console.log('Pilot rehearsal passed for browser workflows, Jira and Confluence migration, GitLab activity, cold backup integrity, ticket creation retries, ticket form conditions, automation history, time reservations and individual trash restore.');
 }
