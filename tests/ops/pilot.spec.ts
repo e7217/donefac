@@ -122,6 +122,23 @@ test('built same-origin pilot serves issue/Gantt, persists document edits and do
   const panel = page.getByRole('dialog', { name: f.issue.title, exact: true });
   await expect(panel).toBeVisible();
   await panel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+  await page.getByRole('button', { name: '업무 만들기', exact: true }).click();
+  const create = page.getByRole('dialog', { name: '새 업무 만들기', exact: true });
+  await create.getByLabel('업무 제목', { exact: true }).fill('근무일로 기간을 정한 합성 업무');
+  await create.getByLabel('시작일', { exact: true }).fill('2026-11-20');
+  await create.getByText('근무일 기간 계산', { exact: true }).click();
+  await create.getByLabel('근무일 수', { exact: true }).fill('3');
+  await create.getByLabel('근무일 수', { exact: true }).press('Enter');
+  await expect(create.getByLabel('종료일', { exact: true })).toHaveValue('');
+  await create.getByRole('button', { name: '날짜에 반영', exact: true }).click();
+  await expect(create.getByLabel('종료일', { exact: true })).toHaveValue('2026-11-24');
+  const [created] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/api/issues' && response.request().method() === 'POST'),
+    create.getByRole('button', { name: '업무 만들기', exact: true }).click(),
+  ]);
+  expect(created.status()).toBe(201);
+  expect(await created.json()).toMatchObject({ projectId: f.project.id, startDate: '2026-11-20', endDate: '2026-11-24' });
+  await expect(create).toBeHidden();
   await page.goto(`/#/${f.project.id}/gantt`);
   const row = page.locator(`.gantt-row[data-issue-id="${f.issue.id}"]`);
   await expect(row).toContainText(f.issue.title);

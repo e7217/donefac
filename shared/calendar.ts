@@ -3,6 +3,7 @@ import type { WorkCalendar } from './types.js';
 export class CalendarError extends Error {constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function invalid(message:string,status=400):never{throw new CalendarError(status,message);}
 export const MIN_CALENDAR_DATE='0000-01-01',MAX_CALENDAR_DATE='9999-12-31';
+export const MAX_WORKING_DURATION_DAYS = 3650;
 const DAY=86400000,MIN_DAY=Math.floor(Date.parse(MIN_CALENDAR_DATE+'T00:00:00Z')/DAY),MAX_DAY=Math.floor(Date.parse(MAX_CALENDAR_DATE+'T00:00:00Z')/DAY);
 export function isCalendarDate(value:unknown):value is string{return typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
 export function calendarDay(value:unknown):number{if(!isCalendarDate(value))invalid('날짜는 유효한 YYYY-MM-DD 형식이어야 합니다.');return Math.floor(Date.parse(value+'T00:00:00Z')/DAY);}
@@ -47,6 +48,17 @@ export function createCalendarMath(calendar:WorkCalendar){
     onOrAfter:(date:string)=>working(calendarDay(date))?date:shift(date,1),
   };
 }
+
+export function calculateWorkingDateRange(math: ReturnType<typeof createCalendarMath>,
+  anchor: 'startDate' | 'endDate', date: string, workingDays: number): { startDate: string; endDate: string } {
+  if (!Number.isSafeInteger(workingDays) || workingDays < 1 || workingDays > MAX_WORKING_DURATION_DAYS) {
+    invalid('근무일 수는 1~3,650 사이의 정수여야 합니다.');
+  }
+  const remaining = workingDays - Number(math.isWorking(date));
+  if (anchor === 'startDate') return { startDate: date, endDate: math.shift(date, remaining) };
+  return { startDate: math.shift(date, -remaining), endDate: date };
+}
+
 export function isWorkingDate(calendar:WorkCalendar,date:string):boolean;
 export function isWorkingDate(date:string,calendar:WorkCalendar):boolean;
 export function isWorkingDate(a:WorkCalendar|string,b:string|WorkCalendar){return typeof a==='string'?createCalendarMath(b as WorkCalendar).isWorking(a):createCalendarMath(a).isWorking(b as string);}

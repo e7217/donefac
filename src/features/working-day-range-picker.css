@@ -1,0 +1,55 @@
+.working-day-range {
+  min-width: 0;
+  margin-block: .45rem;
+  padding: .55rem .7rem;
+  border: 1px solid #dce7e1;
+  border-radius: 7px;
+  background: #f5f9f6;
+  color: #435d51;
+  font-size: .875rem;
+}
+
+.working-day-range > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.working-day-range-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .6rem;
+  margin-block: .55rem;
+}
+
+.working-day-range .working-day-range-fields label {
+  display: grid;
+  gap: .2rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.working-day-range .working-day-range-fields .field {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.working-day-range-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4rem .7rem;
+}
+
+.working-day-range-result output {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem .4rem;
+}
+
+.working-day-range .working-day-range-message {
+  margin: .35rem 0 0;
+  color: #526d5d;
+  font-size: .8125rem;
+}

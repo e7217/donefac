@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
 import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
@@ -15,6 +15,7 @@ import { newRequestId } from '../lib/request-id';
 import { CustomFields, initialIssueType, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect } from './PlanningSelectors';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
+import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-schedule-successor.css';
@@ -155,6 +156,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const childMode = Boolean(parentIssue);
   const successorMode = Boolean(reviewedSchedule);
   const cloneMode = Boolean(reviewedClone);
+  const rangeDates = cloneMode ? cloneDates : scheduleDates;
+  const rangeCalendar = reviewedSchedule?.calendar ?? data.calendars?.find(calendar => calendar.projectId === selectedProject);
+  const rangeMath = useMemo(() => selectedProject ? createCalendarMath(rangeCalendar ?? defaultWorkCalendar(selectedProject)) : null,
+    [rangeCalendar, selectedProject]);
   const pendingCloneReview = cloneReview ?? (reviewedClone && cloneReviewFrom(data, reviewedClone));
   const needsCloneReview = Boolean(pendingCloneReview && !recovering && !replayRejected && !busy);
   const cloneLabels = cloneIssue?.labels.join('\n').replace(/\r\n?/g, '\n');
@@ -344,7 +349,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
 
   function editScheduleDate(endpoint: ScheduleDependencyEndpoint, date: string) {
     setScheduleDates(previous => ({ ...previous, [endpoint]: date }));
-    if (endpoint === 'endDate') setScheduleEndEdited(true);
+    if (successorMode && endpoint === 'endDate') setScheduleEndEdited(true);
+  }
+
+  function applyCalculatedDates(dates: ScheduleDates) {
+    if (pendingRef.current || fieldsLocked || needsScheduleReview || !selectedProject) return;
+    dirtyRef.current = true;
+    if (cloneMode) setCloneDates(previous => ({ ...previous, ...dates }));
+    else {
+      setScheduleDates(dates);
+      if (successorMode) setScheduleEndEdited(true);
+    }
   }
 
   function applySuggestedDate() {
@@ -535,14 +550,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
 
   const dateFields = <>
     {(['startDate', 'endDate'] as const).map(endpoint => <label key={endpoint} className="issue-form-label">{SCHEDULE_DATE_LABELS[endpoint]}
-      <input type="date" name={endpoint} className="field" value={successorMode ? scheduleDates[endpoint] : cloneMode ? cloneDates[endpoint] : undefined}
+      <input type="date" name={endpoint} className="field" value={rangeDates[endpoint]}
         onChange={event => {
           const date = event.target.value;
-          if (successorMode) editScheduleDate(endpoint, date);
           if (cloneMode) setCloneDates(previous => ({ ...previous, [endpoint]: date }));
+          else editScheduleDate(endpoint, date);
         }} />
     </label>)}
   </>;
+  const dateRangePicker = rangeMath && <WorkingDayRangePicker calendarMath={rangeMath}
+    startDate={rangeDates.startDate || null} endDate={rangeDates.endDate || null}
+    onApply={applyCalculatedDates} disabled={fieldsLocked || needsScheduleReview} />;
 
   return <div className="issue-modal-overlay" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
     <section ref={dialog} tabIndex={childMode || successorMode || cloneMode ? -1 : undefined} onKeyDown={keyboard} className="issue-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-issue-title">
@@ -593,6 +611,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               </div>
               {proposal.warning && <p className="issue-successor-warning" role="status">{proposal.warning}</p>}
               <div className="issue-form-grid">{dateFields}</div>
+              {dateRangePicker}
             </section>}
             <IssueDescriptionEditor value={description} format={descriptionFormat} name="description" disabled={fieldsLocked}
               onChange={value => { dirtyRef.current = true; setDescription(value); }}
@@ -604,6 +623,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
               {!successorMode && dateFields}
             </div>
+            {!successorMode && dateRangePicker}
             {reviewedClone && <div><button type="button" className="btn" disabled={needsCloneReview || !(reviewedClone.startDate || reviewedClone.endDate || reviewedClone.dueDate)}
               onClick={copyCloneDates}>원본 일정 복사</button></div>}
             <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={values} onChange={next => {

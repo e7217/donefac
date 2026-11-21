@@ -14,6 +14,7 @@ import {
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
+import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import './schedule-paste.css';
 import './gantt-row-schedule-edit.css';
 
@@ -429,6 +430,11 @@ export function GanttRowScheduleEdit({
               </div>
             </div>)}
           </div>
+          <WorkingDayRangePicker calendarMath={calendarMath} startDate={nextDates.startDate ?? null} endDate={nextDates.endDate ?? null}
+            disabled={editLocked || !currentIssue} onApply={range => {
+              setEditedDates(previous => ({ ...previous, ...range }));
+              invalidate();
+            }} />
         </fieldset>
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>선후행 연결</legend>

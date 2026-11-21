@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import { CalendarError,defaultCalendar,validateWorkCalendar,isWorkingDate,shiftWorkingDate,countWorkingDays,createCalendarMath } from '../../shared/calendar.js';
+import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWorkCalendar, isWorkingDate, shiftWorkingDate,
+  countWorkingDays, createCalendarMath, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
 import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, ScheduleChange } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
@@ -29,6 +30,33 @@ test('working-calendar math honors exceptions, working weekends and full four-di
   const custom=validateWorkCalendar({...c,exceptions:[{date:'2026-11-23',isWorking:false,label:'팀 휴무'},{date:'2026-11-21',isWorking:true,label:'토요일 작업'}]});assert.equal(isWorkingDate(custom,'2026-11-21'),true);assert.equal(isWorkingDate('2026-11-23',custom),false);assert.equal(shiftWorkingDate(custom,'2026-11-20',1),'2026-11-21');assert.equal(shiftWorkingDate('2026-11-20',2,custom),'2026-11-24');assert.equal(shiftWorkingDate('2026-11-24',-2,custom),'2026-11-20');assert.equal(countWorkingDays('2026-11-20','2026-11-24',custom),3);
   assert.throws(()=>validateWorkCalendar({...c,workingWeekdays:[]}),CalendarError);assert.throws(()=>validateWorkCalendar({...c,workingWeekdays:[1,1]}),CalendarError);assert.throws(()=>validateWorkCalendar({...c,exceptions:[{date:'2026-02-30',isWorking:false,label:''}]}),CalendarError);assert.throws(()=>validateWorkCalendar({...c,exceptions:[{date:'2026-11-20',isWorking:false,label:''},{date:'2026-11-20',isWorking:true,label:''}]}),CalendarError);
   const math=createCalendarMath(c),all=math.count('0000-01-01','9999-12-31');assert.ok(all>2000000&&all<3660000);assert.equal(math.shift('0000-01-01',all),'9999-12-31');assert.equal(math.shift('9999-12-31',-(all-1)),'0000-01-03');assert.equal(math.count('2000-02-28','2000-03-01'),3);assert.throws(()=>math.shift('0000-01-01',-1),CalendarError);assert.throws(()=>math.shift('9999-12-31',1),CalendarError);
+});
+
+test('a working-day range counts working anchors and preserves nonworking anchors in either direction', () => {
+  const math = createCalendarMath({ ...defaultCalendar('p'), exceptions: [
+    { date: '2026-11-21', isWorking: true, label: '토요일 근무' },
+    { date: '2026-11-23', isWorking: false, label: '월요일 휴무' },
+  ] });
+  const cases = [
+    ['startDate', '2026-11-20', 3, '2026-11-20', '2026-11-24'],
+    ['endDate', '2026-11-24', 3, '2026-11-20', '2026-11-24'],
+    ['startDate', '2026-11-23', 1, '2026-11-23', '2026-11-24'],
+    ['endDate', '2026-11-23', 2, '2026-11-20', '2026-11-23'],
+    ['startDate', '2026-11-21', 1, '2026-11-21', '2026-11-21'],
+    ['endDate', '2026-11-21', 1, '2026-11-21', '2026-11-21'],
+  ] as const;
+  for (const [anchor, date, duration, startDate, endDate] of cases) {
+    assert.deepEqual(calculateWorkingDateRange(math, anchor, date, duration), { startDate, endDate });
+    assert.equal(math.count(startDate, endDate), duration);
+  }
+  const longest = calculateWorkingDateRange(math, 'startDate', '2026-11-23', MAX_WORKING_DURATION_DAYS);
+  assert.equal(math.count(longest.startDate, longest.endDate), MAX_WORKING_DURATION_DAYS);
+  for (const duration of [0, -1, NaN, 1.5, MAX_WORKING_DURATION_DAYS + 1]) {
+    assert.throws(() => calculateWorkingDateRange(math, 'startDate', '2026-11-23', duration), CalendarError);
+  }
+  assert.throws(() => calculateWorkingDateRange(math, 'startDate', '2026-02-30', 2), CalendarError);
+  assert.throws(() => calculateWorkingDateRange(math, 'endDate', MIN_CALENDAR_DATE, 2), CalendarError);
+  assert.throws(() => calculateWorkingDateRange(math, 'startDate', MAX_CALENDAR_DATE, 2), CalendarError);
 });
 
 test('calendar CAS guards manual workday previews; native backup preserves custom calendars and old formats receive defaults',async()=>{

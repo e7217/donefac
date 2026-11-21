@@ -32,6 +32,7 @@ import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { bulkDateResultMessage, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
+import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { GanttPlanningControls } from './GanttPlanningControls';
 import { GanttPlanAssignment } from './GanttPlanAssignment';
 import { PlanScheduleShiftDialog } from './PlanScheduleShiftDialog';
@@ -1657,10 +1658,20 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
     (recovery === 'stopped' ? cancelButton : submitButton).current?.focus();
   }, [recovery, saving]);
   const customFields = valuesByProject[selectedProject] || {};
+  const calendar = data.calendars?.find(value => value.projectId === selectedProject);
+  const calendarMath = useMemo(() => selectedProject ? createCalendarMath(calendar ?? defaultWorkCalendar(selectedProject)) : null,
+    [calendar, selectedProject]);
   const initialStatus = projectWorkflow(data,selectedProject).initialStatusId;
   const required = requiredFieldsFor(data,selectedProject,type,initialStatus);
   const extraFields = required.filter(field => !field.startsWith('custom:') && !['title','assigneeId','startDate','endDate','cycle','module','release'].includes(field));
   const noteChange = () => { if (!pending.current && !recovery) onDraftChange(CREATE_ISSUE_DRAFT, true); };
+  const fieldsLocked = saving || recovery !== null;
+  function applyCalculatedDates(dates: { startDate: string; endDate: string }) {
+    if (pending.current || fieldsLocked || !selectedProject) return;
+    setStartDate(dates.startDate);
+    setEndDate(dates.endDate);
+    noteChange();
+  }
   function creationInput(form: FormData) {
     return {
       projectId: selectedProject, title: title.trim(), type, status: initialStatus, assigneeId: assigneeId || null,
@@ -1720,8 +1731,17 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   }
   return <form className="gantt-inline-create" aria-label="간트에서 업무 만들기" onSubmit={submit} onChange={noteChange} aria-busy={saving}>
     <div className="gantt-inline-create-heading"><div><strong><Plus size={15} /> 간트에 업무 추가</strong><span>{sharedViewActive ? '공유 보기 조건에 맞는 업무가 이 간트에 표시됩니다.' : '날짜는 나중에 정해도 괜찮아요. 저장하면 같은 간트에 표시됩니다.'}</span></div><button className="issue-icon-button" type="button" onClick={onClose} disabled={saving} aria-label="간트 업무 추가 닫기"><X size={17} /></button></div>
-    <fieldset disabled={saving || recovery !== null} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
-      <div className="gantt-create-fields"><label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} /></label><label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} ariaLabel="추가할 업무 유형" /></label><label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></label><label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></label>{chooseProject && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}</div>
+    <fieldset disabled={fieldsLocked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+      <div className="gantt-create-fields">
+        <label className="issue-form-label gantt-create-title">업무 제목<input autoFocus aria-label="추가할 업무 제목" className="field" placeholder="해야 할 일을 입력하세요" value={title} onChange={event => setTitle(event.target.value)} required maxLength={300} /></label>
+        <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={type} onChange={setType} ariaLabel="추가할 업무 유형" /></label>
+        <label className="issue-form-label">담당자<select aria-label="추가할 업무 담당자" className="field" value={assigneeId} onChange={event => setAssigneeId(event.target.value)}><option value="">미지정</option>{users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+        <label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></label>
+        <label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></label>
+        {chooseProject && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
+        {calendarMath && <div className="issue-grid-wide"><WorkingDayRangePicker calendarMath={calendarMath} startDate={startDate || null} endDate={endDate || null}
+          onApply={applyCalculatedDates} disabled={fieldsLocked} /></div>}
+      </div>
       <div className="issue-form-grid">
         <label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} /></label>
         {PLANNING_KINDS.map(kind => <label key={kind} className="issue-form-label">{PLAN_LABELS[kind]}
