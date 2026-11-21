@@ -19,6 +19,9 @@ import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
+import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
+import type { MigrationPreview } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -324,6 +327,7 @@ class Planner{
   private knownJiraHistory = new Set<string>();
   private jiraAttachmentOwners = new Map<string, AttachmentOwner>();
   private knownJiraAttachments = new Set<string>();
+  private jiraRelationIds = new Map<string, string>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
   private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
@@ -1288,7 +1292,7 @@ class Planner{
       if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
       const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
       if (diagnostic.code === 'NO_PRIMARY_CONTENT' && (this.result.appendPages && config.appendPagesTo?.refreshHistory === true ||
-          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshAttachments === true) &&
+          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshAttachments === true || config.appendTo?.refreshRelations === true) &&
           pkg.dataset.source.format === 'jira-backup-xml')) {
         this.deferredPrimaryNotices.push({ message: diagnostic.message, entry });
       } else this.notice(`SOURCE_${diagnostic.code}`, diagnostic.message, 'error', entry);
@@ -2509,12 +2513,157 @@ class Planner{
     const resource=(issueId:string,documentId:string)=>{const key=JSON.stringify([issueId,documentId]);if(resourcePairs.has(key))return;resourcePairs.add(key);this.result.resourceLinks.push({id:randomUUID(),issueId,documentId,kind:'related'});};
     for(const document of this.result.documents)for(const reference of contentReferences(document.content))if(reference.type==='issue')resource(reference.id,document.id);
     for(const entry of this.entries){if(this.excluded.has(entry.key))continue;const binding=this.bindings.get(entry.key);if(binding?.type==='document')for(const reference of entry.row.references.filter(reference=>reference.kind==='issue')){const target=this.resolve(entry,{kind:'issue',sourceId:reference.sourceId});if(target)resource(target.id,binding.id);}
-      if(entry.row.kind!=='relation')continue;const issueRefs=entry.row.references.filter(reference=>reference.kind==='issue'),pageRefs=entry.row.references.filter(reference=>reference.kind==='page'),issueTargets=issueRefs.map(reference=>this.resolve(entry,{kind:'issue',sourceId:reference.sourceId}));
+      if(entry.row.kind!=='relation'||entry.row.metadata.jiraRelationConflict===true)continue;const issueRefs=entry.row.references.filter(reference=>reference.kind==='issue'),pageRefs=entry.row.references.filter(reference=>reference.kind==='page'),issueTargets=issueRefs.map(reference=>this.resolve(entry,{kind:'issue',sourceId:reference.sourceId}));
       if(this.input.append&&!issueTargets.some(target=>target&&this.issueById.has(target.id)))continue;
-      if(issueRefs.length>=2){if(issueTargets.some(target=>!target)){this.notice('ISSUE_RELATION_UNRESOLVED','업무 연결의 일부 대상이 적용 대상에 없습니다. 원본 연결은 보관합니다.','warning',entry,true);continue;}const type=entry.row.title||string(entry.row.metadata.name||entry.row.metadata.relationship)||'related';if(type.length>120)this.notice('ISSUE_RELATION_TYPE_LIMIT','원본 연결 이름이 현재120자 제한을 넘습니다.','error',entry);const[source,target]=issueTargets as {id:string;label:string}[],key=JSON.stringify([source.id,target.id,type]);if(source.id===target.id)this.notice('ISSUE_RELATION_SELF','자기 자신을 가리키는 업무 연결은 현재 연결 모델에 적용할 수 없습니다.','error',entry);else if(!issuePairs.has(key)){issuePairs.add(key);this.result.issueRelations.push({id:randomUUID(),sourceIssueId:source.id,targetIssueId:target.id,type,version:1,createdAt:this.time(entry.row.createdAt,entry,false)||this.input.now});}}
+      if (issueRefs.length >= 2) {
+        if (issueTargets.some(target => !target)) {
+          this.notice('ISSUE_RELATION_UNRESOLVED', '업무 연결의 일부 대상을 확인할 수 없습니다. 원본 연결은 보관합니다.', 'warning', entry, true);
+          continue;
+        }
+        const [source, target] = issueTargets as { id: string; label: string }[];
+        const link = entry.pkg.dataset.source.product === 'jira' ? jiraIssueRelationSource(entry.row) : null;
+        const type = link?.typeName ?? (entry.row.title || string(entry.row.metadata.name || entry.row.metadata.relationship) || 'related');
+        const [sourceId, targetId] = !link ? [source.id, target.id] : jiraRelationEndpoints(link,
+          link.sourceAlias === link.storedSourceAlias ? source.id : target.id,
+          link.targetAlias === link.storedTargetAlias ? target.id : source.id);
+        const key = JSON.stringify([sourceId, targetId, type]);
+        if (type.length > 120) this.notice('ISSUE_RELATION_TYPE_LIMIT', '원본 연결 이름이 현재 120자 제한을 넘습니다.', 'error', entry);
+        if (sourceId === targetId) this.notice('ISSUE_RELATION_SELF', '자기 자신을 가리키는 업무 연결은 현재 연결 모델에 적용할 수 없습니다.', 'error', entry);
+        else if (!issuePairs.has(key)) {
+          issuePairs.add(key);
+          const traceable = link && this.tracedJiraEndpoint(entry, link.storedSourceAlias, source.id) &&
+            this.tracedJiraEndpoint(entry, link.storedTargetAlias, target.id);
+          this.addIssueRelation(entry, source.id, target.id, type, Boolean(traceable));
+        }
+      }
       if(issueRefs.length&&pageRefs.length){for(const issue of issueTargets)for(const page of pageRefs){const target=this.resolve(entry,{kind:'page',sourceId:page.sourceId,url:string(entry.row.metadata.url)||undefined});if(issue&&target)resource(issue.id,target.id);else this.notice('DOCUMENT_ISSUE_LINK_UNRESOLVED','업무·문서 연결의 원본 ID/주소를 유일하게 확인하지 못해 임의 연결하지 않았습니다.','warning',entry,true);}}
     }
+    this.createJiraRelationRefresh();
     if (this.result.issueRelations.length) this.notice('ISSUE_RELATIONS_PRESERVED', '원본 업무 연결을 관계로 보존합니다. 같은 프로젝트의 차단 관계는 이관 후 티켓에서 일정 연결을 검토할 수 있습니다.', 'info');
+  }
+  private tracedJiraEndpoint(entry: Entry, alias: string, issueId: string): boolean {
+    if (this.originalIssue(alias)?.id === issueId) return true;
+    const candidates = this.referenceIndex.get(JSON.stringify(['issue', 'id', alias])) ?? [];
+    return candidates.some(candidate => candidate.pkg.dataset.source.product === 'jira' &&
+      candidate.pkg.dataset.source.instanceKey === entry.pkg.dataset.source.instanceKey &&
+      !this.excluded.has(candidate.key) && this.bindings.get(candidate.key)?.id === issueId);
+  }
+  private addIssueRelation(entry: Entry, sourceIssueId: string, targetIssueId: string, type: string, jira: boolean) {
+    const id = randomUUID();
+    this.result.issueRelations.push({ id, sourceIssueId, targetIssueId, type, version: 1,
+      createdAt: this.time(entry.row.createdAt, entry, false) || this.input.now });
+    if (jira) this.jiraRelationIds.set(entry.key, id);
+  }
+
+  private createJiraRelationRefresh(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshRelations !== true) return;
+    const context = append.relationRefresh;
+    if (!context) return;
+    const issues = new Map(context.issues.map(issue => [issue.id, issue]));
+    const scope = this.jiraChildScope(append);
+    const pair = (source: string, target: string) => JSON.stringify([source, target]);
+    const stored = new Set(context.active.filter(relation => relation.origin === undefined)
+      .map(relation => JSON.stringify([relation.sourceIssueId, relation.targetIssueId, relation.type])));
+    const liveImported = new Set(context.active.map(relation => relation.id));
+    const native = new Set(context.active.filter(isTeamspaceIssueRelation)
+      .map(relation => JSON.stringify([relation.sourceIssueId, relation.targetIssueId, relation.type])));
+    const knownIds = new Set<string>();
+    const knownPairs = new Map<string, { link: JiraIssueRelationSource; active: boolean }[]>();
+    const remember = (link: JiraIssueRelationSource, source: string, target: string, active: boolean) => {
+      const key = pair(...jiraRelationEndpoints(link, source, target));
+      const entries = knownPairs.get(key) ?? [];
+      entries.push({ link, active });
+      knownPairs.set(key, entries);
+    };
+    for (const { record, relationId } of context.previouslyApplied) {
+      const link = jiraIssueRelationSource(record);
+      if (!link) continue;
+      if (link.stableSourceId) knownIds.add(link.stableSourceId);
+      const source = this.originalIssue(link.sourceAlias)?.id;
+      const target = this.originalIssue(link.targetAlias)?.id;
+      if (source && target) remember(link, source, target, liveImported.has(relationId));
+    }
+    for (const record of context.legacy) {
+      const link = jiraIssueRelationSource(record);
+      if (!link) continue;
+      const source = this.originalIssue(link.storedSourceAlias)?.id;
+      const target = this.originalIssue(link.storedTargetAlias)?.id;
+      if (!source || !target || !stored.has(JSON.stringify([source, target, link.typeName]))) continue;
+      if (link.stableSourceId) knownIds.add(link.stableSourceId);
+      remember(link, link.sourceAlias === link.storedSourceAlias ? source : target,
+        link.targetAlias === link.storedTargetAlias ? target : source, true);
+    }
+
+    const candidates: { entry: Entry; link: JiraIssueRelationSource; sourceId: string; targetId: string }[] = [];
+    const layouts = new Map<string, { link: JiraIssueRelationSource; endpoints: [string, string] }>();
+    const ambiguousIds = new Set<string>();
+    let skipped = 0;
+    for (const entry of this.entries) {
+      if (entry.pkg.dataset.source.product !== 'jira' || this.excluded.has(entry.key)) continue;
+      if (entry.row.kind === 'relation' && entry.row.metadata.jiraRelationConflict === true) {
+        ambiguousIds.add(entry.row.sourceId);
+        skipped++;
+        continue;
+      }
+      const link = jiraIssueRelationSource(entry.row);
+      if (!link) continue;
+      const resolved = [link.sourceAlias, link.targetAlias].map(sourceId => this.resolve(entry, { kind: 'issue', sourceId }));
+      if (link.stableSourceId) {
+        const identity = (alias: string, resolvedId?: string) => {
+          const id = this.boundIssues.get(alias)?.issueId ?? resolvedId;
+          return id ? `issue:${id}` : `jira:${alias}`;
+        };
+        const endpoints: [string, string] = [identity(link.sourceAlias, resolved[0]?.id), identity(link.targetAlias, resolved[1]?.id)];
+        const prior = layouts.get(link.stableSourceId);
+        if (!prior) layouts.set(link.stableSourceId, { link, endpoints });
+        else {
+          const symmetric = prior.link.nativeType === 'related' || link.nativeType === 'related';
+          const [source, target] = prior.endpoints;
+          const sameEndpoints = (source === endpoints[0] && target === endpoints[1]) ||
+            (symmetric && source === endpoints[1] && target === endpoints[0]);
+          if (!sameEndpoints || !sameJiraRelationType(prior.link, link)) ambiguousIds.add(link.stableSourceId);
+        }
+      }
+      if (resolved.some(issue => issue && this.issueById.has(issue.id))) continue;
+      const source = this.resolveJiraChildOwner(entry, [link.sourceAlias], issues, scope);
+      const target = this.resolveJiraChildOwner(entry, [link.targetAlias], issues, scope);
+      if (!source || !target || source.id === target.id) {
+        skipped++;
+        this.notice('JIRA_RELATION_SCOPE_UNRESOLVED', '같은 원본 프로젝트에 연결된 두 업무를 확인할 수 없어 원본 관계를 보관합니다.', 'warning', entry, true);
+        continue;
+      }
+      const [sourceId, targetId] = jiraRelationEndpoints(link, source.id, target.id);
+      const candidate = { entry, link, sourceId, targetId };
+      candidates.push(candidate);
+    }
+
+    const preview: NonNullable<MigrationPreview['jiraRelationRefresh']> = [];
+    let added = 0;
+    for (const { entry, link, sourceId, targetId } of candidates) {
+      const stable = link.stableSourceId;
+      if (stable && ambiguousIds.has(stable)) {
+        skipped++;
+        this.notice('JIRA_RELATION_ID_CONFLICT', '같은 Jira 관계 ID의 대상 또는 유형이 여러 원본에서 달라 관계를 보관합니다.', 'warning', entry, true);
+        continue;
+      }
+      const matches = knownPairs.get(pair(sourceId, targetId))?.some(evidence => sameJiraRelationType(evidence.link, link) &&
+        (evidence.active || !evidence.link.stableSourceId || !stable));
+      const nativeMatch = link.nativeType && native.has(JSON.stringify([sourceId, targetId, link.nativeType]));
+      if ((stable && knownIds.has(stable)) || matches || nativeMatch) {
+        skipped++;
+        continue;
+      }
+      this.addIssueRelation(entry, sourceId, targetId, link.typeName, true);
+      added++;
+      if (stable) knownIds.add(stable);
+      remember(link, sourceId, targetId, true);
+      if (preview.length < 20) preview.push({ recordId: entry.key, sourceKey: issues.get(sourceId)!.key,
+        targetKey: issues.get(targetId)!.key, type: link.typeName });
+    }
+    if (preview.length) this.result.preview.jiraRelationRefresh = preview;
+    if (skipped) this.notice('JIRA_RELATIONS_RETAINED', '이미 처리한 관계와 현재 연결은 유지합니다. 확인이 필요한 링크는 원본 기록에서 검토할 수 있습니다.', 'info');
+    Object.assign(this.result.preview.counts, { newJiraRelations: added, skippedJiraRelations: skipped });
   }
   validateGraph():void{
     const cyclic=(rows:{id:string;parentId:string|null}[], appended:boolean)=>{const incoming=new Map(rows.map(row=>[row.id,0])),children=new Map<string,string[]>();for(const row of rows)if(row.parentId&&(!appended||incoming.has(row.parentId))){incoming.set(row.id,(incoming.get(row.id)||0)+1);const values=children.get(row.parentId)||[];values.push(row.id);children.set(row.parentId,values);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[]){const count=incoming.get(child)!-1;incoming.set(child,count);if(!count)queue.push(child);}return queue.length!==rows.length;};
@@ -2740,6 +2889,7 @@ class Planner{
         ...(excluded ? { excluded: true } : {}),
         ...(jiraHistoryOwner ? { jiraHistoryAppend: true } : {}),
         ...(jiraAttachmentOwner ? { jiraAttachmentAppend: true } : {}),
+        ...(this.jiraRelationIds.has(entry.key) ? { jiraRelationId: this.jiraRelationIds.get(entry.key)! } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
         ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
@@ -2774,10 +2924,11 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
-    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length) for (const { message, entry } of this.deferredPrimaryNotices) {
+    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length &&
+        this.result.preview.counts.newJiraRelations === undefined) for (const { message, entry } of this.deferredPrimaryNotices) {
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
     }
-    const counts={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
+    const counts:Record<string,number>={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
     const atlassianLinks = this.result.atlassianLinks.length;
     Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
     const sourceWorklogs = this.entries.filter(entry=>entry.pkg.dataset.source.product==='jira'&&isJiraWorklog(entry.row)).length;
@@ -2801,8 +2952,10 @@ class Planner{
         ...('startDate' in item && (item.startDate || item.endDate) ? { schedule: { startDate: item.startDate, endDate: item.endDate } } : {}),
       });
     }
-    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length && !this.notices.some(notice => notice.severity === 'error')) {
-      if (this.configuration.appendTo?.refreshAttachments) {
+    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length && !counts.newJiraRelations && !this.notices.some(notice => notice.severity === 'error')) {
+      if (this.configuration.appendTo?.refreshRelations) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무 관계나 다른 업무 변경분이 없습니다.', 'error');
+      } else if (this.configuration.appendTo?.refreshAttachments) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 첨부나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshHistory) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무·댓글·작업 시간이나 기존 업무 변경분이 없습니다.', 'error');

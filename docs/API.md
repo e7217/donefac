@@ -504,6 +504,14 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 원본 패키지에서 일치하는 바이트의 크기와 SHA-256을 미리보기 및 적용 과정에서 확인한다. 바이트나 원본 연결을 확정할 수 없는 파일은 이관 검토에서 확인한다. 미리보기와 영수증의 `newJiraAttachments`에서 기존 티켓에 추가할 파일 수를 확인한다. 댓글·작업 시간과 필드 변경분 옵션을 함께 선택할 수 있다. 형식 45 자체 백업은 추가 설정과 파일의 원본 연결을 보존한다.
 
+### 기존 Jira 업무 사이의 관계 추가
+
+`appendTo.refreshRelations: true`를 지정하면 선택한 Jira 인스턴스와 원본 프로젝트에서 이관한 기존 티켓 두 건에 새 원본 업무 관계를 추가한다. REST·검색 XML의 방향 표기와 관리자 XML의 양쪽 ID를 해석한다. 관계만 있는 관리자 XML에서도 양쪽 업무의 원래 프로젝트가 하나로 확인되면 검토할 수 있다. [Jira Data Center 관계 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-issuelink/) · [Jira 관계 방향 모델](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/)
+
+`counts.newJiraRelations`와 `counts.skippedJiraRelations`는 기존 업무 사이에 추가할 관계와 보관할 원본 관계 건수다. `jiraRelationRefresh`에는 추가할 관계를 최대 20건 표시한다. 각 행은 원본 `recordId`, Teamspace의 `sourceKey`·`targetKey`, 원본 `type`을 담는다. 현재 연결과 동일함을 확인한 관계, 이미 적용한 원본, 양쪽 출처가 불분명하거나 서로 모순된 관계는 건너뛴다. 원본은 이관 기록에서 조회한다.
+
+적용은 관련 업무·연결·원본의 변경 여부를 확인한다. 두 티켓의 변경 이력, 관계, 영수증과 원본 연결 ID(`jiraRelationId`)를 함께 저장한다. 형식 66 백업은 적용한 원본 관계 ID를 보존한다. 전체 이관 검증의 `targetContent.issueRelations`는 관계만 적용한 영수증의 연결도 집계하고 해시를 계산한다. 차단 관계의 간트 선후행은 티켓에서 방향을 검토한 뒤 별도로 저장한다.
+
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
 선택한 페이지가 같은 Confluence 인스턴스와 한 원본 공간에 속하고, 해당 공간이 기존 Teamspace 프로젝트에 연결되어 있으면 `appendPagesTarget`에 대상 프로젝트와 원본 공간이 포함된다. `configuration.appendPagesTo`에 `{projectId}`를 지정한다. 한 미리보기는 Jira 또는 Confluence 중 하나의 추가 이관을 처리한다.

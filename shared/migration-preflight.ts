@@ -8,6 +8,7 @@ const countKeys = [
   'updatedCustomFields', 'conflictingCustomFields', 'updatedDocuments', 'updatedDocumentFields', 'conflictingDocumentFields',
   'skippedDocumentUpdates', 'newConfluenceAttachments', 'newConfluenceAttachmentVersions', 'reusedConfluenceAttachmentVersions',
   'newConfluenceComments', 'newConfluenceRevisions', 'newJiraAttachments', 'newJiraComments', 'newJiraWorklogs',
+  'newJiraRelations', 'skippedJiraRelations',
   'jiraReleases', 'jiraReleaseLinks', 'jiraReleaseUnassigned',
   'jiraSprints', 'jiraSprintLinks', 'jiraSprintUnassigned', 'jiraSprintHistoryOnly',
 ] as const;

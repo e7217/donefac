@@ -9,6 +9,7 @@ import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDa
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
+import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType } from './migration-jira-relations.js';
 
 // Primary dialect references: Jira search export documentation, Importers JSON
 // documentation, and Jira Server parser constants (Action/FileAttachment/ChangeGroup).
@@ -207,11 +208,29 @@ class Context{
   readonly sprints=new JiraSprintProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   readonly restIssues = new Map<LegacyRecord, JiraRestIssueHistory>();
+  private readonly repeatedLinks: { first: LegacyRecord; next: LegacyRecord; path: string }[] = [];
   readonly historyPages: JiraHistoryPage[] = [];
   readonly activityPages = new JiraActivityPages((code, message, recordId, path) => this.warn(code, message, recordId, path));
   constructor(readonly files:Map<string,Buffer>,instanceKey:string,format:LegacyDataset['source']['format']){this.dataset=emptyDataset({product:'jira',format,instanceKey,declaredVersion:null,timezone:null});for(const path of files.keys()){const name=posix.basename(path),values=this.fileNames.get(name)||[];values.push(path);this.fileNames.set(name,values);}}
   put(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord{const sourceId=str(id);if(!sourceId)throw new LegacyImportError(400,'Jira 원본 식별자가 없습니다.');const result=record(kind,sourceId,value);addRecord(this.dataset,result);this.byId.set(result.id,result);return result;}
   ensure(kind:LegacyRecordKind,id:unknown,value:Partial<LegacyRecord>={}):LegacyRecord|undefined{const sourceId=str(id);if(!sourceId)return undefined;return this.byId.get(`${kind}:${sourceId}`)||this.put(kind,sourceId,value);}
+  restIssueLink(id: string, input: Partial<LegacyRecord>, path: string) {
+    const first = this.byId.get(`relation:${id}`);
+    if (!first) this.put('relation', id, input);
+    else this.repeatedLinks.push({ first, next: record('relation', id, input), path });
+  }
+  private checkRestIssueLinks(issueKeys: ReadonlyMap<string, string>) {
+    const canonical = (alias: string) => issueKeys.get(alias) ?? alias;
+    const endpoints = (source: NonNullable<ReturnType<typeof jiraIssueRelationSource>>) =>
+      jiraRelationEndpoints(source, canonical(source.sourceAlias), canonical(source.targetAlias));
+    for (const { first, next, path } of this.repeatedLinks) {
+      if (first.metadata.jiraRelationConflict === true) continue;
+      const left = jiraIssueRelationSource(first), right = jiraIssueRelationSource(next);
+      if (left && right && sameJiraRelationType(left, right) && isDeepStrictEqual(endpoints(left), endpoints(right))) continue;
+      first.metadata.jiraRelationConflict = true;
+      this.warn('JIRA_RELATION_RECORD_CONFLICT', '같은 Jira 관계 ID의 업무 또는 유형이 REST 응답에서 다르게 나타납니다.', first.id, path);
+    }
+  }
   warn(code:string,message:string,recordId:string|null=null,path:string|null=null,severity:'info'|'warning'|'error'='warning'){diagnostic(this.dataset,{severity,code,message,recordId,path});}
   unsupported(type:string,count=1){const existing=this.dataset.unsupported.find(value=>value.type===type);if(existing)existing.count+=count;else this.dataset.unsupported.push({type,count});}
   identity(value:unknown):string|null{if(typeof value==='string'){if(value)this.ensure('identity',value,{title:value,metadata:{identityIncomplete:true}});return value||null;}const input=obj(value),id=str(input.accountId||input.key||input.name||input.username||input.id);if(!id)return null;const profileName=str(input.displayName||input.fullname||input.name||input.username),profile=selected(input,['accountId','key','name','username','emailAddress','email','active']),existing=this.byId.get(`identity:${id}`);if(existing){if(profileName&&existing.metadata.identityIncomplete){existing.title=profileName;existing.metadata.identityIncomplete=false;}Object.assign(existing.metadata,profile);return id;}const identity=this.ensure('identity',id,{title:profileName||id,metadata:{...profile,identityIncomplete:!profileName}})!;return identity.sourceId;}
@@ -257,7 +276,7 @@ class Context{
     this.scheduleDates.apply();
     this.sprints.apply(this.dataset);
     for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
-    const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;
+    const issueKeys=new Map(this.dataset.records.filter(item=>item.kind==='issue'&&item.metadata.key).map(item=>[str(item.metadata.key),item.sourceId]));this.checkRestIssueLinks(issueKeys);const validated=emptyDataset(this.dataset.source);for(const item of this.dataset.records){for(const reference of item.references)if(reference.kind==='issue')reference.sourceId=issueKeys.get(reference.sourceId)||reference.sourceId;item.references=[...new Map(item.references.map(reference=>[JSON.stringify(reference),reference])).values()];if(item.kind==='issue'&&item.parentId)item.parentId=issueKeys.get(item.parentId)||item.parentId;addRecord(validated,item);}this.dataset.records=validated.records;this.warn('PREVIEW_ONLY','이 패키지는 분석·보존 가능성 미리보기이며 Teamspace 업무로 적용하지 않았습니다.',null,null,'info');return this.dataset;
   }
 }
 
@@ -496,7 +515,17 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     context.restIssues.set(item, { location: restIssueLocation(input.self), embeddedIds, embeddedTotal: total });
   }
   readActivity('worklog', fields.worklog, list(importers ? fields.worklogs : obj(fields.worklog).worklogs));
-  for(let linkIndex=0;linkIndex<list(fields.issuelinks).length;linkIndex++){const link=obj(list(fields.issuelinks)[linkIndex]),inward=obj(link.inwardIssue),outward=obj(link.outwardIssue),type=obj(link.type),other=str(inward.id||inward.key||outward.id||outward.key),linkId=str(link.id)||`json:${id}:link:${linkIndex}`;context.ensure('relation',linkId,{title:str(type.name)||'업무 연결',containerId:id,metadata:{direction:link.inwardIssue?'inward':'outward',...selected(type,['id','name','inward','outward'])},references:[...ref('issue',id,'source'),...ref('issue',other,'target')]});}
+  for (const [linkIndex, value] of list(fields.issuelinks).entries()) {
+    const link = obj(value), inward = obj(link.inwardIssue), outward = obj(link.outwardIssue), type = obj(link.type);
+    const innerId = str(inward.id || inward.key), outerId = str(outward.id || outward.key);
+    const linkId = str(link.id) || `json:${id}:link:${linkIndex}`;
+    context.restIssueLink(linkId, { title: str(type.name) || '업무 연결', containerId: id,
+      metadata: { direction: innerId ? 'inward' : 'outward', ...selected(type, ['id', 'name', 'inward', 'outward']),
+        ...(innerId && outerId ? { jiraRelationConflict: true } : {}) },
+      references: [...ref('issue', id, 'source'), ...ref('issue', innerId || outerId, 'target')],
+    }, path);
+    if (innerId && outerId) context.warn('JIRA_RELATION_RECORD_CONFLICT', '같은 Jira 관계 항목에 두 방향의 링크가 함께 있습니다.', `relation:${linkId}`, path);
+  }
   const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','closedSprints','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
   for(const name of Object.keys(fields))if(!known.has(name)&&!/^customfield_\d+$/.test(name))context.unsupported(`json-field:${name}`);
 }

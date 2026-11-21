@@ -587,6 +587,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const hasJiraHistory = newJiraComments > 0 || newJiraWorklogs > 0;
       const jiraAttachmentOwners = new Set(value.jiraAttachmentOwners ?? []);
       const newJiraAttachments = value.attachments.filter(file => jiraAttachmentOwners.has(file.resourceId)).length;
+      const newIssueIds = new Set(value.issues.map(issue => issue.id));
+      const jiraRelationRefresh = value.append ? value.issueRelations.filter(relation =>
+        !newIssueIds.has(relation.sourceIssueId) && !newIssueIds.has(relation.targetIssueId)) : [];
       const attachmentOwners = new Set(value.confluenceAttachmentOwners ?? []);
       const newConfluenceAttachments = value.attachments.filter(file => attachmentOwners.has(file.resourceId)).length;
       const newConfluenceVersions = value.attachmentVersions.filter(version => version.sourceRevision !== undefined).length;
@@ -631,7 +634,6 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       } else if (value.append) {
         const { projectId, startIssueNumber } = value.append;
         const project = get<Project>('projects', projectId);
-        const newIssueIds = new Set(value.issues.map(issue => issue.id));
         const historyRecords = value.sourceRecords.filter(record => record.jiraHistoryAppend === true);
         const commentTargets = new Map(historyRecords.filter(record => record.targetType === 'comment').map(record => [record.targetId, record.ownerId]));
         const worklogSources = new Map(historyRecords.filter(record => record.record.kind === 'history').map(record => [record.id, record.ownerId]));
@@ -646,10 +648,15 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
             [...jiraAttachmentOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
           fail('첨부파일을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
         }
+        if (jiraRelationRefresh.length && (value.preview.configuration.appendTo?.refreshRelations !== true ||
+            jiraRelationRefresh.some(relation => [relation.sourceIssueId, relation.targetIssueId].some(id =>
+              store.get<Issue>('issues', id)?.projectId !== projectId)))) {
+          fail('관계를 추가할 같은 프로젝트의 기존 Jira 업무를 확인해 주세요.', 409);
+        }
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || value.revisions.length ||
-            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !newJiraAttachments) ||
+            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !newJiraAttachments && !jiraRelationRefresh.length) ||
             !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
               issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id)) ||
             value.comments.some(comment => comment.resourceType !== 'issue' || store.get('comments', comment.id) ||
@@ -711,6 +718,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);
       for (const link of value.atlassianLinks??[]) atlassianLinks.create(link);
+      for (const relation of jiraRelationRefresh) {
+        const source = get<Issue>('issues', relation.sourceIssueId);
+        const target = get<Issue>('issues', relation.targetIssueId);
+        activity(req, 'issue', source.id, 'Jira 업무 관계 이관', `${relation.type} · ${target.key}`);
+        activity(req, 'issue', target.id, 'Jira 업무 관계 이관', `${relation.type} · ${source.key}`);
+      }
       if (!value.append && !value.appendPages) {
         const nextNumbers = new Map(value.projects.map(project => [project.id, 1]));
         for (const issue of value.issues) {
@@ -721,13 +734,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length || hasJiraHistory || newJiraAttachments ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length || hasJiraHistory || newJiraAttachments || jiraRelationRefresh.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (newJiraComments) details.push(`기존 업무에 원본 댓글 ${newJiraComments}개 추가`);
       if (newJiraWorklogs) details.push(`기존 업무에 원본 작업 시간 ${newJiraWorklogs}개 추가`);
       if (newJiraAttachments) details.push(`기존 업무에 원본 첨부파일 ${newJiraAttachments}개 추가`);
+      if (jiraRelationRefresh.length) details.push(`기존 업무 사이에 Jira 관계 ${jiraRelationRefresh.length}개 추가`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
       if (newConfluenceAttachments) details.push(`기존 문서에 첨부 ${newConfluenceAttachments}개 추가`);
       if (newConfluenceVersions) details.push(`기존 첨부에 버전 ${newConfluenceVersions}개 추가`);

@@ -16,6 +16,7 @@
 .migration-refresh-option small { grid-column: 2; margin-top: .15rem; }
 .migration-refresh-review { margin: 1rem 0; }
 .migration-refresh-review h4 { margin: 0 0 .6rem; }
+.migration-relation-review-list { list-style: none; margin: 0; padding: 0; }
 .migration-refresh-entry { margin: .5rem 0; padding: .7rem; border: 1px solid #dbe7e4; border-radius: .5rem; }
 .migration-refresh-entry h5 { display: flex; flex-wrap: wrap; gap: .35rem .6rem; margin: 0 0 .55rem; font-size: .9rem; overflow-wrap: anywhere; }
 .migration-refresh-entry ul { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none; }

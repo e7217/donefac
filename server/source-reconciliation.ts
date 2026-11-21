@@ -367,24 +367,29 @@ function finishContent({ count, hash }: ContentFingerprint) {
 
 function issueRelationContent(store: Store, importId: string, linkedIssues: ReadonlySet<string>) {
   const fingerprint = contentFingerprint();
-  if (!linkedIssues.size) return finishContent(fingerprint);
   // Anchor each lookup to receipt endpoints so SQLite uses the endpoint indexes instead of scanning unrelated relations.
   const rows = store.db.prepare(`
     WITH receipt_issues AS (
       SELECT DISTINCT i.id FROM source_records r JOIN issues i ON i.id=r.target_id
       WHERE r.import_id=? AND r.target_type='issue' AND json_valid(r.json)
+    ), projected_relations AS (
+      SELECT DISTINCT json_extract(r.json,'$.jiraRelationId') AS id FROM source_records r
+      WHERE r.import_id=? AND r.product='jira' AND r.kind='relation' AND json_valid(r.json) AND json_type(r.json,'$.jiraRelationId')='text'
     ), receipt_relations AS (
       SELECT relation.id FROM receipt_issues i CROSS JOIN issue_relations relation ON relation.source_issue_id=i.id
       UNION
       SELECT relation.id FROM receipt_issues i CROSS JOIN issue_relations relation ON relation.target_issue_id=i.id
+      UNION
+      SELECT id FROM projected_relations
     )
-    SELECT relation.id, relation.source_issue_id, relation.target_issue_id, relation.json
+    SELECT relation.id, relation.source_issue_id, relation.target_issue_id, relation.json,
+      EXISTS(SELECT 1 FROM projected_relations WHERE projected_relations.id=relation.id) AS projected
     FROM receipt_relations matched CROSS JOIN issue_relations relation ON relation.id=matched.id
     ORDER BY relation.id
-  `).iterate(importId);
+  `).iterate(importId, importId);
   for (const result of rows) {
-    const row = result as { id: string; source_issue_id: string; target_issue_id: string; json: string };
-    if (!linkedIssues.has(row.source_issue_id) && !linkedIssues.has(row.target_issue_id)) continue;
+    const row = result as { id: string; source_issue_id: string; target_issue_id: string; json: string; projected: number };
+    if (!row.projected && !linkedIssues.has(row.source_issue_id) && !linkedIssues.has(row.target_issue_id)) continue;
     addContent(fingerprint, [row.id, row.source_issue_id, row.target_issue_id], contentSha256(row.json));
   }
   return finishContent(fingerprint);

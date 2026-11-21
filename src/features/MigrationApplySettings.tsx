@@ -34,7 +34,8 @@ const jiraRefreshCountLabels = {
   updatedIssues: '변경 업무', updatedFields: '기본 필드 반영', conflictingFields: '현재 값을 유지할 기본 필드', skippedIssueUpdates: '변경을 건너뛴 업무',
   updatedCustomFields: '사용자 정의 속성 반영', conflictingCustomFields: '현재 값을 유지할 사용자 정의 속성',
   newJiraComments: '기존 업무의 새 댓글', newJiraWorklogs: '기존 업무의 새 작업 시간 기록',
-  newJiraAttachments: '기존 업무의 새 첨부파일',
+  newJiraAttachments: '기존 업무의 새 첨부파일', newJiraRelations: '기존 업무 사이의 새 Jira 관계',
+  skippedJiraRelations: 'Jira 관계 원본 보관',
 };
 const confluenceRefreshCountLabels = {
   updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',
@@ -69,7 +70,7 @@ const destinationMode = (configuration: MigrationConfiguration | null | undefine
 type RefreshProduct = 'Jira' | 'Confluence';
 function refreshProduct(configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined {
   const issues = configuration?.appendTo;
-  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory || issues?.refreshAttachments) return 'Jira';
+  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory || issues?.refreshAttachments || issues?.refreshRelations) return 'Jira';
   const pages = configuration?.appendPagesTo;
   if (pages?.refreshExisting || pages?.refreshAttachments || pages?.refreshHistory) return 'Confluence';
 }
@@ -84,11 +85,12 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
   if (product === 'Jira') {
-    const { updatedCustomFields, newJiraComments, newJiraWorklogs, newJiraAttachments } = counts;
+    const { updatedCustomFields, newJiraComments, newJiraWorklogs, newJiraAttachments, newJiraRelations } = counts;
     if (updatedCustomFields) actions.push(`사용자 정의 속성 ${updatedCustomFields.toLocaleString()}건 반영`);
     if (newJiraComments) actions.push(`기존 업무에 새 댓글 ${newJiraComments.toLocaleString()}건 추가`);
     if (newJiraWorklogs) actions.push(`기존 업무에 새 작업 시간 기록 ${newJiraWorklogs.toLocaleString()}건 추가`);
     if (newJiraAttachments) actions.push(`기존 업무에 새 첨부파일 ${newJiraAttachments.toLocaleString()}건 추가`);
+    if (newJiraRelations) actions.push(`기존 업무 사이의 새 Jira 관계 ${newJiraRelations.toLocaleString()}건 추가`);
   } else {
     const { newConfluenceAttachments, newConfluenceAttachmentVersions, newConfluenceComments, newConfluenceRevisions } = counts;
     if (newConfluenceAttachments) actions.push(`기존 문서에 새 첨부 ${newConfluenceAttachments.toLocaleString()}건 추가`);
@@ -300,6 +302,9 @@ function ActorMigration(props: FeatureProps) {
           {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshAttachments" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무에 첨부파일 추가">
             원본 ID와 파일 내용을 확인해 첨부파일을 추가합니다. 패키지에 파일이 누락된 경우 원본 정보가 보존됩니다.
           </RefreshOption>}
+          {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshRelations" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무 사이의 새 관계 추가">
+            같은 프로젝트로 이관한 두 업무의 원본 관계를 확인해 추가합니다.
+          </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
             최신 원본의 제목·본문·라벨을 현재 문서와 비교합니다. 팀에서 바꾼 값은 유지하고, 원본 전체 목록을 확인한 경우에만 라벨을 삭제할 수 있습니다.
           </RefreshOption>}
@@ -429,7 +434,13 @@ function JiraPlanningReview({ rows, label, original, disabled, reviewed, changes
   </fieldset>;
 }
 
-type PreviewOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement; documentReview?: true };
+const originalLabels = {
+  diagnostic: { title: '이관 진단 원본 기록', open: '원본 상세 보기', close: '이관 진단 원본 닫기' },
+  document: { title: 'Confluence 변경 원본 기록', open: 'Confluence 원본 보기', close: 'Confluence 원본 닫기' },
+  relation: { title: 'Jira 관계 원본 기록', open: 'Jira 관계 원본 보기', close: 'Jira 관계 원본 닫기' },
+};
+type PreviewOriginalKind = keyof typeof originalLabels;
+type PreviewOriginal = { source: LegacyPackageSummary; recordId: string; opener: HTMLButtonElement; kind: PreviewOriginalKind };
 
 function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }: {
   preview: MigrationPreview; packages: LegacyPackageSummary[]; actorId: string; busy: boolean; onExclude: (ids: readonly string[]) => void;
@@ -444,11 +455,11 @@ function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }:
     const recordId = qualifiedId.slice(separator + 1);
     return source && recordId ? { source, recordId } : null;
   }
-  function originalButton(qualifiedId: string | null, documentReview?: true) {
+  function originalButton(qualifiedId: string | null, kind: PreviewOriginalKind = 'diagnostic') {
     const target = resolveOriginal(qualifiedId);
     return target ? <button className="btn btn-ghost migration-source-button" type="button"
-      onClick={event => setOriginal({ ...target, opener: event.currentTarget, documentReview })}>
-      <FileSearch size={16} aria-hidden="true" />{documentReview ? 'Confluence 원본 보기' : '원본 상세 보기'}
+      onClick={event => setOriginal({ ...target, opener: event.currentTarget, kind })}>
+      <FileSearch size={16} aria-hidden="true" />{originalLabels[kind].open}
     </button> : null;
   }
   const alreadyExcluded = new Set(preview.configuration.excludedRecords);
@@ -470,7 +481,8 @@ function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }:
   }
   return <>
     {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
-    {preview.documentRefresh && preview.documentRefresh.length > 0 && <ConfluenceRefreshReview rows={preview.documentRefresh} renderOriginal={recordId => originalButton(recordId, true)} />}
+    {preview.jiraRelationRefresh && preview.jiraRelationRefresh.length > 0 && <JiraRelationReview rows={preview.jiraRelationRefresh} total={preview.counts.newJiraRelations} renderOriginal={recordId => originalButton(recordId, 'relation')} />}
+    {preview.documentRefresh && preview.documentRefresh.length > 0 && <ConfluenceRefreshReview rows={preview.documentRefresh} renderOriginal={recordId => originalButton(recordId, 'document')} />}
     <fieldset className="migration-fieldset migration-review-diagnostics" disabled={busy}>
       <legend>이관 검토 진단</legend>
       {candidates.size > 0 && <div className="migration-review-exclusions">
@@ -499,7 +511,7 @@ function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }:
   </>;
 }
 
-function MigrationOriginalDialog({ source, recordId, opener, documentReview, actorId, onClose }: PreviewOriginal & { actorId: string; onClose: () => void }) {
+function MigrationOriginalDialog({ source, recordId, opener, kind, actorId, onClose }: PreviewOriginal & { actorId: string; onClose: () => void }) {
   const titleId = useId();
   const element = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -528,8 +540,8 @@ function MigrationOriginalDialog({ source, recordId, opener, documentReview, act
 
   return <dialog className="migration-original-dialog" ref={element} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose(); }}>
     <header className="migration-original-heading">
-      <div><h3 id={titleId}>{documentReview ? 'Confluence 변경 원본 기록' : '이관 진단 원본 기록'}</h3><p>{source.filename} · {source.source.instanceKey}</p></div>
-      <button ref={closeButton} className="btn btn-ghost" type="button" aria-label={documentReview ? 'Confluence 원본 닫기' : '이관 진단 원본 닫기'} onClick={onClose}><X size={16} aria-hidden="true" />닫기</button>
+      <div><h3 id={titleId}>{originalLabels[kind].title}</h3><p>{source.filename} · {source.source.instanceKey}</p></div>
+      <button ref={closeButton} className="btn btn-ghost" type="button" aria-label={originalLabels[kind].close} onClick={onClose}><X size={16} aria-hidden="true" />닫기</button>
     </header>
     {!response && <p role="status">원본 객체를 불러오는 중…</p>}
     {response && 'error' in response && <div>
@@ -549,7 +561,7 @@ type AppendMapping = NonNullable<MigrationConfiguration['appendTo']>;
 type PageAppendMapping = NonNullable<MigrationConfiguration['appendPagesTo']>;
 type MappingChoice = { id: string; label: string; detail?: string };
 
-type RefreshFlag = 'refreshExisting' | 'refreshCustomFields' | 'refreshAttachments' | 'refreshHistory';
+type RefreshFlag = 'refreshExisting' | 'refreshCustomFields' | 'refreshAttachments' | 'refreshHistory' | 'refreshRelations';
 function RefreshOption<Mapping extends Partial<Record<RefreshFlag, true>>>({ value, option = 'refreshExisting', onChange, label, children }: {
   value: Mapping; option?: RefreshFlag; onChange: (next: Mapping) => void; label: string; children: ReactNode;
 }) {
@@ -578,6 +590,21 @@ function JiraRefreshReview({ rows }: { rows: JiraMigrationIssueReview[] }) {
         ...(row.customFields ?? []).map(change => ({ ...change, id: `custom:${change.fieldId}` })),
       ]} />
     </div>} />
+  </section>;
+}
+
+function JiraRelationReview({ rows, total, renderOriginal }: { rows: NonNullable<MigrationPreview['jiraRelationRefresh']>; total: number; renderOriginal: (recordId: string) => ReactNode }) {
+  const titleId = useId();
+  return <section className="migration-refresh-review" aria-labelledby={titleId}>
+    <h4 id={titleId}>추가할 Jira 관계</h4>
+    {total > rows.length && <p>총 {total.toLocaleString()}건 중 {rows.length.toLocaleString()}건을 표시합니다.</p>}
+    <ul className="migration-relation-review-list">
+      {rows.map(row => <li className="migration-refresh-entry" key={row.recordId}>
+        <h5>{row.sourceKey} → {row.targetKey}</h5>
+        <small>{row.type}</small>
+        {renderOriginal(row.recordId)}
+      </li>)}
+    </ul>
   </section>;
 }
 

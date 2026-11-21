@@ -6,6 +6,7 @@ import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
 import { jiraIssueStatusHistory } from './jira-status-history.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { jiraIssueRelationSource, jiraRelationEndpoints } from './migration-jira-relations.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import type { Store } from './store.js';
 
@@ -58,9 +59,10 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
   const custom = Object.hasOwn(append, 'refreshCustomFields');
   const history = Object.hasOwn(append, 'refreshHistory');
   const attachments = Object.hasOwn(append, 'refreshAttachments');
-  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) + Number(attachments) ||
+  const relations = Object.hasOwn(append, 'refreshRelations');
+  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) + Number(attachments) + Number(relations) ||
       (refresh && append.refreshExisting !== true) || (custom && append.refreshCustomFields !== true) ||
-      (history && append.refreshHistory !== true) || (attachments && append.refreshAttachments !== true)) {
+      (history && append.refreshHistory !== true) || (attachments && append.refreshAttachments !== true) || (relations && append.refreshRelations !== true)) {
     fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
   }
   return {
@@ -72,6 +74,7 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     ...(custom ? { refreshCustomFields: true } : {}),
     ...(history ? { refreshHistory: true } : {}),
     ...(attachments ? { refreshAttachments: true } : {}),
+    ...(relations ? { refreshRelations: true } : {}),
   };
 }
 export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable<MigrationConfiguration['appendPagesTo']> {
@@ -455,6 +458,27 @@ export class SourcePreservationService {
         AND owner_type='issue' AND source_id IN (SELECT value FROM json_each(?))
       ORDER BY source_id,id`).all(instanceKey, JSON.stringify(sourceIds)) as unknown as JiraAttachmentArchive[];
   }
+  jiraKnownRelations(instanceKey: string, sourceIds: string[], aliases: string[]) {
+    const rows = this.store.db.prepare(`WITH aliases(id) AS (SELECT value FROM json_each(?)),
+      matches AS (SELECT source_id, id, json FROM source_records
+        WHERE product='jira' AND source_instance=? AND kind='relation' AND NOT coalesce(json_type(json,'$.excluded')='true',0))
+      SELECT json_extract(json,'$.record') AS record, json_extract(json,'$.jiraRelationId') AS relationId
+      FROM matches
+      WHERE (json_type(json,'$.jiraRelationId')='text' AND source_id IN (SELECT value FROM json_each(?)))
+        OR (json_array_length(json_extract(json,'$.record.references'))=2
+          AND json_extract(json,'$.record.references[0].sourceId') IN (SELECT id FROM aliases)
+          AND json_extract(json,'$.record.references[1].sourceId') IN (SELECT id FROM aliases))
+      ORDER BY source_id,id`).all(JSON.stringify([...new Set(aliases)]), instanceKey, JSON.stringify(sourceIds)) as { record: string; relationId: string | null }[];
+    const previouslyApplied: { record: LegacyRecord; relationId: string }[] = [];
+    const legacy: LegacyRecord[] = [];
+    for (const { record: raw, relationId } of rows) {
+      const record = JSON.parse(raw) as LegacyRecord;
+      if (!jiraIssueRelationSource(record)) continue;
+      if (relationId) previouslyApplied.push({ record, relationId });
+      else legacy.push(record);
+    }
+    return { previouslyApplied, legacy };
+  }
   hasLocalAttachmentVersion(id: string): boolean {
     return Boolean(this.store.db.prepare(`SELECT 1 FROM attachment_versions WHERE id=? AND id<>attachment_id
       AND json_type(json,'$.localRevision')='integer' AND json_extract(json,'$.localRevision')>=2`).get(id));
@@ -500,11 +524,16 @@ export class SourcePreservationService {
           !jiraAttachmentSourceId(record) || !jiraAttachmentFileEvidence(record) || isRestrictedJiraAttachment(record))) {
         fail(400, 'Jira 첨부 원본의 적용 설정과 대상을 확인해 주세요.');
       }
+      const jiraRelationId = Object.hasOwn(value, 'jiraRelationId') ? uuid(value.jiraRelationId) : undefined;
+      if (jiraRelationId && (source.product !== 'jira' || targetType !== null || value.excluded === true || !jiraIssueRelationSource(record))) {
+        fail(400, 'Jira 업무 관계의 원본과 적용 ID를 확인해 주세요.');
+      }
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
         ...(jiraHistory ? { jiraHistoryAppend: true } : {}),
         ...(jiraAttachmentAppend ? { jiraAttachmentAppend: true } : {}),
+        ...(jiraRelationId ? { jiraRelationId } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
@@ -568,7 +597,73 @@ export class SourcePreservationService {
       if (!isCanonicalTeamspaceIssueRelation(value)) fail(400, 'Teamspace 업무 관계의 출처·유형·방향·버전을 확인해 주세요.');
       return { ...relation, origin: 'teamspace' };
     });
-    unique(relations, '업무 관계'); this.bindings(records); return { imports, records, versions, relations };
+    const relationById = unique(relations, '업무 관계');
+    const bindings = this.bindings(records);
+    this.validateJiraRelations(records, byImport, relationById, issues, bindings, Boolean(appliedJiraChildren));
+    return { imports, records, versions, relations };
+  }
+  private validateJiraRelations(records: SourceRecordArchive[], receipts: Map<string, SourceImport>, relations: Map<string, IssueRelation>,
+    issues: Map<string, Issue>, bindings: Binding[], applying: boolean): void {
+    const marked = records.filter(record => record.jiraRelationId);
+    if (!marked.length) return;
+    const key = (instance: string, alias: string) => JSON.stringify([instance, alias]);
+    const needed = new Set<string>();
+    for (const archive of marked) {
+      const source = jiraIssueRelationSource(archive.record)!;
+      needed.add(key(archive.source.instanceKey, source.sourceAlias));
+      needed.add(key(archive.source.instanceKey, source.targetAlias));
+    }
+    const durable = new Map(bindings.filter(binding => binding.product === 'jira' && binding.kind === 'issue')
+      .map(binding => [key(binding.instance, binding.alias), binding.id]));
+    const lookup = applying ? this.store.db.prepare(`SELECT target_id AS id FROM source_bindings
+      WHERE product='jira' AND source_instance=? AND kind='issue' AND target_type='issue' AND source_alias=?`) : undefined;
+    const target = (instance: string, alias: string) => durable.get(key(instance, alias)) ??
+      (lookup?.get(instance, alias) as { id: string } | undefined)?.id;
+    const extra = new Map<string, Set<string>>();
+    for (const archive of records) {
+      const { record, source } = archive, otherAlias = record.metadata.key;
+      if (source.product !== 'jira' || record.kind !== 'issue' || archive.excluded || isRestrictedJiraHistoryOwner(record) ||
+          typeof otherAlias !== 'string' || !otherAlias || otherAlias === record.sourceId) continue;
+      const aliases = [record.sourceId, otherAlias];
+      if (!aliases.some(alias => needed.has(key(source.instanceKey, alias)))) continue;
+      const ids = aliases.flatMap(alias => target(source.instanceKey, alias) ?? []);
+      if (!ids.length) continue;
+      for (const alias of aliases) {
+        const qualified = key(source.instanceKey, alias), values = extra.get(qualified) ?? new Set<string>();
+        for (const id of ids) values.add(id);
+        extra.set(qualified, values);
+      }
+    }
+    const resolved = (instance: string, alias: string) => {
+      const id = target(instance, alias), additional = extra.get(key(instance, alias));
+      if (!additional) return id;
+      if (additional.size !== 1 || id && !additional.has(id)) return undefined;
+      return [...additional][0];
+    };
+    const seen = new Set<string>();
+    for (const archive of marked) {
+      const relationId = archive.jiraRelationId!;
+      if (seen.has(relationId)) fail(400, 'Jira 원본과 적용한 업무 관계가 중복됩니다.');
+      seen.add(relationId);
+      const relation = relations.get(relationId);
+      // Archived evidence must survive an issue's removal even when its relation has been cascaded away.
+      if (!relation) continue;
+      const source = jiraIssueRelationSource(archive.record)!;
+      const receipt = receipts.get(archive.sourceImportId)!;
+      const first = resolved(archive.source.instanceKey, source.sourceAlias);
+      const second = resolved(archive.source.instanceKey, source.targetAlias);
+      const canonical = first && second && jiraRelationEndpoints(source, first, second);
+      const original = source.sourceAlias === source.storedSourceAlias ? [first, second] : [second, first];
+      // Initial/default import keeps the original row order. Follow-up relations between existing issues use canonical direction.
+      const matchesEndpoints = Boolean(canonical) && [canonical, original].some(endpoints => endpoints &&
+        relation.sourceIssueId === endpoints[0] && relation.targetIssueId === endpoints[1]);
+      const sourceProject = issues.get(relation.sourceIssueId)?.projectId;
+      const targetProject = issues.get(relation.targetIssueId)?.projectId;
+      if (relation.origin || relation.type !== source.typeName || !matchesEndpoints ||
+          !sourceProject || !targetProject || !receipt.projectIds.includes(sourceProject) || !receipt.projectIds.includes(targetProject)) {
+        fail(400, 'Jira 업무 관계의 원본·업무 대상·프로젝트가 일치하지 않습니다.');
+      }
+    }
   }
   private validateJiraChildren(imports: SourceImport[], records: SourceRecordArchive[], attachments: Map<string, Attachment>,
     versions: Map<string, AttachmentVersion>, applied?: AppliedJiraChildren): void {
@@ -925,8 +1020,16 @@ export class SourcePreservationService {
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');
-    if (receipt.configuration.appendTo?.refreshCustomFields !== true) {
-      const newIssueIds = new Set(prepared.issues.map(issue => issue.id));
+    const appendTo = receipt.configuration.appendTo;
+    const newIssueIds = new Set(prepared.issues.map(issue => issue.id));
+    const relationIds = new Set(data.relations.map(relation => relation.id));
+    const markedRelations = new Set(data.records.flatMap(record => record.jiraRelationId ? [record.jiraRelationId] : []));
+    if ([...markedRelations].some(id => !relationIds.has(id))) fail(400, 'Jira 원본의 적용 업무 관계가 없습니다.');
+    if (appendTo && data.relations.some(relation => !newIssueIds.has(relation.sourceIssueId) && !newIssueIds.has(relation.targetIssueId) &&
+        (appendTo.refreshRelations !== true || !markedRelations.has(relation.id)))) {
+      fail(400, '기존 Jira 업무 사이의 관계에는 후속 관계 이관 설정과 원본 연결이 필요합니다.');
+    }
+    if (appendTo?.refreshCustomFields !== true) {
       if (data.records.some(record => record.jiraCustomFieldHashes && !newIssueIds.has(record.targetId!))) {
         fail(400, '기존 Jira 업무의 사용자 정의 필드 기준에는 변경분 적용 설정이 필요합니다.');
       }

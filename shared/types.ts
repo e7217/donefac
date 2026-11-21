@@ -230,6 +230,7 @@ export interface MigrationAppendConfiguration {
   refreshCustomFields?: true;
   refreshHistory?: true;
   refreshAttachments?: true;
+  refreshRelations?: true;
 }
 export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
@@ -286,6 +287,7 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
+  jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string }[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
   jiraReleaseChoices?: MigrationJiraPlanningChoice[];
   jiraSprintChoices?: MigrationJiraPlanningChoice[];
@@ -315,6 +317,7 @@ export interface SourceRecordArchive {
   jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
   jiraHistoryAppend?: true;
   jiraAttachmentAppend?: true;
+  jiraRelationId?: string;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }
