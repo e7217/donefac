@@ -605,6 +605,24 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `POST /api/schedule/auto-apply`에 `{previewId}`를 보낸다. 작업자와 미리보기의 업무·연결·달력·워크플로·양식 버전을 확인한다. 정상 적용은 같은 트랜잭션에서 업무 날짜와 되돌리기 기록을 저장하고, 동일 미리보기의 재요청은 저장한 결과를 반환한다. `GET /api/schedule/auto-result/:previewId`에서 같은 작업자가 `{applied:false}` 또는 기존 `{undoId,updated,warnings}`를 읽을 수 있다. 미사용 미리보기의 유효 시간은 30분이며 적용 결과는 7일간 보관된다.
 
+## 선택 업무의 날짜 일괄 편집
+
+브라우저의 `POST /api/schedule/bulk-dates/preview`에 같은 프로젝트의 업무 ID와 화면에서 확인한 버전을 최대 100개 보낸다.
+
+```json
+{
+  "projectId": "project-id",
+  "issues": [{"id": "issue-id", "expectedVersion": 3}],
+  "changes": {"endDate": "2026-12-11", "dueDate": null}
+}
+```
+
+`startDate`, `endDate`, `dueDate` 중 수정할 속성을 하나 이상 지정한다. 생략한 속성은 각 업무의 현재 값을 유지한다. `null`은 날짜를 지우고 문자열은 유효한 YYYY-MM-DD 날짜를 지정한다. 예시에서는 각 시작일을 유지하고 종료일을 지정하며 목표 마감일을 지운다.
+
+미리보기의 `changes`에는 변경할 업무의 시작·종료일과 `fromDue`·`toDue`가 포함된다. 버전이 달라졌거나 업무가 다른 프로젝트로 이동했거나 날짜 검증에 실패하면 해당 업무를 `errors`에 표시한다. 오류가 있거나 변경할 업무가 없으면 `previewId`는 `null`이다. 선후행 경고는 함께 표시한다.
+
+`POST /api/schedule/bulk-dates/apply`에 검토한 `{previewId}`를 보낸다. 작업자와 업무·연결·달력·워크플로·양식 버전을 확인한 뒤 날짜와 적용 결과를 한 번에 저장한다. 미리보기는 30분 동안 유효하며 같은 ID의 성공 결과는 7일 안에 다시 읽을 수 있다. 응답의 `undoId`를 `POST /api/schedule/undo`로 보내 이 요청이 변경한 날짜를 복원한다. 같은 작업공간의 재시작에서는 적용 결과와 되돌리기 기록을 유지하며 자체 JSON 복원은 해당 기록을 초기화한다.
+
 ## 스프레드시트 일정 붙여넣기
 
 브라우저의 `POST /api/schedule/paste-preview`에 `{projectId, text}`를 보낸다. `text`는 헤더가 있는 TSV 또는 CSV다. `key`(`업무 키`)와 `startDate`(`시작일`), `endDate`(`종료일`), `predecessor`(`선행 업무`) 중 한 열 이상이 필요하다. 빈 날짜 값은 유지하고 `-`는 지운다. 선행 업무 키가 있으면 `dependency type`(`연결 유형`)과 `lag days`(`근무일 간격`)도 사용할 수 있다. 유형 `-`는 지정한 관계를 해제한다. 빈 유형과 간격은 기존 값을 사용하며 새 연결의 기본값은 `FS`·`0`이다. 업무 키는 같은 프로젝트에서 조회한다. 다른 헤더가 명시된 열은 무시한다. 최대 500행, UTF-8 128KiB를 처리한다.

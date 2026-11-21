@@ -353,6 +353,87 @@
   cursor: not-allowed;
 }
 
+.schedule-bulk-targets {
+  margin-bottom: 1rem;
+  border: 1px solid #d6e4dc;
+  border-radius: 7px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.875rem;
+}
+
+.schedule-bulk-targets summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.schedule-bulk-targets ul {
+  max-height: 11rem;
+  overflow: auto;
+  padding-left: 1.1rem;
+  margin: 0.5rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.schedule-bulk-targets li span {
+  color: #526f62;
+}
+
+.schedule-bulk-date-fields,
+.schedule-bulk-date-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 0.8rem;
+}
+
+.schedule-bulk-date-field {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+
+.schedule-bulk-date-field .field {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+}
+
+.schedule-bulk-date-field input {
+  margin-top: 0.35rem;
+}
+
+.schedule-bulk-date-actions {
+  margin-top: 0.9rem;
+}
+
+.schedule-bulk-date-table table {
+  table-layout: fixed;
+}
+
+.schedule-bulk-date-table thead th {
+  white-space: normal;
+}
+
+.schedule-bulk-date-table tbody th {
+  min-width: 0;
+}
+
+.schedule-bulk-date-cell .schedule-paste-date {
+  white-space: normal;
+}
+
+.schedule-bulk-date-cell .schedule-paste-date strong,
+.schedule-bulk-date-previous {
+  overflow-wrap: anywhere;
+}
+
+.schedule-bulk-date-previous {
+  display: block;
+  margin-bottom: 0.15rem;
+  color: #526f62;
+  font-size: 0.8125rem;
+}
+
 @media (max-width: 700px) {
   .schedule-paste-overlay {
     padding: 12px;
@@ -377,5 +458,30 @@
 
   .schedule-paste-dialog > footer > span {
     width: 100%;
+  }
+}
+
+@media (max-width: 440px) {
+  .schedule-bulk-date-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 0.35rem 0.6rem;
+    flex-basis: 100%;
+  }
+
+  .schedule-bulk-date-field label {
+    margin: 0;
+  }
+
+  .schedule-bulk-date-field input {
+    grid-column: 2;
+    margin: 0;
+  }
+
+  .schedule-bulk-date-table th,
+  .schedule-bulk-date-table td {
+    padding: 0.55rem 0.3rem;
+    font-size: 0.8125rem;
   }
 }

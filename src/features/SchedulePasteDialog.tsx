@@ -1,9 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowDown, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
+import { ArrowDown, CalendarRange, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
 import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
-import type { FeatureProps, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview } from '../../shared/types';
+import type {
+  FeatureProps, Issue, ScheduleBulkDateChanges, ScheduleBulkDateInput, SchedulePasteApplyResult,
+  SchedulePasteDependencyChange, SchedulePastePreview,
+} from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './schedule-paste.css';
 
@@ -13,51 +16,92 @@ export interface SchedulePasteDialogProps {
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
+  bulkDates?: { issues: readonly Issue[]; refresh: () => Promise<void> };
 }
 
-type Review = { text: string; result: SchedulePastePreview };
+type Review = { input: string; targets: string; result: SchedulePastePreview };
+type DateField = 'startDate' | 'endDate' | 'dueDate';
+type DateAction = 'keep' | 'set' | 'clear';
+type DateEntry = { action: DateAction; value: string };
+type DateDraft = Record<DateField, DateEntry>;
 const DRAFT_ID = 'schedule-paste';
+const BULK_DRAFT_ID = 'schedule-bulk-dates';
 const PAGE_SIZE = 50;
+const bulkFields: { field: DateField; label: string }[] = [
+  { field: 'startDate', label: '시작일' },
+  { field: 'endDate', label: '종료일' },
+  { field: 'dueDate', label: '목표 마감일' },
+];
+const keepDate: DateEntry = { action: 'keep', value: '' };
+const pendingLabels = {
+  preview: '입력한 일정표를 검토하는 중입니다.',
+  apply: '검토한 일정을 적용하는 중입니다.',
+  recover: '이전 적용 요청의 결과를 확인하는 중입니다.',
+  reload: '선택한 업무의 최신 상태를 불러오는 중입니다.',
+  reflect: '적용 결과를 화면에 반영하는 중입니다.',
+};
 const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : '일정 붙여넣기 요청을 완료하지 못했습니다.';
+  error instanceof Error ? error.message : '일정 요청을 완료하지 못했습니다.';
 const hasChanges = (result: SchedulePastePreview) =>
   result.changes.length > 0 || Boolean(result.dependencyChanges?.length);
 
-export function SchedulePasteDialog(props: SchedulePasteDialogProps) {
-  return <ProjectPasteDialog key={props.projectId} {...props} />;
+function isDefiniteApplyRejection(cause: unknown, bulk: boolean, recovering: boolean) {
+  if (!(cause instanceof ApiError) || cause.status < 400 || cause.status >= 500) return false;
+  if (!bulk) return true;
+  if ([408, 425, 429, 499].includes(cause.status)) return false;
+  return !recovering || (cause.status !== 401 && cause.status !== 403);
 }
 
-function ProjectPasteDialog({
+export function SchedulePasteDialog(props: SchedulePasteDialogProps) {
+  return <ProjectScheduleEditDialog key={`${props.projectId}:${Boolean(props.bulkDates)}`} {...props} />;
+}
+
+function ProjectScheduleEditDialog({
   projectId,
   notify,
   onClose,
   onDraftChange,
   onApplied,
+  bulkDates,
 }: SchedulePasteDialogProps) {
   const [text, setText] = useState('');
+  const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
   const [review, setReview] = useState<Review | null>(null);
   const [latest, setLatest] = useState<Review | null>(null);
   const [approved, setApproved] = useState(false);
-  const [pending, setPending] = useState<'preview' | 'apply' | 'recover' | 'reflect' | null>(null);
-  const [retryApply, setRetryApply] = useState<{ previewId: string; text: string } | null>(null);
+  const [pending, setPending] = useState<'preview' | 'apply' | 'recover' | 'reload' | 'reflect' | null>(null);
+  const [retryApply, setRetryApply] = useState<{ previewId: string; input: string } | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [applied, setApplied] = useState<SchedulePasteApplyResult | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const dialog = useRef<HTMLElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const firstDateAction = useRef<HTMLSelectElement>(null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
   const dirtyRef = useRef(false);
   const request = useRef<AbortController | null>(null);
 
-  const dirty = !applied && Boolean(text || review || latest || error);
+  const draftId = bulkDates ? BULK_DRAFT_ID : DRAFT_ID;
+  const title = bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
+  const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
+  const input = bulkDates ? JSON.stringify(dates) : text;
+  const issues = bulkDates?.issues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
+  const targets = issues ? JSON.stringify(issues) : '';
+  const canPreview = bulkDates
+    ? Boolean(issues?.length) && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
+    : Boolean(text.trim());
+  const editLocked = Boolean(pending || applied || (bulkDates && retryApply));
+  const dirty = !applied && Boolean((bulkDates ? datesEdited : text) || review || latest || error);
   const expiresAt = review?.result.expiresAt;
   const expiry = expiresAt ? Date.parse(expiresAt) : NaN;
   const expired = Boolean(review?.result.previewId && Number.isFinite(expiry) && expiry <= clock);
   const validReview = Boolean(
     review &&
       approved &&
-      review.text === text &&
+      review.input === input &&
+      review.targets === targets &&
       review.result.previewId &&
       hasChanges(review.result) &&
       !review.result.errors.length &&
@@ -68,15 +112,15 @@ function ProjectPasteDialog({
 
   useEffect(() => {
     dirtyRef.current = dirty;
-    onDraftChange(DRAFT_ID, dirty, Boolean(pending));
-  }, [dirty, pending, onDraftChange]);
+    onDraftChange(draftId, dirty, Boolean(pending));
+  }, [draftId, dirty, pending, onDraftChange]);
 
-  useEffect(() => () => onDraftChange(DRAFT_ID, false, false), [onDraftChange]);
+  useEffect(() => () => onDraftChange(draftId, false, false), [draftId, onDraftChange]);
 
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    textarea.current?.focus({ preventScroll: true });
+    (firstDateAction.current ?? textarea.current)?.focus({ preventScroll: true });
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -94,11 +138,15 @@ function ProjectPasteDialog({
       notify('일정 요청 결과를 확인한 뒤 닫아 주세요.', 'error');
       return;
     }
-    if (dirtyRef.current && !window.confirm('붙여넣은 일정과 검토 결과를 버리고 닫을까요?')) return;
+    let confirmation = '붙여넣은 일정과 검토 결과를 버리고 닫을까요?';
+    if (bulkDates) confirmation = retryApply
+      ? '일정이 이미 변경됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
+      : '입력한 날짜와 검토 결과를 버리고 닫을까요?';
+    if (dirtyRef.current && !window.confirm(confirmation)) return;
     dirtyRef.current = false;
-    onDraftChange(DRAFT_ID, false, false);
+    onDraftChange(draftId, false, false);
     onClose();
-  }, [notify, onClose, onDraftChange]);
+  }, [bulkDates, draftId, notify, onClose, onDraftChange, retryApply]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -138,14 +186,25 @@ function ProjectPasteDialog({
     return () => document.removeEventListener('keydown', handleKey, true);
   }, [close]);
 
-  function updateText(value: string) {
-    setText(value);
+  function resetReview(edited: boolean) {
     setApproved(false);
     setRetryApply(null);
     setLatest(null);
     setError('');
-    dirtyRef.current = Boolean(value || review);
-    onDraftChange(DRAFT_ID, dirtyRef.current, false);
+    setNotice('');
+    dirtyRef.current = edited || Boolean(review);
+    onDraftChange(draftId, dirtyRef.current, false);
+  }
+
+  function updateText(value: string) {
+    setText(value);
+    resetReview(Boolean(value));
+  }
+
+  function updateDate(field: DateField, entry: DateEntry) {
+    const next = { ...dates, [field]: entry };
+    setDates(next);
+    resetReview(bulkFields.some(item => next[item.field].action !== 'keep'));
   }
 
   function begin(kind: NonNullable<typeof pending>) {
@@ -153,7 +212,7 @@ function ProjectPasteDialog({
     busyRef.current = true;
     setPending(kind);
     setError('');
-    onDraftChange(DRAFT_ID, dirtyRef.current, true);
+    onDraftChange(draftId, dirtyRef.current, true);
     const controller = new AbortController();
     request.current = controller;
     return controller;
@@ -163,26 +222,36 @@ function ProjectPasteDialog({
     busyRef.current = false;
     if (mounted.current && !controller.signal.aborted) {
       setPending(null);
-      onDraftChange(DRAFT_ID, dirtyRef.current, false);
+      onDraftChange(draftId, dirtyRef.current, false);
     }
   }
 
   async function preview(event: FormEvent) {
     event.preventDefault();
-    if (!text.trim() || applied) return;
+    if (!canPreview || editLocked) return;
     const controller = begin('preview');
     if (!controller) return;
     setApproved(false);
     setRetryApply(null);
-    const submitted = text;
+    setNotice('');
+    const submitted = { input, targets };
+    let payload: { projectId: string; text: string } | ScheduleBulkDateInput = { projectId, text };
+    if (issues) {
+      const changes: ScheduleBulkDateChanges = {};
+      for (const { field } of bulkFields) {
+        const { action, value } = dates[field];
+        if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
+      }
+      payload = { projectId, issues, changes };
+    }
     try {
-      const result = await api<SchedulePastePreview>('/schedule/paste-preview', {
+      const result = await api<SchedulePastePreview>(bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview', {
         method: 'POST',
-        body: JSON.stringify({ projectId, text: submitted }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
       if (!mounted.current || controller.signal.aborted) return;
-      const next = { text: submitted, result };
+      const next = { ...submitted, result };
       setLatest(next);
       setClock(Date.now());
       if (!result.errors.length) {
@@ -200,6 +269,24 @@ function ProjectPasteDialog({
     }
   }
 
+  async function reloadTargets() {
+    if (!bulkDates || editLocked) return;
+    const controller = begin('reload');
+    if (!controller) return;
+    setApproved(false);
+    setNotice('');
+    try {
+      await bulkDates.refresh();
+      if (!mounted.current || controller.signal.aborted) return;
+      setLatest(null);
+      setNotice('선택한 업무와 날짜 입력을 유지했습니다. 최신 업무 상태로 미리보기를 다시 만들어 주세요.');
+    } catch (cause) {
+      if (mounted.current && !controller.signal.aborted) setError(`${errorMessage(cause)} 선택한 업무와 날짜 입력은 유지했습니다.`);
+    } finally {
+      finish(controller);
+    }
+  }
+
   async function reflectResult(result: SchedulePasteApplyResult) {
     try {
       await onApplied(result);
@@ -212,16 +299,16 @@ function ProjectPasteDialog({
 
   async function apply() {
     if (!validReview || !review?.result.previewId) return;
-    await requestApply(review.result.previewId, review.text, false);
+    await requestApply(review.result.previewId, review.input, false);
   }
 
-  async function requestApply(previewId: string, submittedText: string, recovering: boolean) {
-    if (submittedText !== text || applied) return;
+  async function requestApply(previewId: string, submittedInput: string, recovering: boolean) {
+    if (submittedInput !== input || applied) return;
     const controller = begin(recovering ? 'recover' : 'apply');
     if (!controller) return;
     setApproved(false);
     try {
-      const result = await api<SchedulePasteApplyResult>('/schedule/paste-apply', {
+      const result = await api<SchedulePasteApplyResult>(bulkDates ? '/schedule/bulk-dates/apply' : '/schedule/paste-apply', {
         method: 'POST',
         body: JSON.stringify({ previewId }),
         signal: controller.signal,
@@ -238,17 +325,17 @@ function ProjectPasteDialog({
       setRetryApply(null);
       setApplied(result);
       dirtyRef.current = false;
-      onDraftChange(DRAFT_ID, false, true);
+      onDraftChange(draftId, false, true);
       await reflectResult(result);
     } catch (cause) {
       if (mounted.current && !controller.signal.aborted) {
-        if (cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
+        if (isDefiniteApplyRejection(cause, Boolean(bulkDates), recovering)) {
           setRetryApply(null);
           setError(
             `${errorMessage(cause)} 입력과 검토 결과를 유지했습니다. 최신 조건으로 새 미리보기를 만들어 주세요.`,
           );
         } else {
-          setRetryApply({ previewId, text: submittedText });
+          setRetryApply({ previewId, input: submittedInput });
           setError(
             `${errorMessage(cause)} 적용 여부를 확인하지 못했습니다. 입력과 검토 결과를 유지했으므로 같은 적용 요청의 결과를 다시 확인하세요.`,
           );
@@ -287,17 +374,19 @@ function ProjectPasteDialog({
         <header>
           <div>
             <h2 id="schedule-paste-title">
-              <ClipboardList size={21} />
-              일정 붙여넣기
+              {bulkDates ? <CalendarRange size={21} /> : <ClipboardList size={21} />}
+              {title}
             </h2>
             <p id="schedule-paste-description">
-              현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.
+              {bulkDates
+                ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
+                : '현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'}
             </p>
           </div>
           <button
             className="btn btn-ghost"
             type="button"
-            aria-label="일정 붙여넣기 닫기"
+            aria-label={`${title} 닫기`}
             disabled={Boolean(pending)}
             onClick={close}
           >
@@ -306,53 +395,108 @@ function ProjectPasteDialog({
         </header>
 
         <form className="schedule-paste-input" onSubmit={preview}>
-          <fieldset disabled={Boolean(pending || applied)}>
-            <label htmlFor="schedule-paste-text">일정표 (TSV 또는 CSV)</label>
-            <textarea
-              ref={textarea}
-              id="schedule-paste-text"
-              className="field"
-              aria-label="붙여넣을 일정표"
-              aria-describedby="schedule-paste-help"
-              value={text}
-              onChange={(event) => updateText(event.target.value)}
-              placeholder={'key\tstartDate\tendDate\nPROJ-123\t2026-12-01\t2026-12-05'}
-              spellCheck={false}
-              rows={8}
-            />
-            <p id="schedule-paste-help">
-              날짜는 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
-              빈 칸은 기존 날짜를 유지합니다.
-              선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
-            </p>
-            <details className="schedule-paste-examples">
-              <summary>입력 예시 보기</summary>
-              <p>스프레드시트에서 헤더를 포함해 복사한 표는 탭으로 구분됩니다.</p>
-              <pre aria-label="TSV 일정 예시">
-                {'업무 키\t시작일\t종료일\t선행 업무\nPROJ-123\t2026-12-01\t2026-12-04\t\nPROJ-124\t2026-12-07\t2026-12-08\tPROJ-123'}
-              </pre>
-              <p>쉼표로 구분한 CSV도 사용할 수 있습니다.</p>
-              <pre aria-label="CSV 일정 예시">
-                {'key,startDate,endDate\nPROJ-123,2026-12-01,2026-12-05\nPROJ-124,,-'}
-              </pre>
-              <p>
-                업무 키는 후행 업무를 가리킵니다. 같은 업무의 시작일과 종료일은 서로 다른 행에 적을 수
-                있으며, 같은 날짜 열에 값을 여러 번 쓰면 값이 모두 같아야 합니다. 연결만 수정할 때는 날짜
-                열을 생략할 수 있습니다.
-              </p>
-              <pre aria-label="선행 업무 연결 예시">
-                {'업무 키\t선행 업무\t연결 유형\t근무일 간격\nPROJ-124\tPROJ-123\tSS\t2\nPROJ-124\tPROJ-122\tFS\t0\nPROJ-124\tPROJ-121\t-\t'}
-              </pre>
-              <p>
-                유형은 FS·SS·FF·SF를 지원합니다. 유형과 간격이 비어 있으면 기존 값을 유지하고, 새 연결은
-                FS·0근무일을 사용합니다. 선행 업무를 비워두면 연결을 유지합니다. 연결을 삭제하려면 해당
-                선행 업무를 지정하고 연결 유형에 <code>-</code>를 입력하세요.
-              </p>
-            </details>
-            <button className="btn btn-primary" type="submit" disabled={!text.trim()}>
-              <RefreshCw size={16} />
-              {pending === 'preview' ? '검토 중…' : '붙여넣기 미리보기'}
-            </button>
+          <fieldset disabled={editLocked}>
+            {bulkDates ? (
+              <>
+                <details className="schedule-bulk-targets">
+                  <summary>선택한 업무 {bulkDates.issues.length}개</summary>
+                  <ul>
+                    {bulkDates.issues.map(issue => (
+                      <li key={issue.id}>
+                        <span>{issue.key}</span> {issue.title}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+                <div className="schedule-bulk-date-fields">
+                  {bulkFields.map(({ field, label }, index) => {
+                    const entry = dates[field];
+                    return (
+                      <div key={field} className="schedule-bulk-date-field">
+                        <label htmlFor={`schedule-bulk-${field}-action`}>{label}</label>
+                        <select
+                          ref={index === 0 ? firstDateAction : undefined}
+                          id={`schedule-bulk-${field}-action`}
+                          className="field"
+                          aria-label={`${label} 변경`}
+                          value={entry.action}
+                          onChange={event => updateDate(field, { ...entry, action: event.target.value as DateAction })}
+                        >
+                          <option value="keep">유지</option>
+                          <option value="set">지정</option>
+                          <option value="clear">삭제</option>
+                        </select>
+                        {entry.action === 'set' && (
+                          <input type="date" className="field" aria-label={`${label} 값`}
+                            max="9999-12-31" required value={entry.value}
+                            onChange={event => updateDate(field, { ...entry, value: event.target.value })} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
+                <label htmlFor="schedule-paste-text">일정표 (TSV 또는 CSV)</label>
+                <textarea
+                  ref={textarea}
+                  id="schedule-paste-text"
+                  className="field"
+                  aria-label="붙여넣을 일정표"
+                  aria-describedby="schedule-paste-help"
+                  value={text}
+                  onChange={(event) => updateText(event.target.value)}
+                  placeholder={'key\tstartDate\tendDate\nPROJ-123\t2026-12-01\t2026-12-05'}
+                  spellCheck={false}
+                  rows={8}
+                />
+                <p id="schedule-paste-help">
+                  날짜는 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
+                  빈 칸은 기존 날짜를 유지합니다.
+                  선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
+                </p>
+                <details className="schedule-paste-examples">
+                  <summary>입력 예시 보기</summary>
+                  <p>스프레드시트에서 헤더를 포함해 복사한 표는 탭으로 구분됩니다.</p>
+                  <pre aria-label="TSV 일정 예시">
+                    {'업무 키\t시작일\t종료일\t선행 업무\nPROJ-123\t2026-12-01\t2026-12-04\t\nPROJ-124\t2026-12-07\t2026-12-08\tPROJ-123'}
+                  </pre>
+                  <p>쉼표로 구분한 CSV도 사용할 수 있습니다.</p>
+                  <pre aria-label="CSV 일정 예시">
+                    {'key,startDate,endDate\nPROJ-123,2026-12-01,2026-12-05\nPROJ-124,,-'}
+                  </pre>
+                  <p>
+                    업무 키는 후행 업무를 가리킵니다. 같은 업무의 시작일과 종료일은 서로 다른 행에 적을 수
+                    있으며, 같은 날짜 열에 값을 여러 번 쓰면 값이 모두 같아야 합니다. 연결만 수정할 때는 날짜
+                    열을 생략할 수 있습니다.
+                  </p>
+                  <pre aria-label="선행 업무 연결 예시">
+                    {'업무 키\t선행 업무\t연결 유형\t근무일 간격\nPROJ-124\tPROJ-123\tSS\t2\nPROJ-124\tPROJ-122\tFS\t0\nPROJ-124\tPROJ-121\t-\t'}
+                  </pre>
+                  <p>
+                    유형은 FS·SS·FF·SF를 지원합니다. 유형과 간격이 비어 있으면 기존 값을 유지하고, 새 연결은
+                    FS·0근무일을 사용합니다. 선행 업무를 비워두면 연결을 유지합니다. 연결을 삭제하려면 해당
+                    선행 업무를 지정하고 연결 유형에 <code>-</code>를 입력하세요.
+                  </p>
+                </details>
+              </>
+            )}
+            {bulkDates ? (
+              <div className="schedule-bulk-date-actions">
+                <button className="btn btn-primary" type="submit" disabled={!canPreview}>
+                  {pending === 'preview' ? '검토 중…' : '날짜 변경 미리보기'}
+                </button>
+                <button className="btn" type="button" onClick={() => void reloadTargets()}>
+                  <RefreshCw size={16} aria-hidden="true" /> 새로고침
+                </button>
+              </div>
+            ) : (
+              <button className="btn btn-primary" type="submit" disabled={!canPreview}>
+                <RefreshCw size={16} />
+                {pending === 'preview' ? '검토 중…' : '붙여넣기 미리보기'}
+              </button>
+            )}
           </fieldset>
         </form>
 
@@ -360,47 +504,46 @@ function ProjectPasteDialog({
           {pending && (
             <p className="schedule-paste-pending" role="status">
               <Loader2 className="spin" size={17} />
-              {pending === 'preview'
-                ? '입력한 일정표를 검토하는 중입니다.'
-                : pending === 'apply'
-                  ? '검토한 일정을 적용하는 중입니다.'
-                  : pending === 'recover'
-                    ? '이전 적용 요청의 결과를 확인하는 중입니다.'
-                    : '적용 결과를 화면에 반영하는 중입니다.'}
+              {pending === 'preview' && bulkDates ? '선택한 업무의 날짜를 검토하는 중입니다.' : pendingLabels[pending]}
             </p>
           )}
+          {notice && <p className="schedule-paste-success" role="status">{notice}</p>}
           {error && (
             <p className="schedule-paste-error" role="alert">
               {error}
             </p>
           )}
-          {retryApply && retryApply.text === text && (
+          {retryApply && retryApply.input === input && (
             <p className="schedule-paste-stale">
-              같은 미리보기 ID로 다시 요청해 적용 여부와 되돌리기 정보를 확인합니다. 입력을 수정하거나 새
-              미리보기를 만들면 이 재시도는 초기화됩니다.
+              {bulkDates
+                ? '같은 미리보기 ID로 적용 여부와 되돌리기 정보를 확인합니다.'
+                : '같은 미리보기 ID로 다시 요청해 적용 여부와 되돌리기 정보를 확인합니다. 입력을 수정하거나 새 미리보기를 만들면 이 재시도는 초기화됩니다.'}
             </p>
           )}
           {applied && (
             <p className="schedule-paste-success" role="status">
-              날짜 {applied.updated.length}건과 업무 연결 {applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.
+              {bulkDates
+                ? `${applied.updated.length}개 업무의 날짜를 변경했습니다.`
+                : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
               적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
           )}
           {rejected && (
-            <section className="schedule-paste-rejected" aria-label="일정 붙여넣기 오류">
+            <section className="schedule-paste-rejected" aria-label={bulkDates ? '선택 업무 날짜 오류' : '일정 붙여넣기 오류'}>
               <h3>적용할 수 없는 입력 {rejected.errors.length}건</h3>
               <p>
                 오류를 수정하고 미리보기를 다시 만드세요. 이전 변경안이 있으면 아래에 참고용으로 남겨
                 둡니다.
               </p>
               <PagedList
-                label="붙여넣기 오류"
+                label={bulkDates ? '업무 날짜 오류' : '붙여넣기 오류'}
                 items={rejected.errors}
                 render={(item, index) => (
                   <li key={index}>
                     <strong>
-                      {item.line === null ? '전체' : `${item.line}행`}
-                      {item.key ? ` · ${item.key}` : ''}
+                      {bulkDates
+                        ? item.key || bulkDates.issues.find(issue => issue.id === item.issueId)?.key || '선택 업무'
+                        : `${item.line === null ? '전체' : `${item.line}행`}${item.key ? ` · ${item.key}` : ''}`}
                     </strong>
                     <span>{item.message}</span>
                   </li>
@@ -412,11 +555,13 @@ function ProjectPasteDialog({
             <WarningList warnings={rejected.warnings} label="입력 검토 경고" />
           )}
           {result && (
-            <section aria-label="붙여넣기 변경 검토">
+            <section aria-label={bulkDates ? '선택 업무 날짜 변경 검토' : '붙여넣기 변경 검토'}>
               <div className="schedule-paste-review-heading">
                 <div>
                   <h3>
-                    날짜 {result.changes.length}건 · 업무 연결 {dependencyChanges.length}건 · 유지 {result.unchanged}행
+                    {bulkDates
+                      ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
+                      : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
                   {result.expiresAt && (
                     <p>검토 유효 시간 {new Date(result.expiresAt).toLocaleTimeString('ko-KR')}까지</p>
@@ -450,13 +595,13 @@ function ProjectPasteDialog({
               )}
               {!hasChanges(result) && (
                 <p className="schedule-paste-noop">
-                  변경할 날짜나 업무 연결이 없습니다.
+                  {bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
                 </p>
               )}
               {result.warnings.length > 0 && (
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
-              {result.changes.length > 0 && <ChangeTable changes={result.changes} />}
+              {result.changes.length > 0 && <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} />}
               {dependencyChanges.length > 0 && <DependencyChangeTable changes={dependencyChanges} />}
             </section>
           )}
@@ -468,7 +613,7 @@ function ProjectPasteDialog({
               ? '적용 후 간트에서 되돌리기를 사용할 수 있습니다.'
               : retryApply
                 ? '적용 여부가 확인되지 않았습니다. 같은 요청의 결과를 확인하세요.'
-                : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
+                : bulkDates ? '검토한 날짜만 한 번에 적용됩니다.' : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
           </span>
           <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>
             닫기
@@ -482,12 +627,12 @@ function ProjectPasteDialog({
             >
               적용 결과 화면에 반영
             </button>
-          ) : retryApply && retryApply.text === text ? (
+          ) : retryApply && retryApply.input === input ? (
             <button
               className="btn btn-primary"
               type="button"
               disabled={Boolean(pending)}
-              onClick={() => void requestApply(retryApply.previewId, retryApply.text, true)}
+              onClick={() => void requestApply(retryApply.previewId, retryApply.input, true)}
             >
               적용 결과 다시 확인
             </button>
@@ -520,20 +665,24 @@ function DateResult({ before, after }: { before: string | null; after: string | 
   );
 }
 
-function ChangeTable({ changes }: { changes: SchedulePastePreview['changes'] }) {
+function ChangeTable({ changes, bulk }: { changes: SchedulePastePreview['changes']; bulk: boolean }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
   return (
-    <div className="schedule-paste-change-table">
+    <div className={`schedule-paste-change-table${bulk ? ' schedule-bulk-date-table' : ''}`}>
       <div className="schedule-paste-table-scroll">
-        <table aria-label="붙여넣기 일정 변경 목록">
+        <table aria-label={bulk ? '선택 업무 날짜 변경 목록' : '붙여넣기 일정 변경 목록'}>
           <thead>
             <tr>
               <th scope="col">업무</th>
-              <th scope="col">현재 시작일</th>
-              <th scope="col">변경 시작일</th>
-              <th scope="col">현재 종료일</th>
-              <th scope="col">변경 종료일</th>
+              {bulk ? bulkFields.map(({ field, label }) => <th key={field} scope="col">{label}</th>) : (
+                <>
+                  <th scope="col">현재 시작일</th>
+                  <th scope="col">변경 시작일</th>
+                  <th scope="col">현재 종료일</th>
+                  <th scope="col">변경 종료일</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -543,14 +692,20 @@ function ChangeTable({ changes }: { changes: SchedulePastePreview['changes'] }) 
                   <small>{change.key}</small>
                   <strong>{change.title}</strong>
                 </th>
-                <td>{change.fromStart || '미정'}</td>
-                <td>
-                  <DateResult before={change.fromStart} after={change.toStart} />
-                </td>
-                <td>{change.fromEnd || '미정'}</td>
-                <td>
-                  <DateResult before={change.fromEnd} after={change.toEnd} />
-                </td>
+                {bulk ? (
+                  <>
+                    <BulkDateCell before={change.fromStart} after={change.toStart} />
+                    <BulkDateCell before={change.fromEnd} after={change.toEnd} />
+                    <BulkDateCell before={change.fromDue ?? null} after={change.toDue ?? null} />
+                  </>
+                ) : (
+                  <>
+                    <td>{change.fromStart || '미정'}</td>
+                    <td><DateResult before={change.fromStart} after={change.toStart} /></td>
+                    <td>{change.fromEnd || '미정'}</td>
+                    <td><DateResult before={change.fromEnd} after={change.toEnd} /></td>
+                  </>
+                )}
               </tr>
             ))}
           </tbody>
@@ -560,6 +715,15 @@ function ChangeTable({ changes }: { changes: SchedulePastePreview['changes'] }) 
         <Pagination label="일정 변경" offset={start} total={changes.length} onChange={setOffset} />
       )}
     </div>
+  );
+}
+
+function BulkDateCell({ before, after }: { before: string | null; after: string | null }) {
+  return (
+    <td className="schedule-bulk-date-cell">
+      {before !== after && <span className="schedule-bulk-date-previous">{before || '미정'} →</span>}
+      <DateResult before={before} after={after} />
+    </td>
   );
 }
 

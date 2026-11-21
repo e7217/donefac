@@ -13,8 +13,8 @@ import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
-import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticScheduleMutation } from './automatic-schedule.js';
-import { SchedulePasteService, SchedulePasteError } from './schedule-paste.js';
+import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
+import { SchedulePasteService, SchedulePasteError, type ScheduleDateMutation } from './schedule-paste.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentListProjects, validatePinnedDocumentRevisions } from './document-content.js';
@@ -86,7 +86,7 @@ import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter }
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
-type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
+type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
 type ScheduleUndoRecord = { id:string; records:ScheduleUndoIssue[]; used:boolean; plan?:ScheduleUndoPlan; linkChanges?:ScheduleDependencyMutation[] };
 
@@ -103,6 +103,8 @@ function normalizeDocumentMetadataLabels(document: DocPage): DocPage {
 const uid = () => randomUUID();
 const now = () => new Date().toISOString();
 const planScheduleLabel = (dates:PlanScheduleDates) => `${dates.startDate ?? '미정'} ~ ${dates.endDate ?? '미정'} · 목표일 ${dates.targetDate ?? '미정'}`;
+const issueScheduleLabel = (issue:Pick<Issue,'startDate'|'endDate'|'dueDate'>,includeDue:boolean) =>
+  `${issue.startDate ?? '미정'} ~ ${issue.endDate ?? '미정'}${includeDue ? ` · 목표 마감일 ${issue.dueDate ?? '미정'}` : ''}`;
 const archivedFiles = (entry:TrashArchive): Attachment[] => [...entry.attachments,...entry.attachmentVersions];
 const tables = { projects: 'projects', users: 'users', issues: 'issues', documents: 'documents', dependencies: 'dependencies', resourceLinks: 'resource_links', activities: 'activities', gitlabLinks: 'gitlab_links' } as const;
 const text = (v: unknown, label: string, max = 500): string => typeof v === 'string' && v.trim() && v.length <= max ? v.trim() : fail(`${label}을(를) 확인해 주세요.`);
@@ -389,7 +391,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return reverse;
   };
   /** Caller owns the transaction, shared by manual edits and guarded proposals. */
-  const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[],plan?:ScheduleUndoPlan,dependencyChanges:ScheduleDependencyMutation[] = [])=>{
+  const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[],plan?:ScheduleUndoPlan,dependencyChanges:ScheduleDependencyMutation[] = [],allowDueDate=false)=>{
     if(!Array.isArray(changes)||(!changes.length&&!plan&&!dependencyChanges.length)||changes.length>1000)return fail('변경할 일정이나 업무 연결을 선택해 주세요.');
     const seen=new Set<string>(),records:ScheduleUndoIssue[]=[],updated:Issue[]=[];
     for(const c of changes){
@@ -397,9 +399,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       if(seen.has(c.id))fail('중복된 티켓입니다.');seen.add(c.id);
       const old=get<Issue>('issues',c.id);checkVersion(old,c.expectedVersion);
       if(!Object.hasOwn(c,'startDate')||!Object.hasOwn(c,'endDate'))fail('시작일과 종료일 값을 지정해 주세요.');
-      const i=validateIssue({...old,startDate:date(c.startDate,'시작일'),endDate:date(c.endDate,'종료일'),version:old.version+1,updatedAt:now()},old,{checkTransition:false});
-      records.push({id:i.id,appliedVersion:i.version,startDate:old.startDate,endDate:old.endDate});store.put('issues',i);
-      activity(req,'issue',i.id,'일정 변경',`${old.startDate||'미정'} ~ ${old.endDate||'미정'} → ${i.startDate||'미정'} ~ ${i.endDate||'미정'}`);updated.push(i);
+      const dueDate=allowDueDate&&Object.hasOwn(c,'dueDate')?date(c.dueDate,'목표 마감일'):old.dueDate;
+      const i=validateIssue({...old,startDate:date(c.startDate,'시작일'),endDate:date(c.endDate,'종료일'),dueDate,version:old.version+1,updatedAt:now()},old,{checkTransition:false});
+      const dueChanged=allowDueDate&&i.dueDate!==(old.dueDate??null);
+      records.push({id:i.id,appliedVersion:i.version,startDate:old.startDate,endDate:old.endDate,...(dueChanged?{dueDate:old.dueDate??null}:{})});
+      store.put('issues',i);
+      activity(req,'issue',i.id,'일정 변경',`${issueScheduleLabel(old,dueChanged)} → ${issueScheduleLabel(i,dueChanged)}`);updated.push(i);
     }
     const projectIds=new Set(updated.map(issue=>issue.projectId));
     const undoId=uid();
@@ -411,9 +416,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     return{undoId,updated,warnings,...(linkChanges.length?{dependencyChanges:linkChanges.length}:{})};
   };
   const scheduleVersions=(projectId:string)=>({calendar:calendars.get(projectId).version,workflow:workflows.get(projectId).version,schema:issueSchemas.get(projectId).version});
-  const validateScheduleChange=(issue:Issue,change:AutomaticScheduleMutation):string|null=>{
+  const validateScheduleChange=(issue:Issue,change:ScheduleDateMutation):string|null=>{
     try {
-      validateIssue({...issue,startDate:change.startDate,endDate:change.endDate},issue,{checkTransition:false});
+      const {startDate,endDate,dueDate=issue.dueDate}=change;
+      validateIssue({...issue,startDate,endDate,dueDate},issue,{checkTransition:false});
       return null;
     } catch(error) {
       if((error instanceof ApiError||error instanceof WorkflowError||error instanceof IssueSchemaError||error instanceof PlanningError)&&error.status<500)return error.message;
@@ -839,7 +845,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     versions:scheduleVersions,
     validateChange:validateScheduleChange,
     warnings:scheduleWarnings,
-    commitChanges:(request,changes,dependencies,linkChanges)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges),
+    commitChanges:(request,changes,dependencies,linkChanges)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true),
   });
   planScheduleShift.registerRoutes(app,{
     actor,calendar:projectId=>calendars.get(projectId),versions:scheduleVersions,
@@ -1698,9 +1704,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       const reverseLinks=record.linkChanges?.length?prepareDependencyUndo(record.id,record.linkChanges):[];
       const updated=record.records.map(entry=>{
         const old=get<Issue>('issues',entry.id);
-        const issue=validateIssue({...old,startDate:entry.startDate,endDate:entry.endDate,version:old.version+1,updatedAt:now()},old,{checkTransition:false});
+        const {startDate,endDate,dueDate=old.dueDate}=entry;
+        const issue=validateIssue({...old,startDate,endDate,dueDate,version:old.version+1,updatedAt:now()},old,{checkTransition:false});
         store.put('issues',issue);
-        activity(req,'issue',issue.id,'일정 되돌리기',`${old.startDate??'미정'} ~ ${old.endDate??'미정'} → ${issue.startDate??'미정'} ~ ${issue.endDate??'미정'}`);
+        const dueChanged=Object.hasOwn(entry,'dueDate');
+        activity(req,'issue',issue.id,'일정 되돌리기',`${issueScheduleLabel(old,dueChanged)} → ${issueScheduleLabel(issue,dueChanged)}`);
         return issue;
       });
       const plan=record.plan&&planning.writeScheduleDates(record.plan.id,record.plan.appliedVersion,record.plan.dates);

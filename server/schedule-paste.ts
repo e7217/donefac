@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
-import type { Dependency, Issue, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview } from '../shared/types.js';
+import { isCalendarDate } from '../shared/calendar.js';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput,
+  type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview } from '../shared/types.js';
 import { dependencyGuardFields } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
@@ -17,12 +19,14 @@ interface ScheduleVersions {
   schema: number;
 }
 
+export type ScheduleDateMutation = AutomaticScheduleMutation & Partial<Pick<Issue, 'dueDate'>>;
+
 interface PasteHooks {
   actor(request: Request): string;
   versions(projectId: string): ScheduleVersions;
-  validateChange(issue: Issue, change: AutomaticScheduleMutation): string | null;
+  validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
-  commitChanges(request: Request, changes: AutomaticScheduleMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
+  commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
 }
 
 interface PasteProposal {
@@ -32,13 +36,55 @@ interface PasteProposal {
   removeAfter: string;
   issueIds: string[];
   guard: string;
-  changes: AutomaticScheduleMutation[];
+  changes: ScheduleDateMutation[];
   linkChanges?: ScheduleDependencyMutation[];
+  kind?: 'bulk-dates';
   result?: SchedulePasteApplyResult;
 }
 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
+const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isId(value: unknown): value is string {
+  return typeof value === 'string' && Boolean(value.trim()) && value.length <= 200;
+}
+
+function parseBulkDateInput(raw: unknown): ScheduleBulkDateInput {
+  if (!isRecord(raw) || Object.keys(raw).length !== 3 || !isId(raw.projectId)) {
+    throw new SchedulePasteError(400, '프로젝트와 일정 일괄 변경 항목을 확인해 주세요.');
+  }
+  if (!Array.isArray(raw.issues) || !raw.issues.length || raw.issues.length > MAX_SCHEDULE_BULK_DATE_ISSUES) {
+    throw new SchedulePasteError(400, `한 프로젝트에서 업무를 1~${MAX_SCHEDULE_BULK_DATE_ISSUES}개 선택해 주세요.`);
+  }
+  const ids = new Set<string>();
+  const issues = raw.issues.map((entry: unknown) => {
+    if (!isRecord(entry) || Object.keys(entry).length !== 2 || !isId(entry.id) ||
+        typeof entry.expectedVersion !== 'number' || !Number.isSafeInteger(entry.expectedVersion) || entry.expectedVersion < 1) {
+      throw new SchedulePasteError(400, '선택한 업무 ID와 조회 당시 버전을 확인해 주세요.');
+    }
+    if (ids.has(entry.id)) throw new SchedulePasteError(400, '같은 업무를 두 번 선택할 수 없습니다.');
+    ids.add(entry.id);
+    return { id: entry.id, expectedVersion: entry.expectedVersion };
+  });
+  const changes: ScheduleBulkDateChanges = {};
+  if (!isRecord(raw.changes) || !Object.keys(raw.changes).length) {
+    throw new SchedulePasteError(400, '변경할 날짜 항목을 하나 이상 선택해 주세요.');
+  }
+  for (const [key, value] of Object.entries(raw.changes)) {
+    if (!Object.hasOwn(dateFields, key)) throw new SchedulePasteError(400, '변경할 날짜 항목을 확인해 주세요.');
+    const field = key as keyof ScheduleBulkDateChanges;
+    if (value !== null && !isCalendarDate(value)) {
+      throw new SchedulePasteError(400, `${dateFields[field]}은 YYYY-MM-DD 형식으로 입력해 주세요.`);
+    }
+    changes[field] = value;
+  }
+  return { projectId: raw.projectId, issues, changes };
+}
 
 function incidentLinks(dependencies: Dependency[], issueIds: Iterable<string>) {
   const targets = new Set(issueIds);
@@ -84,6 +130,18 @@ export class SchedulePasteService {
     return createHash('sha256').update(JSON.stringify({issueVersions, linkVersions, versions})).digest('hex');
   }
 
+  private savePreview(preview: SchedulePastePreview, state: ReturnType<SchedulePasteService['projectState']>,
+    proposal: Pick<PasteProposal, 'actorId' | 'issueIds' | 'changes' | 'linkChanges' | 'kind'>, hooks: PasteHooks): SchedulePastePreview {
+    if (preview.errors.length || (!proposal.changes.length && !proposal.linkChanges?.length)) return preview;
+    const id = randomUUID();
+    const expiresAt = after(AUTO_PREVIEW_TTL_MS);
+    this.store.put(table, {
+      ...proposal, id, projectId: preview.projectId, removeAfter: expiresAt,
+      guard: this.guard(state.issues, state.dependencies, proposal.issueIds, hooks.versions(preview.projectId)),
+    } satisfies PasteProposal);
+    return { ...preview, previewId: id, expiresAt };
+  }
+
   private preview(projectId: unknown, raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
     if (typeof projectId !== 'string' || !projectId || projectId.length > 200) {
       throw new SchedulePasteError(400, '붙여넣을 프로젝트를 선택해 주세요.');
@@ -92,7 +150,8 @@ export class SchedulePasteService {
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
-      const {issues, dependencies} = this.projectState(projectId);
+      const state = this.projectState(projectId);
+      const {issues, dependencies} = state;
       const byKey = new Map<string, Issue | null>();
       for (const issue of issues) {
         const key = issue.key.toUpperCase();
@@ -194,28 +253,71 @@ export class SchedulePasteService {
         });
         preview.warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
       }
-      if (preview.errors.length || (!changes.size && !linkChanges.length)) return preview;
-      const id = randomUUID();
-      const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-      const issueIds = [...targetIds];
-      const proposal: PasteProposal = {
-        id,projectId,actorId,removeAfter:expiresAt,issueIds,
-        guard:this.guard(issues, dependencies, issueIds, hooks.versions(projectId)),
-        changes:[...changes.values()],linkChanges,
-      };
-      this.store.put(table, proposal);
-      return {...preview,previewId:id,expiresAt};
+      return this.savePreview(preview, state, { actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges }, hooks);
     });
   }
 
-  private apply(request: Request, previewId: unknown, hooks: PasteHooks): SchedulePasteApplyResult {
+  private previewBulkDates(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
+    const { projectId, issues: selected, changes: requested } = parseBulkDateInput(raw);
+    return this.store.transaction(() => {
+      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      this.prune();
+      const state = this.projectState(projectId);
+      const byId = new Map(state.issues.map(issue => [issue.id, issue]));
+      const preview: SchedulePastePreview = {
+        projectId, previewId: null, expiresAt: null, changes: [], warnings: [], errors: [], unchanged: 0,
+      };
+      const changes = new Map<string, ScheduleDateMutation>();
+      for (const { id, expectedVersion } of selected) {
+        const issue = byId.get(id);
+        if (!issue) {
+          preview.errors.push({ line: null, issueId: id, message: '선택한 업무가 삭제되었거나 현재 프로젝트에 없습니다. 업무를 다시 선택해 주세요.' });
+          continue;
+        }
+        if (issue.version !== expectedVersion) {
+          preview.errors.push({ line: null, issueId: id, key: issue.key, message: '업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.' });
+          continue;
+        }
+        const startDate = requested.startDate === undefined ? issue.startDate : requested.startDate;
+        const endDate = requested.endDate === undefined ? issue.endDate : requested.endDate;
+        const fromDue = issue.dueDate ?? null;
+        const toDue = requested.dueDate === undefined ? fromDue : requested.dueDate;
+        if (startDate === issue.startDate && endDate === issue.endDate && toDue === fromDue) {
+          preview.unchanged++;
+          continue;
+        }
+        const change: ScheduleDateMutation = { id, expectedVersion, startDate, endDate,
+          ...(fromDue !== toDue ? { dueDate: toDue } : {}) };
+        const error = hooks.validateChange(issue, change);
+        if (error) {
+          preview.errors.push({ line: null, issueId: id, key: issue.key, message: error });
+          continue;
+        }
+        changes.set(id, change);
+        preview.changes.push({ id, key: issue.key, title: issue.title, version: issue.version,
+          fromStart: issue.startDate, fromEnd: issue.endDate, fromDue, toStart: startDate, toEnd: endDate, toDue });
+      }
+      if (changes.size) {
+        const projected = state.issues.map(issue => {
+          const change = changes.get(issue.id);
+          return change ? { ...issue, startDate: change.startDate, endDate: change.endDate } : issue;
+        });
+        preview.warnings = hooks.warnings(projected, affectedLinks(state.dependencies, changes.keys(), []));
+      }
+      return this.savePreview(preview, state, {
+        actorId, issueIds: selected.map(({ id }) => id), changes: [...changes.values()], kind: 'bulk-dates',
+      }, hooks);
+    });
+  }
+
+  private apply(request: Request, previewId: unknown, hooks: PasteHooks, kind?: 'bulk-dates'): SchedulePasteApplyResult {
     if (typeof previewId !== 'string' || !previewId || previewId.length > 200) {
       throw new SchedulePasteError(400, '적용할 미리보기 ID가 필요합니다.');
     }
     const actorId = hooks.actor(request);
     return this.store.transaction(() => {
       const proposal = this.store.get<PasteProposal>(table, previewId);
-      if (!proposal) throw new SchedulePasteError(404, '미리보기가 없거나 만료되었습니다.');
+      if (!proposal || proposal.kind !== kind) throw new SchedulePasteError(404, '미리보기가 없거나 만료되었습니다.');
       if (proposal.actorId !== actorId) throw new SchedulePasteError(409, '미리보기를 만든 작업자가 적용해 주세요.');
       if (proposal.removeAfter <= after(0)) throw new SchedulePasteError(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
@@ -241,6 +343,15 @@ export class SchedulePasteService {
     });
     app.post('/api/schedule/paste-apply', (req, res) => {
       res.json(this.apply(req, req.body.previewId, hooks));
+    });
+    app.post('/api/schedule/bulk-dates/preview', (req, res) => {
+      res.set('Cache-Control', 'no-store').json(this.previewBulkDates(req.body, hooks.actor(req), hooks));
+    });
+    app.post('/api/schedule/bulk-dates/apply', (req, res) => {
+      if (!isRecord(req.body) || Object.keys(req.body).length !== 1) {
+        throw new SchedulePasteError(400, '적용할 일정 미리보기 ID를 확인해 주세요.');
+      }
+      res.set('Cache-Control', 'no-store').json(this.apply(req, req.body.previewId, hooks, 'bulk-dates'));
     });
   }
 }

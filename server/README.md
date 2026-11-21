@@ -36,6 +36,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `POST /api/issues/:id/gitlab-links` verifies an MR or pipeline for a configured repository. `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…` removes a manual ticket link.
 - `POST /api/dependencies`, `PATCH /api/dependencies/:id`, `DELETE /api/dependencies/:id`. PATCH accepts `expectedVersion`, `type`, `lagDays`, and `reverse`. Reversals keep the relationship ID and are checked for cycles.
 - `POST /api/schedule/preview`, `POST /api/schedule/apply`, `POST /api/schedule/undo`
+- `POST /api/schedule/bulk-dates/preview`, `POST /api/schedule/bulk-dates/apply`
 - `POST /api/schedule/paste-preview`, `POST /api/schedule/paste-apply`
 - `GET|PATCH /api/projects/:id/calendar`, `POST /api/schedule/auto-preview`, `POST /api/schedule/auto-apply`
 - `POST /api/schedule/workload-preview` accepts `{projectId,startDate,endDate,userIds?,issueIds?}`. Selected issues limit which scheduled work can move. All work assigned to the selected members still counts against capacity. `POST /api/schedule/workload-apply` accepts `{previewId}`. `GET /api/schedule/workload-result/:previewId` returns the stored apply receipt or `{applied:false}`. These routes use the browser API. Proposals are scoped to the active actor, expire after 30 minutes, and use the standard schedule undo receipt.
@@ -53,6 +54,8 @@ Creates and patches return the resource directly. Revisions and comments return 
 Dates may be partial or absent. A start after an end is rejected. Dependencies support FS, SS, FF and SF relationships inside one project and form a directed acyclic graph. Predecessor/successor relationships are distinct from parent/child grouping.
 
 Bulk moves first return a preview and warnings. Working days use each project's calendar (Mon–Fri by default), including explicit nonworking and working-day overrides. Working-day previews return `calendarVersions`; apply checks them when supplied. Direct manual date edits retain their original version checks. Dependency gap warnings use the project working calendar and are scoped to changed projects. Creating or editing a dependency keeps current dates until a schedule change is applied.
+
+Bulk date editing previews up to 100 issues in one project using the submitted issue versions. It accepts absolute start, end and target due dates with per-field keep and clear semantics. The actor-bound proposal checks relevant dependency and rule changes before applying. Retries return the same result, and the shared undo restores each changed due date along with the planned dates. [Bulk date API](../docs/API.md#선택-업무의-날짜-일괄-편집)
 
 Plan moves bind an actor to a preview of the plan dates and eligible linked issue dates. A linked preview checks plan and member versions, dependency endpoints, and relevant settings before applying. The shared schedule undo record carries the applied plan version and previous dates. The plan, issues, audit events, undo record, and retry receipt use one transaction. See the [plan move API](../docs/API.md#계획과-연결-업무-일정-이동).
 

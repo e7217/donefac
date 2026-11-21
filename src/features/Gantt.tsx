@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Pencil, Plus, Search, Sparkles, Undo2, X } from 'lucide-react';
-import type { CustomFieldValue, Dependency, FeatureProps, Issue, PlanningItem, PlanningKind, Project, SchedulePreview, User } from '../../shared/types';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type SchedulePreview, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -86,6 +86,7 @@ const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const RANGE_PICK_DRAFT = 'date-range-pick';
 const CREATE_ISSUE_DRAFT = 'create';
 const CASCADE_DRAFT = 'successor-schedule';
+const BULK_DATES_DRAFT = 'schedule-bulk-dates';
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
@@ -154,6 +155,7 @@ function ProjectGantt(props: GanttProps) {
   const [hideDone, setHideDone] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
   const [reservationsOpen, setReservationsOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
@@ -184,6 +186,7 @@ function ProjectGantt(props: GanttProps) {
     if (selected.size) setSelected(new Set());
     if (shiftOpen) setShiftOpen(false);
     if (autoOpen) setAutoOpen(false);
+    if (bulkDateSelection) setBulkDateSelection(null);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
   const handledFocusRequest = useRef<string | null>(null);
@@ -192,6 +195,7 @@ function ProjectGantt(props: GanttProps) {
   const successorTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
+  const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const previewDialog = useRef<HTMLElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
@@ -227,6 +231,7 @@ function ProjectGantt(props: GanttProps) {
         else {
           const discardPaste = draftsRef.current.has('schedule-paste');
           const discardPlanShift = draftsRef.current.has('plan-schedule-shift');
+          const discardBulkDates = draftsRef.current.has(BULK_DATES_DRAFT);
           afterAcceptedNavigation(event, () => {
             previewRef.current = null;
             setDatePreviewFocusTarget(null);
@@ -234,6 +239,7 @@ function ProjectGantt(props: GanttProps) {
             setPreview(null); setPreviewError(''); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
             if (discardPaste) setPasteOpen(false);
             if (discardPlanShift) setPlanShift(null);
+            if (discardBulkDates) setBulkDateSelection(null);
             setDraftEpoch(value => value + 1);
             if (awaitingCreationResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
           });
@@ -400,6 +406,8 @@ function ProjectGantt(props: GanttProps) {
     return () => cancelAnimationFrame(frame);
   }, [dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
+  const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
+  const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
   const linkAnchor = selectedAnchor && projectIssues.some(issue => issue.projectId === selectedAnchor.projectId && issue.id !== selectedAnchor.id)
     ? selectedAnchor : null;
@@ -536,6 +544,22 @@ function ProjectGantt(props: GanttProps) {
   function capturedStyle(startDate: string, endDate: string): CSSProperties { const start = Math.max(range.start, dayNumber(startDate)), end = Math.min(range.end, dayNumber(endDate)); return end < start ? { display: 'none' } : { left: (start - range.start) * dayWidth + 2, width: Math.max(3, (end - start + 1) * dayWidth - 4) }; }
 
   function toggleSelected(id: string) { setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
+  function openBulkDates() {
+    if (busyRef.current || !hasProject || activeDatePicker || !selectedIssues.length || bulkDatesOverLimit || !canLeave()) return;
+    queueMicrotask(() => {
+      setLinkPicker(null);
+      setPasteOpen(false);
+      setBulkDateSelection(selectedIssues);
+    });
+  }
+  function closeBulkDates() {
+    setBulkDateSelection(null);
+    requestAnimationFrame(() => {
+      const trigger = bulkDatesTrigger.current;
+      if (trigger && !trigger.disabled) trigger.focus({ preventScroll: true });
+      else scrollRef.current?.focus({ preventScroll: true });
+    });
+  }
   async function requestPreview(ids: string[], offset: number, skipWeekends: boolean, opener?: HTMLButtonElement) {
     if (!ids.length) { notify('이동할 업무를 먼저 선택하세요.', 'error'); return; }
     if (!Number.isInteger(offset) || offset === 0) { notify('0이 아닌 정수 일수를 입력하세요.', 'error'); return; }
@@ -886,6 +910,11 @@ function ProjectGantt(props: GanttProps) {
       }}>업무 위치 해제</button>}
     </div>}
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
+      {hasProject && <button ref={bulkDatesTrigger} className="btn" type="button" onClick={openBulkDates}
+        disabled={!selectedIssues.length || bulkDatesOverLimit || busy || Boolean(activeDatePicker)}>
+        <CalendarRange size={15} aria-hidden="true" />일정 일괄 편집
+      </button>}
+      {hasProject && bulkDatesOverLimit && <span role="status" className="muted">날짜를 한 번에 편집할 업무를 {MAX_SCHEDULE_BULK_DATE_ISSUES}개 이하로 선택하세요.</span>}
       <button ref={findingsTrigger} className="btn gantt-findings-trigger" type="button" aria-label="일정 충돌" aria-expanded={findingsOpen}
         aria-controls={findingsOpen ? FINDINGS_PANEL_ID : undefined}
         aria-describedby="gantt-dependency-summary"
@@ -1114,12 +1143,20 @@ function ProjectGantt(props: GanttProps) {
     {cascade && <GanttCascadeDialog projectId={cascade.projectId} anchorChange={cascade.anchorChange}
       onClose={closeCascade} onApplied={applyCascade} onBusyChange={markBusy} />}
     {autoOpen && <AutomaticScheduleDialog {...props} selectedIssueIds={automaticScheduleIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
-    {pasteOpen && <SchedulePasteDialog
-      projectId={projectId} notify={notify} onDraftChange={trackDraft} onClose={() => setPasteOpen(false)}
+    {(pasteOpen || bulkDateIssues) && <SchedulePasteDialog
+      key={bulkDateIssues ? 'bulk-dates' : 'paste'}
+      projectId={projectId} notify={notify} onDraftChange={trackDraft}
+      bulkDates={bulkDateIssues && { issues: bulkDateIssues, refresh }}
+      onClose={bulkDateIssues ? closeBulkDates : () => setPasteOpen(false)}
       onApplied={async result => {
         setUndoId(result.undoId);
         setScheduleWarnings(result.warnings);
         await refresh();
+        if (bulkDateIssues) {
+          closeBulkDates();
+          notify(`${result.updated.length}개 업무의 날짜를 변경했습니다.`);
+          return;
+        }
         setPasteOpen(false);
         const changes = [];
         if (result.updated.length) changes.push(`업무 일정 ${result.updated.length}건`);

@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { Dependency, Issue, Project, ProjectIssueSchema, ProjectWorkflow, ScheduleChange, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, type Dependency, type Issue, type Project, type ProjectIssueSchema, type ProjectWorkflow,
+  type ScheduleBulkDateInput, type ScheduleChange, type SchedulePasteApplyResult, type SchedulePastePreview, type WorkCalendar,
+  type WorkspaceSnapshot } from '../../shared/types.js';
 
 interface PastePreview {
   projectId: string; previewId: string | null; expiresAt: string | null; changes: ScheduleChange[]; warnings: string[];
@@ -29,8 +31,9 @@ async function fixture() {
   return { dir, call, project: created.data, async close() { await new Promise<void>(resolve => server.close(() => resolve())); service.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
-async function issue(f: Fixture, title: string, startDate: string | null = '2026-11-19', endDate: string | null = '2026-11-20') {
-  const made = await f.call<Issue>('/issues', 'POST', { projectId: f.project.id, title, startDate, endDate });
+async function issue(f: Fixture, title: string, startDate: string | null = '2026-11-19',
+  endDate: string | null = '2026-11-20', dueDate: string | null = null) {
+  const made = await f.call<Issue>('/issues', 'POST', { projectId: f.project.id, title, startDate, endDate, dueDate });
   assert.equal(made.status, 201, JSON.stringify(made.data)); return made.data;
 }
 async function workspace(f: Fixture) { return (await f.call<WorkspaceSnapshot>('/workspace')).data; }
@@ -45,6 +48,164 @@ async function validPreview(f: Fixture, target: Issue, endDate = '2026-11-24') {
 }
 async function apply(f: Fixture, value: PastePreview, actorId = 'user-yun') { return f.call<Applied>('/schedule/paste-apply', 'POST', { previewId: value.previewId }, actorId); }
 function dates(issues: Pick<Issue, 'id' | 'startDate' | 'endDate'>[]) { return Object.fromEntries(issues.map(value => [value.id, [value.startDate, value.endDate]])); }
+
+const bulkDatePath = '/schedule/bulk-dates';
+function bulkDateInput(f: Fixture, issues: Issue[], changes: ScheduleBulkDateInput['changes']): ScheduleBulkDateInput {
+  return { projectId: f.project.id, issues: issues.map(({ id, version }) => ({ id, expectedVersion: version })), changes };
+}
+async function reviewBulkDates(f: Fixture, input: ScheduleBulkDateInput) {
+  const reviewed = await f.call<SchedulePastePreview>(`${bulkDatePath}/preview`, 'POST', input);
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+  return reviewed.data;
+}
+function applyBulkDates(f: Fixture, review: SchedulePastePreview, actorId?: string) {
+  return f.call<SchedulePasteApplyResult>(`${bulkDatePath}/apply`, 'POST', { previewId: review.previewId }, actorId);
+}
+const allDates = ({ startDate, endDate, dueDate }: Issue) => ({ startDate, endDate, dueDate });
+
+test('bulk calendar dates review set, clear and keep separately, bind proposal kind and undo only changed dates', async () => {
+  const f = await fixture();
+  try {
+    const first = await issue(f, '계획 기간이 있는 업무', '2026-11-19', '2026-11-23', '2026-11-24');
+    const second = await issue(f, '마감일이 미정인 업무', '2026-11-18', '2026-11-25');
+    const unchanged = await issue(f, '이미 일치한 날짜', null, '2026-11-20', '2026-11-28');
+    const before = await workspace(f);
+    const review = await reviewBulkDates(f, bulkDateInput(f, [first, second, unchanged], { startDate: null, dueDate: '2026-11-28' }));
+    assert.ok(review.previewId);
+    assert.deepEqual(review.errors, []);
+    assert.equal(review.unchanged, 1);
+    assert.deepEqual(review.changes.map(({ id, fromStart, fromEnd, fromDue, toStart, toEnd, toDue }) =>
+      [id, fromStart, fromEnd, fromDue, toStart, toEnd, toDue]), [
+      [first.id, first.startDate, first.endDate, first.dueDate, null, first.endDate, '2026-11-28'],
+      [second.id, second.startDate, second.endDate, second.dueDate, null, second.endDate, '2026-11-28'],
+    ]);
+    assert.deepEqual(await workspace(f), before);
+    const pasted = await validPreview(f, first, '2026-11-25');
+    assert.equal((await applyBulkDates(f, pasted)).status, 404);
+    assert.equal((await apply(f, review)).status, 404);
+    assert.equal((await applyBulkDates(f, review, 'user-seo')).status, 409);
+    assert.deepEqual(await workspace(f), before);
+
+    const applied = await applyBulkDates(f, review);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.ok(applied.data.undoId);
+    assert.deepEqual(applied.data.updated.map(allDates), [first, second].map(value => ({
+      startDate: null, endDate: value.endDate, dueDate: '2026-11-28',
+    })));
+    const after = await workspace(f);
+    assert.deepEqual(after.issues.find(({ id }) => id === unchanged.id), unchanged);
+    assert.deepEqual(await applyBulkDates(f, review), applied);
+    assert.deepEqual(await workspace(f), after);
+    const undo = await f.call<{ updated: Issue[] }>('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+    assert.equal(undo.status, 200, JSON.stringify(undo.data));
+    assert.deepEqual(undo.data.updated.map(allDates), [first, second].map(allDates));
+    assert.ok(undo.data.updated.every(value => value.version === 3));
+    const direct = await f.call<Applied>('/schedule/apply', 'POST', { changes: [{
+      id: first.id, expectedVersion: undo.data.updated[0].version, startDate: first.startDate,
+      endDate: '2026-11-25', dueDate: '2026-11-29',
+    }] });
+    assert.equal(direct.status, 200, JSON.stringify(direct.data));
+    assert.equal(direct.data.updated[0].dueDate, first.dueDate);
+  } finally { await f.close(); }
+});
+
+test('bulk calendar dates reject stale, absent, malformed or blocked selections while showing valid rows', async () => {
+  const f = await fixture();
+  try {
+    const valid = await issue(f, '나중에 끝나는 업무', '2026-11-19', '2026-11-27', '2026-11-28');
+    const inverted = await issue(f, '먼저 끝나는 업무', '2026-11-19', '2026-11-20', '2026-11-28');
+    const prior = await issue(f, '동시 편집할 업무', '2026-11-19', '2026-11-27', '2026-11-28');
+    const edited = await f.call<Issue>(`/issues/${prior.id}`, 'PATCH', { expectedVersion: prior.version, title: '다른 작업자의 현재 제목' });
+    assert.equal(edited.status, 200, JSON.stringify(edited.data));
+    const removed = await issue(f, '휴지통으로 이동한 업무');
+    assert.equal((await f.call(`/issues/${removed.id}`, 'DELETE')).status, 200);
+    const before = await workspace(f);
+    const foreign = before.issues.find(value => value.projectId !== f.project.id)!;
+    const review = await reviewBulkDates(f, bulkDateInput(f, [valid, inverted, prior, removed, foreign], { startDate: '2026-11-24' }));
+    assert.deepEqual(review.changes.map(change => change.id), [valid.id]);
+    assert.deepEqual(review.changes.map(({ fromDue, toDue }) => [fromDue, toDue]), [['2026-11-28', '2026-11-28']]);
+    assert.deepEqual(review.errors.map(error => [error.line, error.issueId, error.key]), [
+      [null, inverted.id, inverted.key], [null, prior.id, prior.key], [null, removed.id, undefined], [null, foreign.id, undefined],
+    ]);
+    assert.equal(review.previewId, null);
+    assert.equal(review.expiresAt, null);
+    assert.deepEqual(await workspace(f), before);
+
+    const input = bulkDateInput(f, [valid], { dueDate: '2028-02-29' });
+    for (const invalid of [
+      { ...input, issues: [] },
+      { ...input, issues: [...input.issues, ...input.issues] },
+      { ...input, issues: [{ id: valid.id, expectedVersion: `${valid.version}` }] },
+      { ...input, issues: Array.from({ length: MAX_SCHEDULE_BULK_DATE_ISSUES + 1 }, (_, i) => ({ id: `issue-${i}`, expectedVersion: 1 })) },
+      { ...input, changes: {} },
+      { ...input, changes: { startDate: '2026-02-29' } },
+      { ...input, changes: { dueDate: ' 2026-11-28' } },
+      { ...input, changes: { endDate: '' } },
+      { ...input, changes: { title: '해당 없는 항목' } },
+    ]) {
+      const rejected = await f.call(`${bulkDatePath}/preview`, 'POST', invalid);
+      assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    }
+    assert.ok((await reviewBulkDates(f, input)).previewId);
+    const noop = await reviewBulkDates(f, bulkDateInput(f, [valid], { dueDate: valid.dueDate }));
+    assert.equal(noop.unchanged, 1);
+    assert.equal(noop.previewId, null);
+    assert.deepEqual(noop.errors, []);
+    const workflowPath = `/projects/${f.project.id}/workflow`;
+    const workflow = (await f.call<ProjectWorkflow>(workflowPath)).data;
+    const rule = await f.call(workflowPath, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      fieldRules: [{ issueType: '*', statusId: valid.status, requiredFields: ['dueDate'] }],
+    });
+    assert.equal(rule.status, 200, JSON.stringify(rule.data));
+    const blocked = await reviewBulkDates(f, bulkDateInput(f, [valid], { dueDate: null }));
+    assert.equal(blocked.previewId, null);
+    assert.match(blocked.errors[0].message, /마감일/);
+  } finally { await f.close(); }
+});
+
+test('bulk calendar dates guard linked changes and roll back a failed write across dates, activity and retry state', async () => {
+  const f = await fixture();
+  try {
+    const first = await issue(f, '첫째 일정', '2026-11-17', '2026-11-27', '2026-11-26');
+    const second = await issue(f, '둘째 일정', '2026-11-18', '2026-11-26', '2026-11-26');
+    const predecessor = await issue(f, '선행 일정', '2026-11-22', '2026-11-25');
+    const link = await f.call<Dependency>('/dependencies', 'POST', { predecessorId: predecessor.id, successorId: first.id, type: 'FS', lagDays: 0 });
+    assert.equal(link.status, 201, JSON.stringify(link.data));
+    const input = bulkDateInput(f, [first, second], { startDate: '2026-11-23', dueDate: null });
+    const linkedReview = await reviewBulkDates(f, input);
+    assert.ok(linkedReview.previewId);
+    assert.ok(linkedReview.warnings.some(warning => warning.includes(`${predecessor.key} → ${first.key}`)));
+    const edited = await f.call<Issue>(`/issues/${predecessor.id}`, 'PATCH', { expectedVersion: predecessor.version, endDate: '2026-11-26' });
+    assert.equal(edited.status, 200, JSON.stringify(edited.data));
+    const beforeApply = await workspace(f);
+    assert.equal((await applyBulkDates(f, linkedReview)).status, 409);
+    assert.deepEqual(await workspace(f), beforeApply);
+
+    const review = await reviewBulkDates(f, input);
+    assert.ok(review.previewId);
+    const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    try {
+      database.exec(`CREATE TRIGGER fail_bulk_dates_second BEFORE UPDATE ON issues
+        WHEN json_extract(NEW.json,'$.title')='둘째 일정'
+        BEGIN SELECT RAISE(ABORT,'synthetic bulk dates second write failure'); END`);
+      try {
+        assert.equal((await applyBulkDates(f, review)).status, 500);
+        assert.deepEqual(await workspace(f), beforeApply);
+        assert.equal(database.prepare('SELECT COUNT(*) as count FROM schedule_undos').get()?.count, 0);
+      } finally { database.exec('DROP TRIGGER fail_bulk_dates_second'); }
+      const applied = await applyBulkDates(f, review);
+      assert.equal(applied.status, 200, JSON.stringify(applied.data));
+      assert.ok(applied.data.updated.every(value => value.dueDate === null));
+      assert.equal((await f.call(`/issues/${first.id}`, 'PATCH', {
+        expectedVersion: applied.data.updated[0].version, dueDate: '2026-11-29',
+      })).status, 200);
+      const beforeUndo = await workspace(f);
+      assert.equal((await f.call('/schedule/undo', 'POST', { undoId: applied.data.undoId })).status, 409);
+      assert.deepEqual(await workspace(f), beforeUndo);
+    } finally { database.close(); }
+  } finally { await f.close(); }
+});
 
 test('mixed spreadsheet date edits preview without source writes, apply once, and share atomic undo with manual scheduling', async () => {
   const f = await fixture();

@@ -1125,7 +1125,18 @@ export interface WorkspaceSnapshot {
   issueSchemas?: ProjectIssueSchema[];
   issueOrders?: ProjectIssueOrder[];
 }
-export interface ScheduleChange { id: string; key: string; title: string; version: number; fromStart: string | null; fromEnd: string | null; toStart: string | null; toEnd: string | null }
+export interface ScheduleChange {
+  id: string;
+  key: string;
+  title: string;
+  version: number;
+  fromStart: string | null;
+  fromEnd: string | null;
+  toStart: string | null;
+  toEnd: string | null;
+  fromDue?: string | null;
+  toDue?: string | null;
+}
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
 export interface AutomaticSchedulePreview extends SchedulePreview { previewId: string; blocking: string[]; expiresAt: string }
 export interface WorkloadLevelSummary { overloadedCells: number; excessMinutes: number; completionDate: string | null }
@@ -1171,7 +1182,7 @@ export interface ProjectScheduleAnalysis {
   warnings: string[];
   partial: boolean;
 }
-export interface SchedulePasteDiagnostic { line: number | null; key?: string; message: string }
+export interface SchedulePasteDiagnostic { line: number | null; key?: string; issueId?: string; message: string }
 export interface SchedulePasteDependencyChange {
   line: number;
   predecessorKey: string;
@@ -1192,6 +1203,13 @@ export interface SchedulePastePreview {
   unchanged: number;
 }
 export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; warnings: string[]; dependencyChanges?: number }
+export const MAX_SCHEDULE_BULK_DATE_ISSUES = 100;
+export type ScheduleBulkDateChanges = Partial<Pick<Issue, 'startDate' | 'endDate' | 'dueDate'>>;
+export interface ScheduleBulkDateInput {
+  projectId: string;
+  issues: { id: string; expectedVersion: number }[];
+  changes: ScheduleBulkDateChanges;
+}
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {
   previewId: string | null;
