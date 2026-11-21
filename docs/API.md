@@ -292,6 +292,16 @@ curl --fail-with-body \
 
 최신 저장본은 현재 첨부와 본문에서 직접 참조한 과거 파일 버전을 모두 담는다. 승인·발행본은 그 본문이 직접 참조한 파일만 담는다. 같은 서비스 주소의 문서·절·파일 링크는 패키지 상대 경로로 바꾸고, 다른 주소로 저장된 링크는 진단에 기록한다. 문서 500개, 첨부 1,500개, 압축 전후 각각 64MiB까지 처리한다. 조건이 올바르지 않으면 `400`, 해당 문서나 공간 또는 내보낼 저장본이 없으면 `404`, 한도를 넘으면 `413`, 대상 파일을 읽거나 무결성을 확인할 수 없으면 `503`과 JSON 오류를 반환한다.
 
+## 문서 트리 Markdown ZIP 가져오기
+
+브라우저의 `POST /api/document-markdown-import/preview?projectId=<ID>&parentId=<ID>`에 `application/octet-stream` ZIP 바이트를 보낸다. `projectId`의 빈 값은 팀 공통 공간이며 `parentId`의 빈 값은 최상위다. 현재 작업자 기준으로 `{id,format,projectId,parentId,expiresAt,pages,warnings,attachmentCount}`를 반환한다. `format`은 `teamspace`, `docmost`, `markdown` 중 하나다. `pages`에는 `{path,parentPath,title,attachmentCount}`, `warnings`에는 `{path,message}`가 들어간다.
+
+`POST /api/document-markdown-import/apply?previewId=<ID>`에 같은 작업자와 ZIP 바이트를 보낸다. 미리보기는 30분 동안 적용할 수 있다. 대상 공간과 상위 문서가 미리보기 이후 바뀌었거나 파일이 다르면 `409`로 새 미리보기를 요청한다. 성공하면 `{documentIds,rootIds,attachmentCount,duplicate}`를 `201`로 반환한다. 7일 안에 같은 요청을 다시 보내면 같은 문서 ID와 `duplicate: true`를 `200`으로 돌려준다. 문서·첫 이력·활동·첨부·적용 기록을 함께 저장하며 자체 JSON 복원 시 적용 기록을 초기화한다.
+
+압축 전후 각각 64MiB, UTF-8 `.md` 한 파일당 512KiB, 변환한 본문 합계 64MiB, 문서 500개, 첨부 후보 1,500개와 파일당 20MiB까지 처리한다. Teamspace ZIP은 명세의 계층·첨부 소유권·크기·SHA-256을 확인한다. Docmost ZIP은 메타데이터가 지정한 계층과 순서·아이콘을 사용한다. 일반 ZIP은 상위 문서 이름과 같은 폴더, 폴더의 `index.md` 또는 `README.md`에서 상위 문서를 확인한다. Docmost·일반 ZIP은 본문 경로로 확인한 파일을 가져오며 나머지 파일은 검토 안내에 표시한다.
+
+문서·절, 첨부 상대 링크는 새 주소로 연결한다. 단독 Markdown 이미지가 ZIP 안의 PNG·JPEG·GIF·WebP를 가리키면 이미지 블록으로 가져온다. 작업자를 각 새 초안의 작성자로 기록한다. 구조나 크기 오류가 있으면 전체 적용을 보류한다.
+
 ## 문서 라벨
 
 브라우저와 `/api/v1`의 문서 생성·수정 경로는 선택 필드 `labels`를 받는다. 문서당 최대 20개, 라벨당 최대 60 UTF-16 코드 단위를 허용한다. 앞뒤 공백을 제거하고 NFC로 정규화하며, 대소문자 차이는 같은 라벨로 취급한다. 같은 라벨이 반복되면 처음 입력한 표기를 유지한다. 수정에서 `labels`를 생략하면 현재 값을 유지하고 `[]`를 보내면 모두 지운다.

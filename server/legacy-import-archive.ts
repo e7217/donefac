@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import { XMLValidator } from 'fast-xml-parser';
-import { fromBufferPromise, type Entry } from 'yauzl';
+import { fromBufferPromise, getFileNameLowLevel, type Entry } from 'yauzl';
 import type { LegacyFile } from '../shared/types.js';
 
 export class LegacyArchiveError extends Error {
@@ -175,7 +175,14 @@ function safePath(path: string): string {
 }
 function entryMode(entry: Entry): number { return entry.externalFileAttributes >>> 16 & 0xf000; }
 function digest(path: string, bytes: Buffer): LegacyFile { return { path, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }; }
-export async function readLegacyArchive(bytes: Buffer, filename: string): Promise<{ files: Map<string, Buffer>; manifest: LegacyFile[]; expandedBytes: number }> {
+type ZipReadOptions = {
+  maxExpandedBytes?: number;
+  maxFileBytes?: number;
+  normalizeEntryName?: (name: string) => string;
+};
+
+export async function readLegacyArchive(bytes: Buffer, filename: string, options: ZipReadOptions = {}):
+  Promise<{ files: Map<string, Buffer>; manifest: LegacyFile[]; expandedBytes: number }> {
   if (!Buffer.isBuffer(bytes)) return fail('파일 바이트가 필요합니다.');
   if (bytes.length > LEGACY_MAX_RAW_BYTES) fail('원본 파일은 64 MiB 이하여야 합니다.', 413);
   const path = safePath(filename), extension = /\.([^.\/]+)$/.exec(path)?.[1].toLowerCase();
@@ -183,43 +190,49 @@ export async function readLegacyArchive(bytes: Buffer, filename: string): Promis
   if (extension !== 'zip') return { files: new Map([[path, bytes]]), manifest: [digest(path, bytes)], expandedBytes: bytes.length };
   const files = new Map<string, Buffer>(), manifest: LegacyFile[] = [], seen = new Set<string>(), kinds = new Map<string, 'file' | 'directory'>();
   let expandedBytes = 0, entryCount = 0;
+  const maxExpandedBytes = Math.min(LEGACY_MAX_EXPANDED_BYTES, options.maxExpandedBytes ?? LEGACY_MAX_EXPANDED_BYTES);
+  const maxFileBytes = Math.min(LEGACY_MAX_FILE_BYTES, options.maxFileBytes ?? LEGACY_MAX_FILE_BYTES);
   try {
-    const zip = await fromBufferPromise(bytes, { autoClose: false, lazyEntries: true, decodeStrings: true, strictFileNames: true, validateEntrySizes: true });
+    const zip = await fromBufferPromise(bytes, { autoClose: false, lazyEntries: true, decodeStrings: !options.normalizeEntryName, strictFileNames: true, validateEntrySizes: true });
     try {
-      const entries: { entry: Entry; directory: boolean }[] = []; let declaredExpandedBytes = 0;
+      const entries: { entry: Entry; directory: boolean; name: string }[] = []; let declaredExpandedBytes = 0;
       if (zip.entryCount > LEGACY_MAX_FILES) fail('아카이브 항목 수는 5,000개 이하여야 합니다.', 413);
       for await (const entry of zip.eachEntry()) {
         if (++entryCount > LEGACY_MAX_FILES) fail('아카이브 항목 수는 5,000개 이하여야 합니다.', 413);
-        const name = safePath(entry.fileName), key = name.normalize('NFC').toLowerCase();
+        const originalName = options.normalizeEntryName
+          ? getFileNameLowLevel(entry.generalPurposeBitFlag, entry.fileNameRaw, entry.extraFields, true)
+          : entry.fileName;
+        const entryName = options.normalizeEntryName?.(originalName) ?? originalName;
+        const name = safePath(entryName), key = name.normalize('NFC').toLowerCase();
         if (seen.has(key)) fail('아카이브에 중복되거나 대소문자만 다른 파일 경로가 있습니다.'); seen.add(key);
         if (entry.generalPurposeBitFlag & 0x800) {
           try { new TextDecoder('utf-8', { fatal: true }).decode(entry.fileNameRaw); } catch { fail('아카이브 파일 이름의 UTF-8이 손상되었습니다.'); }
         }
         if (entry.isEncrypted() || entry.generalPurposeBitFlag & 0x40 || ![0, 8].includes(entry.compressionMethod)) fail('암호화 또는 지원하지 않는 압축 방식입니다.');
-        const mode = entryMode(entry), directory = entry.fileName.endsWith('/') || mode === 0x4000 || Boolean(entry.externalFileAttributes & 0x10);
+        const mode = entryMode(entry), directory = entryName.endsWith('/') || mode === 0x4000 || Boolean(entry.externalFileAttributes & 0x10);
         if (mode && mode !== 0x8000 && mode !== 0x4000) fail('심볼릭 링크와 특수 파일은 가져올 수 없습니다.');
         if (mode === 0x8000 && directory) fail('아카이브 파일·디렉터리 종류가 일치하지 않습니다.');
-        if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 || entry.uncompressedSize > LEGACY_MAX_FILE_BYTES) fail('압축 해제 개별 파일은 64 MiB 이하여야 합니다.', 413);
+        if (!Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 || entry.uncompressedSize > maxFileBytes) fail(`압축 해제 개별 파일은 ${maxFileBytes / 1024 / 1024} MiB 이하여야 합니다.`, 413);
         if (directory && entry.uncompressedSize !== 0) fail('디렉터리 항목에 파일 데이터가 있습니다.');
         if (kinds.get(key) === 'file' || !directory && kinds.get(key) === 'directory') fail('아카이브 파일과 디렉터리 경로가 충돌합니다.');
         kinds.set(key, directory ? 'directory' : 'file');
         const segments = key.split('/');
         for (let i = 1; i < segments.length; i++) { const parent = segments.slice(0, i).join('/'); if (kinds.get(parent) === 'file') fail('아카이브 상위 경로가 파일입니다.'); kinds.set(parent, 'directory'); }
         declaredExpandedBytes += entry.uncompressedSize;
-        if (declaredExpandedBytes > LEGACY_MAX_EXPANDED_BYTES) fail('압축 해제 합계는 256 MiB 이하여야 합니다.', 413);
-        entries.push({ entry, directory });
+        if (declaredExpandedBytes > maxExpandedBytes) fail(`압축 해제 합계는 ${maxExpandedBytes / 1024 / 1024} MiB 이하여야 합니다.`, 413);
+        entries.push({ entry, directory, name });
       }
-      for (const { entry, directory } of entries) {
+      for (const { entry, directory, name } of entries) {
         const stream = await zip.openReadStreamPromise(entry); const chunks: Buffer[] = []; let size = 0, checksum = 0;
         try {
           for await (const raw of stream) {
             const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw); size += chunk.length; expandedBytes += chunk.length;
-            if (size > LEGACY_MAX_FILE_BYTES || expandedBytes > LEGACY_MAX_EXPANDED_BYTES) fail('실제 압축 해제 크기가 제한을 초과했습니다.', 413);
+            if (size > maxFileBytes || expandedBytes > maxExpandedBytes) fail('실제 압축 해제 크기가 제한을 초과했습니다.', 413);
             checksum = crc32(chunk, checksum); chunks.push(chunk);
           }
         } finally { stream.destroy(); }
         if (size !== entry.uncompressedSize || checksum !== entry.crc32) fail('아카이브 파일 크기 또는 CRC가 일치하지 않습니다.');
-        if (!directory) { const content = Buffer.concat(chunks, size); files.set(entry.fileName, content); manifest.push(digest(entry.fileName, content)); }
+        if (!directory) { const content = Buffer.concat(chunks, size); files.set(name, content); manifest.push(digest(name, content)); }
       }
       return { files, manifest, expandedBytes };
     } finally { zip.close(); }

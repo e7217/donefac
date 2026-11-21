@@ -121,6 +121,12 @@ function packageHref(from: string, to: string, fragment?: string): string {
   return `${path}${fragment ? `#${encodeSegment(fragment)}` : ''}`;
 }
 
+export const documentArchiveAttachmentFooter = '\n## 첨부파일\n\n';
+
+export function documentArchiveAttachmentLink(documentPath: string, filePath: string, filename: string): string {
+  return `- [${escapeMarkdownText(filename)}](${packageHref(documentPath, filePath)})`;
+}
+
 function selectedDocuments(services: ExportServices, rows: DocumentTreeRow[], source: Source): Map<string, ExportDocument> {
   const selected = new Map<string, ExportDocument>();
   // Bound the retained page bodies even when markup renders to little or no Markdown.
@@ -256,9 +262,9 @@ function captureArchive(services: ExportServices, query: Record<string, unknown>
         const base = JSON.parse(row.json) as Attachment;
         const head = attachmentVersions.head(base);
         const path = addAttachment({ ...head, id: head.currentVersionId }, base.id, metadata);
-        return `- [${escapeMarkdownText(head.filename)}](${packageHref(metadata.path, path)})`;
+        return documentArchiveAttachmentLink(metadata.path, path, head.filename);
       });
-      if (links.length) markdown += `\n## 첨부파일\n\n${links.join('\n')}\n`;
+      if (links.length) markdown += `${documentArchiveAttachmentFooter}${links.join('\n')}\n`;
     }
     addText(metadata.path, markdown);
   }

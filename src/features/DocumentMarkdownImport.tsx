@@ -4,7 +4,7 @@ import { useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 import { Loader2 } from 'lucide-react';
 import { ReadonlyDocumentContent } from './DocumentBlocks';
 
-export type MarkdownImportPreview = ReturnType<typeof import('./document-markdown-import')['previewMarkdownImport']>;
+export type MarkdownImportPreview = ReturnType<typeof import('../../shared/document-markdown-import')['previewMarkdownImport']>;
 type ImportOperation = 'read' | 'preview' | null;
 
 function keepPreviewInPlace(event: SyntheticEvent) {
@@ -49,7 +49,7 @@ export function DocumentMarkdownImport({ preview, onPreview, disabled }: {
   async function readFile(file: File) {
     const token = invalidate('read');
     try {
-      const { MAX_MARKDOWN_IMPORT_BYTES } = await import('./document-markdown-import');
+      const { MAX_MARKDOWN_IMPORT_BYTES } = await import('../../shared/document-markdown-import');
       if (operation.current.token !== token) return;
       if (file.size > MAX_MARKDOWN_IMPORT_BYTES) throw new Error('Markdown 파일은 512KiB까지 가져올 수 있습니다.');
       const bytes = await file.arrayBuffer();
@@ -70,7 +70,7 @@ export function DocumentMarkdownImport({ preview, onPreview, disabled }: {
   async function convert() {
     const token = invalidate('preview');
     try {
-      const { previewMarkdownImport } = await import('./document-markdown-import');
+      const { previewMarkdownImport } = await import('../../shared/document-markdown-import');
       if (operation.current.token !== token) return;
       const result = previewMarkdownImport(source, sourceUrl.trim() || undefined);
       onPreview(result, fileName.replace(/\.(?:md|markdown|mdown)$/i, ''));

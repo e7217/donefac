@@ -1,0 +1,73 @@
+.document-markdown-archive-import {
+  width: min(620px, calc(100vw - 28px));
+}
+
+.document-markdown-archive-fields {
+  display: grid;
+  gap: 14px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.document-markdown-archive-fields input[type='file'] {
+  overflow: hidden;
+}
+
+.document-markdown-archive-import .document-offline-export-status,
+.document-markdown-archive-import .document-offline-export-error,
+.document-markdown-archive-review {
+  margin-top: 14px;
+}
+
+.document-markdown-archive-review h3 {
+  margin: 0;
+  color: #25354c;
+  font-size: 16px;
+}
+
+.document-markdown-archive-pages {
+  max-height: 235px;
+  margin: 10px 0 14px;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid #e7ebf2;
+  border-radius: 7px;
+}
+
+.document-markdown-archive-pages li {
+  padding: 8px 10px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.document-markdown-archive-pages li + li {
+  border-top: 1px solid #edf0f5;
+}
+
+.document-markdown-archive-pages small {
+  display: block;
+  margin-top: 3px;
+  color: #54647a;
+}
+
+.document-markdown-archive-pages .btn {
+  height: auto;
+  text-align: left;
+  white-space: normal;
+}
+
+.document-markdown-archive-warnings {
+  margin: 10px 0 14px;
+  color: #725518;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.document-markdown-archive-warnings ul {
+  max-height: 180px;
+  overflow: auto;
+  padding-inline-start: 20px;
+}

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { normalizeDocumentContent } from '../../server/document-content.js';
 import { markdownImportSectionId } from '../../shared/document-sections.js';
 import type { RichContent } from '../../shared/types.js';
-import { MAX_MARKDOWN_IMPORT_BYTES, previewMarkdownImport } from '../../src/features/document-markdown-import.js';
+import { MAX_MARKDOWN_IMPORT_BYTES, previewMarkdownImport } from '../../shared/document-markdown-import.js';
 
 const children = (value: RichContent): RichContent[] => [value, ...(value.content ?? []).flatMap(children)];
 const linkOf = (value: RichContent) => value.marks?.find(mark => mark.type === 'link')?.attrs?.href;

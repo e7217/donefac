@@ -26,6 +26,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
 import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
+import { confirmMarkdownArchiveClose, DocumentMarkdownArchiveImport, type ArchiveImportNavigation } from './DocumentMarkdownArchiveImport';
 import { DocumentOfflineExport, type DocumentOfflineExportScope } from './DocumentOfflineExport';
 import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
 import { DocumentTreeMove } from './DocumentTreeMove';
@@ -249,6 +250,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const opener = offlineExportOpener.current;
     setOfflineExport(null);
     requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
+  }
+  const archiveImportOpener = useRef<HTMLButtonElement>(null);
+  const archiveImportNavigation = useRef<ArchiveImportNavigation>('ready');
+  const [archiveImport, setArchiveImport] = useState(false);
+  const recordArchiveImportNavigation = useCallback((state: ArchiveImportNavigation) => {
+    archiveImportNavigation.current = state;
+  }, []);
+  function closeArchiveImport() {
+    setArchiveImport(false);
+    requestAnimationFrame(() => archiveImportOpener.current?.focus({ preventScroll: true }));
   }
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
@@ -531,12 +542,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument, closeAnnotation]); // Deliberately preserve the local buffer on snapshot refresh.
 
   useEffect(() => {
-    if (!selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
-  }, [selectedDocumentId, visible, onSelectDocument]);
+    if (!archiveImport && !selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
+  }, [archiveImport, selectedDocumentId, visible, onSelectDocument]);
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (creatingRequest.current || templateCreateAttempt.current || templateDraftDirty.current || draftRef.current?.dirty
+      if (archiveImportNavigation.current !== 'ready' || creatingRequest.current || templateCreateAttempt.current || templateDraftDirty.current || draftRef.current?.dirty
         || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
         || isReplySending() || hasReplyDraft(actorRef.current, draftRef.current?.id)) {
         rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = '';
@@ -550,6 +561,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
       if (offlineExport) afterAcceptedNavigation(event, () => setOfflineExport(null));
+      if (archiveImport) {
+        if (archiveImportNavigation.current === 'busy') {
+          event.preventDefault();
+          notify('ZIP 가져오기 요청이 끝난 뒤 이동해 주세요.', 'error');
+          return;
+        }
+        if (!confirmMarkdownArchiveClose(archiveImportNavigation.current)) {
+          event.preventDefault();
+          return;
+        }
+        afterAcceptedNavigation(event, () => setArchiveImport(false));
+      }
       if (isDocumentPreservedByNavigation(event, selectedDocumentId)) {
         if (annotationDialog) {
           event.preventDefault();
@@ -575,7 +598,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('teamspace:navigate', guard);
     return () => window.removeEventListener('teamspace:navigate', guard);
-  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport]);
+  }, [annotationDialog, archiveImport, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport]);
 
   useEffect(() => {
     if (teamCreation && !creating && !teamCreationRejected) createSubmit.current?.focus({ preventScroll: true });
@@ -646,7 +669,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen || newOpen || templateManager || offlineExport) return;
+      if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen && !copyOpen && !orderOpen) void saveDraft();
@@ -655,7 +678,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
+  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1415,16 +1438,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
-    <div className="docs-heading" inert={newOpen || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
+    <div className="docs-heading" inert={newOpen || archiveImport || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
       <div className="document-template-heading-actions">
         <button className="btn" type="button" onClick={event => openOfflineExport(currentProject ? 'project' : 'common', event.currentTarget)}>
           <ArrowDownToLine size={15} aria-hidden="true" />Markdown ZIP 내보내기
+        </button>
+        <button ref={archiveImportOpener} className="btn" type="button" disabled={saving || restoring || creating}
+          onClick={() => { setExportOpen(false); setArchiveImport(true); }}>
+          <FileInput size={15} aria-hidden="true" />Markdown ZIP 가져오기
         </button>
         <button className="btn" type="button" onClick={event => manageTemplates(event.currentTarget)}><FileStack size={15} aria-hidden="true" />팀 템플릿 관리</button>
         <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button>
       </div>
     </div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || Boolean(issueBlockDialog || documentAction || templateManager || offlineExport)}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || archiveImport || Boolean(issueBlockDialog || documentAction || templateManager || offlineExport)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         {onChangeDocumentLabel && <div className="docs-label-filters">
@@ -1694,6 +1721,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
     {offlineExport && <DocumentOfflineExport document={selectedPage} project={currentProject} initialScope={offlineExport}
       actorId={actorId} notify={notify} onClose={closeOfflineExport} />}
+    {archiveImport && <DocumentMarkdownArchiveImport projects={data.projects} documents={data.documents} initialProjectId={currentProject?.id ?? null}
+      actorId={actorId} refresh={refresh} openDocument={openDocument} onNavigationChange={recordArchiveImportNavigation} onClose={closeArchiveImport} />}
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
       sourceDocument={documentAction.source} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}

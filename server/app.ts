@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, attachmentId, safeFilename, sniffMime, hash } from './attachments.js';
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
 import { AttachmentAppend } from './attachment-append.js';
+import { MarkdownArchiveImportError, MarkdownArchiveImportService } from './markdown-archive-import.js';
+import { MAX_MARKDOWN_ARCHIVE_BYTES } from '../shared/document-markdown-archive.js';
 import { Store } from './store.js';
 import { WorkspaceRevisions } from './workspace-revisions.js';
 import { seed } from './seed.js';
@@ -200,6 +202,7 @@ export function createApp(options: {
   const documentTemplateAssets = new DocumentTemplateAssetsService(store, files);
   const documentTemplates = new DocumentTemplatesService(store, documentTemplateAssets);
   const documentDraftFiles = new AttachmentAppend(dataDir);
+  const markdownArchiveImport = new MarkdownArchiveImportService(store, documentDraftFiles);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const deadlineReminders = new DeadlineRemindersService(
@@ -249,6 +252,11 @@ export function createApp(options: {
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
   app.use('/api/legacy-import/packages',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'원본 패키지는 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_PACKAGE_BYTES})(req,res,next);});
+  app.use('/api/document-markdown-import', (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    if (!req.is('application/octet-stream')) return res.status(415).json({ error: 'Markdown ZIP을 application/octet-stream 형식으로 보내 주세요.' });
+    express.raw({ type: 'application/octet-stream', limit: MAX_MARKDOWN_ARCHIVE_BYTES })(req, res, next);
+  });
   app.use('/api/integrations/gitlab/webhook',express.json({limit:2*1024*1024,verify:(req,_res,buffer)=>{(req as Request & {gitlabRawBody:Buffer}).gitlabRawBody=Buffer.from(buffer);}}));
   app.use(express.json({limit:MAX_PACKAGE_BYTES}));
   app.use((req,res,next)=>{req.body??={};if(req.method!=='GET'&&(typeof req.body!=='object'||Array.isArray(req.body)))return res.status(400).json({error:'JSON 객체가 필요합니다.'});next();});
@@ -1463,6 +1471,26 @@ export function createApp(options: {
     });
     res.set('Cache-Control', 'no-store').json(order);
   });
+  app.post('/api/document-markdown-import/preview', async (req, res) => {
+    const { projectId, parentId } = req.query;
+    if (typeof projectId !== 'string' || typeof parentId !== 'string') return fail('문서 공간과 상위 위치를 지정해 주세요.');
+    const result = await markdownArchiveImport.preview({ projectId: projectId || null, parentId: parentId || null }, actor(req), req.body);
+    res.set('Cache-Control', 'no-store').json(result);
+  });
+  app.post('/api/document-markdown-import/apply', async (req, res) => {
+    const { previewId } = req.query;
+    if (typeof previewId !== 'string') return fail('검토한 Markdown ZIP 미리보기를 지정해 주세요.');
+    const authorId = actor(req);
+    const result = await markdownArchiveImport.apply(previewId, authorId, req.body, {
+      validateDocument: document => { validateDocument(document, undefined, { skipReferences: true }); },
+      validateBatch: documents => documentContent.validateBatch(documents.map(({ id, content }) => ({ id, content }))),
+      record(document) {
+        revision(document, authorId, 'Markdown ZIP 가져오기');
+        activity(req, 'document', document.id, 'Markdown ZIP에서 문서 생성', document.title);
+      },
+    });
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
+  });
   app.post('/api/documents/:id/copy-preview', (req, res) => {
     res.set('Cache-Control', 'no-store').json(documentTreeCopy.preview(req.params.id, actor(req), req.body, templateOrigins(req)));
   });
@@ -2446,6 +2474,7 @@ export function createApp(options: {
       issueProjectMove.clearForImport();
       issuePaste.resetForImport();
       documentCreation.invalidateForImport();
+      markdownArchiveImport.reset();
       issueBulkEdit.resetForImport();
       cycleCompletion.resetForImport();
       issueOrders.clearCycleMovesForImport();
@@ -2552,6 +2581,7 @@ export function createApp(options: {
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});
+    if (error instanceof MarkdownArchiveImportError) return res.status(error.status).json({ error: error.message, details: error.details });
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

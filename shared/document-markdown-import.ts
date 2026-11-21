@@ -1,6 +1,6 @@
 import { lexer, type MarkedToken, type Token, type Tokens } from 'marked';
-import { markdownImportSectionId } from '../../shared/document-sections.js';
-import type { RichContent } from '../../shared/types.js';
+import { markdownImportSectionId } from './document-sections.js';
+import type { RichContent } from './types.js';
 
 export const MAX_MARKDOWN_IMPORT_BYTES = 512 * 1024;
 const maxDepth = 60;
@@ -19,6 +19,13 @@ const messages = {
 } as const;
 type WarningCode = keyof typeof messages;
 type Mark = NonNullable<RichContent['marks']>[number];
+type Destination = { href: string; imageSrc?: string };
+interface MarkdownArchiveConversion {
+  exportedTitle?: boolean;
+  sectionMarkers?: boolean;
+  resolve: (destination: string) => Destination | undefined;
+}
+const sectionMarker = /^<a id="([a-zA-Z0-9][a-zA-Z0-9_-]{0,79})" name="\1"><\/a>$/;
 
 const entityValues: Record<string, string> = {
   amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0', copy: '©', reg: '®',
@@ -85,10 +92,12 @@ class MarkdownConversion {
   private readonly warningCounts = new Map<WarningCode, number>();
   private readonly sections = new Map<Tokens.Heading, string>();
   private readonly anchors = new Map<string, string>();
+  private readonly explicitAnchors = new Map<string, string>();
+  private readonly omittedBlocks = new Set<Token>();
   private readonly nextAnchorSuffix = new Map<string, number>();
   suggestedTitle = '';
 
-  constructor(private readonly sourceUrl: URL | null) {}
+  constructor(private readonly sourceUrl: URL | null, private readonly archive?: MarkdownArchiveConversion) {}
 
   get warnings() {
     return [...this.warningCounts].map(([code, count]) => ({ code, count, message: messages[code] }));
@@ -98,10 +107,25 @@ class MarkdownConversion {
     this.warningCounts.set(code, (this.warningCounts.get(code) ?? 0) + 1);
   }
 
+  sectionId(fragment: string): string | undefined {
+    return this.explicitAnchors.get(fragment) ?? this.anchors.get(fragment.normalize('NFC'));
+  }
+
   indexHeadings(tokens: Token[], depth = 0): void {
     if (depth > maxDepth) throw new Error(boundsMessage);
+    let marker: { token: Token; id: string } | undefined;
+    if (depth === 0 && this.archive?.exportedTitle && tokens[0]?.type === 'heading' && (tokens[0] as Tokens.Heading).depth === 1) {
+      const title = tokens[0] as Tokens.Heading;
+      this.suggestedTitle = inlineLabel(title.tokens).trim().replace(/\s+/gu, ' ').slice(0, 240).toWellFormed();
+      this.omittedBlocks.add(title);
+    }
     for (const raw of tokens) {
+      if (raw.type === 'space' || this.omittedBlocks.has(raw)) continue;
       const token = raw as MarkedToken;
+      if (this.archive?.sectionMarkers && (token.type === 'paragraph' || token.type === 'html')) {
+        const explicit = sectionMarker.exec(token.raw.trim())?.[1];
+        if (explicit) { marker = { token, id: explicit }; continue; }
+      }
       if (token.type === 'blockquote') this.indexHeadings(token.tokens, depth + 1);
       if (token.type === 'list') {
         for (const item of token.items) this.indexHeadings(item.tokens, depth + 1);
@@ -113,14 +137,21 @@ class MarkdownConversion {
         }
         const id = markdownImportSectionId(this.sections.size + 1);
         this.sections.set(token, id);
+        if (marker) {
+          if (this.explicitAnchors.has(marker.id)) throw new Error('문서에서 같은 절 ID를 두 번 사용할 수 없습니다.');
+          this.explicitAnchors.set(marker.id, id);
+          this.omittedBlocks.add(marker.token);
+        }
         const base = title.normalize('NFC').toLowerCase().replace(/\s/gu, ' ').replace(/[^\p{L}\p{N} _-]/gu, '').replaceAll(' ', '-');
-        if (!base) continue;
-        let slug = base;
-        let next = this.nextAnchorSuffix.get(base) ?? 1;
-        while (this.anchors.has(slug)) slug = `${base}-${next++}`;
-        this.nextAnchorSuffix.set(base, next);
-        this.anchors.set(slug, id);
+        if (base) {
+          let slug = base;
+          let next = this.nextAnchorSuffix.get(base) ?? 1;
+          while (this.anchors.has(slug)) slug = `${base}-${next++}`;
+          this.nextAnchorSuffix.set(base, next);
+          this.anchors.set(slug, id);
+        }
       }
+      marker = undefined;
     }
   }
 
@@ -130,9 +161,11 @@ class MarkdownConversion {
       this.warn('unsafeLink');
       return { href: null };
     }
+    const packaged = this.archive?.resolve(address);
+    if (packaged) return packaged;
     if (address.startsWith('#')) {
       try {
-        const match = this.anchors.get(decodeURIComponent(address.slice(1)).normalize('NFC'));
+        const match = this.sectionId(decodeURIComponent(address.slice(1)));
         if (match) return { href: `#${match}` };
       } catch {
         // Keep a malformed or unrecognized fragment as original text or a source link.
@@ -153,6 +186,17 @@ class MarkdownConversion {
     }
     this.warn('unsafeLink');
     return { href: null };
+  }
+
+  private inlineImage(tokens: Token[]): RichContent | null {
+    if (!this.archive || tokens.length !== 1 || tokens[0].type !== 'image') return null;
+    const image = tokens[0] as Tokens.Image;
+    const raw = decodeDestination(image.href);
+    if (/[\\\u0000-\u001f\u007f]/.test(raw) || /^\/\//.test(raw.trim())) return null;
+    const destination = this.archive.resolve(raw.trim());
+    if (!destination?.imageSrc) return null;
+    const alt = inlineLabel(image.tokens).replace(/\s+/gu, ' ').trim();
+    return { type: 'image', attrs: { src: destination.imageSrc, alt, ...(image.title ? { title: image.title } : {}) } };
   }
 
   private inline(tokens: Token[], depth: number, marks: Mark[] = [], literal = false): RichContent[] {
@@ -235,6 +279,7 @@ class MarkdownConversion {
     if (depth > maxDepth) throw new Error(boundsMessage);
     const content: RichContent[] = [];
     for (const raw of tokens) {
+      if (this.omittedBlocks.has(raw)) continue;
       const token = raw as MarkedToken;
       switch (token.type) {
         case 'space': case 'def': case 'checkbox': break;
@@ -246,7 +291,7 @@ class MarkdownConversion {
           break;
         }
         case 'paragraph':
-          content.push(paragraph(this.inline(token.tokens, depth + 1)));
+          content.push(this.inlineImage(token.tokens) ?? paragraph(this.inline(token.tokens, depth + 1)));
           break;
         case 'text':
           content.push(paragraph(token.tokens?.length ? this.inline(token.tokens, depth + 1) : textNode(decodeText(token.text))));
@@ -299,13 +344,13 @@ function verifyConvertedSize(root: RichContent) {
   if (new TextEncoder().encode(JSON.stringify(root)).byteLength > maxDocumentBytes) throw new Error(boundsMessage);
 }
 
-export function previewMarkdownImport(source: string, sourceUrl?: string) {
+function readMarkdown(source: string, sourceUrl?: string, archive?: MarkdownArchiveConversion) {
   if (source.length > MAX_MARKDOWN_IMPORT_BYTES || new TextEncoder().encode(source).byteLength > MAX_MARKDOWN_IMPORT_BYTES) {
     throw new Error('Markdown 파일은 UTF-8 기준 512KiB까지 가져올 수 있습니다.');
   }
   if (!source.isWellFormed() || source.includes('\u0000')) throw new Error('올바른 Markdown 텍스트를 확인해 주세요.');
-  if (!source.trim()) throw new Error('가져올 Markdown 내용을 입력해 주세요.');
-  const conversion = new MarkdownConversion(sourceLocation(sourceUrl));
+  if (!source.trim() && !archive) throw new Error('가져올 Markdown 내용을 입력해 주세요.');
+  const conversion = new MarkdownConversion(sourceLocation(sourceUrl), archive);
   let tokens: Token[];
   try {
     tokens = lexer(source.replace(/^\uFEFF/, ''), { gfm: true });
@@ -314,9 +359,23 @@ export function previewMarkdownImport(source: string, sourceUrl?: string) {
     throw new Error('Markdown 구조를 읽을 수 없습니다. 원문을 확인해 주세요.');
   }
   conversion.indexHeadings(tokens);
-  const body = conversion.blocks(tokens);
-  if (!body.length) throw new Error('가져올 수 있는 Markdown 본문이 없습니다.');
-  const content: RichContent = { type: 'doc', content: body };
-  verifyConvertedSize(content);
-  return { content, suggestedTitle: conversion.suggestedTitle, warnings: conversion.warnings };
+  return {
+    suggestedTitle: conversion.suggestedTitle,
+    sectionId: (fragment: string) => conversion.sectionId(fragment),
+    build() {
+      const body = conversion.blocks(tokens);
+      if (!body.length && !archive) throw new Error('가져올 수 있는 Markdown 본문이 없습니다.');
+      const content: RichContent = { type: 'doc', content: body.length ? body : [paragraph()] };
+      verifyConvertedSize(content);
+      return { content, suggestedTitle: conversion.suggestedTitle, warnings: conversion.warnings };
+    },
+  };
+}
+
+export function previewMarkdownImport(source: string, sourceUrl?: string) {
+  return readMarkdown(source, sourceUrl).build();
+}
+
+export function readArchiveMarkdown(source: string, options: MarkdownArchiveConversion) {
+  return readMarkdown(source, undefined, options);
 }
