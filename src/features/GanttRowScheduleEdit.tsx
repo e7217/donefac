@@ -24,6 +24,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   dependencies: readonly Dependency[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
+  initialDates?: ScheduleBulkDateChanges;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
@@ -118,10 +119,10 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, focusDate, actorId, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, dependencies, calendar, focusDate, initialDates, actorId, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
-  const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>({});
+  const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
   const [drafts, setDrafts] = useState(() => [linkDraft(1)]);
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const nextDraftId = useRef(2);

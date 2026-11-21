@@ -1,8 +1,8 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
+import { ArrowRight, CalendarRange, Check, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -36,6 +36,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
+import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import './issues.css';
 import './issue-decision-source.css';
 
@@ -46,6 +47,7 @@ type IssueDependencyEditor =
   | { otherRole?: never; dependency?: never; review: RelationScheduleReview };
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
 type IssueEditError = { message: string; openBlockers?: boolean };
+const scheduleDateFields = ['startDate', 'endDate', 'dueDate'] as const;
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
@@ -165,6 +167,20 @@ function IssuePanelContent(props: IssuePanelProps) {
     });
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
+  const [rowScheduleEdit, setRowScheduleEdit] = useState<{ issue: Issue; initialDates: ScheduleBulkDateChanges } | null>(null);
+  const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; keepDateDraft: boolean } | null>(null);
+  const [scheduleUndoId, setScheduleUndoId] = useState<string | null>(null);
+  const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
+  const rowScheduleOpener = useRef<HTMLButtonElement>(null);
+  const rowScheduleGuard = useRef({ dirty: false, pending: false });
+  const trackRowScheduleDraft = useCallback((_id: string, dirty: boolean, pending = false) => {
+    rowScheduleGuard.current = { dirty, pending };
+  }, []);
+  const closeRowScheduleEdit = useCallback((restoreFocus = true) => {
+    rowScheduleGuard.current = { dirty: false, pending: false };
+    setRowScheduleEdit(null);
+    if (restoreFocus) requestAnimationFrame(() => rowScheduleOpener.current?.focus({ preventScroll: true }));
+  }, []);
   const [projectMove, setProjectMove] = useState<{ draftMessage: string | null } | null>(null);
   const projectMoveTrigger = useRef<HTMLButtonElement>(null);
   const projectMoveGuard = useRef({ dirty: false, pending: false, uncertain: false });
@@ -174,7 +190,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setProjectMove(null);
     if (restoreFocus) requestAnimationFrame(() => projectMoveTrigger.current?.focus({ preventScroll: true }));
   }, [trackProjectMoveDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || projectMove);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || rowScheduleEdit || projectMove);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
@@ -236,6 +252,24 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLoadedVersion(issue?.version);
     if (!dirty) { setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setError(null); setConflict(false); setDeleteConfirm(false); }
   }
+  if (scheduleReflection) {
+    setScheduleReflection(null);
+    if (issue && draft && baseDraft && issue.projectId === baseDraft.projectId && draft.version === baseDraft.version) {
+      const { anchorVersion, keepDateDraft } = scheduleReflection;
+      const expectedVersion = baseDraft.version + (anchorVersion === null ? 0 : 1);
+      // The reviewed schedule is the only change to this form's saved version.
+      if (issue.version === expectedVersion && (anchorVersion === null || issue.version === anchorVersion)) {
+        const nextDraft = { ...draft, version: issue.version, updatedAt: issue.updatedAt };
+        for (const field of scheduleDateFields) {
+          if (keepDateDraft && draft[field] !== baseDraft[field]) continue;
+          if (field === 'dueDate') nextDraft.dueDate = issue.dueDate;
+          else nextDraft[field] = issue[field];
+        }
+        setDraft(nextDraft);
+        setBaseDraft(issue);
+      }
+    }
+  }
   const confirmDiscard = useCallback(() => {
     if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
     if (!dirtyRef.current) return true;
@@ -250,13 +284,14 @@ function IssuePanelContent(props: IssuePanelProps) {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
-      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || projectMoveGuard.current.pending) {
+      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending || projectMoveGuard.current.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
       }
       const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
       if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
+      if (rowScheduleGuard.current.dirty) childNames.push('일정과 연결 입력');
       if (hasCommentEditDraft()) childNames.push('댓글 수정 입력');
       const moveGuard = projectMoveGuard.current;
       const moveDiscard = moveGuard.uncertain ? '이동 결과를 아직 확인하지 못했습니다. 다른 화면으로 이동할까요?' : '작성 중인 프로젝트 이동 설정을 버릴까요?';
@@ -277,17 +312,18 @@ function IssuePanelContent(props: IssuePanelProps) {
           setCommentDraft(emptyCommentDraft()); setError(null); setConflict(false);
         });
       }
+      if (rowScheduleEdit) afterAcceptedNavigation(event, () => closeRowScheduleEdit(false));
       if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
       if (!dirtyRef.current && !savingRef.current && !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
-          !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending) return;
+          !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify, tab, projectMove, closeProjectMove, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
+  }, [issue, notify, tab, projectMove, rowScheduleEdit, closeProjectMove, closeRowScheduleEdit, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -396,6 +432,54 @@ function IssuePanelContent(props: IssuePanelProps) {
     ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
     : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
       ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
+  function openRowScheduleEdit() {
+    if (!issue || !draft || !baseDraft) return;
+    if (savingRef.current || dependencyBusyRef.current || commenting || isCommentEditPending() ||
+      linkingRef.current || childDraft.current?.pending || gitlabDraft.current?.pending) {
+      notify('현재 요청이 끝난 뒤 일정과 연결을 편집해 주세요.', 'error');
+      return;
+    }
+    const initialDates: ScheduleBulkDateChanges = {};
+    for (const field of scheduleDateFields) {
+      if (draft[field] !== baseDraft[field]) initialDates[field] = draft[field] ?? null;
+    }
+    setRowScheduleEdit({ issue, initialDates });
+  }
+  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean) {
+    await refresh();
+    setScheduleReflection({ anchorVersion: result.updated.find(value => value.id === issueId)?.version ?? null, keepDateDraft });
+    setScheduleWarnings(result.warnings);
+  }
+  async function reflectRowScheduleEdit(result: SchedulePasteApplyResult) {
+    setScheduleUndoId(result.undoId);
+    await reflectScheduleChange(result, false);
+    closeRowScheduleEdit();
+    const datesChanged = result.updated.length > 0;
+    const linksChanged = Boolean(result.dependencyChanges);
+    notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
+      : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
+  }
+  async function undoRowScheduleEdit() {
+    if (!scheduleUndoId || dependencyBusyRef.current || savingRef.current || rowScheduleGuard.current.pending) return;
+    dependencyBusyRef.current = true;
+    setDependencyBusy(true);
+    try {
+      const result = await post<Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>>('/schedule/undo', { undoId: scheduleUndoId });
+      setScheduleUndoId(null);
+      try {
+        await reflectScheduleChange(result, true);
+        notify('일정과 연결 변경을 되돌렸습니다.');
+      } catch (cause) {
+        notify(`일정과 연결 변경을 되돌렸습니다. 최신 업무를 불러오지 못했습니다. ${errorMessage(cause)}`, 'error');
+      }
+      requestAnimationFrame(() => rowScheduleOpener.current?.focus({ preventScroll: true }));
+    } catch (cause) {
+      notify(errorMessage(cause), 'error');
+    } finally {
+      dependencyBusyRef.current = false;
+      setDependencyBusy(false);
+    }
+  }
   function projectMoveDraftMessage() {
     const childDrafts = [childDraft.current, gitlabDraft.current];
     if (savingRef.current || commenting || isCommentEditPending() || linkingRef.current || dependencyBusyRef.current || childDrafts.some(value => value?.pending)) {
@@ -650,10 +734,20 @@ function IssuePanelContent(props: IssuePanelProps) {
           <label className="issue-form-label">담당자<select aria-label="담당자" className="field" value={draft.assigneeId || ''} onChange={e => update('assigneeId', e.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label className="issue-form-label">시작일<input aria-label="시작일" type="date" className="field" value={draft.startDate || ''} onChange={e => update('startDate', e.target.value || null)} /></label>
           <label className="issue-form-label">종료일<input aria-label="종료일" type="date" className="field" value={draft.endDate || ''} onChange={e => update('endDate', e.target.value || null)} /></label>
-          <label className="issue-form-label">요청자<IssueReporterSelect value={draft.reporterId} users={data.users} onChange={value => update('reporterId', value)} /></label>
-          <div className="issue-grid-wide"><button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
-            onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button></div>
           <label className="issue-form-label">목표 마감일<input aria-label="목표 마감일" type="date" className="field" value={draft.dueDate || ''} onChange={e => update('dueDate', e.target.value || null)} /></label>
+          <label className="issue-form-label">요청자<IssueReporterSelect value={draft.reporterId} users={data.users} onChange={value => update('reporterId', value)} /></label>
+          <div className="issue-grid-wide issue-date-actions">
+            <button ref={rowScheduleOpener} className="btn" type="button" aria-haspopup="dialog" disabled={dependencyBusy || commenting}
+              onClick={openRowScheduleEdit}><CalendarRange size={15} aria-hidden="true" />일정과 연결 편집</button>
+            <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
+              onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button>
+            {scheduleUndoId && <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
+              onClick={() => void undoRowScheduleEdit()}><Undo2 size={15} aria-hidden="true" />일정과 연결 되돌리기</button>}
+          </div>
+          {scheduleWarnings.length > 0 && <div className="issue-grid-wide issue-schedule-warnings" role="status">
+            <ul>{scheduleWarnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>
+            <button className="issue-icon-button" type="button" onClick={() => setScheduleWarnings([])} aria-label="일정 경고 닫기"><X size={14} aria-hidden="true" /></button>
+          </div>}
           <label className="issue-form-label">예상 소요 (포인트)<input aria-label="예상 소요 (포인트)" className="field" type="number" min="0" step="0.5" placeholder="미정" value={draft.estimate ?? ''} onChange={e => update('estimate', e.target.value === '' ? null : Number(e.target.value))} /></label>
           <label className="issue-form-label">계획 작업 시간 (분)<input aria-label="계획 작업 시간 (분)" className="field" type="number" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} placeholder="미정" value={draft.plannedEffortMinutes ?? ''} onChange={e => update('plannedEffortMinutes', e.target.value === '' ? null : Number(e.target.value))} /></label>
           <label className="issue-form-label issue-grid-wide">상위 업무<select aria-label="상위 업무" className="field" value={draft.parentId || ''} onChange={e => update('parentId', e.target.value || null)}><option value="">없음</option>{data.issues.filter(i => i.projectId === draft.projectId && i.id !== issueId).map(i => <option key={i.id} value={i.id}>{i.key} · {i.title}</option>)}</select></label>
@@ -809,6 +903,10 @@ function IssuePanelContent(props: IssuePanelProps) {
       onDraftChange={trackProjectMoveDraft} onClose={closeProjectMove} refresh={refreshIssueRelations} />}
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
       onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
+    {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
+      issues={data.issues} dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
+      actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
+      onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
       anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}
       relationReview={relationScheduleReview && { sourceIssueId: relationScheduleReview.relation.sourceIssueId,
