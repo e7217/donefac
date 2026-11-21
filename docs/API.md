@@ -75,6 +75,10 @@ curl --fail-with-body \
 
 `DELETE /api/v1/resource-links/:id`는 양쪽 대상에 접근할 수 있는 쓰기 키를 사용하며 성공하면 `{ok: true}`를 반환한다. 결정 근거가 붙은 연결의 해제를 요청하면 `409`를 반환한다. 해당 근거는 티켓 화면에서 원문과 함께 확인할 수 있다.
 
+## 팀 간트의 프로젝트 간 차단
+
+브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 Teamspace 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
+
 ## 선후행 업무 연결
 
 `GET /api/v1/projects/:id/dependencies`는 프로젝트에 두 업무가 모두 있는 연결을 `Dependency[]`로 반환한다. 각 항목에는 `id`, `predecessorId`, `successorId`, `type`, `lagDays`, `version`이 있다. 읽기 키로 조회하고 쓰기 키로 변경한다. 변경할 두 업무와 차단 관계의 두 업무는 모두 키의 허용 범위에 있어야 한다. 아래 브라우저 경로의 `/api`를 `/api/v1`으로 바꿔 자동화 키를 사용한다.

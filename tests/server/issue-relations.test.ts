@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Dependency, Issue, IssueRelation, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Dependency, Issue, IssueRelation, TeamScheduleBlocker, WorkspaceSnapshot } from '../../shared/types.js';
 
 const actor = 'user-seo';
 const otherActor = 'user-min';
@@ -47,7 +47,7 @@ async function fixture(t: TestContext) {
   async function request<T = unknown>(path: string, { method = 'GET', body, headers }: RequestOptions = {}) {
     const result = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor, ...headers },
       body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: result.status, data: await result.json() as T };
+    return { status: result.status, headers: result.headers, data: await result.json() as T };
   }
   async function call<T = unknown>(path: string, options?: RequestOptions, status = 200) {
     const result = await request<T>(path, options);
@@ -162,6 +162,55 @@ test('relation API keys can only read or edit edges whose two endpoints are in s
   assert.deepEqual(await f.call(path, { headers: wide }), [local]);
   const events = (await f.call<WorkspaceSnapshot>('/workspace')).activities.filter(event => event.action.startsWith('업무 관계 '));
   assert.ok(events.length && events.every(event => event.actorId === actor));
+});
+
+test('team Gantt blockers expose only native cross-project relations between live issues, leaving status and dates to the chart', async t => {
+  const f = await fixture(t);
+  const source = await f.create('다른 프로젝트의 차단 원인');
+  const target = await f.create('외부 차단을 받는 업무', secondary);
+  const local = await f.create('같은 프로젝트의 차단 대상');
+  const imported: IssueRelation = {
+    id: randomUUID(), sourceIssueId: target.id, targetIssueId: source.id,
+    type: 'blocks', version: 1, createdAt: new Date().toISOString(),
+  };
+  const backup = await f.call<Backup>('/export');
+  await f.call('/import', { method: 'POST', body: { data: { ...backup, issueRelations: [...backup.issueRelations, imported] } } });
+  const scheduleBefore = (await f.call<WorkspaceSnapshot>('/workspace')).dependencies;
+
+  await f.call(pathFor(source.id), { method: 'POST', body: add(local.id, 'blocks') }, 201);
+  await f.call(pathFor(source.id), { method: 'POST', body: add(target.id, 'related') }, 201);
+  const original = await f.call<IssueRelation>(pathFor(source.id), { method: 'POST', body: add(target.id, 'blocks') }, 201);
+  const payload = (relation: IssueRelation): TeamScheduleBlocker => {
+    const { id, sourceIssueId, targetIssueId, version } = relation;
+    return { id, sourceIssueId, targetIssueId, version };
+  };
+  const readPath = '/schedule/team-blockers';
+  const result = await f.request<TeamScheduleBlocker[]>(readPath);
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(result.data, [payload(original)]);
+
+  const currentSource = (await f.call<WorkspaceSnapshot>('/workspace')).issues.find(issue => issue.id === source.id);
+  assert.ok(currentSource);
+  const terminal = await f.call<Issue>(`/issues/${source.id}`, { method: 'PATCH', body: { expectedVersion: currentSource.version, status: 'done' } });
+  assert.equal(terminal.status, 'done');
+  assert.deepEqual(await f.call(readPath), [payload(original)]);
+
+  const reversed = await f.call<IssueRelation>(child(source.id, original.id), { method: 'PATCH', body: {
+    expectedVersion: original.version, type: 'blocks', direction: 'incoming',
+  } });
+  assert.ok(reversed.version > original.version);
+  assert.deepEqual(await f.call(readPath), [{ ...payload(reversed), sourceIssueId: target.id, targetIssueId: source.id }]);
+  const readKey = await f.key('팀 간트 전체 범위 읽기', [primary, secondary], 'read');
+  await f.call(`/v1${readPath}`, { headers: readKey }, 403);
+
+  const { trashEntryId } = await f.call<{ trashEntryId: string }>(`/issues/${source.id}`, { method: 'DELETE', body: { expectedVersion: terminal.version } });
+  assert.deepEqual(await f.call(readPath), []);
+  await f.call(`/trash/${trashEntryId}/restore`, { method: 'POST', body: {} });
+  const [restored] = await f.call<TeamScheduleBlocker[]>(readPath);
+  assert.ok(restored.version > reversed.version);
+  assert.deepEqual({ ...restored, version: reversed.version }, payload(reversed));
+  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).dependencies, scheduleBefore);
 });
 
 test('restore preserves legacy labels and advances active and archived team links past stale versions', async t => {

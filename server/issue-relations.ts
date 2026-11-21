@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isIssueRelationDirection, isIssueRelationType, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, type TeamspaceIssueRelation } from '../shared/issue-relations.js';
-import type { Issue, IssueRelation } from '../shared/types.js';
+import type { Issue, IssueRelation, TeamScheduleBlocker } from '../shared/types.js';
 import { findTeamspaceIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { Store } from './store.js';
 
@@ -52,6 +52,19 @@ export class IssueRelationsService {
   list(issueId: string): IssueRelation[] {
     this.requireIssue(issueId);
     return listIssueRelations(this.store, issueId);
+  }
+
+  teamScheduleBlockers(): TeamScheduleBlocker[] {
+    return this.store.db.prepare(`SELECT relation.id,
+      relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
+      json_extract(relation.json, '$.version') AS version
+      FROM issue_relations AS relation
+      JOIN issues AS source ON source.id=relation.source_issue_id
+      JOIN issues AS target ON target.id=relation.target_issue_id
+      WHERE json_extract(relation.json, '$.origin')='teamspace'
+        AND json_extract(relation.json, '$.type')='blocks'
+        AND source.project_id<>target.project_id
+      ORDER BY relation.source_issue_id, relation.target_issue_id`).all() as TeamScheduleBlocker[];
   }
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {

@@ -41,6 +41,7 @@ import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityE
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDependencyFindings';
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
+import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
@@ -97,11 +98,13 @@ const BAR_EDGE_INSET = 2;
 const MAX_TIMELINE_DAYS = 180;
 const ANALYSIS_PANEL_ID = 'gantt-schedule-analysis';
 const FINDINGS_PANEL_ID = 'gantt-dependency-findings';
+const TEAM_BLOCKERS_PANEL_ID = 'gantt-team-blockers';
 const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const RANGE_PICK_DRAFT = 'date-range-pick';
 const CREATE_ISSUE_DRAFT = 'create';
 const CASCADE_DRAFT = 'successor-schedule';
 const BULK_DATES_DRAFT = 'schedule-bulk-dates';
+const TEAM_BLOCKER_DRAFT = 'team-blocker';
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
@@ -183,6 +186,7 @@ function ProjectGantt(props: GanttProps) {
   const [reservationsOpen, setReservationsOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [findingsOpen, setFindingsOpen] = useState(false);
+  const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
   const [previousFocusRequest, setPreviousFocusRequest] = useState(focusRequest);
@@ -228,6 +232,7 @@ function ProjectGantt(props: GanttProps) {
   const restoreCreateFocus = useRef(false);
   const successorTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
+  const teamBlockersTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const dependencyFocusTrigger = useRef<HTMLButtonElement>(null);
   const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
@@ -257,6 +262,7 @@ function ProjectGantt(props: GanttProps) {
     else draftsRef.current.delete(id);
   }, []);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
+  const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
   const markBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
   useEffect(() => {
     const guard = (event: Event) => {
@@ -298,6 +304,11 @@ function ProjectGantt(props: GanttProps) {
     };
   }, [notify, refresh]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
+  function closeTeamBlockers() {
+    if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
+    setTeamBlockersOpen(false);
+    teamBlockersTrigger.current?.focus({ preventScroll: true });
+  }
   function finishCreating() {
     restoreCreateFocus.current = true;
     setCreateOpen(false);
@@ -511,6 +522,7 @@ function ProjectGantt(props: GanttProps) {
   const activeFindings = dependencyFocus ? findings.filter(({ predecessor, successor }) => issueRows.has(predecessor.id) && issueRows.has(successor.id)) : findings;
   const activeConflictCount = activeFindings.filter(finding => finding.check.kind === 'conflict').length;
   const canShowFindings = hasProject || (allProjects && data.projects.length > 0);
+  const canShowTeamBlockers = allProjects && data.projects.length > 1;
   const datePickerRow = datePicker ? issueRows.get(datePicker.issue.id) : undefined;
   const activeDatePicker = datePickerRow ? datePicker : null;
   function focusPickedDay(day: number) {
@@ -1120,6 +1132,11 @@ function ProjectGantt(props: GanttProps) {
         {activeFindings.length > 0 && <span className="gantt-findings-count" aria-hidden="true">{activeFindings.length}</span>}
       </button>
       <span id="gantt-dependency-summary" hidden>충돌 {activeConflictCount}건, 전체 점검 항목 {activeFindings.length}건</span>
+      {canShowTeamBlockers && <button ref={teamBlockersTrigger} className="btn" type="button" aria-expanded={teamBlockersOpen}
+        aria-controls={teamBlockersOpen ? TEAM_BLOCKERS_PANEL_ID : undefined} data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
+        disabled={busy || issueOverlayOpen} onClick={() => teamBlockersOpen ? closeTeamBlockers() : setTeamBlockersOpen(true)}>
+        <Network size={15} aria-hidden="true" />프로젝트 간 차단
+      </button>}
       {hasProject && <button ref={analysisTrigger} className="btn" type="button" aria-expanded={analysisOpen} aria-controls={analysisOpen ? ANALYSIS_PANEL_ID : undefined} onClick={() => setAnalysisOpen(open => !open)}>
         <ChartNoAxesCombined size={15} aria-hidden="true" />일정 여유 분석
       </button>}
@@ -1152,6 +1169,11 @@ function ProjectGantt(props: GanttProps) {
       disabled={busy || Boolean(issueOverlayOpen)} onLocateDate={locateFindingDate}
       onEditLink={(dependency, opener) => showLinkEditor(opener, { dependency })}
       onClose={() => { setFindingsOpen(false); findingsTrigger.current?.focus({ preventScroll: true }); }} />}
+    {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
+      visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
+      busy={busy || Boolean(issueOverlayOpen)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
+      onPointerDown={keepInlineDateFocus} refresh={refresh} notify={notify} onClose={closeTeamBlockers}
+      onDraftChange={trackTeamBlockerDraft} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateAnalysisDate} />}

@@ -1703,6 +1703,9 @@ export function createApp(options: {
   app.get('/api/issues/:id/relations',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));
   });
+  app.get('/api/schedule/team-blockers',(_req,res)=>{
+    res.set('Cache-Control','no-store').json(issueRelations.teamScheduleBlockers());
+  });
   app.post('/api/issues/:id/relations',(req,res)=>{
     const { relation, created }=issueRelations.create(req.params.id,req.body,relationAudit(req),relationNotification(req));
     res.status(created?201:200).json(relation);

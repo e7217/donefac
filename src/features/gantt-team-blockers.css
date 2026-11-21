@@ -1,0 +1,154 @@
+.gantt-team-blockers {
+  min-width: 0;
+  margin: 16px 0;
+  padding: 14px;
+}
+
+.gantt-team-blockers-header,
+.gantt-team-blockers-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.gantt-team-blockers-header {
+  justify-content: space-between;
+}
+
+.gantt-team-blockers-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 16px;
+}
+
+.gantt-team-blockers-status,
+.gantt-team-blockers-form p {
+  margin: 8px 0 0;
+  color: #53685e;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-blockers p[role='alert'] {
+  color: #a12627;
+}
+
+.gantt-team-blockers-form,
+.gantt-team-blockers-list > li {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dce6df;
+  border-radius: 6px;
+}
+
+.gantt-team-blockers-form {
+  margin-top: 10px;
+  background: #f6f8f7;
+}
+
+.gantt-team-blockers-form h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.gantt-team-blockers-form fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.gantt-team-blockers-picker {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gantt-team-blockers-picker label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.gantt-team-blockers-picker .field {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.gantt-team-blockers-form > .gantt-team-blockers-actions {
+  margin-top: 10px;
+}
+
+.gantt-team-blockers-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-team-blockers-list > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.gantt-team-blockers-endpoint {
+  min-width: 0;
+}
+
+.gantt-team-blockers-endpoint small,
+.gantt-team-blockers-picker small {
+  color: #53685e;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-blockers-endpoint .gantt-team-blockers-actions {
+  flex-wrap: nowrap;
+}
+
+.gantt-team-blockers .gantt-team-blockers-issue {
+  display: block;
+  min-width: 0;
+  padding-inline: 5px;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gantt-team-blockers .issue-icon-button {
+  flex: none;
+}
+
+.gantt-team-blockers-arrow {
+  color: #53685e;
+}
+
+.gantt-team-blockers-pages {
+  justify-content: flex-end;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+@media (max-width: 550px) {
+  .gantt-team-blockers-form fieldset,
+  .gantt-team-blockers-list > li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gantt-team-blockers-arrow {
+    transform: rotate(90deg);
+  }
+}
