@@ -89,12 +89,30 @@
 .document-publication-state,
 .document-publication-review-actions,
 .document-publication-request,
+.document-publication-comparison,
 .document-publication-snapshot {
   min-width: 0;
   padding: 20px;
   border: 1px solid #dfe7e1;
   border-radius: 10px;
   background: #fff;
+}
+
+.document-publication-snapshot-actions,
+.document-publication-comparison > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.document-publication-comparison > header {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.document-publication-comparison > header > h3 {
+  margin: 0;
 }
 
 .document-publication-state {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_DOCUMENT_REVIEWERS } from '../shared/types.js';
 import type {
-  DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion,
+  DocPage, DocRevision, DocumentPublicationComparison, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion,
   DocumentReview, DocumentReviewApproval, DocumentReviewParticipant, RichContent, TeamNotificationKind, User,
 } from '../shared/types.js';
 import type { NotificationsService } from './notifications.js';
@@ -33,6 +33,10 @@ function version(value: unknown, minimum = 0): number {
   if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) >= Number.MAX_SAFE_INTEGER) fail(400, '문서 검토·발행 버전을 확인해 주세요.');
   return Number(value);
 }
+function workspaceGeneration(value: unknown): string | null {
+  if (value !== null && typeof value !== 'string') fail(409, '워크스페이스 복원 상태를 확인해 주세요.');
+  return value;
+}
 function groupEntries(value: unknown): unknown[] {
   if (!Array.isArray(value) || value.length < 2 || value.length > MAX_DOCUMENT_REVIEWERS) {
     fail(400, `공동 검토 기록에는 2~${MAX_DOCUMENT_REVIEWERS}명의 검토자가 필요합니다.`);
@@ -62,9 +66,7 @@ export class DocumentPublicationService {
     return row ? JSON.parse(row.json) as DocumentPublicationState : { documentId, version: 0, review: null, published: null };
   }
   private generation(): string | null {
-    const value: unknown = this.store.setting('attachmentImportGeneration');
-    if (value !== null && typeof value !== 'string') fail(409, '워크스페이스 복원 상태를 확인해 주세요.');
-    return value;
+    return workspaceGeneration(this.store.setting('attachmentImportGeneration'));
   }
   private summary(documentId: string, revisionId: string | undefined): RevisionSummary | null {
     if (!revisionId) return null;
@@ -126,6 +128,47 @@ export class DocumentPublicationService {
     `).get(documentId, revisionId, path) as { json: string } | undefined;
     if (!row) fail(409, '검토·발행 저장본이 변경되었거나 삭제되었습니다.');
     return JSON.parse(row.json) as DocRevision;
+  }
+  comparison(documentId: string, query: URLSearchParams): DocumentPublicationComparison {
+    id(documentId, '문서 ID');
+    if (query.size !== 4) fail(400, '문서 비교에는 네 가지 조회 조건을 각각 한 번씩 지정해 주세요.');
+    const versionText = query.get('expectedVersion');
+    if (versionText === null || !/^(?:0|[1-9]\d*)$/u.test(versionText)) {
+      fail(400, '문서 검토·발행 버전을 확인해 주세요.');
+    }
+    const expectedVersion = version(Number(versionText));
+    const generationText = query.get('workspaceGeneration');
+    const expectedGeneration = generationText === '' ? null : id(generationText, '워크스페이스 복원 세대');
+    const publishedRevisionId = id(query.get('publishedRevisionId'), '비교할 발행본 ID');
+    const reviewRevisionId = id(query.get('reviewRevisionId'), '비교할 검토본 ID');
+
+    // Resolve the generation, publication state and both pinned bodies from the same database snapshot.
+    const row = this.store.db.prepare(`
+      SELECT json_extract(p.json,'$.version') AS version, g.value AS generation,
+        published.json AS published, review.json AS review
+      FROM documents d
+      LEFT JOIN document_publications p ON p.document_id=d.id
+      LEFT JOIN settings g ON g.key='attachmentImportGeneration'
+      LEFT JOIN revisions published ON published.document_id=d.id AND published.id=?
+        AND published.id=json_extract(p.json,'$.published.revisionId')
+      LEFT JOIN revisions review ON review.document_id=d.id AND review.id=?
+        AND review.id=json_extract(p.json,'$.review.revisionId')
+      WHERE d.id=?
+    `).get(publishedRevisionId, reviewRevisionId, documentId) as {
+      version: number | null; generation: string | null; published: string | null; review: string | null;
+    } | undefined;
+    if (!row) fail(404, '문서를 찾을 수 없습니다.');
+    const generation = workspaceGeneration(row.generation === null ? null : JSON.parse(row.generation));
+    if (expectedGeneration !== generation) fail(409, '워크스페이스가 복원되었습니다. 문서를 다시 불러와 주세요.');
+    if (expectedVersion !== row.version || !row.published || !row.review || publishedRevisionId === reviewRevisionId) {
+      fail(409, '비교할 검토·발행 저장본이 변경되었거나 없습니다. 최신 상태를 불러와 주세요.');
+    }
+    return {
+      version: row.version,
+      workspaceGeneration: generation,
+      published: JSON.parse(row.published) as DocRevision,
+      review: JSON.parse(row.review) as DocRevision,
+    };
   }
   transition(documentId: string, actorId: string, body: Record<string, unknown>, authorizeBody?: (content: RichContent) => void): DocumentPublicationView {
     return this.store.transaction(() => {

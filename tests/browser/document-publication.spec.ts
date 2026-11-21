@@ -128,3 +128,125 @@ test('360px에서 지정한 검토자가 고정된 버전을 확인하고 발행
     for (const document of documents.reverse()) await request.delete(`/api/documents/${document.id}`);
   }
 });
+
+test('360px에서 발행본과 고정 검토본의 차이를 보고 메모와 편집 초안을 유지한다', async ({ page, request }) => {
+  test.setTimeout(65_000);
+  const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const [author, reviewer] = workspace.users;
+  const project = workspace.projects[0];
+  const suffix = randomUUID().slice(0, 8);
+  const firstTitle = `서버 운영 안내 ${suffix}`;
+  const opened = await request.post('/api/documents', {
+    headers: { 'X-Actor-Id': author.id },
+    data: { projectId: project.id, title: firstTitle, content: body(paragraph('현재 발행 중인 원래 절차')) },
+  });
+  expect(opened.status(), await opened.text()).toBe(201);
+  const original = await opened.json() as DocPage;
+  const documentPath = `/api/documents/${original.id}`;
+  const publicationPath = `${documentPath}/publication`;
+  const comparisonPath = `${publicationPath}/comparison`;
+  const note = `비교 화면을 열기 전에 작성한 검토 메모 ${suffix}`;
+  const latestTitle = `검토 이후 서버에 저장한 별도 초안 ${suffix}`;
+  const unsavedTitle = `비교할 때 탭에만 남아 있는 초안 ${suffix}`;
+
+  async function write(action: string, state: Pick<DocumentPublicationView, 'version' | 'workspaceGeneration'>,
+    actor: string, data: Record<string, unknown> = {}) {
+    const response = await request.post(publicationPath, {
+      headers: { 'X-Actor-Id': actor }, data: { action, expectedVersion: state.version, workspaceGeneration: state.workspaceGeneration, ...data },
+    });
+    expect(response.status(), await response.text()).toBe(200);
+    return await response.json() as DocumentPublicationView;
+  }
+  async function update(before: DocPage, title: string, text: string) {
+    const response = await request.patch(documentPath, {
+      headers: { 'X-Actor-Id': author.id },
+      data: { expectedVersion: before.version, contentSchemaVersion: 4, title, content: body(paragraph(text)) },
+    });
+    expect(response.status(), await response.text()).toBe(200);
+    return await response.json() as DocPage;
+  }
+
+  try {
+    const state = await (await request.get(publicationPath)).json() as DocumentPublicationView;
+    const first = await write('request', state, author.id, { expectedDocumentVersion: original.version, reviewerId: reviewer.id });
+    const published = await write('publish', first, reviewer.id);
+    const candidate = await update(original, `이번에 검토할 문서 제목 ${suffix}`, '이번 검토에 새로 추가한 배포 단계');
+    const pending = await write('request', published, author.id, { expectedDocumentVersion: candidate.version, reviewerId: reviewer.id });
+    const later = await update(candidate, latestTitle, '다음 초안의 본문은 검토와 별개');
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/documents/${original.id}`);
+    await page.getByLabel('작업자 선택', { exact: true }).selectOption(reviewer.id);
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(title).toHaveValue(latestTitle);
+    await title.fill(unsavedTitle);
+    const open = page.getByRole('button', { name: '검토·발행', exact: true });
+    await open.click();
+    const dialog = page.getByRole('dialog', { name: '문서 검토·발행', exact: true });
+    const compare = dialog.getByRole('button', { name: '발행본과 비교', exact: true });
+    const comparison = dialog.getByRole('region', { name: '발행본과 검토본 비교', exact: true });
+    const resultMemo = dialog.getByLabel('검토 결과 메모', { exact: true });
+    const publish = dialog.getByRole('button', { name: '검토본 발행', exact: true });
+    await resultMemo.fill(note);
+    await expect(publish).toBeDisabled();
+
+    const isComparison = (endpoint: string) => new URL(endpoint).pathname === comparisonPath;
+    let releaseComparison!: () => void;
+    const heldComparison = new Promise<void>(resolve => { releaseComparison = resolve; });
+    await page.route(url => url.pathname === comparisonPath, async route => {
+      await heldComparison;
+      await route.continue();
+    }, { times: 1 });
+    const pairResponse = page.waitForResponse(response => isComparison(response.url()) && response.request().method() === 'GET');
+    try {
+      await compare.click();
+      await resultMemo.focus();
+    } finally {
+      releaseComparison();
+    }
+    expect((await pairResponse).status()).toBe(200);
+    await expect(comparison).toContainText(`발행본 · 버전 ${original.version}`);
+    await expect(comparison).toContainText(`검토본 · 버전 ${candidate.version}`);
+    await expect(comparison).toContainText(original.title);
+    await expect(comparison).toContainText(candidate.title);
+    await expect(comparison).toContainText('현재 발행 중인 원래 절차');
+    await expect(comparison).toContainText('이번 검토에 새로 추가한 배포 단계');
+    await expect(comparison).not.toContainText(/다음 초안의 본문|비교할 때 탭에만/u);
+    await expect(comparison.locator('[contenteditable=true]')).toHaveCount(0);
+    await expect(resultMemo).toHaveValue(note);
+    await expect(resultMemo).toBeFocused();
+    await expect(publish).toBeDisabled();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    await comparison.getByRole('button', { name: '비교 닫기', exact: true }).click();
+    await expect(comparison).toHaveCount(0);
+    await expect(compare).toBeFocused();
+    await expect(resultMemo).toHaveValue(note);
+
+    await compare.click();
+    await expect(comparison).toContainText(candidate.title);
+    const isReviewSnapshot = (url: URL) => url.pathname === `${publicationPath}/snapshot` && url.searchParams.get('kind') === 'review';
+    await page.route(isReviewSnapshot, async route => {
+      await write('withdraw', pending, author.id);
+      await route.continue();
+    }, { times: 1 });
+    const changed = page.waitForResponse(response => isReviewSnapshot(new URL(response.url())) && response.request().method() === 'GET');
+    await dialog.getByRole('button', { name: '검토본 불러오기', exact: true }).click();
+    expect((await changed).status()).toBe(404);
+    await expect(dialog.getByRole('status').filter({ hasText: '상태가 바뀌었거나' })).toBeVisible();
+    await expect(comparison).toHaveCount(0);
+    await expect(publish).toBeDisabled();
+    await expect(resultMemo).toHaveValue(note);
+    const discardMemo = page.waitForEvent('dialog').then(async confirmation => {
+      expect(confirmation.message()).toContain('메모를 버리고 닫을까요?');
+      await confirmation.accept();
+    });
+    await dialog.getByRole('button', { name: '검토·발행 닫기', exact: true }).click();
+    await discardMemo;
+    await expect(dialog).toBeHidden();
+    await expect(title).toHaveValue(unsavedTitle);
+    const saved = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).documents.find(doc => doc.id === later.id);
+    expect(saved?.title).toBe(later.title);
+  } finally {
+    await request.delete(documentPath);
+  }
+});

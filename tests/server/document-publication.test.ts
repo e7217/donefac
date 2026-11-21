@@ -11,6 +11,7 @@ import { WebSocket } from 'ws';
 import * as Y from 'yjs';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import type {
   ApiKeyCreated,
@@ -30,7 +31,7 @@ type Backup = WorkspaceSnapshot & {
   documentPublications: DocumentPublicationState[];
   teamNotifications: TeamNotification[];
 };
-type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
+type Action = 'request' | 'publish' | 'approve' | 'request_changes' | 'withdraw';
 const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 
 async function fixture() {
@@ -82,7 +83,7 @@ async function document(f: Fixture, id: string) {
 }
 async function edit(f: Fixture, before: DocPage, text: string, title = before.title) {
   const response = await f.call<DocPage>(`/documents/${before.id}`, 'PATCH', {
-    expectedVersion: before.version, title, content: content(text),
+    expectedVersion: before.version, title, content: content(text), contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION,
   });
   assert.equal(response.status, 200, JSON.stringify(response.data));
   return response.data;
@@ -114,6 +115,60 @@ function diskRevision(f: Fixture, id: string) {
   assert.ok(row);
   return JSON.parse(row.json) as DocRevision;
 }
+
+test('comparison reads the exact pinned pair after editing and rejects stale state, pointers and restore generations', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const baseline = await make(f, '처음 발행한 본문');
+  const published = await accepted(transition(f, await requestReview(f, baseline), 'publish', 'user-seo'));
+  const requested = await edit(f, baseline, '이번 검토 요청의 본문', '검토 요청 제목');
+  const state = await accepted(transition(f, published, 'request', 'user-min', {
+    expectedDocumentVersion: requested.version, reviewerIds: ['user-seo', 'user-jun'],
+  }));
+  const later = await edit(f, requested, '비교에서 제외할 다음 편집', '다음 편집 제목');
+  const publishedRevision = await snapshot(f, state, 'published');
+  const reviewRevision = await snapshot(f, state, 'review');
+  type Comparison = { version: number; workspaceGeneration: string | null; published: DocRevision; review: DocRevision };
+  const comparison = (view: DocumentPublicationView, options: Record<string, string> = {}, id = baseline.id) => f.call<Comparison>(
+    `/documents/${id}/publication/comparison?${new URLSearchParams({
+      expectedVersion: String(view.version), workspaceGeneration: view.workspaceGeneration ?? '',
+      publishedRevisionId: publishedRevision.id, reviewRevisionId: reviewRevision.id, ...options,
+    })}`, 'GET', undefined, 'user-seo',
+  );
+  const saved = await f.call<Backup>('/export');
+  assert.equal(saved.status, 200);
+  assert.equal(publishedRevision.version, baseline.version);
+  assert.equal(reviewRevision.version, requested.version);
+  assert.equal(publishedRevision.plainText, '처음 발행한 본문');
+  assert.equal(reviewRevision.plainText, '이번 검토 요청의 본문');
+  const pair = { version: state.version, workspaceGeneration: state.workspaceGeneration, published: publishedRevision, review: reviewRevision };
+  assert.deepEqual(await comparison(state), { status: 200, data: pair });
+  assert.equal((await comparison(state, { publishedRevisionId: reviewRevision.id })).status, 409);
+  const latestRevision = saved.data.revisions.find(row => row.documentId === baseline.id && row.version === later.version);
+  assert.ok(latestRevision);
+  assert.equal((await comparison(state, { reviewRevisionId: latestRevision.id })).status, 409);
+  assert.equal((await comparison(state, {}, 'missing-document')).status, 404);
+  assert.deepEqual(await publication(f, baseline.id), { ...state, documentVersion: later.version });
+  const rechecked = (await f.call<Backup>('/export')).data;
+  for (const field of ['documents', 'revisions', 'documentPublications', 'activities', 'teamNotifications'] as const) {
+    assert.deepEqual(rechecked[field], saved.data[field]);
+  }
+
+  const partial = await accepted(transition(f, state, 'approve', 'user-seo', { note: '먼저 검토를 마쳤습니다.' }));
+  assert.equal(partial.version, state.version + 1);
+  assert.equal(partial.published?.revisionId, publishedRevision.id);
+  assert.equal(partial.review?.revisionId, reviewRevision.id);
+  assert.equal((await comparison(state)).status, 409);
+  assert.deepEqual(await comparison(partial), { status: 200, data: { ...pair, version: partial.version } });
+
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  const restored = await publication(f, baseline.id);
+  assert.equal(restored.version, partial.version);
+  assert.notEqual(restored.workspaceGeneration, partial.workspaceGeneration);
+  assert.equal((await comparison(partial)).status, 409);
+  assert.deepEqual(await comparison(restored), { status: 200, data: { ...pair, version: partial.version, workspaceGeneration: restored.workspaceGeneration } });
+});
 
 test('manual review freezes exactly the persisted candidate, enforces the designated reviewer and keeps later drafts independent', async () => {
   const f = await fixture();
@@ -441,5 +496,35 @@ test('public publication routes require write access, enforce project boundaries
     const result = await f.call<DocumentPublicationView>(path, 'POST', publish, 'user-min', reviewer);
     assert.equal(result.status, 200, JSON.stringify(result.data));
     assert.equal(result.data.published!.publishedById, 'user-seo');
+
+    const comparePath = (view: DocumentPublicationView, documentId = doc.id) => `/v1/documents/${documentId}/publication/comparison?${new URLSearchParams({
+      expectedVersion: String(view.version), workspaceGeneration: view.workspaceGeneration ?? '',
+      publishedRevisionId: view.published!.revisionId, reviewRevisionId: view.review!.revisionId,
+    })}`;
+    const compareWithKey = (location: string) => f.call(location, 'GET', undefined, 'user-min', read);
+    let current = await edit(f, doc, '같은 범위의 두 번째 검토 본문');
+    const localPair = await requestReview(f, current);
+    const comparison = await compareWithKey(comparePath(localPair));
+    assert.equal(comparison.status, 200, JSON.stringify(comparison.data));
+    assert.deepEqual(comparison.data, { version: localPair.version, workspaceGeneration: null,
+      published: await snapshot(f, localPair, 'published'), review: await snapshot(f, localPair, 'review') });
+    assert.equal((await compareWithKey(comparePath(localPair, otherResponse.data.id))).status, 403);
+    assert.equal((await compareWithKey(`${comparePath(localPair)}&expectedVersion=${localPair.version}`)).status, 400);
+
+    await accepted(transition(f, localPair, 'withdraw', 'user-min'));
+    const withForeignReference = await f.call<DocPage>(`/documents/${doc.id}`, 'PATCH', {
+      expectedVersion: current.version, content: {
+        type: 'doc', content: [{ type: 'issueSummary', attrs: {
+          projectId: 'project-team', savedViewId: null, label: '다른 프로젝트의 업무 현황', groupBy: 'status',
+        } }],
+      },
+    });
+    assert.equal(withForeignReference.status, 200, JSON.stringify(withForeignReference.data));
+    const foreignReview = await requestReview(f, withForeignReference.data);
+    assert.equal((await compareWithKey(comparePath(foreignReview))).status, 403);
+    await accepted(transition(f, foreignReview, 'publish', 'user-seo'));
+    current = await edit(f, withForeignReference.data, '다른 범위의 참조를 뺀 검토 본문');
+    const foreignPublished = await requestReview(f, current);
+    assert.equal((await compareWithKey(comparePath(foreignPublished))).status, 403);
   } finally { await f.close(); }
 });

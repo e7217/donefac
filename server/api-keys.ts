@@ -309,7 +309,7 @@ export class ApiKeyService {
     }
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     const issueRelations = /^\/api\/issues\/([^/]+)\/relations(?:\/([^/]+))?$/.exec(path);
-    const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot)?$/.exec(path);
+    const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot|\/comparison)?$/.exec(path);
     const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis|dependencies)$/.exec(path);
     if (projectResource && (request.method === 'GET' || (request.method === 'PATCH' && ['workload-capacity','issue-order'].includes(projectResource[2])))) {
       if (request.method === 'PATCH' && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
@@ -390,7 +390,7 @@ export class ApiKeyService {
         this.used(key); return next();
       }
       if (publication) {
-        this.query(request, publication[2] ? ['kind', 'revisionId'] : []);
+        if (publication[2] !== '/comparison') this.query(request, publication[2] ? ['kind', 'revisionId'] : []);
         this.resource(key, 'documents', this.decode(publication[1]));
         this.used(key); return next();
       }

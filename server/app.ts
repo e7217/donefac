@@ -1946,6 +1946,15 @@ export function createApp(options: {
     apiKeys.authorizeDocumentBody(req,revision.content);
     res.json(revision);
   });
+  app.get('/api/documents/:id/publication/comparison',(req,res)=>{
+    res.set('Cache-Control','no-store');
+    const queryStart=req.url.indexOf('?');
+    const query=new URLSearchParams(queryStart<0?'':req.url.slice(queryStart+1));
+    const comparison=documentPublication.comparison(req.params.id,query);
+    apiKeys.authorizeDocumentBody(req,comparison.published.content);
+    apiKeys.authorizeDocumentBody(req,comparison.review.content);
+    res.json(comparison);
+  });
   app.post('/api/documents/:id/publication',(req,res)=>{
     res.json(documentPublication.transition(req.params.id,actor(req),req.body,content=>apiKeys.authorizeDocumentBody(req,content)));
   });

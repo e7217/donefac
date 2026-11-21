@@ -940,6 +940,12 @@ export interface DocumentPublicationView extends DocumentPublicationState {
   reviewRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
   publishedRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;
 }
+export interface DocumentPublicationComparison {
+  version: number;
+  workspaceGeneration: string | null;
+  published: DocRevision;
+  review: DocRevision;
+}
 export type DocumentPublicationListTab = 'assigned' | 'requested' | 'published';
 export type DocumentPublicationScope = 'workspace' | 'project' | 'common';
 export type DocumentPublicationTarget = { kind: 'review' | 'published'; revisionId: string };

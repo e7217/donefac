@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, FileCheck2, FileText, Plus, RefreshCw, Send, X } from 'lucide-react';
+import { CheckCircle2, FileCheck2, FileText, GitCompareArrows, Plus, RefreshCw, Send, X } from 'lucide-react';
 import { documentPlainText, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, isLiveDocumentInclude } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
 import {
   MAX_DOCUMENT_REVIEWERS,
   type DocPage,
   type DocRevision,
+  type DocumentPublicationComparison,
   type DocumentPublicationTarget,
   type DocumentPublicationView,
   type DocumentReviewApproval,
@@ -20,6 +21,7 @@ import {
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { DocumentBlocksProvider, ReadonlyDocumentContent } from './DocumentBlocks';
+import { DocumentComparisonContent } from './DocumentHistory';
 import './document-publication.css';
 
 export interface DocumentPublicationProps {
@@ -149,8 +151,13 @@ function PublicationDialog({
   const [snapshotKind, setSnapshotKind] = useState<SnapshotKind | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState<SnapshotKind | null>(null);
   const [snapshotError, setSnapshotError] = useState('');
+  const [comparison, setComparison] = useState<DocumentPublicationComparison | null>(null);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [comparisonError, setComparisonError] = useState('');
   const dialog = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const comparisonButton = useRef<HTMLButtonElement>(null);
+  const comparisonHeading = useRef<HTMLHeadingElement>(null);
   const nextReviewerFieldKey = useRef(1);
   const reviewerFieldFocus = useRef<number | null>(null);
   const wasCovered = useRef(covered);
@@ -159,6 +166,7 @@ function PublicationDialog({
   const dirty = useRef(false);
   const summaryRequest = useRef<AbortController | null>(null);
   const snapshotRequest = useRef<AbortController | null>(null);
+  const comparisonRequest = useRef<AbortController | null>(null);
   const initialSnapshotAttempted = useRef(false);
   const transitionRequest = useRef<AbortController | null>(null);
   const refreshDocumentRef = useRef(refreshDocument);
@@ -170,6 +178,19 @@ function PublicationDialog({
   const canAddReviewer = reviewerFields.length < Math.min(MAX_DOCUMENT_REVIEWERS, users.length);
   const person = (id: string) =>
     data.users.find((user) => user.id === id)?.name ?? '현재 목록에 없는 팀원';
+
+  const resetComparison = useCallback(() => {
+    comparisonRequest.current?.abort();
+    comparisonRequest.current = null;
+    setComparison(null);
+    setComparisonLoading(false);
+    setComparisonError('');
+  }, []);
+
+  const closeComparison = useCallback(() => {
+    resetComparison();
+    requestAnimationFrame(() => comparisonButton.current?.focus());
+  }, [resetComparison]);
 
   const resetNotes = useCallback(() => {
     setReviewerFields(INITIAL_REVIEWER_FIELDS);
@@ -216,6 +237,7 @@ function PublicationDialog({
   const load = useCallback(
     async (refresh = false) => {
       if (pending.current) return;
+      resetComparison();
       summaryRequest.current?.abort();
       const controller = new AbortController();
       summaryRequest.current = controller;
@@ -241,7 +263,7 @@ function PublicationDialog({
         if (active.current && !controller.signal.aborted) setLoading(false);
       }
     },
-    [actorId, page.id],
+    [actorId, page.id, resetComparison],
   );
 
   useEffect(() => {
@@ -254,6 +276,7 @@ function PublicationDialog({
       active.current = false;
       summaryRequest.current?.abort();
       snapshotRequest.current?.abort();
+      comparisonRequest.current?.abort();
       transitionRequest.current?.abort();
     };
   }, []);
@@ -269,6 +292,13 @@ function PublicationDialog({
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };
   }, []);
+
+  useLayoutEffect(() => {
+    const focused = window.document.activeElement;
+    if (comparison && !covered && (focused === comparisonButton.current || focused === window.document.body)) {
+      comparisonHeading.current?.focus();
+    }
+  }, [comparison, covered]);
 
   useEffect(() => {
     const revealed = wasCovered.current && !covered;
@@ -329,7 +359,8 @@ function PublicationDialog({
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        close();
+        if (comparison || comparisonLoading) closeComparison();
+        else close();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -346,7 +377,7 @@ function PublicationDialog({
     }
     window.addEventListener('keydown', keyboard, true);
     return () => window.removeEventListener('keydown', keyboard, true);
-  }, [close, covered]);
+  }, [close, closeComparison, comparison, comparisonLoading, covered]);
 
   const fetchSnapshot = useCallback(async ({kind,revisionId}:DocumentPublicationTarget, generation:string|null) => {
     snapshotRequest.current?.abort();
@@ -372,12 +403,14 @@ function PublicationDialog({
     } catch (cause) {
       if (!active.current || controller.signal.aborted) return;
       setSnapshotError(messageOf(cause));
-      if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404))
+      if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404)) {
+        resetComparison();
         setNeedsReload(true);
+      }
     } finally {
       if (active.current && !controller.signal.aborted) setSnapshotLoading(null);
     }
-  }, [actorId,page.id]);
+  }, [actorId, page.id, resetComparison]);
 
   function loadSnapshot(kind: SnapshotKind) {
     if (!view || pending.current) return;
@@ -419,6 +452,48 @@ function PublicationDialog({
   const isRequester = Boolean(view?.review && view.review.requestedById === actorId);
   const actionsDisabled = !view || loading || Boolean(busy) || needsReload;
 
+  async function loadComparison() {
+    if (!view?.review || !view.published || actionsDisabled || pending.current || comparisonRequest.current) return;
+    if (comparison) {
+      comparisonHeading.current?.focus();
+      return;
+    }
+    const { version, workspaceGeneration, review, published } = view;
+    const query = new URLSearchParams({
+      expectedVersion: String(version), workspaceGeneration: workspaceGeneration ?? '',
+      publishedRevisionId: published.revisionId, reviewRevisionId: review.revisionId,
+    });
+    const controller = new AbortController();
+    comparisonRequest.current = controller;
+    setComparisonLoading(true);
+    setComparisonError('');
+    try {
+      const result = await api<DocumentPublicationComparison>(
+        `/documents/${encodeURIComponent(page.id)}/publication/comparison?${query}`, {
+          signal: controller.signal,
+          headers: { 'X-Actor-Id': actorId },
+        },
+      );
+      if (!active.current || controller.signal.aborted) return;
+      if (result.version !== version || result.workspaceGeneration !== workspaceGeneration ||
+          result.published?.id !== published.revisionId || result.review?.id !== review.revisionId ||
+          result.published.documentId !== page.id || result.review.documentId !== page.id) {
+        setNeedsReload(true);
+        throw new Error('선택한 발행본과 검토본을 확인할 수 없습니다. 최신 정보를 불러와 주세요.');
+      }
+      setComparison(result);
+    } catch (cause) {
+      if (!active.current || controller.signal.aborted) return;
+      setComparisonError(messageOf(cause));
+      if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404)) setNeedsReload(true);
+    } finally {
+      if (active.current && comparisonRequest.current === controller) {
+        comparisonRequest.current = null;
+        setComparisonLoading(false);
+      }
+    }
+  }
+
   async function transition(action: Action) {
     if (!view || actionsDisabled || pending.current) return;
     if (action === 'request' && (!canRequest || requestOutdated || !reviewerSelectionValid)) return;
@@ -431,6 +506,7 @@ function PublicationDialog({
       !window.confirm('현재 검토 요청을 철회할까요? 기존 발행본은 유지됩니다.')
     )
       return;
+    resetComparison();
     pending.current = true;
     setBusy(action);
     setError('');
@@ -609,14 +685,27 @@ function PublicationDialog({
                           <p>{view.review.changesRequested.note}</p>
                         </div>
                       )}
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={Boolean(busy) || Boolean(snapshotLoading) || loading}
-                        onClick={() => void loadSnapshot('review')}
-                      >
-                        검토본 불러오기
-                      </button>
+                      <div className="document-publication-snapshot-actions">
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={Boolean(busy) || Boolean(snapshotLoading) || loading}
+                          onClick={() => void loadSnapshot('review')}
+                        >
+                          검토본 불러오기
+                        </button>
+                        {view.published && <button
+                          ref={comparisonButton}
+                          type="button"
+                          className="btn"
+                          disabled={actionsDisabled}
+                          aria-disabled={comparisonLoading || undefined}
+                          aria-expanded={Boolean(comparison)}
+                          onClick={() => void loadComparison()}
+                        >
+                          <GitCompareArrows size={15} aria-hidden="true" />발행본과 비교
+                        </button>}
+                      </div>
                     </>
                   ) : (
                     <p>저장한 문서를 다른 팀원에게 검토 요청할 수 있습니다.</p>
@@ -661,6 +750,22 @@ function PublicationDialog({
                   </p>
                 </section>
               </div>
+
+              {comparisonLoading && <p role="status">발행본과 검토본을 불러오는 중…</p>}
+              {comparisonError && <p className="document-publication-error" role="alert">{comparisonError}</p>}
+              {comparison && <section className="document-publication-comparison" aria-label="발행본과 검토본 비교">
+                <header>
+                  <h3 ref={comparisonHeading} tabIndex={-1}>발행본과 검토본 비교</h3>
+                  <button type="button" className="btn" onClick={closeComparison}>비교 닫기</button>
+                </header>
+                <DocumentComparisonContent
+                  key={`${comparison.published.id}:${comparison.review.id}`}
+                  before={comparison.published}
+                  after={comparison.review}
+                  beforeLabel={`발행본 · 버전 ${comparison.published.version}`}
+                  afterLabel={`검토본 · 버전 ${comparison.review.version}`}
+                />
+              </section>}
 
               {canReview && (
                 <section className="document-publication-review-actions" aria-label="검토 결과 보내기">

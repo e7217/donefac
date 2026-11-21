@@ -1042,6 +1042,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `GET /api/v1/documents/:id/publication/snapshot?kind=review&revisionId=…`에는 상태 응답의 `reviewRevision.id`를 넣는다. 마지막 발행본은 `kind=published`와 `publishedRevision.id`를 사용한다. 응답은 요청 당시 저장된 `DocRevision`이다. 저장본이 없으면 `404`, 상태가 바뀌어 다른 저장본을 가리키면 `409`를 반환한다.
 
+`GET /api/v1/documents/:id/publication/comparison`에는 상태 응답의 `version`을 `expectedVersion`으로 보내고, `workspaceGeneration`, `publishedRevisionId`, `reviewRevisionId`를 함께 보낸다. 복원 세대가 `null`이면 `workspaceGeneration=`을 보낸다. 응답의 `published`와 `review`는 같은 조회에서 검증한 두 `DocRevision`이며 `version`과 `workspaceGeneration`도 포함한다. 문서와 두 본문의 참조 범위를 검사한다. 최신 발행본이나 검토본이 없거나, 버전·복원 세대·저장본이 달라지면 `409`를 반환한다. 브라우저의 `/api` 경로에서도 같은 계약을 사용한다.
+
 `POST /api/v1/documents/:id/publication`에는 최신 조회 결과의 `version`을 `expectedVersion`으로, `workspaceGeneration`을 반환된 값 그대로 보낸다. 쓰기 키의 소유자를 작업자로 사용하고 브라우저 경로에서는 현재 선택한 작업자를 사용한다.
 
 | `action` | 필요한 값과 동작 |

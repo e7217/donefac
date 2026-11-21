@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, GitCompareArrows, History, List, RotateCcw, X } from 'lucide-react';
 import type { DocRevision, RichContent, User } from '../../shared/types';
-import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffUnit } from '../../shared/document-diff';
+import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffSource, type DocumentDiffUnit } from '../../shared/document-diff';
 import { CALLOUT_LABELS, contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone, STATUS_BADGE_TONE_LABELS } from '../../shared/document-nodes';
 import { containsDocumentNavigation, ReadonlyDocumentContent } from './DocumentBlocks';
 import { documentRevisionLabel, hasDocumentFormattedBlocks } from './document-utils';
@@ -56,55 +56,147 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
 }
 
 type Group = { id: number; kind: 'equal' | 'change'; before: DocumentDiffUnit[]; after: DocumentDiffUnit[] };
-type Row = { id: string; kind: 'equal' | 'change' | 'fold'; before?: DocumentDiffUnit; after?: DocumentDiffUnit; groupId?: number; count?: number };
+type Row = { id: string; kind: 'equal' | 'change'; before?: DocumentDiffUnit; after?: DocumentDiffUnit } |
+  { id: string; kind: 'fold'; groupId: number; count: number };
 function groupsOf(runs: DocumentDiffRun[]): Group[] {
   const groups: Group[] = [];
   for (const run of runs) {
-    if (run.kind === 'equal') groups.push({ id: groups.length, kind: 'equal', before: run.before, after: run.after });
-    else { let group = groups.at(-1); if (!group || group.kind !== 'change') { group = { id: groups.length, kind: 'change', before: [], after: [] }; groups.push(group); } for (const unit of run.before) group.before.push(unit); for (const unit of run.after) group.after.push(unit); }
+    if (run.kind === 'equal') {
+      groups.push({ id: groups.length, kind: 'equal', before: run.before, after: run.after });
+      continue;
+    }
+    let group = groups.at(-1);
+    if (!group || group.kind !== 'change') {
+      group = { id: groups.length, kind: 'change', before: [], after: [] };
+      groups.push(group);
+    }
+    for (const unit of run.before) group.before.push(unit);
+    for (const unit of run.after) group.after.push(unit);
   }
   return groups;
 }
 
 function Comparison({ revisions, current, beforeId, afterId, setBeforeId, setAfterId, onClose }: { revisions: DocRevision[]; current: DocumentHistoryProps['current']; beforeId: string; afterId: string; setBeforeId: (id: string) => void; setAfterId: (id: string) => void; onClose: () => void }) {
-  const [layout, setLayout] = useState<'split' | 'unified'>('split');
-  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
-  const [page, setPage] = useState(0);
   const [currentSnapshot, setCurrentSnapshot] = useState(() => structuredClone(current));
   const closeRef = useRef<HTMLButtonElement>(null), dialogRef = useRef<HTMLElement>(null);
   useEffect(() => { const previous = document.activeElement; closeRef.current?.focus(); return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); }; }, []);
-  const before = revisions.find(value => value.id === beforeId), savedAfter = revisions.find(value => value.id === afterId), after = afterId === 'current' ? currentSnapshot : savedAfter;
-  const beforeLabel = before ? documentRevisionLabel(before) : '기준 버전 없음', afterLabel = afterId === 'current' ? `${currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 ${currentSnapshot.version} 기준` : savedAfter ? documentRevisionLabel(savedAfter) : '대상 버전 없음';
-  const outcome = useMemo((): { result?: DocumentDiffResult; error?: string } => { if (!before || !after) return { error: '비교할 두 버전을 선택하세요.' }; try { return { result: diffDocuments(before, after) }; } catch (cause) { return { error: cause instanceof Error ? cause.message : '문서 구조를 비교하지 못했습니다.' }; } }, [before, after]);
-  const groups = useMemo(() => groupsOf(outcome.result?.runs || []), [outcome.result]);
-  const rows = useMemo(() => {
-    const result: Row[] = [];
-    for (const group of groups) {
-      if (group.kind === 'equal' && group.before.length > 4 && !expanded.has(group.id)) { result.push({ id: `fold:${group.id}`, kind: 'fold', groupId: group.id, count: group.before.length }); continue; }
-      if (layout === 'unified' && group.kind === 'change') { for (const [index, unit] of group.before.entries()) result.push({ id: `${group.id}:old:${index}`, kind: 'change', before: unit }); for (const [index, unit] of group.after.entries()) result.push({ id: `${group.id}:new:${index}`, kind: 'change', after: unit }); }
-      else for (let index = 0; index < Math.max(group.before.length, group.after.length); index++) result.push({ id: `${group.id}:${index}`, kind: group.kind, before: group.before[index], after: group.after[index] });
-    }
-    return result;
-  }, [groups, expanded, layout]);
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), currentPage = Math.min(page, totalPages - 1), visible = rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
-  const reset = () => { setExpanded(new Set()); setPage(0); };
+  const before = revisions.find(value => value.id === beforeId);
+  const savedAfter = revisions.find(value => value.id === afterId);
+  const currentLabel = `${currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 ${currentSnapshot.version} 기준`;
   function keyboard(event: KeyboardEvent) {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
     if (event.key === 'Tab') { const focusable = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled),input:not(:disabled),a[href],[tabindex="0"]'); if (!focusable?.length) return; const first = focusable[0], last = focusable[focusable.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
   }
   return <div className="document-diff-overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} className="document-diff-dialog" role="dialog" aria-modal="true" aria-labelledby="document-diff-title" onKeyDown={keyboard}>
     <header><div><span>DOCUMENT HISTORY</span><h2 id="document-diff-title"><GitCompareArrows size={20} />문서 버전 비교</h2><p>제목과 저장된 본문 구조를 비교합니다. 비교 화면에서는 문서를 수정하지 않습니다.</p></div><button ref={closeRef} className="issue-icon-button" aria-label="문서 버전 비교 닫기" onClick={onClose}><X size={20} /></button></header>
-    <div className="document-diff-controls"><label>기준<select className="field" aria-label="비교 기준 버전" value={beforeId} onChange={event => { setBeforeId(event.target.value); reset(); }}>{revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}</select></label><label>대상<select className="field" aria-label="비교 대상 버전" value={afterId} onChange={event => { setAfterId(event.target.value); reset(); }}><option value="current">{currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 {currentSnapshot.version} 기준</option>{revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}</select></label><div className="document-diff-layout" aria-label="비교 표시 방식"><button className={layout === 'split' ? 'active' : ''} onClick={() => { setLayout('split'); setPage(0); }}><Columns2 size={14} />나란히</button><button className={layout === 'unified' ? 'active' : ''} onClick={() => { setLayout('unified'); setPage(0); }}><List size={14} />통합</button></div></div>
-    <div className="document-diff-current-note"><span>현재 편집본은 비교를 열거나 다시 불러온 시점의 내용입니다.</span><button className="btn btn-ghost" onClick={() => { setCurrentSnapshot(structuredClone(current)); reset(); }}>현재 편집본 다시 불러오기</button></div>
+    <DocumentComparisonContent
+      before={before}
+      after={afterId === 'current' ? currentSnapshot : savedAfter}
+      beforeLabel={before ? documentRevisionLabel(before) : '기준 버전 없음'}
+      afterLabel={afterId === 'current' ? currentLabel : savedAfter ? documentRevisionLabel(savedAfter) : '대상 버전 없음'}
+      pairKey={`${beforeId}:${afterId}`}
+      controls={reset => <>
+        <label>기준<select className="field" aria-label="비교 기준 버전" value={beforeId} onChange={event => { setBeforeId(event.target.value); reset(); }}>
+          {revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}
+        </select></label>
+        <label>대상<select className="field" aria-label="비교 대상 버전" value={afterId} onChange={event => { setAfterId(event.target.value); reset(); }}>
+          <option value="current">{currentLabel}</option>
+          {revisions.map(revision => <option key={revision.id} value={revision.id}>{documentRevisionLabel(revision)} · {revision.title}</option>)}
+        </select></label>
+      </>}
+      note={reset => <div className="document-diff-current-note">
+        <span>현재 편집본은 비교를 열거나 다시 불러온 시점의 내용입니다.</span>
+        <button className="btn btn-ghost" onClick={() => { setCurrentSnapshot(structuredClone(current)); reset(); }}>현재 편집본 다시 불러오기</button>
+      </div>}
+    />
+    <footer><span>서식·블록 속성·표·이미지·참조 대상의 변경도 구조 정보에 표시합니다.</span><button className="btn" onClick={onClose}>비교 닫기</button></footer>
+  </section></div>;
+}
+
+interface DocumentComparisonContentProps {
+  before?: DocumentDiffSource;
+  after?: DocumentDiffSource;
+  beforeLabel: string;
+  afterLabel: string;
+  pairKey?: string;
+  controls?: (reset: () => void) => ReactNode;
+  note?: (reset: () => void) => ReactNode;
+}
+
+export function DocumentComparisonContent({ before, after, beforeLabel, afterLabel, pairKey = '', controls, note }: DocumentComparisonContentProps) {
+  const [layout, setLayout] = useState<'split' | 'unified'>('split');
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const [page, setPage] = useState(0);
+  const outcome = useMemo((): { result?: DocumentDiffResult; error?: string } => {
+    if (!before || !after) return { error: '비교할 두 버전을 선택하세요.' };
+    try {
+      return { result: diffDocuments(before, after) };
+    } catch (cause) {
+      return { error: cause instanceof Error ? cause.message : '문서 구조를 비교하지 못했습니다.' };
+    }
+  }, [before, after]);
+  const groups = useMemo(() => groupsOf(outcome.result?.runs || []), [outcome.result]);
+  const rows = useMemo(() => {
+    const result: Row[] = [];
+    for (const group of groups) {
+      if (group.kind === 'equal' && group.before.length > 4 && !expanded.has(group.id)) {
+        result.push({ id: `fold:${group.id}`, kind: 'fold', groupId: group.id, count: group.before.length });
+      } else if (layout === 'unified' && group.kind === 'change') {
+        for (const [index, unit] of group.before.entries()) result.push({ id: `${group.id}:old:${index}`, kind: 'change', before: unit });
+        for (const [index, unit] of group.after.entries()) result.push({ id: `${group.id}:new:${index}`, kind: 'change', after: unit });
+      } else {
+        for (let index = 0; index < Math.max(group.before.length, group.after.length); index++) {
+          result.push({ id: `${group.id}:${index}`, kind: group.kind, before: group.before[index], after: group.after[index] });
+        }
+      }
+    }
+    return result;
+  }, [groups, expanded, layout]);
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages - 1);
+  const visible = rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  const reset = () => { setExpanded(new Set()); setPage(0); };
+  return <div className={`document-diff-content${controls ? '' : ' is-inline'}`}>
+    <div className="document-diff-controls">
+      {controls?.(reset)}
+      <div className="document-diff-layout" role="group" aria-label="비교 표시 방식">
+        <button type="button" className={layout === 'split' ? 'active' : ''} aria-pressed={layout === 'split'} onClick={() => { setLayout('split'); setPage(0); }}><Columns2 size={14} />나란히</button>
+        <button type="button" className={layout === 'unified' ? 'active' : ''} aria-pressed={layout === 'unified'} onClick={() => { setLayout('unified'); setPage(0); }}><List size={14} />통합</button>
+      </div>
+    </div>
+    {note?.(reset)}
     <div className="document-diff-source-labels"><span>기준 · {beforeLabel}<strong>{before?.title}</strong></span><span>대상 · {afterLabel}<strong>{after?.title}</strong></span></div>
     {outcome.error ? <div className="document-diff-error" role="alert">{outcome.error}<p>한도: 본문 8MiB · 제목 64KiB · {DOCUMENT_DIFF_LIMITS.nodes.toLocaleString('ko-KR')}개 노드 · 깊이 {DOCUMENT_DIFF_LIMITS.depth}. 한도를 넘으면 비교를 중단하며 내용을 잘라서 동일하다고 표시하지 않습니다.</p></div> : outcome.result && <>
       <div className="document-diff-summary" role="status"><span className="is-add">+ 추가 {outcome.result.stats.added}</span><span className="is-remove">− 삭제 {outcome.result.stats.removed}</span><span>변경 없음 {outcome.result.stats.unchanged}</span>{outcome.result.identical && <strong>제목과 본문 구조가 같습니다.</strong>}<small>단위: 구조 정보 또는 최대 {DOCUMENT_DIFF_LIMITS.textChunk.toLocaleString('ko-KR')}자 텍스트 조각</small></div>
       {outcome.result.fallbackGaps > 0 && <p className="document-diff-bound-note">변경량이 큰 {outcome.result.fallbackGaps}개 구간은 세부 정렬 대신 삭제·추가 묶음으로 표시합니다. 원본과 대상의 내용을 생략하지 않습니다.</p>}
-      <div className={`document-diff-rows is-${layout}`} aria-label="문서 차이 내용">{visible.map(row => row.kind === 'fold' ? <button className="document-diff-fold" key={row.id} onClick={() => { setExpanded(previous => new Set(previous).add(row.groupId!)); setPage(0); }}>변경 없는 내용 {row.count!.toLocaleString('ko-KR')}개 펼치기<ChevronRight size={14} /></button> : <div className={`document-diff-row is-${row.kind}`} key={row.id}>{layout === 'split' ? <><DiffCell key={`${beforeId}:${afterId}:${layout}:before`} unit={row.before} kind={row.kind === 'equal' ? 'equal' : 'delete'} /><DiffCell key={`${beforeId}:${afterId}:${layout}:after`} unit={row.after} kind={row.kind === 'equal' ? 'equal' : 'insert'} /></> : <DiffCell key={`${beforeId}:${afterId}:${layout}:unified`} unit={row.kind === 'equal' ? row.after : row.before || row.after} kind={row.kind === 'equal' ? 'equal' : row.before ? 'delete' : 'insert'} />}</div>)}</div>
-      <div className="document-diff-pagination"><button className="btn btn-ghost" aria-label="문서 차이 이전 페이지" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}><ChevronLeft size={14} />이전</button><span>{currentPage + 1} / {totalPages} 페이지 · {rows.length.toLocaleString('ko-KR')}개 표시 행 · 페이지당 최대 {PAGE_SIZE}행</span><button className="btn btn-ghost" aria-label="문서 차이 다음 페이지" disabled={currentPage + 1 >= totalPages} onClick={() => setPage(currentPage + 1)}>다음<ChevronRight size={14} /></button><button className="btn btn-ghost" disabled={!expanded.size} onClick={() => { setExpanded(new Set()); setPage(0); }}>변경 없는 내용 접기</button></div>
+      <div className={`document-diff-rows is-${layout}`} aria-label="문서 차이 내용">
+        {visible.map(row => {
+          if (row.kind === 'fold') {
+            return <button type="button" className="document-diff-fold" key={row.id}
+              onClick={() => { setExpanded(previous => new Set(previous).add(row.groupId)); setPage(0); }}>
+              변경 없는 내용 {row.count.toLocaleString('ko-KR')}개 펼치기<ChevronRight size={14} />
+            </button>;
+          }
+          const unchanged = row.kind === 'equal';
+          return <div className={`document-diff-row is-${row.kind}`} key={row.id}>
+            {layout === 'split' ? <>
+              <DiffCell key={`${pairKey}:split:before`} unit={row.before} kind={unchanged ? 'equal' : 'delete'} />
+              <DiffCell key={`${pairKey}:split:after`} unit={row.after} kind={unchanged ? 'equal' : 'insert'} />
+            </> : <DiffCell key={`${pairKey}:unified`} unit={unchanged ? row.after : row.before || row.after}
+              kind={unchanged ? 'equal' : row.before ? 'delete' : 'insert'} />}
+          </div>;
+        })}
+      </div>
+      <div className="document-diff-pagination">
+        <button type="button" className="btn btn-ghost" aria-label="문서 차이 이전 페이지" disabled={currentPage === 0}
+          onClick={() => setPage(currentPage - 1)}><ChevronLeft size={14} />이전</button>
+        <span>{currentPage + 1} / {totalPages} 페이지 · {rows.length.toLocaleString('ko-KR')}개 표시 행 · 페이지당 최대 {PAGE_SIZE}행</span>
+        <button type="button" className="btn btn-ghost" aria-label="문서 차이 다음 페이지" disabled={currentPage + 1 >= totalPages}
+          onClick={() => setPage(currentPage + 1)}>다음<ChevronRight size={14} /></button>
+        <button type="button" className="btn btn-ghost" disabled={!expanded.size} onClick={reset}>변경 없는 내용 접기</button>
+      </div>
     </>}
-    <footer><span>서식·블록 속성·표·이미지·참조 대상의 변경도 구조 정보에 표시합니다.</span><button className="btn" onClick={onClose}>비교 닫기</button></footer>
-  </section></div>;
+  </div>;
 }
 
 type SummaryLine = { label: string; value: string };
