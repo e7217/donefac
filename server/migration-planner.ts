@@ -102,7 +102,7 @@ function newerConfluencePage(next: LegacyRecord, previous: LegacyRecord, timezon
 function sameConfluencePageRevision(next: LegacyRecord, previous: LegacyRecord, timezone: string, previousTimezone: string): boolean {
   const version = confluenceSourceVersion(next);
   if (version === null || version !== confluenceSourceVersion(previous)) return false;
-  // A label-only checkpoint becomes the latest raw page for the next refresh.
+  // A same-version checkpoint becomes the latest raw page for the next refresh.
   if (next.title.trim() !== previous.title.trim() || hasConfluenceBody(next) !== hasConfluenceBody(previous) || next.text !== previous.text) return false;
   if (next.updatedAt === null && previous.updatedAt === null) return true;
   const nextTime = sourceTimestamp(next.updatedAt, timezone), previousTime = sourceTimestamp(previous.updatedAt, previousTimezone);
@@ -148,6 +148,14 @@ function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>
 
 function hasConfluenceBody(record: LegacyRecord): boolean {
   return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
+}
+
+function hasOriginalConfluenceChecklistFallback(record: LegacyRecord, current: DocPage['content']): boolean {
+  if (!hasConfluenceBody(record) || !/<ac:task-list(?=[\s/>])/u.test(record.text) || current.content?.length !== 1) return false;
+  const [block] = current.content;
+  const [value] = block.content ?? [];
+  return block.type === 'codeBlock' && block.attrs?.language == null && block.content?.length === 1 &&
+    value.type === 'text' && value.text === record.text;
 }
 
 function hasConfluenceExcerptMacro(record: LegacyRecord): boolean {
@@ -937,7 +945,8 @@ class Planner{
       seen.add(document.id);
       const timezone = this.configuration.timezone;
       const newer = newerConfluencePage(row, previous.record, timezone, previousTimezone);
-      const sameRevision = !newer && row.metadata.labelSetComplete === true && !sourceBodyErrors.has(entry.key) &&
+      const originalChecklistFallback = hasOriginalConfluenceChecklistFallback(previous.record, document.content);
+      const sameRevision = !newer && (row.metadata.labelSetComplete === true || originalChecklistFallback) && !sourceBodyErrors.has(entry.key) &&
         sameConfluencePageRevision(row, previous.record, timezone, previousTimezone);
       if (!newer && !sameRevision) {
         skippedDocumentUpdates++;
@@ -948,8 +957,8 @@ class Planner{
       if (newer && (!title || title.length > 300)) {
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
-      const needsBodyReview = newer && hasConfluenceBody(row) &&
-        (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row) || hasConfluenceColumnLayout(row));
+      const needsBodyReview = hasConfluenceBody(row) && (originalChecklistFallback || newer &&
+        (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row) || hasConfluenceColumnLayout(row)));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
           resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
@@ -973,6 +982,10 @@ class Planner{
         for (const diagnostic of safeBody.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
       }
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
+      if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
+        // For old receipts, the full original code block is the only proven baseline.
+        hashes.content = confluencePageFieldDigest('content', document.content);
+      }
       const currentLabels = document.labels ?? [];
       const status = string(row.metadata.contentStatus).trim().toLowerCase();
       const labels = !status || status === 'current'
@@ -1011,8 +1024,10 @@ class Planner{
           incoming: field === 'labels' ? incomingText : confluenceReviewExcerpt(incomingText), decision,
           ...(field === 'content' && current === incomingText ? { formatOnly: true } : {}) });
         if (field === 'labels' && sameRevision && decision === 'apply') this.notice('CONFLUENCE_REFRESH_LABEL_SAME_REVISION',
-          '같은 페이지 버전에서 라벨 목록만 비교했습니다. 반영 전에 내보내기 순서를 확인해 주세요.', 'warning', entry, true);
+          '같은 페이지 버전의 라벨 목록을 비교했습니다. 반영 전에 내보내기 순서를 확인해 주세요.', 'warning', entry, true);
         if (decision === 'apply') {
+          if (field === 'content' && sameRevision && originalChecklistFallback) this.notice('CONFLUENCE_REFRESH_CHECKLIST_RESTORED',
+            '원문 블록으로 보관된 본문을 편집 가능한 체크리스트가 있는 본문으로 바꿉니다.', 'warning', entry, true);
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
           checkpoint = true;

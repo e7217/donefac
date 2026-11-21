@@ -5,7 +5,7 @@ import { buildMigrationOptions,buildMigrationPlan } from '../../server/migration
 import { convertLegacyContent } from '../../server/migration-content.js';
 import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
-import type { LegacyDataset,LegacyRecord,LegacyValue,User } from '../../shared/types.js';
+import type { DocPage,LegacyDataset,LegacyRecord,LegacyValue,User } from '../../shared/types.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
@@ -769,6 +769,63 @@ test('Confluence append and refresh resolve hrefs to an already imported page ab
   assert.equal(conflicted.preview.documentRefresh?.[0].fields.find(field => field.field === 'content')?.decision, 'conflict');
   assert.deepEqual(conflicted.documentUpdates, []);
   assert.deepEqual(contentReferences(conflicted.documents[0].content).map(({ id }) => id), [retained.id]);
+});
+
+test('reviewed Confluence refresh repairs only untouched full-page checklist fallback, even at the same source revision', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const original = page('10', { authorId: null, text: '<h2>확인 절차</h2><ac:task-list><ac:task><ac:task-status>incomplete</ac:task-status>' +
+    '<ac:task-body><ac:link><ri:user ri:userkey="source-reviewer"/></ac:link> 검토하기 <time datetime="2026-11-28"/>' +
+    '</ac:task-body></ac:task></ac:task-list><p>다음 단계</p>' });
+  const initialSource = pkg('original-checklist', 'confluence', [space, original]);
+  const initial = buildMigrationPlan(input([initialSource]));
+  assert.equal(initial.preview.canApply, true, JSON.stringify(initial.preview.notices));
+  const [project] = initial.projects;
+  const [current] = initial.documents;
+  const sourceRecord = initial.sourceRecords.find(item => item.targetId === current.id)!;
+  const fallback: DocPage = { ...current, plainText: original.text, content: { type: 'doc', content: [
+    { type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: original.text }] },
+  ] } };
+  const legacyReceipt = { ...sourceRecord };
+  delete legacyReceipt.confluencePageFieldHashes;
+  const fallbackReceipt = { ...sourceRecord, confluencePageFieldHashes: { ...sourceRecord.confluencePageFieldHashes,
+    content: createHash('sha256').update(JSON.stringify(['content', JSON.stringify(fallback.content)])).digest('hex') } };
+  const refresh = (local = fallback, previous = legacyReceipt, source = original) => {
+    const next = pkg('checklist-refresh', 'confluence', [space, source]);
+    next.dataset.source.instanceKey = initialSource.dataset.source.instanceKey;
+    const request = input([next]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = { project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'checklist-refresh',
+      knownPages: [{ sourceId: original.sourceId, documentId: current.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: current.title }],
+      refreshDocuments: [{ document: local, previous, previousTimezone: 'UTC' }] };
+    return buildMigrationPlan(request);
+  };
+
+  for (const receipt of [legacyReceipt, fallbackReceipt]) {
+    const repaired = refresh(fallback, receipt);
+    assert.equal(repaired.preview.canApply, true, JSON.stringify(repaired.preview.notices));
+    assert.equal(repaired.documents.length, 0);
+    assert.ok(repaired.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_CHECKLIST_RESTORED'));
+    assert.deepEqual(repaired.preview.documentRefresh?.[0].fields.map(({ field, decision }) => [field, decision]), [['content', 'apply']]);
+    const update = repaired.documentUpdates?.[0];
+    assert.equal(update?.documentId, current.id);
+    assert.equal(update?.expectedVersion, fallback.version);
+    assert.deepEqual(update?.changes.content?.content?.map(block => block.type), ['heading', 'taskList', 'paragraph']);
+    const checkpoint = repaired.sourceRecords.find(item => item.targetId === current.id)!;
+    assert.equal(checkpoint.record.text, original.text);
+    assert.equal(checkpoint.confluencePageFieldHashes?.content, sourceRecord.confluencePageFieldHashes?.content);
+    assert.deepEqual(refresh({ ...current, version: current.version + 1 }, checkpoint).documentUpdates, []);
+  }
+
+  const locallyEdited = { ...fallback, version: fallback.version + 1, content: { type: 'doc', content: [
+    { type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: `${original.text}\n팀의 메모` }] },
+  ] } };
+  assert.deepEqual(refresh(locallyEdited, fallbackReceipt).documentUpdates, []);
+  const changedInSameSourceRevision = { ...original, text: original.text.replace('다음 단계', '다른 단계') };
+  assert.deepEqual(refresh(fallback, fallbackReceipt, changedInSameSourceRevision).documentUpdates, []);
+  const newerSameBody = { ...original, metadata: { version: '4' } };
+  assert.ok(refresh(fallback, fallbackReceipt, newerSameBody).documentUpdates?.[0].changes.content);
+  const laterChanged = { ...changedInSameSourceRevision, metadata: { version: '4' } };
+  assert.equal(refresh(locallyEdited, fallbackReceipt, laterChanged).preview.documentRefresh?.[0].fields[0].decision, 'conflict');
 });
 
 test('all available attachment versions retain distinct files and a missing newest version requires acknowledgement',()=>{

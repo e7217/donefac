@@ -807,6 +807,88 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
   }
 });
 
+test('360px에서 이관한 Confluence 담당 체크리스트를 편집하고 다시 연다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), spaceKey = `TSK${id}`, spaceName = `체크리스트 원본 공간 ${id}`, title = `배포 체크리스트 ${id}`;
+  const user = 'release-operator', dueDate = '2026-12-07';
+  const beforeList = '체크리스트에 앞서 환경을 확인합니다.', afterList = '완료한 뒤 변경 내역을 공유합니다.';
+  const beforeUser = '담당', afterUser = '배포 설정 검토', afterDate = '까지 진행';
+  const expectedTask = `${beforeUser} @${user} ${afterUser} ${dueDate} ${afterDate}`;
+  const body = `<p>${beforeList}</p>
+    <ac:task-list>
+      <ac:task><ac:task-id>1</ac:task-id><ac:task-status>incomplete</ac:task-status>
+        <ac:task-body>${beforeUser} <ac:link><ri:user ri:username="${user}"/></ac:link> ${afterUser} <time datetime="${dueDate}"/> ${afterDate}</ac:task-body>
+      </ac:task>
+      <ac:task><ac:task-id>2</ac:task-id><ac:task-status>complete</ac:task-status><ac:task-body>배포 권한 확인</ac:task-body></ac:task>
+    </ac:task-list>
+    <p>${afterList}</p>`;
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">${spaceName}</property></object>
+    <object class="Page"><id name="id">31001</id><property name="title">${title}</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      <property name="creationDate">2020-01-02T00:00:00Z</property>
+    </object>
+    <object class="BodyContent"><id name="id">31301</id><property name="body"><![CDATA[${body}]]></property>
+      <property name="content" class="Page"><id name="id">31001</id></property><property name="bodyType">2</property>
+    </object>
+  </hibernate-generic>`;
+  const filename = `confluence-checklist-${id}.zip`;
+  const pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `confluence-checklist-${id}`);
+  let imported: DocPage | undefined;
+  try {
+    const { settings } = await open(page, request);
+    await selectPackage(settings, filename);
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts.documents).toBe(1);
+    const sample = plan.samples.find(item => item.title === title);
+    for (const value of [beforeList, expectedTask, afterList]) expect(sample?.plainText).toContain(value);
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await review.getByText('변환된 내용 견본', { exact: true }).click();
+    await expect(review).toContainText(expectedTask);
+    await acknowledge(review, plan);
+    const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applyResponse = await applied;
+    expect(applyResponse.status(), await applyResponse.text()).toBe(201);
+    const { import: receipt } = await applyResponse.json() as MigrationApplyResult;
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    imported = snapshot.documents.find(document => document.projectId === receipt.projectIds[0] && document.title === title);
+    expect(imported).toBeTruthy();
+
+    await expect(settings.getByLabel('이관 영수증 상세', { exact: true })).toContainText('원본 기록과 생성 프로젝트');
+    const audit = await openReconciliation(settings);
+    await audit.getByRole('button', { name: `현재 문서 열기 ${title}`, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(title);
+    const editor = page.locator('.docs-prose[contenteditable="true"]');
+    const tasks = editor.locator('ul[data-type="taskList"] > li');
+    const assignedTask = tasks.filter({ hasText: afterUser });
+    const pending = assignedTask.getByRole('checkbox');
+    await expect(tasks).toHaveCount(2);
+    await expect(assignedTask.locator('p')).toHaveText(expectedTask);
+    await expect(assignedTask.getByRole('link')).toHaveCount(0);
+    await expect(editor.locator(':scope > p')).toHaveText([beforeList, afterList]);
+    await expect(pending).not.toBeChecked();
+    await expect(tasks.filter({ hasText: '배포 권한 확인' }).getByRole('checkbox')).toBeChecked();
+
+    await pending.check();
+    const saved = page.waitForResponse(response => response.url().endsWith(`/api/documents/${imported!.id}`) && response.request().method() === 'PATCH');
+    const save = page.locator('.docs-save-button');
+    await save.click();
+    expect((await saved).ok()).toBe(true);
+    await expect(save).toBeDisabled();
+    await page.reload();
+    await expect(pending).toBeChecked();
+    await expect(assignedTask.locator('p')).toHaveText(expectedTask);
+  } finally {
+    if (imported) await request.delete(`/api/documents/${imported.id}`);
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
 test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 본문을 함께 보존한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

@@ -309,6 +309,8 @@ Jira Data Center REST 수집은 프로젝트 또는 명시한 업무 키를 기�
 
 Confluence Server에서는 이관 전 현재 계정이 읽을 수 있는 페이지의 ID·버전·상위 관계와 직접 제한 및 상속된 읽기 제한을 확인한다. 실제 공간 XML을 제공하면 같은 공간의 현재 페이지와 대조하고 ZIP에서 확인한 본문·첨부 근거와 진단을 집계한다. 공간의 전체 열람 범위와 이관 대상은 별도 검토한다. 원문과 버전·첨부의 이관 입력은 공간 XML을 사용한다. [Confluence 공간 XML 대조](PILOT.md#confluence-공간-xml과-현재-페이지-대조)
 
+Confluence 체크리스트는 항목 순서와 완료 여부를 편집 가능한 목록으로 옮긴다. 항목의 원본 담당자와 기한은 본문 텍스트로 보존한다. 일부 항목의 원본 구조를 변환할 수 없으면 해당 구조의 위치에 원문을 남긴다. 이전 이관에서 체크리스트가 포함된 본문 전체를 원문 코드 블록에 보관한 문서는 같은 원본 버전으로도 변경분 미리보기에서 복구를 검토할 수 있다. 저장 본문과 보관 원본을 비교해 팀 편집을 보존한다. [Confluence 체크리스트와 사용자 참조 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html)
+
 병행 기간에는 업무와 문서에 Jira 티켓 및 Confluence 페이지 주소를 연결한다. 조회 버튼을 누르면 설정한 각 서버의 읽기 API에서 제목·상태·식별자와 수정 시각을 가져온다. 팀에서 사용할 연결의 자격 증명은 서버의 별도 파일에 둔다. 연결 주소는 전체 백업에서 보존하며, 원본 조회는 GET 요청으로 처리한다. [Jira 이슈 읽기 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/), [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/)
 
 기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 오프라인 분석과 원문 보관에 이어 작성자·상태·유형·필드 매핑, 문서 변환, 새 프로젝트 적용을 구현했다.

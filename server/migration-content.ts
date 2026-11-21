@@ -1,4 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
+import { isCalendarDate } from '../shared/calendar.js';
 import {
   isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH,
   type CalloutVariant, type StatusBadgeTone,
@@ -152,6 +153,16 @@ function attachmentIdentity(node: XmlNode): MigrationReferenceInput {
 }
 const escapeXml = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 function serializeXml(node: XmlNode | string): string { return typeof node === 'string' ? escapeXml(node) : `<${node.name}${Object.entries(node.attrs).map(([key, value]) => ` ${key}="${escapeXml(value)}"`).join('')}>${node.children.map(serializeXml).join('')}</${node.name}>`; }
+const taskAttributes = new Set(['ac:local-id', 'xmlns:ac', 'xmlns:ri']);
+const userLabels = ['ri:display-name', 'ri:displayname'];
+const userIdentifiers = ['ri:username', 'ri:userkey', 'ri:account-id', 'ri:accountid'];
+const userAttributes = new Set([...userLabels, ...userIdentifiers, 'xmlns:ri']);
+const inertInline = (node: RichContent) => inline(node) && !node.marks?.some(mark => mark.type === 'link');
+function confluenceDate(value: string): boolean {
+  if (isCalendarDate(value)) return true;
+  const timestamp = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$/u.exec(value);
+  return Boolean(timestamp && isCalendarDate(timestamp[1]));
+}
 function decodeXml(value: string): string {
   const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', apos: "'", quot: '"' };
   return value.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|apos|quot);/g, (_, entity: string) => entity.startsWith('#') ? String.fromCodePoint(entity[1] === 'x' ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1))) : named[entity]);
@@ -386,9 +397,9 @@ class Converter {
   xmlParts(children: (XmlNode | string)[], depth: number, blockLayout = false): RichContent[] {
     const isBlock = (value: XmlNode | string | undefined) => {
       if (!value || typeof value === 'string') return false;
-      if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt', 'span', 'br'].includes(value.name)) return false;
+      if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt', 'span', 'br', 'time', 'ri:user'].includes(value.name)) return false;
       if (['ac:structured-macro', 'ac:macro'].includes(value.name) && value.attrs['ac:name'] === 'status') return false;
-      if (value.name === 'ac:link' && value.children.some(child => typeof child !== 'string' && child.name === 'ri:attachment')) return false;
+      if (value.name === 'ac:link' && value.children.some(child => typeof child !== 'string' && ['ri:attachment', 'ri:user'].includes(child.name))) return false;
       return true;
     };
     return children.flatMap((child, index) => blockLayout && typeof child === 'string' && !child.trim() && (isBlock(children[index - 1]) || isBlock(children[index + 1])) ? [] : this.xml(child, depth + 1));
@@ -414,6 +425,8 @@ class Converter {
         return nodes;
       }
       case 'br': return [{ type: 'hardBreak' }];
+      case 'time': return this.confluenceTime(node, depth);
+      case 'ri:user': return this.confluenceUser(node, depth);
       case 'hr': return [{ type: 'horizontalRule' }];
       case 'blockquote': return [{ type: 'blockquote', content: flow(this.xmlParts(node.children, depth, true)) }];
       case 'pre': return [codeBlock(this.xmlText(node))];
@@ -456,6 +469,8 @@ class Converter {
         return reference ? this.reference(reference, false, label) : this.link(values.length ? values : text(url), url);
       }
       case 'ac:link': {
+        const user = child('ri:user');
+        if (user) return this.confluenceUser(user, depth, node);
         const page = child('ri:page'), attachment = child('ri:attachment'), body = child('ac:plain-text-link-body') || child('ac:link-body'), label = body ? this.xmlText(body) : '';
         const fragment = node.attrs['ac:anchor']?.trim();
         if (this.context.sectionLinks && fragment) {
@@ -482,12 +497,100 @@ class Converter {
         return this.image(input, node.attrs['ac:alt'] || node.attrs['ac:title'] || '');
       }
       case 'img': return this.image({ kind: 'attachment', url: node.attrs.src }, node.attrs.alt || '');
-      case 'ac:task-list': return [{ type: 'taskList', content: node.children.filter(value => typeof value !== 'string' || value.trim()).flatMap(value => this.xml(value, depth + 1)) }];
-      case 'ac:task': { const body = child('ac:task-body'), status = child('ac:task-status'); return [{ type: 'taskItem', attrs: { checked: Boolean(status && this.xmlText(status).trim() === 'complete') }, content: flow(body ? this.xmlParts(body.children, depth + 1, true) : []) }]; }
+      case 'ac:task-list': return this.confluenceTaskList(node, depth);
+      case 'ac:task': return [{ type: 'taskList', content: [this.confluenceTask(node, depth)] }];
       case 'ac:structured-macro': case 'ac:macro': return this.richDocument && node.attrs['ac:name'] === 'section'
         ? this.columnLayout(node, depth) : this.macro(node, depth + 1);
       default: return this.fallback(`XML ${type}`, serializeXml(node));
     }
+  }
+  private unsupportedInline(node: XmlNode, label: string): RichContent[] {
+    this.warn('UNSUPPORTED_CONTENT', `지원하지 않는 ${label} 구조는 해당 위치에 원문 텍스트로 보존했습니다.`);
+    return text(serializeXml(node));
+  }
+  private confluenceTime(node: XmlNode, depth: number): RichContent[] {
+    const date = node.attrs.datetime?.trim();
+    if (!date || !confluenceDate(date) || Object.keys(node.attrs).some(key => key !== 'datetime')) {
+      return this.unsupportedInline(node, 'Confluence 날짜');
+    }
+    const label = this.xmlParts(node.children, depth);
+    if (!label.every(inertInline)) return this.unsupportedInline(node, 'Confluence 날짜');
+    this.warn('DATE_FLATTENED', 'Confluence 본문 날짜는 원본 값이 보이는 텍스트로 변환했습니다.');
+    const visible = this.xmlText(node).trim();
+    if (!visible) return text(date);
+    return visible === date ? label : [...label, ...text(` (${date})`)];
+  }
+  private confluenceUser(user: XmlNode, depth: number, link?: XmlNode): RichContent[] {
+    const source = link ?? user;
+    const body = link?.children.find((child): child is XmlNode => typeof child !== 'string' &&
+      (child.name === 'ac:link-body' || child.name === 'ac:plain-text-link-body'));
+    const unexpectedUser = user.children.some(child => typeof child !== 'string') || Object.keys(user.attrs).some(key => !userAttributes.has(key));
+    const unexpectedLink = link && (Object.keys(link.attrs).some(key => !taskAttributes.has(key)) ||
+      link.children.some(child => typeof child === 'string' ? child.trim() : child !== user && child !== body));
+    const unexpectedBody = body && (Object.keys(body.attrs).length > 0 ||
+      body.name === 'ac:plain-text-link-body' && body.children.some(child => typeof child !== 'string'));
+    if (unexpectedUser || unexpectedLink || unexpectedBody) {
+      return this.unsupportedInline(source, 'Confluence 사용자 참조');
+    }
+    const label = body ? this.xmlParts(body.children, depth + 1) : [];
+    if (!label.every(inertInline)) return this.unsupportedInline(source, 'Confluence 사용자 참조');
+    const display = this.xmlText(user).trim() || userLabels.map(key => user.attrs[key]?.trim()).find(Boolean);
+    const identifier = userIdentifiers.map(key => user.attrs[key]?.trim()).find(Boolean);
+    const fallback = display || (identifier ? `@${identifier.replace(/^@/u, '')}` : '');
+    const result = body && this.xmlText(body).trim() ? label : text(fallback);
+    if (!result.length) return this.unsupportedInline(source, 'Confluence 사용자 참조');
+    this.warn('MENTION_FLATTENED', 'Confluence 사용자 참조는 표시 이름·원본 ID를 텍스트로 보존했습니다.');
+    return result;
+  }
+  private confluenceTaskList(node: XmlNode, depth: number): RichContent[] {
+    const blocks: RichContent[] = [];
+    let items: RichContent[] = [];
+    const flush = () => {
+      if (!items.length) return;
+      blocks.push({ type: 'taskList', content: items });
+      items = [];
+    };
+    if (Object.keys(node.attrs).some(key => !taskAttributes.has(key))) {
+      blocks.push(...this.fallback('Confluence 체크리스트 속성', serializeXml({ ...node, children: [] })));
+    }
+    for (const child of node.children) {
+      if (typeof child !== 'string' && child.name === 'ac:task') items.push(this.confluenceTask(child, depth + 1));
+      else if (typeof child !== 'string' || child.trim()) {
+        this.tick(depth + 1);
+        flush();
+        blocks.push(...this.fallback('Confluence 체크리스트 항목', serializeXml(child)));
+      }
+    }
+    flush();
+    return blocks.length ? blocks : this.fallback('Confluence 빈 체크리스트', serializeXml(node));
+  }
+  private confluenceTask(node: XmlNode, depth: number): RichContent {
+    this.tick(depth);
+    const parts = node.children.filter(child => typeof child !== 'string' || child.trim());
+    const nodes = parts.filter((child): child is XmlNode => typeof child !== 'string');
+    const body = nodes.find(child => child.name === 'ac:task-body');
+    const statuses = nodes.filter(child => child.name === 'ac:task-status');
+    const [status] = statuses;
+    const simple = (part: XmlNode) => !Object.keys(part.attrs).length && part.children.every(child => typeof child === 'string');
+    const value = statuses.length === 1 && simple(status) ? this.xmlText(status).trim() : null;
+    const knownStatus = value === 'complete' || value === 'incomplete';
+    const blocks = body ? this.xmlParts(body.children, depth + 1, true) : [];
+    for (const wrapper of [node, body]) {
+      if (wrapper && Object.keys(wrapper.attrs).some(key => !taskAttributes.has(key))) {
+        blocks.push(...this.fallback('Confluence 할 일 속성', serializeXml({ ...wrapper, children: [] })));
+      }
+    }
+    const seenIds = new Set<string>();
+    for (const part of parts) {
+      this.tick(depth + 1);
+      if (part === body || part === status && knownStatus) continue;
+      if (typeof part !== 'string' && ['ac:task-id', 'ac:task-uuid'].includes(part.name) && simple(part) && !seenIds.has(part.name)) {
+        seenIds.add(part.name);
+        continue;
+      }
+      blocks.push(...this.fallback('Confluence 할 일의 부가 정보', serializeXml(part)));
+    }
+    return { type: 'taskItem', attrs: { checked: value === 'complete' }, content: ensureListItem(blocks) };
   }
   private columnLayout(node: XmlNode, depth: number): RichContent[] {
     const rows = parseConfluenceColumnLayout(node, depth === 1);

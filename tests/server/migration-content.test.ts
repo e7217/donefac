@@ -38,6 +38,71 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
   assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 3); assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '펼쳐 보기'); assert.ok(result.plainText.includes('접힌 내용'));
 });
 
+const storageTask = (id: number, checked: boolean, body: string) => `<ac:task><ac:task-id>${id}</ac:task-id>` +
+  `<ac:task-status>${checked ? 'complete' : 'incomplete'}</ac:task-status><ac:task-body>${body}</ac:task-body></ac:task>`;
+
+test('Confluence checklist assignees and valid dates stay readable inside editable task items', () => {
+  const xml = '<h2>배포 절차</h2><p>체크리스트 바로 앞 설명</p><ac:task-list>' +
+    storageTask(1, false, '<ac:link><ri:user ri:userkey="release-reviewer-key"/></ac:link> ' +
+      '<strong>배포 결과 확인</strong> 기한 <time datetime="2026-11-28"/> 이후 점검') +
+    storageTask(2, true, '확인 시작: <ri:user ri:username="qa-reviewer"/> ' +
+      '<ac:link><ri:user ri:userkey="historical-account"/><ac:link-body><em>원문에서 표시한 담당자</em></ac:link-body></ac:link> ' +
+      '<time datetime="2024-02-29">2월 마지막 날</time> 작업 종료') +
+    '</ac:task-list><p>체크리스트 바로 뒤 설명</p>';
+  for (const kind of ['page', 'revision'] as const) {
+    const result = convertLegacyContent({ ...source('confluence-storage', xml), kind }, resolver());
+    canonical(result);
+    assert.deepEqual(result.content.content?.map(node => node.type), ['heading', 'paragraph', 'taskList', 'paragraph']);
+    const items = nodes(result.content, 'taskItem');
+    assert.deepEqual(items.map(item => item.attrs?.checked), [false, true]);
+    for (const item of items) assert.equal(item.content?.[0].type, 'paragraph');
+    const inlineText = (item: RichContent) => nodes(item, 'text').map(node => node.text).join('');
+    assert.match(inlineText(items[0]), /release-reviewer-key.*배포 결과 확인.*2026-11-28.*이후 점검/u);
+    assert.match(inlineText(items[1]), /확인 시작.*qa-reviewer.*작업 종료/u);
+    for (const text of ['원문에서 표시한 담당자', '2월 마지막 날', '2024-02-29']) assert.ok(inlineText(items[1]).includes(text), text);
+    assert.equal(nodes(items[0], 'text').find(node => node.text === '배포 결과 확인')?.marks?.[0].type, 'bold');
+    assert.equal(nodes(items[1], 'text').find(node => node.text === '원문에서 표시한 담당자')?.marks?.[0].type, 'italic');
+    assert.equal(nodes(result.content, 'codeBlock').length, 0);
+    assert.ok(!nodes(result.content, 'text').some(node => node.marks?.some(mark => mark.type === 'link')));
+    assert.ok(!result.diagnostics.some(diagnostic => diagnostic.code === 'RAW_CONTENT_FALLBACK'));
+  }
+});
+
+test('unsupported Confluence task content and missing identity or date attributes retain local source evidence', () => {
+  const xml = '<h2>다른 제목은 편집 가능</h2><ac:task-list>' +
+    storageTask(1, false, '<vendor:unknown-assignment code="source-extension">확인할 확장 원문</vendor:unknown-assignment>' +
+      '<p>지원하지 않는 구조 뒤의 설명</p>') +
+    storageTask(2, true, '앞 내용 <ac:link><ri:user/><ac:link-body>계정 키가 없는 원문 담당자</ac:link-body></ac:link> ' +
+      '<time>날짜 속성이 없는 원문</time> <time datetime="2026-02-30">달력 범위 오류 원문</time> 뒤 내용') +
+    '</ac:task-list><p>별도로 저장할 문단</p>';
+  const result = convertLegacyContent(source('confluence-storage', xml), resolver());
+  canonical(result);
+  assert.deepEqual(result.content.content?.map(node => node.type), ['heading', 'taskList', 'paragraph']);
+  const items = nodes(result.content, 'taskItem');
+  assert.deepEqual(items.map(item => item.attrs?.checked), [false, true]);
+  assert.equal(items[0].content?.[0].type, 'paragraph');
+  const fallback = nodes(items[0], 'codeBlock').map(node => node.content?.[0]?.text).join('');
+  assert.match(fallback, /source-extension[\s\S]*확인할 확장 원문/u);
+  assert.match(result.plainText.replaceAll('\n', ' '), /앞 내용.*계정 키가 없는 원문 담당자.*날짜 속성이 없는 원문.*달력 범위 오류 원문.*뒤 내용/u);
+  assert.ok(result.plainText.includes('2026-02-30'));
+  for (const text of ['다른 제목은 편집 가능', '지원하지 않는 구조 뒤의 설명', '별도로 저장할 문단']) assert.ok(result.plainText.includes(text), text);
+  assert.ok(result.diagnostics.some(diagnostic => diagnostic.severity === 'warning'));
+  assert.ok(!result.diagnostics.some(diagnostic => diagnostic.code === 'RAW_CONTENT_FALLBACK'));
+});
+
+test('unsupported Confluence checklist siblings keep adjacent task runs editable in their original order', () => {
+  const xml = '<p>체크리스트 앞 문단</p><ac:task-list>\n' + storageTask(1, false, '지원하는 첫 번째 업무') +
+    '<vendor:task-set label="source-list-note">형식이 다른 목록 항목</vendor:task-set>' +
+    storageTask(2, true, '지원하는 두 번째 업무') + '\n</ac:task-list><p>체크리스트 뒤 문단</p>';
+  const result = convertLegacyContent(source('confluence-storage', xml), resolver());
+  canonical(result);
+  assert.deepEqual(result.content.content?.map(node => node.type), ['paragraph', 'taskList', 'codeBlock', 'taskList', 'paragraph']);
+  assert.deepEqual(nodes(result.content, 'taskItem').map(item => item.attrs?.checked), [false, true]);
+  assert.match(result.plainText.replaceAll('\n', ' '), /체크리스트 앞 문단.*지원하는 첫 번째 업무.*source-list-note.*형식이 다른 목록 항목.*지원하는 두 번째 업무.*체크리스트 뒤 문단/u);
+  assert.ok(result.diagnostics.some(diagnostic => diagnostic.severity === 'warning'));
+  assert.ok(!result.diagnostics.some(diagnostic => diagnostic.code === 'RAW_CONTENT_FALLBACK'));
+});
+
 test('Confluence section links preserve proven case-sensitive anchors and degrade ambiguous or unavailable targets', () => {
   const marker = (name: string) => `<ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">${name}</ac:parameter></ac:structured-macro>`;
   const link = (name: string, label: string) => `<p><ac:link ac:anchor="${name}"><ac:link-body><strong>${label}</strong></ac:link-body></ac:link></p>`;

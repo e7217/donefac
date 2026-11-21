@@ -16,6 +16,8 @@ const privateRelatedTitle = 'synthetic-private-related-issue-title';
 const privateRelease = 'synthetic-private-release-name';
 const privateSprint = 'synthetic-private-sprint-name';
 const privateBody = 'synthetic-private-document-body';
+const privateChecklistItem = 'synthetic-private-checklist-item';
+const checklistDue = '2026-11-28';
 const privateJiraComment = 'synthetic-private-jira-comment';
 const privateConfluenceComment = 'synthetic-private-confluence-comment';
 const privateRevision = 'synthetic-private-historical-document-body';
@@ -74,7 +76,9 @@ function fixturePackages() {
       <property name="contentStatus">historical</property><property name="originalVersion" class="Page"><id name="id">200</id></property>
       <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
       <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
-    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>${privateBody}</p>]]></property>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>${privateBody}</p><ac:task-list>
+      <ac:task><ac:task-id>1</ac:task-id><ac:task-status>complete</ac:task-status><ac:task-body><ac:link><ri:user ri:userkey="${confluenceAuthor}"/></ac:link> ${privateChecklistItem} <time datetime="${checklistDue}"/></ac:task-body></ac:task>
+    </ac:task-list>]]></property>
       <property name="content" class="Page"><id name="id">200</id></property></object>
     <object class="BodyContent"><id name="id">301</id><property name="body"><![CDATA[<p>${privateRevision}</p>]]></property>
       <property name="content" class="Page"><id name="id">201</id></property></object>
@@ -133,6 +137,7 @@ async function readReport(root, answer) {
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
     privateRevision, privateWorklog, privateOldStatus, privateOtherStatus, jiraAuthor, privateJiraDisplayName, confluenceAuthor, confluenceGroup, originalFrom,
+    privateChecklistItem,
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
@@ -211,7 +216,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(pendingEvidence.restore, null);
 
   const review = launch(['review', root], env);
-  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding;
+  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding, importedDocument;
   try {
     const base = await waitForReview(review);
     assert.equal((await fetch(base, { signal: AbortSignal.timeout(10_000) })).status, 200);
@@ -254,6 +259,11 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     const related = imported.issues.find(value => value.title === privateRelatedTitle);
     const [document] = imported.documents;
     assert.ok(issue && related && document);
+    assert.deepEqual(document.content.content.map(block => block.type), ['paragraph', 'taskList']);
+    assert.equal(document.content.content[1].content[0].attrs.checked, true);
+    const expectedDocumentText = `${privateBody}\n@${confluenceAuthor} ${privateChecklistItem} ${checklistDue}`;
+    assert.equal(document.plainText, expectedDocumentText);
+    importedDocument = document;
     assert.equal(imported.planningItems.length, 2);
     const release = imported.planningItems.find(item => item.kind === 'release');
     const sprint = imported.planningItems.find(item => item.kind === 'cycle');
@@ -273,7 +283,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.deepEqual(revisions.sort((left, right) => left.version - right.version)
       .map(({ version, title, plainText, authorId }) => [version, title, plainText, authorId]), [
       [1, 'Historical page', privateRevision, actor],
-      [2, 'Original page', privateBody, actor],
+      [2, 'Original page', expectedDocumentText, actor],
     ]);
     assert.deepEqual(worklogs.entries.map(({ note, durationSeconds, authorId }) => [note, durationSeconds, authorId]), [[privateWorklog, 91, actor]]);
     assert.deepEqual(relations.map(({ sourceIssueId, targetIssueId, type }) => [sourceIssueId, targetIssueId, type]), [[issue.id, related.id, 'Blocks']]);
@@ -339,7 +349,11 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.ok(existsSync(join(attempt, 'backup', 'manifest.json')));
   assert.ok(existsSync(join(attempt, 'restored', 'teamspace.sqlite')));
   const restored = await startRehearsalPilot(join(attempt, 'restored'));
+  let legacyBackup;
   try {
+    const restoredWorkspace = await json(restored.url, '/workspace');
+    assert.deepEqual(restoredWorkspace.documents.find(document => document.id === importedDocument.id), importedDocument);
+    legacyBackup = await json(restored.url, '/export');
     assert.deepEqual(await json(restored.url, `/issues/${importedIssueId}/jira-status-history`), importedStatusHistory);
     const stablePage = jiraFindingsPath(importedReceipt, 'unresolved-time', importedFinding.fingerprint);
     assert.deepEqual(await json(restored.url, stablePage), importedFinding);
@@ -350,6 +364,47 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     assert.deepEqual(unavailable.rows, [{ ...importedFinding.rows[0], reason: 'issue-in-trash' }]);
   } finally {
     await restored.close();
+  }
+
+  const legacyPilot = await startRehearsalPilot(join(scratch, 'legacy-checklist'));
+  try {
+    const base = legacyPilot.url;
+    // Simulate a prior import with the exact whole-page fallback and no field checkpoint.
+    const originalPage = legacyBackup.sourceRecords.find(record => record.targetId === importedDocument.id && record.record.kind === 'page');
+    const savedPage = legacyBackup.documents.find(document => document.id === importedDocument.id);
+    const savedRevision = legacyBackup.revisions.find(revision => revision.documentId === savedPage.id && revision.version === savedPage.version);
+    assert.ok(originalPage && savedRevision);
+    const plainText = originalPage.record.text;
+    const content = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: plainText }] }] };
+    Object.assign(savedPage, { plainText, content });
+    Object.assign(savedRevision, { plainText, content });
+    delete originalPage.confluencePageFieldHashes;
+    const legacyReceipt = legacyBackup.sourceImports.find(receipt => receipt.id === originalPage.sourceImportId);
+    delete legacyReceipt.integrity;
+    await json(base, '/import', { method: 'POST', body: { data: legacyBackup } });
+    const actor = legacyBackup.users[0].id;
+
+    const { filename, product, bytes } = packages.find(item => item.product === 'confluence');
+    const packageQuery = new URLSearchParams({ filename, product, instanceKey: `${originalFrom}-${product}` });
+    const upload = await fetch(`${base}/api/legacy-import/packages?${packageQuery}`, { method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': actor }, body: bytes, signal: AbortSignal.timeout(35_000) });
+    const summary = await upload.json();
+    assert.ok(upload.ok, JSON.stringify(summary));
+    const options = await json(base, `/migrations/options?${new URLSearchParams({ packageId: summary.id })}`);
+    const configuration = { ...options.defaultConfiguration, appendPagesTo: { projectId: savedPage.projectId, refreshExisting: true } };
+    const reviewed = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration } });
+    assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+    assert.ok(reviewed.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_CHECKLIST_RESTORED'));
+    assert.equal(reviewed.counts.updatedDocuments, 1);
+    await json(base, `/migrations/previews/${reviewed.id}/apply`, { method: 'POST', actor, status: 201,
+      body: { expectedVersion: reviewed.version, acknowledgements: reviewed.requiredAcknowledgements } });
+    const { documents } = await json(base, '/workspace');
+    const repaired = documents.find(document => document.id === savedPage.id);
+    assert.equal(repaired.version, savedPage.version + 1);
+    assert.deepEqual(repaired.content, importedDocument.content);
+    assert.equal(repaired.plainText, importedDocument.plainText);
+  } finally {
+    await legacyPilot.close();
   }
 
   const rawPath = join(root, 'workspace', 'legacy-imports', `${staged.packages[0].packageId}.bundle`);
