@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, RichContent, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { listIssueRelations } from './issue-relations.js';
@@ -247,7 +247,7 @@ export class ApiKeyService {
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     const issueRelations = /^\/api\/issues\/([^/]+)\/relations(?:\/([^/]+))?$/.exec(path);
     const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot)?$/.exec(path);
-    const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis)$/.exec(path);
+    const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis|dependencies)$/.exec(path);
     if (projectResource && (request.method === 'GET' || (request.method === 'PATCH' && ['workload-capacity','issue-order'].includes(projectResource[2])))) {
       if (request.method === 'PATCH' && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
       this.query(request, projectResource[2] === 'workload' ? ['startDate','endDate'] : []);
@@ -349,6 +349,8 @@ export class ApiKeyService {
     }
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
+    const dependency = /^\/api\/dependencies\/([^/]+)$/.exec(path);
+    const relationDependency = /^\/api\/issues\/([^/]+)\/relations\/([^/]+)\/schedule-dependency$/.exec(path);
     if (request.method === 'POST' && ['/api/issues', '/api/documents'].includes(path)) {
       this.query(request, []);
       const type = path === '/api/issues' ? 'issue' : 'document';
@@ -364,6 +366,29 @@ export class ApiKeyService {
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
       } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+    } else if (request.method === 'POST' && (path === '/api/dependencies' || relationDependency)) {
+      this.query(request, []);
+      if (relationDependency) {
+        const issueId = this.decode(relationDependency[1]);
+        this.resource(key, 'issues', issueId);
+        const relation = this.store.get<IssueRelation>('issue_relations', this.decode(relationDependency[2]));
+        if (!relation || (relation.sourceIssueId !== issueId && relation.targetIssueId !== issueId)) return fail(404, '업무 관계를 찾을 수 없습니다.');
+        this.resource(key, 'issues', relation.sourceIssueId === issueId ? relation.targetIssueId : relation.sourceIssueId);
+      }
+      this.resource(key, 'issues', request.body?.predecessorId);
+      this.resource(key, 'issues', request.body?.successorId);
+    } else if (dependency && ['PATCH', 'DELETE'].includes(request.method)) {
+      const query = this.query(request, request.method === 'DELETE' ? ['expectedVersion'] : []);
+      const existing = this.store.get<Dependency>('dependencies', this.decode(dependency[1]));
+      if (!existing) return fail(404, '일정 연결을 찾을 수 없습니다.');
+      this.resource(key, 'issues', existing.predecessorId);
+      this.resource(key, 'issues', existing.successorId);
+      if (request.method === 'DELETE') {
+        const version = /^\d+$/.test(query.expectedVersion ?? '') ? Number(query.expectedVersion) : NaN;
+        if (!Number.isSafeInteger(version) || version < 1 || Object.hasOwn(request.body ?? {}, 'expectedVersion')) {
+          fail(400, '일정 연결을 삭제하려면 쿼리의 expectedVersion이 필요합니다.');
+        }
+      }
     } else if (issueRelations && (!issueRelations[2] && request.method === 'POST' || issueRelations[2] && ['PATCH','DELETE'].includes(request.method))) {
       this.query(request, request.method === 'DELETE' ? ['expectedVersion'] : []);
       const id = this.decode(issueRelations[1]);

@@ -9,7 +9,7 @@ import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { ApiKeyService } from '../../server/api-keys.js';
-import type { ApiKeyCreated, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, DocPage, Issue, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, Issue, IssueRelation, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-api-key-test-'));
@@ -107,6 +107,149 @@ test('public mutations reuse normal validation and bind author, target/source sc
     assert.equal((await f.call('/v1/planning-items', 'POST', { projectId: 'project-neo', kind: 'cycle', name: '허용하지 않은 생성' }, headers)).status, 403);
     assert.equal((await f.call('/v1/import', 'POST', { data: {} }, headers)).status, 403);
     const wide = await f.create('write', null); assert.equal((await f.call<DocPage>('/v1/documents', 'POST', { title: '전체 범위 공통 문서' }, bearer(wide.token))).status, 201);
+  } finally { await f.close(); }
+});
+
+test('public schedule dependencies authorize both endpoints and return only the requested project', async () => {
+  const f = await fixture();
+  try {
+    const reader = bearer((await f.create()).token);
+    const writer = bearer((await f.create('write')).token);
+    const teamWriter = bearer((await f.create('write', ['project-team'])).token);
+    const allProjects = bearer((await f.create('read', null)).token);
+    const list = '/v1/projects/project-neo/dependencies';
+    const outsideList = '/v1/projects/project-team/dependencies';
+    const path = '/v1/dependencies';
+    const proposed = { predecessorId: 'issue-1', successorId: 'issue-3' };
+    assert.equal((await f.call(list, 'GET', undefined, { 'X-Actor-Id': 'user-min' })).status, 401);
+    assert.equal((await f.call(path, 'POST', proposed)).status, 401);
+    assert.equal((await f.call(outsideList, 'GET', undefined, reader)).status, 403);
+    assert.equal((await f.call(`${list}?projectId=project-team`, 'GET', undefined, reader)).status, 400);
+    assert.equal((await f.call('/v1/projects/missing-project/dependencies', 'GET', undefined, allProjects)).status, 404);
+
+    // Seed a mixed-project historical row directly so the read and edit guards
+    // must check the stored endpoints even though normal creation forbids it.
+    const mixed: Dependency = { id: 'mixed-dependency', predecessorId: 'issue-1', successorId: 'issue-10', type: 'FS', lagDays: 0, version: 1 };
+    const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    try {
+      database.prepare('INSERT INTO dependencies(id,predecessor_id,successor_id,json) VALUES(?,?,?,?)')
+        .run(mixed.id, mixed.predecessorId, mixed.successorId, JSON.stringify(mixed));
+    } finally { database.close(); }
+
+    const original = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const neo = await f.call<Dependency[]>(list, 'GET', undefined, reader);
+    assert.equal(neo.status, 200);
+    assert.deepEqual(neo.data, [{ id: 'dep-1', predecessorId: 'issue-2', successorId: 'issue-6', type: 'FS', lagDays: 0, version: 1 }]);
+    const team = await f.call<Dependency[]>(outsideList, 'GET', undefined, allProjects);
+    assert.equal(team.status, 200);
+    assert.deepEqual(team.data, [{ id: 'dep-2', predecessorId: 'issue-10', successorId: 'issue-12', type: 'FS', lagDays: 0, version: 1 }]);
+    assert.equal((await f.call(path, 'POST', proposed, reader)).status, 403);
+    assert.equal((await f.call(`${path}/dep-1`, 'PATCH', { expectedVersion: 1, reverse: true }, reader)).status, 403);
+    assert.equal((await f.call(`${path}/dep-1?expectedVersion=1`, 'DELETE', undefined, reader)).status, 403);
+    for (const candidate of [
+      { ...proposed, predecessorId: 'issue-10' },
+      { ...proposed, successorId: 'issue-10' },
+    ]) assert.equal((await f.call(path, 'POST', candidate, writer)).status, 403);
+    for (const [id, headers] of [['dep-2', writer], [mixed.id, writer], [mixed.id, teamWriter]] as const) {
+      assert.equal((await f.call(`${path}/${id}`, 'PATCH', { expectedVersion: 1, reverse: true }, headers)).status, 403);
+      assert.equal((await f.call(`${path}/${id}?expectedVersion=1`, 'DELETE', undefined, headers)).status, 403);
+    }
+    const after = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    assert.deepEqual(after.dependencies, original.dependencies);
+    assert.deepEqual(after.activities, original.activities);
+  } finally { await f.close(); }
+});
+
+test('public schedule dependency edits preserve the graph on cycles and stale versions', async () => {
+  const f = await fixture();
+  try {
+    const writer = bearer((await f.create('write', ['project-neo'], 'user-seo')).token, { 'X-Actor-Id': 'user-jun' });
+    const path = '/v1/dependencies';
+    async function connect(predecessorId: string, successorId: string) {
+      const saved = await f.call<Dependency>(path, 'POST', { predecessorId, successorId, actorId: 'user-jun' }, writer);
+      assert.equal(saved.status, 201);
+      assert.equal(saved.data.version, 1);
+      return saved.data;
+    }
+    const main = await connect('issue-1', 'issue-4');
+    await connect('issue-1', 'issue-3');
+    const lastLeg = await connect('issue-3', 'issue-4');
+    const changePath = `${path}/${main.id}`;
+    const reverse = { expectedVersion: main.version, reverse: true, type: 'SS', lagDays: -2, actorId: 'user-jun' };
+    const beforeCycle = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    assert.equal((await f.call(path, 'POST', { predecessorId: 'issue-4', successorId: 'issue-1' }, writer)).status, 400);
+    assert.equal((await f.call(changePath, 'PATCH', reverse, writer)).status, 400);
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, beforeCycle);
+
+    assert.equal((await f.call(`${path}/${lastLeg.id}?expectedVersion=${lastLeg.version}`, 'DELETE', undefined, writer)).status, 200);
+    const updated = await f.call<Dependency>(changePath, 'PATCH', reverse, writer);
+    assert.equal(updated.status, 200);
+    const version = updated.data.version;
+    assert.ok(version && main.version && version > main.version);
+    assert.deepEqual(updated.data, { id: main.id, predecessorId: 'issue-4', successorId: 'issue-1', type: 'SS', lagDays: -2, version });
+    const beforeStale = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const reversalEvents = beforeStale.activities.filter(entry => entry.action === '선후행 방향 변경');
+    assert.deepEqual(reversalEvents.map(({ resourceId }) => resourceId).sort(), ['issue-1', 'issue-4']);
+    assert.ok(reversalEvents.every(({ actorId }) => actorId === 'user-seo'));
+    assert.equal((await f.call(changePath, 'PATCH', { ...reverse, expectedVersion: undefined }, writer)).status, 400);
+    assert.equal((await f.call(changePath, 'PATCH', reverse, writer)).status, 409);
+    assert.equal((await f.call(changePath, 'DELETE', undefined, writer)).status, 400);
+    assert.equal((await f.call(changePath, 'DELETE', { expectedVersion: version }, writer)).status, 400);
+    assert.equal((await f.call(`${changePath}?expectedVersion=${version}`, 'DELETE', { expectedVersion: version }, writer)).status, 400);
+    assert.equal((await f.call(`${changePath}?expectedVersion=${version}&expectedVersion=${main.version}`, 'DELETE', undefined, writer)).status, 400);
+    assert.equal((await f.call(`${changePath}?expectedVersion=${main.version}`, 'DELETE', undefined, writer)).status, 409);
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, beforeStale);
+
+    const removed = await f.call(`${changePath}?expectedVersion=${version}`, 'DELETE', undefined, writer);
+    assert.equal(removed.status, 200);
+    assert.deepEqual(removed.data, { ok: true });
+    const list = await f.call<Dependency[]>('/v1/projects/project-neo/dependencies', 'GET', undefined, writer);
+    assert.equal(list.status, 200);
+    assert.ok(list.data.every(edge => edge.id !== main.id));
+  } finally { await f.close(); }
+});
+
+test('public conversion authorizes the actual blocking relation and attributes the audit to the key owner', async () => {
+  const f = await fixture();
+  try {
+    const reader = bearer((await f.create()).token);
+    const writer = bearer((await f.create('write', ['project-neo'], 'user-seo')).token, { 'X-Actor-Id': 'user-jun' });
+    const bothProjects = bearer((await f.create('write', ['project-neo', 'project-team'])).token);
+    const relationPath = '/issues/issue-1/relations';
+    const local = await f.call<IssueRelation>(relationPath, 'POST', { otherIssueId: 'issue-3', type: 'blocks', direction: 'outgoing' });
+    const outside = await f.call<IssueRelation>(relationPath, 'POST', { otherIssueId: 'issue-10', type: 'blocks', direction: 'outgoing' });
+    assert.equal(local.status, 201);
+    assert.equal(outside.status, 201);
+    const path = (issueId: string, relation: IssueRelation) => `/v1/issues/${issueId}/relations/${relation.id}/schedule-dependency`;
+    const request = { expectedVersion: local.data.version, predecessorId: 'issue-1', successorId: 'issue-3', type: 'FF', lagDays: 2, actorId: 'user-jun' };
+    const localPath = path('issue-1', local.data);
+    const outsidePath = path('issue-1', outside.data);
+    const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const relationsBefore = (await f.call<IssueRelation[]>(relationPath)).data;
+    assert.equal((await f.call(localPath, 'POST', request, reader)).status, 403);
+    assert.equal((await f.call(outsidePath, 'POST', request, writer)).status, 403);
+    assert.equal((await f.call(localPath, 'POST', { ...request, successorId: 'issue-10' }, writer)).status, 403);
+    assert.equal((await f.call(outsidePath, 'POST', { ...request, successorId: 'issue-10' }, bothProjects)).status, 400);
+    assert.equal((await f.call(localPath, 'POST', { ...request, successorId: 'issue-4' }, writer)).status, 400);
+    assert.equal((await f.call(localPath, 'POST', { ...request, predecessorId: 'issue-3', successorId: 'issue-1' }, writer)).status, 400);
+    assert.equal((await f.call(path('issue-4', local.data), 'POST', request, writer)).status, 404);
+    assert.equal((await f.call(localPath, 'POST', { ...request, expectedVersion: local.data.version + 1 }, writer)).status, 409);
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before);
+
+    const created = await f.call<Dependency>(localPath, 'POST', request, writer);
+    assert.equal(created.status, 201);
+    assert.deepEqual(created.data, { id: created.data.id, predecessorId: 'issue-1', successorId: 'issue-3', type: 'FF', lagDays: 2, version: 1 });
+    const replay = await f.call<Dependency>(path('issue-3', local.data), 'POST', request, writer);
+    assert.equal(replay.status, 200);
+    assert.deepEqual(replay.data, created.data);
+    const after = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    assert.deepEqual(after.dependencies, [...before.dependencies, created.data]);
+    assert.deepEqual((await f.call<IssueRelation[]>(relationPath)).data, relationsBefore);
+    const activityIds = new Set(before.activities.map(entry => entry.id));
+    const activities = after.activities.filter(entry => !activityIds.has(entry.id));
+    assert.deepEqual(activities.map(({ resourceId, actorId, action }) => ({ resourceId, actorId, action })), [
+      { resourceId: 'issue-3', actorId: 'user-seo', action: '선행 업무 연결' },
+    ]);
   } finally { await f.close(); }
 });
 

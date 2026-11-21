@@ -21,6 +21,7 @@ curl --fail-with-body \
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
 | `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
+| `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
 | `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
@@ -30,6 +31,8 @@ curl --fail-with-body \
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
 | `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
+| `POST /dependencies` · `PATCH`·`DELETE /dependencies/:id` | 선후행 연결 추가·유형·간격·방향 변경과 해제 |
+| `POST /issues/:id/relations/:relationId/schedule-dependency` | 기존 차단 관계에서 선후행 연결 추가 |
 | `GET /issues/:id/gitlab-links` | 프로젝트 범위 안 업무의 브랜치·커밋·MR·파이프라인 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
@@ -60,11 +63,13 @@ curl --fail-with-body \
 
 ## 선후행 업무 연결
 
-브라우저의 `POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
+`GET /api/v1/projects/:id/dependencies`는 프로젝트에 두 업무가 모두 있는 연결을 `Dependency[]`로 반환한다. 각 항목에는 `id`, `predecessorId`, `successorId`, `type`, `lagDays`, `version`이 있다. 읽기 키로 조회하고 쓰기 키로 변경한다. 변경할 두 업무와 차단 관계의 두 업무는 모두 키의 허용 범위에 있어야 한다. 아래 브라우저 경로의 `/api`를 `/api/v1`으로 바꿔 자동화 키를 사용한다.
+
+`POST /api/dependencies`로 `{predecessorId,successorId,type?,lagDays?}`를 보낸다. 관계는 `FS`, `SS`, `FF`, `SF`를 지원하고 기본값은 `FS`와 `0`이다. `lagDays`는 −3,650~3,650 사이의 정수 근무일이다. 같은 프로젝트 안에서 방향별 업무 쌍은 한 번만 연결할 수 있으며 순환 관계는 거절한다.
 
 기존 차단 관계에서 연결할 때는 `POST /api/issues/:issueId/relations/:relationId/schedule-dependency`에 `{expectedVersion,predecessorId,successorId,type,lagDays}`를 보낸다. `expectedVersion`은 조회한 업무 관계의 버전이다. 관계에 속한 두 업무가 같은 프로젝트에 있어야 한다. 직접 만든 `blocks` 관계는 차단하는 업무를 선행으로 사용하며, 이관된 `Blocks`, `Is Blocked By`, `Blocked By`는 요청에서 방향을 선택한다. 원래 관계와 업무 날짜를 보존한 채 일정 연결을 추가한다. 새 연결이면 `201`, 같은 방향·유형·간격이 이미 저장돼 있으면 같은 연결과 `200`을 반환한다.
 
-`PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?,reverse?}`를 보내 연결 유형과 간격을 바꾼다. `reverse: true`는 같은 연결 ID에서 선행 업무와 후행 업무를 서로 바꾼다. 반대 방향이 순환을 만들면 변경을 거절한다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
+`PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?,reverse?}`를 보내 연결 유형과 간격을 바꾼다. `reverse: true`는 같은 연결 ID에서 선행 업무와 후행 업무를 서로 바꾼다. 반대 방향이 순환을 만들면 변경을 거절한다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. `/api/v1`의 해제 요청에는 이 쿼리 값이 필요하다. 현재 버전이 바뀌면 `409`와 최신 버전을 반환한다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
 
 ## 일정 여유 분석
 

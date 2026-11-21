@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { Link2, X } from 'lucide-react';
+import { ArrowRightLeft, Link2, X } from 'lucide-react';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import type { Dependency, DependencyType, Issue } from '../../shared/types';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
@@ -112,6 +112,11 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
     }
   }
 
+  function swapDirection() {
+    setPredecessorId(successorId);
+    setSuccessorId(predecessorId);
+  }
+
   function pickRelationDirection(direction: string) {
     if (!relationReview) return;
     const { sourceIssueId, targetIssueId } = relationReview;
@@ -159,8 +164,7 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
             <label className="issue-form-label">연결 방향
               <select className="field" aria-label="연결 방향" value={otherIsSuccessor ? 'successor' : 'predecessor'} disabled={busy} onChange={event => {
                 if ((event.target.value === 'successor') === otherIsSuccessor) return;
-                setPredecessorId(successorId);
-                setSuccessorId(predecessorId);
+                swapDirection();
               }}>
                 <option value="predecessor">상대 업무가 선행</option>
                 <option value="successor">상대 업무가 후행</option>
@@ -200,6 +204,12 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
                 ))}
               </select>
             </label>
+            {editing && <div className="issue-dependent-search">
+              <button className="btn" type="button" disabled={busy || !predecessor || !successor} onClick={swapDirection}>
+                <ArrowRightLeft size={15} aria-hidden="true" />선행·후행 바꾸기
+              </button>
+              <span className="sr-only" role="status">선행 {predecessor?.key} → 후행 {successor?.key}</span>
+            </div>}
           </>}
           <label className="issue-form-label">연결 유형
             <select ref={typeSelect} className="field" aria-label="연결 유형" disabled={busy} value={type} aria-describedby={`${id}-type-help`} onChange={event => {

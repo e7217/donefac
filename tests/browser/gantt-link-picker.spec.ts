@@ -170,7 +170,7 @@ test('360px에서 날짜 없는 행을 키보드로 선택하고 기존 연결�
     await dialog.getByRole('button', { name: '연결 변경 저장', exact: true }).click();
     const response = await updated;
     expect(response.status(), await response.text()).toBe(200);
-    expect(response.request().postDataJSON()).toMatchObject({ expectedVersion: dependency.version ?? 1, type: 'SS', lagDays: 2 });
+    expect(response.request().postDataJSON()).toEqual({ expectedVersion: dependency.version ?? 1, type: 'SS', lagDays: 2 });
     await expect(dialog).toHaveCount(0);
     await expect(picker).toBeFocused();
 
@@ -241,6 +241,92 @@ test('360px 간트에서 선택한 행을 필터로 가려진 같은 프로젝�
       expect(saved.issues.find(item => item.id === issue.id)).toMatchObject({ startDate: issue.startDate, endDate: issue.endDate });
     }
     expect(writes).toEqual(['POST']);
+  } finally {
+    for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
+
+test('360px 간트에서 선후행 방향을 검토한 뒤 바꾸고 동시 변경이 있으면 입력을 보존한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const project = (await workspace(request)).projects[0];
+  const prefix = `간트 방향 변경 ${randomUUID()}`;
+  const issues: Issue[] = [];
+  try {
+    const predecessor = await createIssue(request, project.id, `${prefix} 선행`, issues, dateAt(1), dateAt(3));
+    const successor = await createIssue(request, project.id, `${prefix} 후행`, issues, dateAt(4), dateAt(6));
+    const created = await request.post('/api/dependencies', {
+      data: { predecessorId: predecessor.id, successorId: successor.id, type: 'FF', lagDays: -2 },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const dependency = await created.json() as Dependency;
+    const dependencyPath = `/api/dependencies/${dependency.id}`;
+    const waitForUpdate = () => page.waitForResponse(response =>
+      new URL(response.url()).pathname === dependencyPath && response.request().method() === 'PATCH');
+    const writes = countDependencyWrites(page);
+    const { chart } = await openChart(page, project.id, prefix);
+    const connector = chart.locator(`[data-dependency-id="${dependency.id}"]`);
+    await expect(connector).toHaveCount(1);
+    const originalPath = await connector.getAttribute('d');
+    const list = page.getByRole('region', { name: '업무 연결 목록', exact: true });
+    const edit = (before: Issue, after: Issue) => list.getByRole('button', { name: `${before.key}와 ${after.key} 연결 수정`, exact: true });
+    await edit(predecessor, successor).click();
+    const dialog = page.getByRole('dialog', { name: '업무 연결 수정', exact: true });
+    const before = dialog.getByLabel('선행 업무', { exact: true });
+    const after = dialog.getByLabel('후행 업무', { exact: true });
+    const type = dialog.getByLabel('연결 유형', { exact: true });
+    const lag = dialog.getByLabel('추가 간격 근무일', { exact: true });
+    const swap = dialog.getByRole('button', { name: '선행·후행 바꾸기', exact: true });
+    const save = dialog.getByRole('button', { name: '연결 변경 저장', exact: true });
+    await expect(type).toBeFocused();
+    await expect(save).toBeDisabled();
+    await swap.press('Enter');
+    await expect(before).toHaveValue(successor.id);
+    await expect(after).toHaveValue(predecessor.id);
+    await expect(type).toHaveValue('FF');
+    await expect(lag).toHaveValue('-2');
+    await expect(dialog.getByRole('status')).toHaveText(`선행 ${successor.key} → 후행 ${predecessor.key}`);
+    expect(writes).toEqual([]);
+    expect((await workspace(request)).dependencies.find(link => link.id === dependency.id)).toEqual(dependency);
+    page.once('dialog', confirmation => confirmation.dismiss());
+    await swap.press('Escape');
+    await expect(dialog).toBeVisible();
+    await expect(before).toHaveValue(successor.id);
+
+    const saved = waitForUpdate();
+    await save.click();
+    const saveResponse = await saved;
+    expect(saveResponse.status(), await saveResponse.text()).toBe(200);
+    expect(saveResponse.request().postDataJSON()).toEqual({ expectedVersion: dependency.version, type: 'FF', lagDays: -2, reverse: true });
+    const reversed = await saveResponse.json() as Dependency;
+    expect(reversed).toMatchObject({ id: dependency.id, predecessorId: successor.id, successorId: predecessor.id, type: 'FF', lagDays: -2 });
+    await expect(dialog).toHaveCount(0);
+    await expect(edit(successor, predecessor)).toBeFocused();
+    await expect.poll(() => connector.getAttribute('d')).not.toEqual(originalPath);
+
+    await edit(successor, predecessor).click();
+    await swap.click();
+    await lag.fill('3');
+    const concurrent = await request.patch(dependencyPath, { data: { expectedVersion: reversed.version, lagDays: 4 } });
+    expect(concurrent.status(), await concurrent.text()).toBe(200);
+    const latest = await concurrent.json() as Dependency;
+    const rejected = waitForUpdate();
+    await save.click();
+    expect((await rejected).status()).toBe(409);
+    await expect(dialog.getByRole('alert')).toContainText('다른 작업자가 이 연결을 변경했습니다');
+    await expect(before).toHaveValue(predecessor.id);
+    await expect(after).toHaveValue(successor.id);
+    await expect(lag).toHaveValue('3');
+    await expect(save).toBeDisabled();
+    page.once('dialog', confirmation => confirmation.accept());
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(edit(successor, predecessor)).toBeFocused();
+
+    const snapshot = await workspace(request);
+    expect(snapshot.dependencies.find(link => link.id === dependency.id)).toEqual(latest);
+    for (const issue of issues) {
+      expect(snapshot.issues.find(item => item.id === issue.id)).toMatchObject({ startDate: issue.startDate, endDate: issue.endDate, version: issue.version });
+    }
+    expect(writes).toEqual(['PATCH', 'PATCH']);
   } finally {
     for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
   }

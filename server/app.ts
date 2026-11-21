@@ -1545,6 +1545,18 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   });
   app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
+  app.get('/api/projects/:id/dependencies',(req,res)=>{
+    const projectId=get<Project>('projects',req.params.id).id;
+    const rows=store.db.prepare(`SELECT d.json FROM dependencies d
+      JOIN issues predecessor ON predecessor.id=d.predecessor_id
+      JOIN issues successor ON successor.id=d.successor_id
+      WHERE predecessor.project_id=? AND successor.project_id=? ORDER BY d.id`).all(projectId,projectId) as {json:string}[];
+    const dependencies=rows.map(row=>{
+      const {id,predecessorId,successorId,type,lagDays,version}=JSON.parse(row.json) as Dependency;
+      return {id,predecessorId,successorId,type,lagDays,version:version??1};
+    });
+    res.set('Cache-Control','no-store').json(dependencies);
+  });
   app.post('/api/dependencies',(req,res)=>{
     const input=req.body??{};
     const dependency:Dependency={id:uid(),predecessorId:input.predecessorId,successorId:input.successorId,

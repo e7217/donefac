@@ -295,7 +295,7 @@ test('legacy blocking labels let the actor choose either direction without repla
   const cross = await f.call<IssueRelation>(pathFor(a.id), { method: 'POST', body: add(outsider.id, 'blocks') }, 201);
   assert.match((await f.call<{ error: string }>(schedulePath(a.id, cross), { method: 'POST', body: scheduleBody(cross) }, 400)).error, /같은 프로젝트/);
   const publicKey = await f.key('차단 일정 공개 API 확인', [primary], 'write');
-  await f.call(`/v1${schedulePath(a.id, legacy)}`, { method: 'POST', body: chosen, headers: publicKey }, 403);
+  assert.deepEqual(await f.call(`/v1${schedulePath(a.id, legacy)}`, { method: 'POST', body: chosen, headers: publicKey }), dependency);
   const after = await f.call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(after.issues, original.issues);
   assert.deepEqual(after.dependencies, [...original.dependencies, dependency]);

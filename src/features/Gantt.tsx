@@ -268,6 +268,12 @@ function ProjectGantt(props: GanttProps) {
     notify(`과부하를 줄이는 ${result.updated.length}개 업무의 일정을 적용했습니다.`);
   }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
+  const editingDependency = linkEditor?.dependency;
+  const latestDependency = editingDependency && data.dependencies.find(link => link.id === editingDependency.id);
+  const staleDependencyMessage = editingDependency && (!latestDependency
+    ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
+    : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
+      ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const project = data.projects.find(value => value.id === projectId);
   const hasProject = Boolean(project);
@@ -663,17 +669,19 @@ function ProjectGantt(props: GanttProps) {
     }
   }
   async function saveDependency(input: DependencyInput) {
-    if (busyRef.current) return;
-    const dependency = linkEditor?.dependency;
+    if (busyRef.current || staleDependencyMessage) return;
     markBusy(true);
     try {
-      if (dependency) {
-        const { type, lagDays } = input;
-        await patch(`/dependencies/${encodeURIComponent(dependency.id)}`, { expectedVersion: dependency.version ?? 1, type, lagDays });
+      if (editingDependency) {
+        const { predecessorId, successorId, type, lagDays } = input;
+        const reverse = predecessorId === editingDependency.successorId && successorId === editingDependency.predecessorId;
+        await patch(`/dependencies/${encodeURIComponent(editingDependency.id)}`, {
+          expectedVersion: editingDependency.version ?? 1, type, lagDays, ...(reverse ? { reverse: true } : {}),
+        });
       } else {
         await post('/dependencies', input);
       }
-      await refreshAfterDependencyChange(dependency ? '업무 연결을 수정했습니다.' : '선행·후행 업무를 연결했습니다.');
+      await refreshAfterDependencyChange(editingDependency ? '업무 연결을 수정했습니다.' : '선행·후행 업무를 연결했습니다.');
       closeLinkEditor();
     } catch (err) {
       if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => {});
@@ -1092,8 +1100,8 @@ function ProjectGantt(props: GanttProps) {
         notify(`${changes.join(' · ')}을 변경했습니다.`);
       }}
     />}
-    {linkEditor && <GanttDependencyModal key={linkEditor.dependency?.id ?? draftEpoch} issues={projectIssues} dependency={linkEditor.dependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
-      onDraftChange={trackDraft} onClose={() => { if (canLeave()) closeLinkEditor(); }} onSubmit={saveDependency} />}
+    {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch} issues={projectIssues} dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
+      staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={() => { if (canLeave()) closeLinkEditor(); }} onSubmit={saveDependency} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
       onClose={() => { if (canLeave()) setPlanAssignment(null); }}
       onApplied={updated => setSelected(previous => {
