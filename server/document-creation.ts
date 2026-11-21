@@ -6,6 +6,7 @@ import type { Store } from './store.js';
 
 type Receipt = { actorId: string; projectId: string | null; fingerprint: string; documentId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
+type CreationOperation = 'delivery-blocker-draft' | 'document-template-draft' | `document-tree-copy:${string}` | `issue-linked-document:${string}`;
 
 export function bindImportedDocumentSections(document: DocPage): void {
   const sections = new Set<string>();
@@ -41,8 +42,13 @@ export class DocumentCreationService {
   }
 
   create(actorId: string, input: Record<string, unknown>, persist: () => DocPage,
-    operation?: 'delivery-blocker-draft' | 'document-template-draft' | `document-tree-copy:${string}`): { document: DocPage; duplicate: boolean } {
-    if (!Object.hasOwn(input, 'requestId')) return { document: this.store.transaction(persist), duplicate: false };
+    operation?: CreationOperation, verify?: (document: DocPage) => void): { document: DocPage; duplicate: boolean } {
+    const createDocument = () => {
+      const document = persist();
+      verify?.(document);
+      return document;
+    };
+    if (!Object.hasOwn(input, 'requestId')) return { document: this.store.transaction(createDocument), duplicate: false };
     const requestId = input.requestId;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
       throw new DocumentCreationError(400, '문서 생성 요청 ID를 확인해 주세요.', 'invalid_request_id');
@@ -66,10 +72,11 @@ export class DocumentCreationService {
         if (!document || document.projectId !== receipt.projectId || document.authorId !== actorId) {
           throw new DocumentCreationError(409, '이 요청에서 생성한 문서를 현재 확인할 수 없습니다. 문서 목록과 휴지통을 확인해 주세요.', 'result_unavailable');
         }
+        verify?.(document);
         return { document, duplicate: true };
       }
 
-      const document = persist();
+      const document = createDocument();
       this.store.db.prepare('INSERT INTO document_creation_requests(id,actor_id,project_id,fingerprint,document_id) VALUES (?,?,?,?,?)')
         .run(id, actorId, document.projectId, fingerprint, document.id);
       return { document, duplicate: false };

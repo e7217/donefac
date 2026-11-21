@@ -167,6 +167,17 @@
   gap: 8px;
 }
 
+.issue-linked-documents-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.issue-linked-documents-heading h3 { margin: 0; }
+
 .issue-schedule-warnings {
   display: flex;
   align-items: flex-start;

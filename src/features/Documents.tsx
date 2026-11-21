@@ -46,7 +46,8 @@ import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevisi
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
-import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel, downloadDocument, templateContent } from './document-utils';
+import { DOCUMENT_TEMPLATES, templateContent } from './document-built-in-templates';
+import { contentMarkdown, contentText, documentRevisionLabel, downloadDocument } from './document-utils';
 import { Attachments } from './Attachments';
 import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';

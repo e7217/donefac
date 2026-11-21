@@ -24,6 +24,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
+import { creationRequestId, deterministicCreationId } from './creation-request.js';
 import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent } from './document-templates.js';
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
@@ -106,7 +107,7 @@ import { fieldApplies, hasCustomValue, issueSearchText, visibleIssueFieldIds } f
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
-import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
+import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -1584,21 +1585,58 @@ export function createApp(options: {
   app.patch('/api/document-templates/:id', (req,res) => {
     res.json(documentTemplates.patch(req.params.id,actor(req),req.body,templateOrigins(req)));
   });
-  app.post('/api/documents',(req,res)=>{
+  function writeIssueDocumentLink(req: Request, link: ResourceLink, title = '') {
+    store.put('resource_links',link);
+    activity(req,'issue',link.issueId,'문서 연결',title);
+  }
+  // The original link ID lets a receipt distinguish a later manual link between the same resources.
+  const linkedDocumentLinkId = (issueId: string, documentId: string) => deterministicCreationId(['issue-linked-document-link', issueId, documentId]);
+  function createDocument(req: Request, res: Response, issueId?: string) {
     const authorId = actor(req);
     const input=req.body;
+    if (issueId !== undefined && (!input || typeof input !== 'object' || Array.isArray(input))) {
+      return fail('업무와 문서 공간, 초안 내용을 확인해 주세요.');
+    }
     const usesTemplate=Object.hasOwn(input,'templateId')||Object.hasOwn(input,'expectedTemplateVersion');
-    if(usesTemplate&&(Object.keys(input).some(key=>!['requestId','templateId','expectedTemplateVersion','projectId','parentId','title','actorId'].includes(key))||
+    const templateFields = ['requestId','templateId','expectedTemplateVersion','projectId','parentId','title','actorId'];
+    if (issueId !== undefined) templateFields.push('expectedIssueProjectId');
+    const invalidLocation = (input.projectId!=null&&(typeof input.projectId!=='string'||!input.projectId))||
+      (input.parentId!=null&&(typeof input.parentId!=='string'||!input.parentId));
+    if (issueId !== undefined) {
+      if (typeof input.requestId !== 'string' || !creationRequestId.test(input.requestId)) {
+        throw new DocumentCreationError(400, '문서 생성 요청 ID를 확인해 주세요.', 'invalid_request_id');
+      }
+      const draftFields = ['requestId','expectedIssueProjectId','projectId','parentId','title','actorId','content','icon','labels','status'];
+      if (typeof input.expectedIssueProjectId !== 'string' || !input.expectedIssueProjectId.trim() || invalidLocation ||
+        Object.keys(req.query).length || (!usesTemplate && Object.keys(input).some(key => !draftFields.includes(key))) ||
+        (Object.hasOwn(input,'status') && input.status !== 'draft')) {
+        return fail('업무와 문서 공간, 초안 내용을 확인해 주세요.');
+      }
+    }
+    if(usesTemplate&&(Object.keys(input).some(key=>!templateFields.includes(key))||
       typeof input.requestId!=='string'||typeof input.templateId!=='string'||!input.templateId||
-      !Number.isSafeInteger(input.expectedTemplateVersion)||input.expectedTemplateVersion<1||
-      (input.projectId!=null&&(typeof input.projectId!=='string'||!input.projectId))||
-      (input.parentId!=null&&(typeof input.parentId!=='string'||!input.parentId)))){
+      !Number.isSafeInteger(input.expectedTemplateVersion)||input.expectedTemplateVersion<1||invalidLocation)){
       return fail('팀 템플릿, 문서 공간과 저장 요청을 확인해 주세요.');
     }
+    let linkedResult: ResourceLink | undefined;
+    const verifyLink = issueId === undefined ? undefined : (document: DocPage) => {
+      const link = store.get<ResourceLink>('resource_links', linkedDocumentLinkId(issueId, document.id));
+      if (!link || link.issueId !== issueId || link.documentId !== document.id || !store.get<Issue>('issues', issueId)) {
+        throw new DocumentCreationError(409, '이 요청에서 만든 업무·문서 연결을 현재 확인할 수 없습니다.', 'result_unavailable');
+      }
+      linkedResult = link;
+    };
     let staged:ReturnType<AttachmentAppend['stage']>|undefined;
     let result:ReturnType<DocumentCreationService['create']>;
     try {
       result = documentCreation.create(authorId, input, () => {
+        if (issueId !== undefined) {
+          const issue = get<Issue>('issues', issueId);
+          if (issue.projectId !== input.expectedIssueProjectId) {
+            fail('업무의 프로젝트가 바뀌었습니다. 문서를 연결할 업무와 공간을 다시 확인해 주세요.', 409,
+              {reason:'issue_project_changed',projectId:issue.projectId});
+          }
+        }
         const timestamp=now(), id=uid(), projectId=input.projectId??null;
         if(usesTemplate&&projectId!==null)get<Project>('projects',projectId);
         const template=usesTemplate?documentTemplates.forDraft(input.templateId,input.expectedTemplateVersion,projectId):null;
@@ -1620,16 +1658,25 @@ export function createApp(options: {
         }
         revision(d,authorId,template?`팀 템플릿 사용 · ${template.name}`:'최초 작성');
         activity(req,'document',d.id,'문서 생성',d.title);
+        if (issueId !== undefined) {
+          writeIssueDocumentLink(req, { id: linkedDocumentLinkId(issueId, d.id), issueId, documentId: d.id, kind: '관련 문서' }, d.title);
+        }
         notifyDocumentCreated(d);
         return d;
-      },usesTemplate?'document-template-draft':undefined);
+      },issueId !== undefined ? `issue-linked-document:${issueId}` : usesTemplate ? 'document-template-draft' : undefined,verifyLink);
     } catch(error) {
       try{staged?.rollback();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
       throw error;
     }
     try{staged?.commit();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
-    res.status(result.duplicate ? 200 : 201).json(result.document);
-  });
+    const status = result.duplicate ? 200 : 201;
+    if (issueId === undefined) return res.status(status).json(result.document);
+    if (!linkedResult) throw new Error('The linked document receipt has no resource link');
+    const payload: LinkedDocumentCreationResult = { document: result.document, link: linkedResult };
+    return res.status(status).json(payload);
+  }
+  app.post('/api/documents',(req,res)=>createDocument(req,res));
+  app.post('/api/issues/:id/documents',(req,res)=>createDocument(req,res,req.params.id));
   app.get('/api/documents/:id/sibling-order', (req, res) => {
     res.set('Cache-Control', 'no-store').json(documentOrders.get(req.params.id));
   });
@@ -2140,8 +2187,7 @@ export function createApp(options: {
       const existing=store.db.prepare('SELECT json FROM resource_links WHERE issue_id=? AND document_id=?').get(issueId,documentId) as {json:string}|undefined;
       if(existing) return {link:JSON.parse(existing.json) as ResourceLink,created:false};
       const link:ResourceLink={id:uid(),issueId,documentId,kind};
-      store.put('resource_links',link);
-      activity(req,'issue',issueId,'문서 연결');
+      writeIssueDocumentLink(req,link);
       return {link,created:true};
     });
     res.status(created?201:200).json({id:link.id,issueId:link.issueId,documentId:link.documentId,kind:link.kind});

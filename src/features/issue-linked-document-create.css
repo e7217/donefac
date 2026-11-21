@@ -1,0 +1,56 @@
+.issue-linked-document-create .document-templates-header p {
+  overflow-wrap: anywhere;
+}
+
+.issue-linked-document-fields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 0;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
+.issue-linked-document-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  color: #4d5e74;
+  font-size: 12px;
+}
+
+.issue-linked-document-fields .field {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+}
+
+.issue-linked-document-location {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.issue-linked-document-template,
+.issue-linked-document-progress {
+  margin: 0;
+  color: #54647a;
+  font-size: 12px;
+}
+
+.issue-linked-document-progress { margin-top: 10px; }
+
+.issue-linked-document-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #e7ebf2;
+}
+
+@media (max-width: 460px) {
+  .issue-linked-document-location { grid-template-columns: minmax(0, 1fr); }
+}

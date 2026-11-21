@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -28,6 +28,7 @@ import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueChangeHistory } from './IssueChangeHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
+import { IssueLinkedDocumentCreate } from './IssueLinkedDocumentCreate';
 import { IssueProjectMove } from './IssueProjectMove';
 import { IssueReporterSelect } from './IssueReporterSelect';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
@@ -190,7 +191,18 @@ function IssuePanelContent(props: IssuePanelProps) {
     setProjectMove(null);
     if (restoreFocus) requestAnimationFrame(() => projectMoveTrigger.current?.focus({ preventScroll: true }));
   }, [trackProjectMoveDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || rowScheduleEdit || projectMove);
+  const [linkedDocumentCreation, setLinkedDocumentCreation] = useState(false);
+  const linkedDocumentOpener = useRef<HTMLButtonElement>(null);
+  const linkedDocumentGuard = useRef({ dirty: false, pending: false, uncertain: false });
+  const trackLinkedDocumentDraft = useCallback((dirty: boolean, pending: boolean, uncertain: boolean) => {
+    linkedDocumentGuard.current = { dirty, pending, uncertain };
+  }, []);
+  const closeLinkedDocumentCreation = useCallback((restoreFocus = true) => {
+    trackLinkedDocumentDraft(false, false, false);
+    setLinkedDocumentCreation(false);
+    if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
+  }, [trackLinkedDocumentDraft]);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
@@ -284,7 +296,8 @@ function IssuePanelContent(props: IssuePanelProps) {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
-      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending || projectMoveGuard.current.pending) {
+      const documentGuard = linkedDocumentGuard.current;
+      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending || projectMoveGuard.current.pending || documentGuard.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
@@ -292,6 +305,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
       if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
       if (rowScheduleGuard.current.dirty) childNames.push('일정과 연결 입력');
+      if (documentGuard.dirty && !documentGuard.uncertain) childNames.push('연결 문서 입력');
       if (hasCommentEditDraft()) childNames.push('댓글 수정 입력');
       const moveGuard = projectMoveGuard.current;
       const moveDiscard = moveGuard.uncertain ? '이동 결과를 아직 확인하지 못했습니다. 다른 화면으로 이동할까요?' : '작성 중인 프로젝트 이동 설정을 버릴까요?';
@@ -300,9 +314,13 @@ function IssuePanelContent(props: IssuePanelProps) {
         return;
       }
       if (moveGuard.dirty && (dirtyRef.current || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
-      if (dirtyRef.current || childNames.length) {
-        const message = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
+      if (dirtyRef.current || childNames.length || documentGuard.uncertain) {
+        const hasUnsavedInput = dirtyRef.current || childNames.length > 0;
+        const draftMessage = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
+        const message = documentGuard.uncertain
+          ? `연결 문서가 이미 저장됐을 수 있습니다. ${hasUnsavedInput ? draftMessage : '저장 결과 확인을 닫고 이동할까요?'}`
+          : draftMessage;
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
           for (const value of childDrafts) value?.discard();
@@ -314,16 +332,18 @@ function IssuePanelContent(props: IssuePanelProps) {
       }
       if (rowScheduleEdit) afterAcceptedNavigation(event, () => closeRowScheduleEdit(false));
       if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
+      if (linkedDocumentCreation) afterAcceptedNavigation(event, () => closeLinkedDocumentCreation(false));
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
       if (!dirtyRef.current && !savingRef.current && !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
-          !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending) return;
+          !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
+          !linkedDocumentGuard.current.dirty && !linkedDocumentGuard.current.pending && !linkedDocumentGuard.current.uncertain) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify, tab, projectMove, rowScheduleEdit, closeProjectMove, closeRowScheduleEdit, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
+  }, [issue, notify, tab, projectMove, rowScheduleEdit, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeLinkedDocumentCreation, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -592,6 +612,15 @@ function IssuePanelContent(props: IssuePanelProps) {
       setLinking(false);
     }
   }
+  function showCreatedLinkedDocument({ document }: LinkedDocumentCreationResult) {
+    closeLinkedDocumentCreation(false);
+    notify('새 문서를 만들고 이 업무에 연결했습니다.');
+    requestAnimationFrame(() => {
+      const link = issuePanel.current?.querySelector<HTMLButtonElement>(`[data-linked-document-id="${CSS.escape(document.id)}"]`);
+      if (link) link.focus();
+      else linkedDocumentOpener.current?.focus({ preventScroll: true });
+    });
+  }
   async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
   function openDependencyEditor(opener: HTMLButtonElement, otherRole: RelatedIssueDirection, dependency?: Dependency) {
     if (savingRef.current || dependencyBusyRef.current) return;
@@ -655,12 +684,14 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   function linkedDocumentRow(doc: DocPage, link?: ResourceLink) {
     const count = bodyReferences.get(doc.id)?.count;
-    const space = link ? undefined : data.projects.find(project => project.id === doc.projectId)?.name ?? '팀 공통';
+    const space = !link || doc.projectId !== issue?.projectId
+      ? data.projects.find(project => project.id === doc.projectId)?.name ?? '팀 공통' : undefined;
     const title = doc.title || '제목 없는 문서';
     return <div className="issue-related-row">
       <FileText size={15} aria-hidden="true" />
       <div className="issue-document-entry">
-        <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link">{title}</button>
+        <button type="button" onClick={() => navigateDocument(doc.id)} className="issue-document-link"
+          data-linked-document-id={link ? doc.id : undefined}>{title}</button>
         {(space || count) && <small className="issue-document-entry-meta">
           {space && <span>{space}</span>}
           {count && <span>본문 참조 {count}곳</span>}
@@ -816,7 +847,13 @@ function IssuePanelContent(props: IssuePanelProps) {
         refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} controlsRef={relationControls} highlightOpenBlockers={Boolean(error?.openBlockers)}
         onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
-        <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
+        <div className="issue-linked-documents-heading">
+          <h3><FileText size={16} aria-hidden="true" /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
+          <button ref={linkedDocumentOpener} className="btn" type="button" aria-haspopup="dialog"
+            disabled={saving || dependencyBusy || linking || commenting || Boolean(commentEditing.operation)} onClick={() => setLinkedDocumentCreation(true)}>
+            <Plus size={14} aria-hidden="true" />새 연결 문서 만들기
+          </button>
+        </div>
         {linkedDocuments.map(link => {
           const doc = data.documents.find(d => d.id === link.documentId);
           if (!doc) return null;
@@ -901,6 +938,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       onCloneCreated={showCreatedClone} refresh={refreshIssueRelations} />}
     {projectMove && <IssueProjectMove data={data} issue={issue} draftMessage={projectMove.draftMessage} beforeApply={projectMoveDraftMessage}
       onDraftChange={trackProjectMoveDraft} onClose={closeProjectMove} refresh={refreshIssueRelations} />}
+    {linkedDocumentCreation && <IssueLinkedDocumentCreate data={data} issue={issue} actorId={props.actorId} refresh={refresh}
+      onDraftChange={trackLinkedDocumentDraft} onClose={closeLinkedDocumentCreation} onCreated={showCreatedLinkedDocument} />}
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
       onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}

@@ -962,6 +962,7 @@ export interface Dependency { id: string; predecessorId: string; successorId: st
 export interface DocumentSourceSelection { from: number; to: number; text: string }
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
+export interface LinkedDocumentCreationResult { document: DocPage; link: ResourceLink }
 
 export interface DecisionFollowUpItem {
   linkId: string;

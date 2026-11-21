@@ -301,6 +301,14 @@ curl --fail-with-body \
 
 문서 화면의 Markdown 가져오기는 브라우저에서 파일이나 입력 내용을 미리보기로 변환한다. 저장은 새 문서와 같은 API에 검토한 `content`를 보낸다. 미리보기 입력을 바꾸면 다시 검토한 뒤 저장한다. 첫 저장 응답을 확인할 수 없으면 같은 요청을 다시 보내고, 응답을 받은 뒤 목록이 갱신되지 않았으면 문서 열기만 다시 시도한다.
 
+## 티켓에서 새 연결 문서 만들기
+
+브라우저의 `POST /api/issues/:id/documents`에 `X-Actor-Id`와 `{requestId,expectedIssueProjectId,title,projectId,parentId}`를 보낸다. `requestId`는 UUID v4이고 `expectedIssueProjectId`는 검토한 티켓의 프로젝트다. `projectId: null`은 팀 공통 공간이고 `parentId: null`은 최상위다. 저장할 `content`, `icon`, `labels`를 선택적으로 보내거나 `templateId`와 `expectedTemplateVersion`을 함께 보내 팀 템플릿을 사용한다. 결과는 초안이며, 상위 문서는 선택한 공간에 있어야 한다.
+
+신규 생성은 `{document,link}`와 `201`을 반환한다. `link`의 종류는 `관련 문서`다. 문서, 최초 이력, 팀 템플릿 첨부, 양방향 연결, 활동, 알림과 요청 기록을 한 트랜잭션에 저장한다. 같은 티켓·작업자·입력을 재전송하면 원래 문서와 연결을 `200`으로 반환한다. 다른 작업자·티켓·입력으로 같은 요청 ID를 쓰면 `409`와 `request_conflict`를 반환한다. 새 요청의 티켓이 다른 프로젝트로 이동했다면 `409`와 `issue_project_changed`를 반환하므로 현재 소속을 다시 검토한다.
+
+확인할 수 없는 문서나 해제된 원래 연결은 `409`와 `result_unavailable`을 반환한다. 물리 백업은 생성 요청 기록을 보존한다. 이동용 JSON은 문서와 연결을 보존하며 같은 워크스페이스를 교체하면 앞서 사용한 생성 요청을 무효화한다.
+
 ## 형제 문서 순서
 
 브라우저의 `GET /api/documents/:id/sibling-order`는 기준 문서의 현재 위치에 속한 전체 형제 순서를 `{projectId,parentId,documentIds,version}`으로 반환한다. 형제 범위는 최상위에서 공간별이며, 하위에서는 같은 상위 문서의 현재 공간을 따른다. 사용자 지정 순서가 생기기 전에는 삽입 순서를 적용한다.
