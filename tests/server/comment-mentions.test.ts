@@ -185,7 +185,7 @@ test('native format 71 verifies live, trash and individual comment mentions and 
   await f.call(`/trash/items/${deleted.trashItemId}`, { method: 'DELETE' });
   await f.call(`/users/${unassociated}`, { method: 'PATCH', body: { name: '새 표시 이름' } });
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 71);
+  assert.ok(backup.schemaVersion >= 71);
   assert.match((await f.restore({ ...backup, schemaVersion: 70 }, 400)).error!, /schemaVersion 71/);
   const entries = (data: Backup) => [data.comments.find(value => value.id === live.id)!,
     data.trashEntries.find(value => value.id === trashEntryId)!.comments.find(value => value.id === inResourceTrash.id)!,

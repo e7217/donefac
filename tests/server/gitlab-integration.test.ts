@@ -57,6 +57,42 @@ test('pipeline branch ordering prevents late older results and MR inheritance re
   }finally{f.close();}
 });
 
+test('authenticated GitLab reads add exact target MR merge evidence to an existing revision without taking a conflicting SHA', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const time = '2024-02-10T08:00:00.000Z';
+  const head = 'a'.repeat(40), mergeSha = 'b'.repeat(40), conflictingSha = 'c'.repeat(40);
+  let remote: Record<string, unknown> = {};
+  const mock = await mockServer((path, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(path.includes('/merge_requests?') ? [remote] : []));
+  });
+  t.after(mock.close);
+  f.configure({ baseUrl: mock.url });
+  const projectUrl = `${mock.url}/team/repo`;
+  remote = { id: 101, iid: 7, target_project_id: 42, title: 'NEO-1 merge evidence', state: 'merged',
+    updated_at: time, sha: head, web_url: `${projectUrl}/-/merge_requests/7` };
+  await f.service.sync();
+  assert.equal(links(f)[0].mergeCommitShas, undefined);
+  const event = f.service.webhook(request({ object_kind: 'deployment', project: { id: 42, web_url: projectUrl },
+    deployment_id: 12, environment: 'production', status: 'success', status_changed_at: time,
+    commit_url: `${projectUrl}/-/commit/${mergeSha}`, short_sha: mergeSha.slice(0, 8) }));
+  assert.equal(event.deploymentUpdated, true);
+  assert.equal(f.service.deployments.issuePage('issue-1', 0).total, 0);
+
+  remote = { ...remote, merge_commit_sha: mergeSha };
+  await f.service.sync();
+  assert.deepEqual(links(f)[0].mergeCommitShas, [mergeSha]);
+  assert.equal(links(f)[0].updatedAt, time);
+  assert.equal(f.service.deployments.issuePage('issue-1', 0).items[0].deploymentId, 12);
+  remote = { ...remote, merge_commit_sha: conflictingSha };
+  await f.service.sync();
+  assert.deepEqual(links(f)[0].mergeCommitShas, [mergeSha]);
+  remote = { ...remote, updated_at: '2024-02-10T08:00:01.000Z', merge_commit_sha: undefined };
+  await f.service.sync();
+  assert.deepEqual(links(f)[0].mergeCommitShas, [mergeSha]);
+});
+
 test('MR readiness refreshes an unchanged GitLab revision and reconciles sparse approval and close events', async t => {
   const f=fixture();
   t.after(f.close);

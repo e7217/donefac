@@ -30,14 +30,15 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
   const calls: { action: 'review' | 'register'; body: Record<string, unknown> }[] = [];
   const reviewed = new Set<number>();
   const registered = new Set<number>();
+  let deploymentEvents: boolean | null = true;
   const result = (repositoryId: number, state: GitlabProjectWebhookReview['state']): GitlabProjectWebhookReview => ({
     settingsVersion: saved.version,
     repositoryId,
     receiverUrl,
     authMode: 'secret',
     state,
-    hooks: state === 'created' || state === 'configured' ? [{
-      id: repositoryId + 100, pushEvents: true, mergeRequestEvents: true, pipelineEvents: true,
+    hooks: state === 'created' || state === 'configured' || state === 'review' ? [{
+      id: repositoryId + 100, pushEvents: true, mergeRequestEvents: true, pipelineEvents: true, deploymentEvents,
       sslVerification: true, unfilteredPush: true, standardPayload: true, active: true,
     }] : [],
     ...(state === 'missing' ? { reviewId: `review-${repositoryId}` } : {}),
@@ -61,7 +62,8 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
       expect(new URL(route.request().url()).search).toBe('');
       const repositoryId = Number(body.repositoryId);
       reviewed.add(repositoryId);
-      await route.fulfill({ json: result(repositoryId, registered.has(repositoryId) ? 'configured' : 'missing') });
+      const existing = deploymentEvents === true ? 'configured' : 'review';
+      await route.fulfill({ json: result(repositoryId, registered.has(repositoryId) ? existing : 'missing') });
     });
     await page.route(`**${registerPath}`, async route => {
       const body = route.request().postDataJSON() as Record<string, unknown>;
@@ -123,7 +125,9 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
     expect(calls).toHaveLength(1);
     await register.click();
     await expect(setup).toContainText('GitLab에 웹훅을 등록했습니다.');
-    await expect(setup.getByRole('list', { name: '웹훅 설정', exact: true })).toContainText('SSL 검증 켜짐');
+    const checkedFlags = setup.getByRole('list', { name: '웹훅 설정', exact: true });
+    await expect(checkedFlags).toContainText('SSL 검증 켜짐');
+    await expect(checkedFlags).toContainText('배포 이벤트 켜짐');
     await expect(credential).toHaveCount(0);
     await expect(setup).not.toContainText(webhookSecret);
     await expect(firstReceipt).toContainText('인증 수신 대기');
@@ -159,6 +163,14 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
       { action: 'register', body: { expectedVersion: saved.version, repositoryId: 99, reviewId: 'review-99', managementToken, webhookCredential: webhookSecret } },
       { action: 'review', body: { expectedVersion: saved.version, repositoryId: 99, managementToken } },
     ]);
+    for (const [value, label] of [[false, '꺼짐'], [null, '확인 불가']] as const) {
+      deploymentEvents = value;
+      await recheck.click();
+      await expect(checkedFlags).toContainText(`배포 이벤트 ${label}`);
+      await expect(setup).toContainText('Deployment events를 켠 뒤 다시 점검하세요.');
+      await expect(register).toHaveCount(0);
+    }
+    expect(calls.slice(-2).every(call => call.action === 'review')).toBe(true);
     await expect(secondReceipt).toContainText('인증 수신 대기');
     await expect(draftAddress).toHaveValue('https://unsaved-gitlab-draft.test');
     await expect(draftId).toHaveValue('777');

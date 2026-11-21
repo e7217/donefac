@@ -5,6 +5,7 @@ import { GitMerge, Link2, RefreshCw } from 'lucide-react';
 import type { FeatureProps, GitlabLink, GitlabSettings } from '../../shared/types';
 import { api, ApiError, post, remove } from '../lib/api';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { IssueGitlabDeployments } from './GitlabDeployments';
 
 type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   issueId: string;
@@ -223,5 +224,6 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
     {visibleLinks.length ? <GitlabActivityList links={visibleLinks} manualActions={{ disabled: controlsDisabled || actionOpen,
       verify: (link, trigger) => showEditor(trigger, link), unlink: showUnlink }} />
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
+    <IssueGitlabDeployments issueId={issueId} links={links} />
   </section>;
 }

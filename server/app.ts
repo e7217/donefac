@@ -40,6 +40,7 @@ import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssig
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError, branchObjectId } from './gitlab-integration.js';
 import { GitlabProjectWebhookSetupError } from './gitlab-project-webhook-setup.js';
+import { GitlabDeploymentError } from './gitlab-deployments.js';
 import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -1778,7 +1779,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -1803,6 +1804,10 @@ export function createApp(options: {
     }
     if(data.schemaVersion<65&&data.documentTemplateAssets!==undefined&&(!Array.isArray(data.documentTemplateAssets)||data.documentTemplateAssets.length)){
       fail('팀 문서 템플릿 첨부를 포함한 백업은 schemaVersion 65가 필요합니다.');
+    }
+    if (data.schemaVersion < 72 && data.gitlabDeployments !== undefined &&
+        (!Array.isArray(data.gitlabDeployments) || data.gitlabDeployments.length)) {
+      fail('GitLab 배포 기록을 포함한 백업은 schemaVersion 72가 필요합니다.');
     }
     const importedTemplateAssets=documentTemplateAssets.validateRestore(data.schemaVersion>=65?data.documentTemplateAssets:[],importedTemplates);
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
@@ -1889,6 +1894,9 @@ export function createApp(options: {
     if ((data.schemaVersion >= 9 || data.issueRelations != null) && (!Array.isArray(data.issueRelations) ||
       data.issueRelations.some((value: unknown) => !value || typeof value !== 'object' || Array.isArray(value)))) fail('업무 관계 목록을 확인해 주세요.');
     const importedTrash=trash.validateImport(data.schemaVersion>=17?data.trashEntries:[],data);
+    if (data.schemaVersion < 72 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
+      links => links.some((link: GitlabLink) => Object.hasOwn(link, 'mergeCommitShas')),
+    )) fail('GitLab 병합 커밋 증거를 포함한 백업은 schemaVersion 72가 필요합니다.');
     if(data.schemaVersion<31&&data.trashItems!==undefined&&(!Array.isArray(data.trashItems)||data.trashItems.length))fail('개별 댓글·첨부 휴지통을 포함한 백업은 schemaVersion 31이 필요합니다.');
     const importedTrashItems=trashItems.validateImport(data.schemaVersion>=31?data.trashItems:[],{...data,trash:importedTrash});
     if (data.schemaVersion < 24 && (data.gitlabLinks.some((link: { kind: string }) => link.kind === 'branch') ||
@@ -2178,6 +2186,7 @@ export function createApp(options: {
       }
       recordIssueRelationVersion(store, restoredIssueRelationVersion);
       sourcePreservation.replaceImported(liveSources,previousImports);
+      gitlab.deployments.restore(data.schemaVersion >= 72 ? data.gitlabDeployments : [], data.exportedAt);
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       trash.replaceImported(importedTrash);
       trashItems.replaceImported(importedTrashItems);
@@ -2203,6 +2212,7 @@ export function createApp(options: {
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof GitlabDeploymentError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});

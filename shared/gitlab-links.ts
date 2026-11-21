@@ -60,6 +60,17 @@ export function isRestorableGitlabLink(value: unknown): boolean {
   const link = value as Record<string, unknown>;
   if (Object.hasOwn(link, 'mergeReadiness') &&
       (link.kind !== 'merge_request' || link.state !== 'opened' || !isGitlabMergeReadiness(link.mergeReadiness))) return false;
+  if (Object.hasOwn(link, 'mergeCommitShas')) {
+    const { id, projectId, issueId, iid, mergeCommitShas } = link;
+    const objectKey = typeof id === 'string' && /^gitlab:([a-f\d]{12}):([1-9]\d*):merge_request:([1-9]\d*):/u.exec(id);
+    if (link.kind !== 'merge_request' || link.state !== 'merged' || !objectKey || String(projectId) !== objectKey[2] ||
+        typeof projectId !== 'number' || !Number.isSafeInteger(projectId) || !Number.isSafeInteger(Number(objectKey[3])) ||
+        typeof issueId !== 'string' || !issueId || id !== `${objectKey[0]}${issueId}` ||
+        typeof iid !== 'number' || !Number.isSafeInteger(iid) || iid < 1 ||
+        !Array.isArray(mergeCommitShas) || mergeCommitShas.length < 1 || mergeCommitShas.length > 2 ||
+        mergeCommitShas.some((sha, index) => typeof sha !== 'string' || gitlabObjectSha(sha) !== sha || /^0+$/u.test(sha) ||
+          index > 0 && mergeCommitShas[index - 1] >= sha)) return false;
+  }
   if (Object.hasOwn(link, 'originalJiraKey') && !isJiraIssueKey(link.originalJiraKey)) return false;
   if (Object.hasOwn(link, 'branchObservationSource') &&
       (link.kind !== 'branch' || link.branchObservationSource !== 'sync' || link.state !== 'active')) return false;

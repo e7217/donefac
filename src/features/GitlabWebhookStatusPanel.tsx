@@ -10,6 +10,7 @@ const eventLabels: Record<GitlabWebhookDelivery['event'], string> = {
   tag_push: 'Tag Push',
   merge_request: 'Merge Request',
   pipeline: 'Pipeline',
+  deployment: '배포 이벤트',
   other: '기타',
 };
 const authenticationLabels: Record<GitlabWebhookDelivery['authentication'], string> = {
@@ -78,7 +79,9 @@ export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSetting
             {delivery && <>
               <p>{eventLabels[delivery.event]} · {authenticationLabels[delivery.authentication]}</p>
               <p><time dateTime={delivery.receivedAt}>{new Date(delivery.receivedAt).toLocaleString('ko-KR')}</time></p>
-              <p>업무 연결 {delivery.linked}건 · 자동화 기록 {delivery.automationRuns}건{delivery.duplicate && ' · 중복 전송'}</p>
+              {delivery.event === 'deployment'
+                ? <p>{delivery.duplicate ? '중복 전송' : delivery.deploymentUpdated ? '배포 기록 반영' : '배포 상태 변경 없음'}</p>
+                : <p>업무 연결 {delivery.linked}건 · 자동화 기록 {delivery.automationRuns}건{delivery.duplicate && ' · 중복 전송'}</p>}
             </>}
           </section></li>;
         })}

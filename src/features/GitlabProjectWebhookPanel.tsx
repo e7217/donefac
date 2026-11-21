@@ -44,6 +44,7 @@ function ExistingHook({ hook }: { hook: Hook }) {
     ['Push', hook.pushEvents],
     ['Merge Request', hook.mergeRequestEvents],
     ['Pipeline', hook.pipelineEvents],
+    ['배포 이벤트', hook.deploymentEvents ?? null],
     ['SSL 검증', hook.sslVerification],
     ['모든 브랜치 Push', hook.unfilteredPush],
     ['기본 전송 본문', hook.standardPayload],
@@ -53,8 +54,11 @@ function ExistingHook({ hook }: { hook: Hook }) {
     <h3>웹훅 #{hook.id}</h3>
     {hook.receiverExact === false && <p>수신 경로는 같으며 GitLab의 등록 주소를 확인해 주세요.</p>}
     <ul className="gitlab-project-webhook-events" aria-label="웹훅 설정" role="list">
-      {flags.map(([label, enabled]) => <li key={label} data-enabled={enabled}>{label} {enabled ? '켜짐' : '꺼짐'}</li>)}
+      {flags.map(([label, enabled]) => <li key={label} data-enabled={enabled === true}>
+        {label} {enabled === null ? '확인 불가' : enabled ? '켜짐' : '꺼짐'}
+      </li>)}
     </ul>
+    {hook.deploymentEvents !== true && <p>GitLab 저장소의 Settings → Webhooks에서 이 웹훅의 Deployment events를 켠 뒤 다시 점검하세요.</p>}
     <p>{hook.active === null ? '전송 상태 확인 불가' : hook.active ? '전송 가능' : '전송 중지'}</p>
   </li>;
 }
@@ -158,7 +162,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
       GitLab에서 접근할 수 있는 Teamspace 배포 주소에 수신 경로 <code>{receiverPath}</code>를 붙여 사용하세요.
       Teamspace에 수신 주소가 설정되면 이 화면에서 점검할 수 있습니다.
     </p>}
-    <p className="gitlab-project-webhook-note">Push, Merge Request, Pipeline을 켜고 SSL 검증을 사용하세요.</p>
+    <p className="gitlab-project-webhook-note">Push, Merge Request, Pipeline, Deployment events를 켜고 SSL 검증을 사용하세요.</p>
     {reviewAvailable && <>
       <p className="gitlab-project-webhook-note">저장된 GitLab 주소 <code>{baseUrl}</code></p>
       <form className="gitlab-project-webhook-fields" onSubmit={event => void runAction(event, 'review')}>

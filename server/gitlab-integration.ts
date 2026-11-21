@@ -8,13 +8,14 @@ import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
+import { GitlabDeployments } from './gitlab-deployments.js';
 import type { Store } from './store.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new GitlabIntegrationError(status,message,details);}
 type Obj=Record<string,unknown>;
 type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
-type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[] };
+type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[]; deploymentUpdated?: true };
 type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery };
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string;approvalRevision?:{updatedAt:string;head:string}};
 type BranchCursor={id:string;pipelineId:number};
@@ -37,7 +38,7 @@ type JiraKeyBinding={issueId:string;originalJiraKey:string};
 type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
 type KeyReader=(...values:unknown[])=>string[];
 type TicketMatcher={match:(keys:string[],inherited?:TicketMatch[])=>TicketMatch[];inherit:(link:GitlabLink)=>TicketMatch|undefined;ambiguousKeys:Set<string>};
-type MergeObservation=Pick<GitlabMergeReadiness,'source'|'observedAt'>&{invalidate?:boolean};
+type MergeObservation=Pick<GitlabMergeReadiness,'source'|'observedAt'>&{invalidate?:boolean; repositoryId?:number};
 const approvalActions=new Set(['approval','approved','unapproval','unapproved']);
 const PREVIEW_CANDIDATE_LIMIT=100;
 const AMBIGUOUS_KEY_LIMIT=20;
@@ -96,10 +97,16 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
   const id=objectId(object);
   const explicitTitle=string(object.title)||string(object.name);
   const title=explicitTitle||string(object.ref)||string(object.message)||`${kind} #${id}`;
+  const state=string(object.state)||string(object.status)||'unknown';
+  const incomingTime=occurredAt(object.updated_at||object.finished_at||object.created_at);
+  const mergeCommitShas=kind==='merge_request' && state==='merged' && incomingTime && observation?.repositoryId &&
+    numericObjectId(object.target_project_id)===String(observation.repositoryId) && numericObjectId(object.id) && numericObjectId(object.iid)
+    ? [...new Set([gitlabObjectSha(object.merge_commit_sha),gitlabObjectSha(object.squash_commit_sha)]
+      .filter((sha): sha is string => Boolean(sha && !/^0+$/u.test(sha))))].sort() : [];
   return {
     id,numericId:numericObjectId(object.id),hasTitle:Boolean(explicitTitle),title:title.slice(0,500),matchedKeys:[...new Set([...readKeys(title,object.description,object.source_branch,object.ref),...explicitKeys])],
     webUrl:validWebUrl(object.web_url||object.url),iid:kind==='commit'?0:Number(object.iid||object.id)||0,reportedIid:Number(numericObjectId(object.iid))||0,
-    state:string(object.state)||string(object.status)||'unknown',incomingTime:occurredAt(object.updated_at||object.finished_at||object.created_at),
+    state,incomingTime,mergeCommitShas,
     sourceBranch:bound(object.source_branch||object.ref,512),sourceSha:bound(object.sha||record(object.last_commit).id,128),
     mergeObservation:kind==='merge_request'&&object.state==='opened'&&observation
       ?{...observation,evidence:parseGitlabMergeReadiness(object,observation.observedAt,observation.source)}:undefined,
@@ -115,9 +122,9 @@ function gitlabLinkObjectKey(instance:string,projectId:number,kind:GitlabLink['k
   return `gitlab:${instance}:${projectId}:${kind}:${id}`;
 }
 function linkForIssue(instance:string,projectId:number,kind:GitlabLink['kind'],match:TicketMatch,draft:LinkDraft):GitlabLink{
-  const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha }=draft;
+  const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha,mergeCommitShas }=draft;
   const {issue:{id:issueId},originalJiraKey}=match;
-  return {id:`${gitlabLinkObjectKey(instance,projectId,kind,id)}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{}),...(originalJiraKey?{originalJiraKey}:{}),...(draft.mergeObservation?.evidence?{mergeReadiness:draft.mergeObservation.evidence}:{})};
+  return {id:`${gitlabLinkObjectKey(instance,projectId,kind,id)}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{}),...(originalJiraKey?{originalJiraKey}:{}),...(draft.mergeObservation?.evidence?{mergeReadiness:draft.mergeObservation.evidence}:{}),...(mergeCommitShas.length?{mergeCommitShas}:{})};
 }
 function retainOriginalJiraKey(link:GitlabLink,existing?:GitlabLink):GitlabLink{
   return !link.originalJiraKey&&existing?.originalJiraKey?{...link,originalJiraKey:existing.originalJiraKey}:link;
@@ -197,10 +204,18 @@ function applyMergeObservation(link:GitlabLink,existing:GitlabLink,draft:LinkDra
       evidence={...prior,state:'unknown'};
     }
   }
-  if(evidence===link.mergeReadiness)return link;
+  const priorMergeShas=existing.state==='merged'?existing.mergeCommitShas:undefined;
+  let mergeCommitShas=link.state==='merged'?priorMergeShas:undefined;
+  if(link.state==='merged' && draft.incomingTime===link.updatedAt && sameMergeHead(link,draft) &&
+      draft.mergeCommitShas.length>(priorMergeShas?.length??0) && (priorMergeShas??[]).every(sha=>draft.mergeCommitShas.includes(sha))){
+    mergeCommitShas=draft.mergeCommitShas;
+  }
+  if(evidence===link.mergeReadiness&&mergeCommitShas===link.mergeCommitShas)return link;
   const next={...link};
   if(evidence)next.mergeReadiness=evidence;
   else delete next.mergeReadiness;
+  if(mergeCommitShas)next.mergeCommitShas=mergeCommitShas;
+  else delete next.mergeCommitShas;
   return next;
 }
 function matchesManualLink(existing:GitlabLink,draft:LinkDraft):boolean{
@@ -281,7 +296,7 @@ function repositoryCommitDraft(object:Obj, readKeys:KeyReader):LinkDraft{
 }
 
 async function readProjectPlan(connection:SyncConnection,projectId:number,options:ReadOptions):Promise<ProjectReadPlan>{
-  const observation={source:'read',observedAt:now()} as const;
+  const observation={source:'read',observedAt:now(),repositoryId:projectId} as const;
   const scan=await readGitlabSyncProject(connection,projectId,options);
   const readKeys=connection.jiraRoutes?.some(route=>route.repositoryId===projectId)?routedKeys:keys;
   const mergeRequests=scan.mergeRequests.map(object=>readLink('merge_request',object,[],readKeys,
@@ -318,7 +333,9 @@ export class GitlabIntegrationService{
   private readonly manualLinkRows:StatementSync;
   private readonly linkedMergeRequestRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
+  readonly deployments: GitlabDeployments;
   constructor(private readonly store:Store,private readonly hooks:Hooks,webhookPublicOrigin?:string){
+    this.deployments=new GitlabDeployments(store);
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
@@ -399,7 +416,7 @@ export class GitlabIntegrationService{
     const data={...object,web_url:webUrl};
     const draft=kind==='branch'?repositoryBranchDraft(data,keys):kind==='commit'?repositoryCommitDraft(data,keys):readLink(kind,{
       ...data,iid:kind==='merge_request'?object.iid:Number(numericObjectId(object.iid)||numericObjectId(object.id)),
-    },[],keys,{source:'read',observedAt:startedAt});
+    },[],keys,{source:'read',observedAt:startedAt,repositoryId});
     if(!draft.id||!draft.webUrl)fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.',502);
     return this.store.transaction(()=>{
       assertSettingsVersion(captured.version,this.raw().version);
@@ -716,13 +733,17 @@ export class GitlabIntegrationService{
   }
   webhook(req:Request):WebhookResult{
     const raw=this.raw(),authentication=this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
-    const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push'} as Record<string,string>)[header]||'';
+    const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push','Deployment Hook':'deployment'} as Record<string,string>)[header]||'';
     const attributes=record(body.object_attributes),instance=this.instance(raw),externalId=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update((req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody||Buffer.from(JSON.stringify(body))).digest('hex');if(externalId.length>500)fail('Webhook 식별자가 너무 깁니다.');const eventId=`gitlab:${instance}:${projectId}:${kind}:${createHash('sha256').update(externalId).digest('hex')}`;
     const receivedAt = now();
     const processWebhook = (): WebhookResult => {
       if(this.store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
       if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:this.recordPush(raw,instance,projectId,kind,body,project),runs:[]};
+      if(kind==='deployment'){
+        const changed=this.deployments.observe(instance,raw.baseUrl,projectId,body);
+        return{ok:true,duplicate:false,linked:0,runs:[],...(changed?{deploymentUpdated:true}:{})};
+      }
       if(kind!=='merge_request'&&kind!=='pipeline')return{ok:true,duplicate:false,linked:0,runs:[]};
       const id=objectId(attributes),state=string(attributes.state)||string(attributes.status)||'unknown',branch=bound(kind==='merge_request'?attributes.source_branch:attributes.ref,512),sha=bound(attributes.sha||record(attributes.last_commit).id||record(body.commit).id,128);
       const action=string(attributes.action);
@@ -745,7 +766,7 @@ export class GitlabIntegrationService{
       const inherited=kind==='pipeline'?this.inheritedMatches(projectId,branch,sha,instance,matcher):[];
       const object={...attributes,...(time?{updated_at:time}:{}),...(branch?{source_branch:branch}:{}),...(sha?{sha}:{}),web_url:attributes.web_url||attributes.url||(kind==='pipeline'&&project.web_url?`${project.web_url}/-/pipelines/${id}`:'')};
       const invalidate=Boolean(attributes.oldrev)||action==='reopen'||approvalActions.has(action);
-      const observation:MergeObservation|undefined=mergeRepositoryMatches&&objectDisposition==='fresh'&&time?{source:'webhook',observedAt:time,invalidate}:undefined;
+      const observation:MergeObservation|undefined=mergeRepositoryMatches&&objectDisposition==='fresh'&&time?{source:'webhook',observedAt:time,invalidate,repositoryId:projectId}:undefined;
       const draft=readLink(kind,object,extra,readKeys,observation),canUpsert=objectDisposition==='fresh'||objectDisposition==='unverified';
       const direct=canUpsert?draft.matchedKeys:readKeys(attributes.title,attributes.description,branch,attributes.ref,...extra);
       const byMatchId=new Map((id?matcher.match(direct,inherited):[]).map(match=>[match.issue.id,match]));
@@ -776,9 +797,10 @@ export class GitlabIntegrationService{
     };
     return this.store.transaction(() => {
       const result = processWebhook();
-      const event = kind === 'push' || kind === 'tag_push' || kind === 'merge_request' || kind === 'pipeline' ? kind : 'other';
-      const { duplicate, linked, runs } = result;
-      const delivery: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns: runs.length };
+      const event = kind === 'push' || kind === 'tag_push' || kind === 'merge_request' || kind === 'pipeline' || kind === 'deployment' ? kind : 'other';
+      const { duplicate, linked, runs, deploymentUpdated } = result;
+      const delivery: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns: runs.length,
+        ...(deploymentUpdated ? { deploymentUpdated } : {}) };
       this.store.put('gitlab_webhook_deliveries', { id: String(projectId), delivery } satisfies StoredWebhookDelivery);
       return result;
     });
@@ -1060,6 +1082,24 @@ export class GitlabIntegrationService{
       res.set('Cache-Control','no-store');
       if (Object.keys(req.query).length) fail('웹훅 수신 상태 조회 조건을 확인해 주세요.');
       res.json(this.webhookStatus());
+    });
+    const deploymentOffset=(request:Request)=>{
+      const value=request.query.offset??'0';
+      if(typeof value!=='string'||!/^\d+$/u.test(value)||!Number.isSafeInteger(Number(value)))fail('GitLab 배포 조회 위치를 확인해 주세요.');
+      return Number(value);
+    };
+    app.get('/api/integrations/gitlab/deployments',(req,res)=>{
+      if(Object.keys(req.query).some(key=>key!=='repositoryId'&&key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');
+      const repositoryId=Number(numericObjectId(req.query.repositoryId));
+      const settings=this.raw();
+      if(!repositoryId)fail('배포를 조회할 GitLab 저장소를 선택해 주세요.');
+      if(!settings.projectIds.includes(repositoryId))fail('저장된 GitLab 저장소를 선택해 주세요.',403);
+      res.set('Cache-Control','no-store').json(this.deployments.repositoryPage(this.instance(settings),repositoryId,deploymentOffset(req)));
+    });
+    app.get('/api/issues/:id/gitlab-deployments',(req,res)=>{
+      if(Object.keys(req.query).some(key=>key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');
+      const issue=this.requireIssue(String(req.params.id));
+      res.set('Cache-Control','no-store').json(this.deployments.issuePage(issue.id,deploymentOffset(req)));
     });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));

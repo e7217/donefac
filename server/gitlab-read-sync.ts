@@ -199,15 +199,18 @@ function webhookIdentity(row: GitlabReadObject, projectId: number, requireProjec
 
 function webhookFlags(row: GitlabReadObject, id: number): GitlabProjectWebhook {
   const { push_events: pushEvents, merge_requests_events: mergeRequestEvents, pipeline_events: pipelineEvents,
+    deployment_events: deploymentEvents,
     enable_ssl_verification: sslVerification, push_events_branch_filter: filter, branch_filter_strategy: strategy,
     custom_webhook_template: template, alert_status: status } = row;
   if (typeof pushEvents !== 'boolean' || typeof mergeRequestEvents !== 'boolean' || typeof pipelineEvents !== 'boolean' ||
+      (deploymentEvents != null && typeof deploymentEvents !== 'boolean') ||
       typeof sslVerification !== 'boolean' || [filter, strategy, template, status].some(value => value != null && typeof value !== 'string')) {
     invalidWebhookResponse();
   }
   const active = status === 'executable' ? true : status === 'disabled' || status === 'temporarily_disabled' ? false : null;
   const unfilteredPush = strategy === 'all_branches' || ((strategy == null || strategy === 'wildcard') && (filter == null || filter === ''));
-  return { id, pushEvents, mergeRequestEvents, pipelineEvents, sslVerification, unfilteredPush, standardPayload: template == null || template === '', active };
+  return { id, pushEvents, mergeRequestEvents, pipelineEvents, deploymentEvents: deploymentEvents ?? null,
+    sslVerification, unfilteredPush, standardPayload: template == null || template === '', active };
 }
 
 function webhookNextPage(headers: Headers, url: URL, page: number, rowCount: number): boolean {
@@ -270,7 +273,8 @@ export async function createGitlabProjectWebhook(connection: Connection, project
     throw new GitlabReadError('webhooks', 'network');
   }
   const response = await readJson(projectUrl, headers, 'webhooks', signal, undefined, {
-    url: receiver, push_events: true, merge_requests_events: true, pipeline_events: true, enable_ssl_verification: true,
+    url: receiver, push_events: true, merge_requests_events: true, pipeline_events: true, deployment_events: true,
+    enable_ssl_verification: true,
     [mode === 'signature' ? 'signing_token' : 'token']: value,
   });
   if (!isReadObject(response)) invalidWebhookResponse();

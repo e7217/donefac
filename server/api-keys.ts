@@ -314,6 +314,12 @@ export class ApiKeyService {
         this.resource(key, 'issues', this.decode(gitlabLinks[1]));
         this.used(key); return next();
       }
+      const gitlabDeployments = /^\/api\/issues\/([^/]+)\/gitlab-deployments$/.exec(path);
+      if (gitlabDeployments) {
+        this.query(request, ['offset']);
+        this.resource(key, 'issues', this.decode(gitlabDeployments[1]));
+        this.used(key); return next();
+      }
       if (publication) {
         this.query(request, publication[2] ? ['kind', 'revisionId'] : []);
         this.resource(key, 'documents', this.decode(publication[1]));

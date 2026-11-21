@@ -24,7 +24,10 @@ const readToken = 'synthetic-gitlab-read-only';
 const managementToken = 'synthetic-gitlab-project-manager';
 const repositoryId = 42;
 const hookPath = `${contextPath}/api/v4/projects/${repositoryId}/hooks`;
-const hookOptions = { url: receiverUrl, push_events: true, merge_requests_events: true, pipeline_events: true, enable_ssl_verification: true };
+const hookOptions = {
+  url: receiverUrl, push_events: true, merge_requests_events: true, pipeline_events: true, deployment_events: true,
+  enable_ssl_verification: true,
+};
 const hook = (id: number, overrides: Record<string, unknown> = {}) => ({
   id, project_id: repositoryId, ...hookOptions, push_events_branch_filter: '', custom_webhook_template: null, alert_status: 'executable', ...overrides,
 });
@@ -156,8 +159,15 @@ test('webhook review is read-only and a matching one-time credential registers t
   assert.equal(saved.data.receiverUrl, receiverUrl);
   assert.equal(saved.data.repositoryId, repositoryId);
   assert.equal(saved.data.authMode, 'secret');
+  assert.equal(saved.data.hooks[0].deploymentEvents, true);
   const replay = await app.call<Review>(registerPath, submitted);
   assert.equal(replay.data.state, 'configured');
+  remoteHooks[0].deployment_events = false;
+  const needsDeployment = await app.call<Review>(registerPath, submitted);
+  assert.equal(needsDeployment.data.state, 'review');
+  assert.equal(needsDeployment.data.hooks[0].deploymentEvents, false);
+  assert.equal(needsDeployment.data.reviewId, undefined);
+  remoteHooks[0].deployment_events = true;
   remoteHooks[0].url = `${receiverUrl}/?routing=existing`;
   const variant = await app.call<Review>(registerPath, submitted);
   assert.equal(variant.data.state, 'review');
@@ -180,7 +190,7 @@ test('webhook review is read-only and a matching one-time credential registers t
 });
 
 test('review checks matching hook settings, rejects conflicting pagination and never writes from an incomplete list', async t => {
-  let mode: 'match' | 'conflict' | 'duplicate' | 'jump' | 'foreign' | 'limit' = 'match';
+  let mode: 'match' | 'deployment-unknown' | 'conflict' | 'duplicate' | 'jump' | 'foreign' | 'limit' = 'match';
   let foreignRequests = 0;
   const foreign = await gitlab(t, (_call, response) => { foreignRequests++; reply(response, []); });
   const source = await gitlab(t, (call, response) => {
@@ -188,7 +198,7 @@ test('review checks matching hook settings, rejects conflicting pagination and n
     if (mode === 'jump') return reply(response, [], 200, { 'X-Next-Page': '3' });
     if (mode === 'foreign') return reply(response, [hook(17)], 200, { Link: `<${foreign.url}/api/v4/projects/42/hooks?page=2>; rel="next"` });
     if (mode === 'limit') return reply(response, [hook(100 + page)], 200, { 'X-Next-Page': String(page + 1) });
-    if (page === 1) return reply(response, [hook(17)], 200, { 'X-Next-Page': '2' });
+    if (page === 1) return reply(response, [hook(17, mode === 'deployment-unknown' ? { deployment_events: undefined } : {})], 200, { 'X-Next-Page': '2' });
     return reply(response, mode === 'duplicate' ? [hook(17)] : mode === 'conflict'
       ? [hook(18, { push_events_branch_filter: 'main', alert_status: 'temporarily_disabled' })] : [], 200, { 'X-Next-Page': '' });
   });
@@ -196,6 +206,11 @@ test('review checks matching hook settings, rejects conflicting pagination and n
   const settings = await app.configure(source.url);
   const input = reviewInput(settings, managementToken);
   assert.equal((await app.call<Review>(reviewPath, input)).data.state, 'configured');
+  mode = 'deployment-unknown';
+  const legacy = (await app.call<Review>(reviewPath, input)).data;
+  assert.equal(legacy.state, 'review');
+  assert.equal(legacy.hooks[0].deploymentEvents, null);
+  assert.equal(legacy.reviewId, undefined);
   mode = 'conflict';
   const conflict = await app.call<Review>(reviewPath, input);
   assert.equal(conflict.data.state, 'review');

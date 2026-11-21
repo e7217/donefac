@@ -6,6 +6,7 @@ export interface GitlabProjectWebhook {
   pushEvents: boolean;
   mergeRequestEvents: boolean;
   pipelineEvents: boolean;
+  deploymentEvents: boolean | null;
   sslVerification: boolean;
   unfilteredPush: boolean;
   standardPayload: boolean;

@@ -912,7 +912,22 @@ export interface GitlabMergeReadiness {
   observedAt: string;
   source: 'read' | 'webhook';
 }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness }
+export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[] }
+export const GITLAB_DEPLOYMENT_STATES = ['blocked', 'running', 'success', 'failed', 'canceled'] as const;
+export type GitlabDeploymentState = typeof GITLAB_DEPLOYMENT_STATES[number];
+export interface GitlabDeployment {
+  instance: string;
+  repositoryId: number;
+  deploymentId: number;
+  environment: string;
+  environmentTier?: string;
+  sha: string;
+  status: GitlabDeploymentState;
+  changedAt: string;
+  projectUrl: string;
+  jobUrl?: string;
+}
+export interface GitlabDeploymentPage { items: GitlabDeployment[]; total: number; offset: number; limit: number }
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[]; webhookReceiverUrl?: string }
@@ -924,12 +939,13 @@ export interface GitlabRepositorySearch {
   repositories: GitlabRepositoryCandidate[];
 }
 export interface GitlabWebhookDelivery {
-  event: 'push' | 'tag_push' | 'merge_request' | 'pipeline' | 'other';
+  event: 'push' | 'tag_push' | 'merge_request' | 'pipeline' | 'deployment' | 'other';
   authentication: 'secret-token' | 'signing-token';
   receivedAt: string;
   duplicate: boolean;
   linked: number;
   automationRuns: number;
+  deploymentUpdated?: true;
 }
 export interface GitlabWebhookStatus {
   settingsVersion: number;

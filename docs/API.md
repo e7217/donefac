@@ -37,6 +37,7 @@ curl --fail-with-body \
 | `POST /dependencies` · `PATCH`·`DELETE /dependencies/:id` | 선후행 연결 추가·유형·간격·방향 변경과 해제 |
 | `POST /issues/:id/relations/:relationId/schedule-dependency` | 기존 차단 관계에서 선후행 연결 추가 |
 | `GET /issues/:id/gitlab-links` | 프로젝트 범위 안 업무의 브랜치·커밋·MR·파이프라인 조회 |
+| `GET /issues/:id/gitlab-deployments` | 프로젝트 범위 안 업무의 연결된 GitLab 배포 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
 | `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
@@ -365,7 +366,13 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 
 등록은 `{expectedVersion,repositoryId,reviewId,managementToken,webhookCredential}`을 받는다. `reviewId`는 인증 값이 설정된 누락 저장소의 점검 결과에 표시되며, 같은 작업자·저장소·연결 버전으로 10분간 유효하다. 관리 토큰은 저장소의 Maintainer·Owner 권한 또는 관리자 권한과 `api` 범위가 필요하다. 다시 입력한 웹훅 인증 값을 저장한 값과 대조하며, Signing Token이 설정된 경우 기능 플래그 없이 서명 등록을 지원하는 GitLab 19.1 이상인지 먼저 확인한다. 등록용 자격 증명은 저장하지 않는다. [GitLab 토큰 범위](https://docs.gitlab.com/security/tokens/access_token_scopes/) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab 버전 조회](https://docs.gitlab.com/api/metadata/)
 
-등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline과 SSL 검증을 켜고 `created`로 반환한다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
+등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline·Deployment와 SSL 검증을 켜고 `created`로 반환한다. 기존 훅의 `deploymentEvents`가 `false`이거나 확인할 수 없으면 `review`가 표시된다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
+
+### GitLab 환경별 배포
+
+`Deployment Hook`은 허용한 저장소에서 인증된 이벤트의 `deployment_id`, `environment`, `status`, `status_changed_at`과 정확한 전체 SHA가 있는 `commit_url`을 사용한다. 수명주기 상태는 `blocked`, `running`, `success`, `failed`, `canceled`다. GitLab 프로젝트에 속한 `deployable_url`은 `deployable_id`와 함께 검사한다. 인증된 같은 배포 ID의 더 최근 상태를 저장하고, 최종 상태 뒤에 실행 중·차단 상태가 도착하면 최종 상태를 보존한다. 배포를 저장하거나 갱신한 응답과 마지막 수신 요약에 `deploymentUpdated: true`를 표시한다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
+
+브라우저의 `GET /api/integrations/gitlab/deployments?repositoryId=42`는 저장된 연결의 해당 저장소를 조회한다. `GET /api/issues/:id/gitlab-deployments`와 범위 제한 `/api/v1/issues/:id/gitlab-deployments`는 해당 티켓의 개발 활동과 같은 인스턴스·저장소·전체 SHA의 결과를 읽는다. 연결된 커밋·파이프라인의 SHA와 대상 저장소가 확인된 병합 MR의 병합·스쿼시 SHA를 증거로 사용한다. 두 경로는 최신 변경 시각순으로 `{items,total,offset,limit}`을 반환한다. `offset` 기본값은 0이며 한 페이지는 50건이다. 자체 백업 형식 72는 `gitlabDeployments`와 `GitlabLink.mergeCommitShas`를 보존한다.
 
 ### 이관한 Jira 키로 연결
 

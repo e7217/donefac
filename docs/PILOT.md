@@ -42,6 +42,8 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 **개발 · GitLab → GitLab 웹훅 수신 확인**에서 저장소별 마지막 인증 수신을 확인한다. 업무 연결이 0건이어도 수신 시각과 이벤트가 표시된다. GitLab에서 이벤트를 보낸 뒤 **수신 상태 새로고침**을 누른다. 수신이 표시되지 않으면 GitLab의 **Settings → Webhooks → Edit → Recent events**에서 전송 결과를 확인할 수 있다. [GitLab 웹훅 전송 이력](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
 
+기존 훅으로 배포를 받으려면 GitLab 프로젝트의 웹훅 설정에서 **Deployment events**를 켠다. 정상 배포 이벤트가 기록되면 수신 확인에 **배포 기록 반영**이 표시된다. **GitLab 배포 기록**에서 저장소를 선택해 환경·상태·시각을 대조하고, 연결된 커밋이나 병합 MR이 있으면 해당 티켓의 배포 목록에서 같은 항목을 확인한다. 새 수신부터 기록한다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
+
 티켓 키가 없는 작업은 티켓의 **GitLab 개발 활동**에서 허용 저장소를 선택하고 기존 브랜치·커밋·MR·파이프라인 주소를 붙여 넣어 연결한다. 브랜치는 해당 브랜치의 루트 페이지 주소, 커밋은 전체 SHA가 들어간 주소를 사용한다. 연결된 브랜치는 인증된 푸시로 확인한 마지막 SHA와 삭제 상태를 표시한다.
 
 ## Jira·Confluence 원본 조회

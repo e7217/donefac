@@ -56,8 +56,8 @@ function externalError(error: unknown, creating = false): GitlabProjectWebhookSe
 }
 
 function isConfigured(hook: GitlabProjectWebhook): boolean {
-  return hook.receiverExact !== false && hook.pushEvents && hook.mergeRequestEvents && hook.pipelineEvents && hook.sslVerification &&
-    hook.unfilteredPush && hook.standardPayload && hook.active !== false;
+  return hook.receiverExact !== false && hook.pushEvents && hook.mergeRequestEvents && hook.pipelineEvents &&
+    hook.deploymentEvents === true && hook.sslVerification && hook.unfilteredPush && hook.standardPayload && hook.active !== false;
 }
 
 export class GitlabProjectWebhookSetup {
