@@ -13,6 +13,24 @@
 .workflow-state-table .workflow-limit-input { font-size: 12px; font-variant-numeric: tabular-nums; }
 .workflow-state-table .workflow-limit-input[aria-invalid='true'] { border-color: #ae4230; }
 
+.workflow-transition-blockers {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  min-height: 28px;
+  color: #4d685a;
+  font-size: 11px;
+}
+
+.workflow-transition-blockers input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #177c72;
+}
+
 @media (max-width: 480px) {
   .workflow-state-table th:nth-child(2) { width: 19%; }
   .workflow-state-table .workflow-limit-column { width: 5.25rem; min-width: 5.25rem; }

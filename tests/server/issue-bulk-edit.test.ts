@@ -318,6 +318,60 @@ test('issue and rule changes invalidate reviewed batches and project-scoped vali
   assert.deepEqual(after.issues.find(issue => issue.id === foreign.id), foreign);
 });
 
+test('a new or reopened blocker invalidates an otherwise current bulk review without committing any row', async t => {
+  const f = await fixture(t);
+  const target = await f.createIssue('차단 상태를 검토할 업무');
+  const other = await f.createIssue('정상 일괄 검토 업무');
+  let source = await f.createIssue('다른 프로젝트 선행 업무', { projectId: otherProjectId });
+  const workflow = await f.expectStatus<ProjectWorkflow>(200, workflowPath);
+  await f.expectStatus(200, workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'review'
+      ? { ...edge, requireResolvedBlockers: true } : edge),
+  });
+
+  const changes = { status: 'review', priority: 'urgent' } as const;
+  const beforeLink = await f.preview([target, other], changes);
+  assert.ok(beforeLink.previewId);
+  await f.expectStatus(201, `/issues/${source.id}/relations`, 'POST', {
+    otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+  });
+  const blockedReview = await f.preview([target, other], changes);
+  assert.equal(blockedReview.previewId, null);
+  assert.equal(blockedReview.blocked, 1);
+  assert.equal(blockedReview.changed, 1);
+  assert.equal(blockedReview.rows[0].id, target.id);
+  assert.match(blockedReview.rows[0].reason ?? '', /열린 차단 업무/u);
+  assert.ok(!JSON.stringify(blockedReview).includes(source.key));
+  const afterLink = await f.snapshot();
+  assert.equal((await f.apply(beforeLink.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterLink);
+
+  const sourceStatus = (status: 'done' | 'todo') => f.expectStatus<Issue>(200, `/issues/${source.id}`, 'PATCH', {
+    status, expectedVersion: source.version,
+  });
+  source = await sourceStatus('done');
+  const beforeReopen = await f.preview([target, other], changes);
+  assert.ok(beforeReopen.previewId);
+  source = await sourceStatus('todo');
+  const afterReopen = await f.snapshot();
+  assert.equal((await f.apply(beforeReopen.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterReopen);
+
+  await sourceStatus('done');
+  const reviewed = await f.preview([target, other], changes);
+  assert.ok(reviewed.previewId);
+  const applied = await f.apply(reviewed.previewId);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.updated.length, 2);
+  const after = await f.snapshot();
+  for (const { id, version } of [target, other]) {
+    const issue = after.issues.find(item => item.id === id)!;
+    assert.equal(issue.version, version + 1);
+    assert.deepEqual(issueFields(issue), { ...changes, assigneeId: null });
+  }
+});
+
 test('a late database error rolls back the whole bulk edit with each side effect and permits the same reviewed batch to retry', async t => {
   const f = await fixture(t);
   const first = await f.createIssue('첫 번째 적용 기록');

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, AutomationRun, GitlabWebhookStatus, Issue, IssueAutomationRunPage, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationRule, AutomationRun, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -60,6 +60,100 @@ test('preview and webhook honor the same required-field workflow without creatin
     assert.equal(resolved.latestBlockedRunId,null);
     assert.deepEqual(resolved.items,[blocked]);
   }finally{await f.close();}
+});
+
+test('GitLab preview and delivery honor the blocker guard and a new event succeeds after resolution', async () => {
+  const f = await fixture();
+  try {
+    await configure(f);
+    await endpoint(f);
+    const path = '/projects/project-neo/workflow';
+    const { data: workflow } = await f.call<ProjectWorkflow>(path);
+    const guard = await f.call(path, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      transitions: workflow.transitions.map(edge => edge.from === 'in_progress' && edge.to === 'done'
+        ? { ...edge, requireResolvedBlockers: true } : edge),
+    });
+    assert.equal(guard.status, 200, JSON.stringify(guard.data));
+    const created = await f.call<Issue>('/issues', 'POST', { projectId: 'project-team', title: '외부 프로젝트 승인' });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const source = created.data;
+    const target = f.observer.get<Issue>('issues', 'issue-1')!;
+    const linked = await f.call(`/issues/${source.id}/relations`, 'POST', {
+      otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+    });
+    assert.equal(linked.status, 201, JSON.stringify(linked.data));
+    const saved = await rule(f);
+    const sample = { trigger: 'merge_request.merged', gitlabProjectId: 42, branch: `feature/${target.key}` };
+    const preview = () => f.call('/automation/preview', 'POST', { rule: saved, issueIds: [target.id], sample });
+    const blockedPreview = await preview();
+    assert.equal(blockedPreview.status, 200);
+    assert.equal(blockedPreview.data.outcomes[0].outcome, 'blocked');
+    assert.match(blockedPreview.data.outcomes[0].reason, /열린 차단 업무/u);
+    assert.ok(!JSON.stringify(blockedPreview.data).includes(source.key));
+    assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
+
+    const originalEvent = payload(301, target.key);
+    const eventId = randomUUID();
+    const blockedEvent = await hook(f, originalEvent, eventId);
+    assert.equal(blockedEvent.status, 200, JSON.stringify(blockedEvent.data));
+    assert.deepEqual(f.observer.get('issues', target.id), target);
+    assert.deepEqual((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data, []);
+    const [blockedRun] = (await f.call<AutomationRun[]>('/automation-runs')).data;
+    assert.equal(blockedRun.outcome, 'blocked');
+    assert.match(blockedRun.reason ?? '', /열린 차단 업무/u);
+    assert.equal(f.observer.all('gitlab_links').length, 1);
+
+    const closed = await f.call<Issue>(`/issues/${source.id}`, 'PATCH', { status: 'done', expectedVersion: source.version });
+    assert.equal(closed.status, 200, JSON.stringify(closed.data));
+    assert.equal((await preview()).data.outcomes[0].outcome, 'changed');
+    assert.equal((await hook(f, originalEvent, eventId)).data.duplicate, true);
+    assert.deepEqual(f.observer.get('issues', target.id), target);
+    assert.equal((await hook(f, payload(302, target.key))).status, 200);
+    const moved = f.observer.get<Issue>('issues', target.id)!;
+    assert.equal(moved.status, 'done');
+    assert.equal(moved.version, target.version + 1);
+    assert.ok(moved.completedAt);
+    assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data.map(item => item.outcome).sort(), ['blocked', 'changed']);
+    const deliveries = (await f.call<WebhookDelivery[]>('/webhook-deliveries')).data;
+    assert.equal(deliveries.length, 1);
+    const detail = (await f.call<{ envelope: WebhookEnvelope }>(`/webhook-deliveries/${deliveries[0].id}`)).data;
+    assert.equal(detail.envelope.origin, 'automation');
+    assert.equal(detail.envelope.resource.status, 'done');
+  } finally {
+    await f.close();
+  }
+});
+
+test('native format 81 retains blocker guards and rejects a mislabeled legacy backup', async () => {
+  const f = await fixture();
+  try {
+    const path = '/projects/project-neo/workflow';
+    const legacy = { ...(await f.call('/export')).data, schemaVersion: 80 };
+    const { data: workflow } = await f.call<ProjectWorkflow>(path);
+    const edgeFor = (value: ProjectWorkflow) => value.transitions.find(edge => edge.from === 'in_progress' && edge.to === 'done');
+    const guarded = await f.call<ProjectWorkflow>(path, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      transitions: workflow.transitions.map(edge => edge === edgeFor(workflow) ? { ...edge, requireResolvedBlockers: true } : edge),
+    });
+    assert.equal(guarded.status, 200);
+    assert.equal(edgeFor(guarded.data)?.requireResolvedBlockers, true);
+    const saved = (await f.call('/export')).data;
+    assert.equal(saved.schemaVersion, 81);
+    const bad = await f.call<{ error: string }>('/import', 'POST', { data: { ...saved, schemaVersion: 80 } });
+    assert.equal(bad.status, 400);
+    assert.match(bad.data.error, /schemaVersion 81/u);
+    assert.deepEqual((await f.call<ProjectWorkflow>(path)).data, guarded.data);
+
+    assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
+    assert.equal(edgeFor((await f.call<ProjectWorkflow>(path)).data)?.requireResolvedBlockers, undefined);
+    assert.equal((await f.call('/import', 'POST', { data: saved })).status, 200);
+    const restored = (await f.call<ProjectWorkflow>(path)).data;
+    assert.equal(edgeFor(restored)?.requireResolvedBlockers, true);
+    assert.ok(restored.version > guarded.data.version);
+  } finally {
+    await f.close();
+  }
 });
 
 test('native automation backup restores execution history and disabled rules with operational outbox reset',async()=>{

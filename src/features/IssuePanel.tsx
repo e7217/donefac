@@ -14,7 +14,7 @@ import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
-import { IssueRelations } from './IssueRelations';
+import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, CommentMentionText, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
@@ -40,6 +40,7 @@ type IssueDependencyEditor =
   | { otherRole: RelatedIssueDirection; dependency?: Dependency; review?: never }
   | { otherRole?: never; dependency?: never; review: RelationScheduleReview };
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
+type IssueEditError = { message: string; openBlockers?: boolean };
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
@@ -54,6 +55,11 @@ type IssuePanelProps = FeatureProps & {
 
 function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, descriptionFormat: issue.descriptionFormat ?? 'plain', type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
+}
+
+function isOpenBlockerError(cause: unknown) {
+  return cause instanceof ApiError && cause.status === 422 && cause.details !== null &&
+    typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'open_issue_blockers';
 }
 
 export function IssuePanel(props: IssuePanelProps) {
@@ -102,7 +108,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [commenting, setCommenting] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<IssueEditError | null>(null);
   const [conflict, setConflict] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [childCreation, setChildCreation] = useState<Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version'> | null>(null);
@@ -114,6 +120,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [cloneCreation, setCloneCreation] = useState<Issue | null>(null);
   const [createdClone, setCreatedClone] = useState<Pick<Issue, 'id' | 'key'> | null>(null);
   const [relationsRefreshKey, setRelationsRefreshKey] = useState(0);
+  const relationControls = useRef<IssueRelationsHandle>(null);
   const cloneCreationTrigger = useRef<HTMLButtonElement>(null);
   const createdCloneLink = useRef<HTMLButtonElement>(null);
   const cloneReturnFocus = useRef<'trigger' | 'receipt' | null>(null);
@@ -207,7 +214,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   useEffect(() => { dirtyRef.current = dirty || Boolean(commentDraft.body.trim()); }, [dirty, commentDraft.body]);
   if (loadedVersion !== issue?.version) {
     setLoadedVersion(issue?.version);
-    if (!dirty) { setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setError(''); setConflict(false); setDeleteConfirm(false); }
+    if (!dirty) { setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setError(null); setConflict(false); setDeleteConfirm(false); }
   }
   const confirmDiscard = useCallback(() => {
     if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
@@ -239,7 +246,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           setDependencyEditor(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
-          setCommentDraft(emptyCommentDraft()); setError(''); setConflict(false);
+          setCommentDraft(emptyCommentDraft()); setError(null); setConflict(false);
         });
       }
     };
@@ -358,7 +365,10 @@ function IssuePanelContent(props: IssuePanelProps) {
     ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
     : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
       ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
-  function update<K extends keyof Issue>(key: K, value: Issue[K]) { setDraft(previous => previous ? { ...previous, [key]: value } : previous); }
+  function update<K extends keyof Issue>(key: K, value: Issue[K]) {
+    if ((key === 'status' || key === 'type') && draft?.[key] !== value && error?.openBlockers) setError(null);
+    setDraft(previous => previous ? { ...previous, [key]: value } : previous);
+  }
   function canPrepareAutomationStatus(run: AutomationRun) {
     return Boolean(issue && draft && baseDraft && !conflict && !saving && !dependencyBusy && !commenting &&
       draft.version === issue.version && baseDraft.status === issue.status && draft.status === baseDraft.status &&
@@ -372,12 +382,12 @@ function IssuePanelContent(props: IssuePanelProps) {
       return;
     }
     update('status', run.toStatus);
-    setError('');
+    setError(null);
     statusField.current?.focus();
   }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
-    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError('');
+    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError(null);
     try {
       const { descriptionFormat, ...fields } = editableIssue(draft, labels);
       const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
@@ -385,19 +395,27 @@ function IssuePanelContent(props: IssuePanelProps) {
         ...(changedFormat ? { descriptionFormat } : {}) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
-    } catch (err) { setError(errorMessage(err)); if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); } } finally { savingRef.current = false; setSaving(false); }
+    } catch (err) {
+      const openBlockers = isOpenBlockerError(err);
+      setError({ message: errorMessage(err), openBlockers });
+      if (openBlockers) {
+        setRelationsRefreshKey(key => key + 1);
+        void refresh().catch(() => undefined);
+      }
+      if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); }
+    } finally { savingRef.current = false; setSaving(false); }
   }
   async function reloadLatest() {
     const hadUnsaved = dirtyRef.current;
     if (!confirmDiscard()) return;
     savingRef.current = true; setSaving(true);
-    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(''); dirtyRef.current = false; await refresh(); }
-    catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
+    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(null); dirtyRef.current = false; await refresh(); }
+    catch (err) { dirtyRef.current = hadUnsaved; setError({ message: errorMessage(err) }); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
     if (gitlabDraft.current?.pending) { notify('GitLab 연결 변경이 끝난 뒤 업무를 휴지통으로 옮겨 주세요.', 'error'); return; }
     if (!issue || savingRef.current || commenting || dependencyBusyRef.current || childDraft.current?.pending) return;
-    savingRef.current = true; setSaving(true); setError('');
+    savingRef.current = true; setSaving(true); setError(null);
     try {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
       window.dispatchEvent(new Event('teamspace:trash-changed'));
@@ -410,7 +428,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       }
       savingRef.current = false;
       onClose();
-    } catch (err) { setError(errorMessage(err)); }
+    } catch (err) { setError({ message: errorMessage(err) }); }
     finally { savingRef.current = false; setSaving(false); }
   }
   async function addComment(event: FormEvent) {
@@ -591,7 +609,11 @@ function IssuePanelContent(props: IssuePanelProps) {
         </div></div>
         <CustomFields data={data} projectId={draft.projectId} issueType={draft.type} status={draft.status} values={draft.customFields || {}} existingValues={baseDraft?.customFields || {}} onChange={value => update('customFields', value)} disabled={saving} requiredFields={requiredFields} />
         {requiredFields.length > 0 && <p className="issue-section-empty">이 유형·상태의 필수 속성: {requiredFieldLabels(data, draft.projectId, requiredFields).join(', ')}</p>}
-        {error && <div className="issue-form-error" role="alert">{error}</div>}
+        {error && <div className="issue-form-error">
+          <div role="alert">{error.message}</div>
+          {error.openBlockers && <button className="btn issue-transition-blocker-action" type="button"
+            onClick={() => relationControls.current?.focusBlockers()}>차단 업무 보기</button>}
+        </div>}
         <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || dependencyBusy || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
       <section className="issue-related-section" aria-label="업무 의존성">
@@ -641,7 +663,8 @@ function IssuePanelContent(props: IssuePanelProps) {
         </button>)}
       </section>
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
-        refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
+        refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} controlsRef={relationControls} highlightOpenBlockers={Boolean(error?.openBlockers)}
+        onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
         {linkedDocuments.map(link => {

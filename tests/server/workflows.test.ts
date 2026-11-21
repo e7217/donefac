@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { Issue, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Issue, IssueRelation, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dataDir?: string, seed = true) {
   const dir = dataDir || mkdtempSync(join(tmpdir(), 'teamspace-workflows-'));
@@ -15,7 +16,7 @@ async function fixture(dataDir?: string, seed = true) {
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('테스트 서버 주소 없음');
   const base = `http://127.0.0.1:${address.port}/api`;
   let closed = false;
-  const request = async <T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown) => { const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; };
+  const request = async <T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown, headers?: Record<string, string>) => { const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json() as T }; };
   return { dir, request, close: async () => { if (closed) return; closed = true; await new Promise<void>(resolve => server.close(() => resolve())); service.close(); }, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -43,6 +44,91 @@ test('default workflows retain old transitions; configured edges, issue types an
     assert.equal((await f.request('/schedule/apply', 'POST', { changes: [{ id: issue.id, expectedVersion: issue.version, startDate: '2026-11-16', endDate: '2026-11-18' }] })).status, 200);
     issue = (await f.request<WorkspaceSnapshot>('/workspace')).data.issues.find(value => value.id === issue.id)!;
     const done = await f.request<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, status: 'shipped_custom' }); assert.equal(done.status, 200); assert.ok(done.data.completedAt);
+  } finally { await f.close(); f.remove(); }
+});
+
+test('opt-in transitions require live incoming native blockers to be resolved, with scoped generic errors and compatible workflow PATCH', async () => {
+  const f = await fixture();
+  const primary = 'project-neo', secondary = 'project-team';
+  const path = `/projects/${primary}/workflow`;
+  const isGuardedEdge = ({ from, to }: { from: string; to: string }) => from === 'todo' && to === 'done';
+  const readWorkflow = async (projectId: string) => (await f.request<ProjectWorkflow>(`/projects/${projectId}/workflow`)).data;
+  const saveGuard = (workflow: ProjectWorkflow, requireResolvedBlockers: unknown) => f.request<ProjectWorkflow>(path, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version, transitions: workflow.transitions.map(edge => isGuardedEdge(edge) ? { ...edge, requireResolvedBlockers } : edge),
+  });
+  async function createIssue(projectId: string, title: string) {
+    const result = await f.request<Issue>('/issues', 'POST', { projectId, title });
+    assert.equal(result.status, 201);
+    return result.data;
+  }
+  const changeStatus = (issue: Issue, status: string) => f.request<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, status });
+  const link = (source: Issue, target: Issue, type: 'blocks' | 'related') =>
+    f.request<IssueRelation>(`/issues/${source.id}/relations`, 'POST', { otherIssueId: target.id, type, direction: 'outgoing' });
+  const blocked = { error: '열린 차단 업무를 해결한 뒤 상태를 변경해 주세요.', details: { reason: 'open_issue_blockers' } };
+  try {
+    const target = await createIssue(primary, '종료할 업무');
+    const local = await createIssue(primary, '같은 프로젝트의 차단 업무');
+    const foreign = await createIssue(secondary, '다른 프로젝트의 차단 업무');
+    const reference = await createIssue(secondary, '차단과 무관한 참조 업무');
+    type Backup = { issueRelations: IssueRelation[]; schemaVersion: number };
+    const backup = (await f.request<Backup>('/export')).data;
+    const imported: IssueRelation = { id: randomUUID(), sourceIssueId: reference.id, targetIssueId: target.id,
+      type: 'blocks', version: 1, createdAt: new Date().toISOString() };
+    assert.equal((await f.request('/import', 'POST', { data: { ...backup, issueRelations: [...backup.issueRelations, imported] } })).status, 200);
+    const issues = (await f.request<WorkspaceSnapshot>('/workspace')).data.issues;
+    let current = issues.find(issue => issue.id === target.id)!;
+    const localCurrent = issues.find(issue => issue.id === local.id)!;
+    const foreignCurrent = issues.find(issue => issue.id === foreign.id)!;
+    assert.equal((await link(local, target, 'blocks')).status, 201);
+    assert.equal((await link(target, reference, 'blocks')).status, 201);
+    assert.equal((await link(reference, target, 'related')).status, 201);
+
+    const customStatus = { id: 'withdrawn', label: '철회됨', color: '#7f838f', category: 'cancelled' } as const;
+    const defaultPrimary = await readWorkflow(primary);
+    const primaryWorkflow = await f.request<ProjectWorkflow>(path, 'PATCH', { ...defaultPrimary, expectedVersion: defaultPrimary.version,
+      statuses: [...defaultPrimary.statuses, { ...customStatus, label: '검토 중', category: 'review' }] });
+    assert.equal(primaryWorkflow.status, 200);
+    const secondaryWorkflow = await readWorkflow(secondary);
+    const secondaryPath = `/projects/${secondary}/workflow`;
+    assert.equal((await f.request(secondaryPath, 'PATCH', { ...secondaryWorkflow, expectedVersion: secondaryWorkflow.version,
+      statuses: [...secondaryWorkflow.statuses, customStatus], transitions: [...secondaryWorkflow.transitions,
+        { from: 'todo', to: customStatus.id, issueTypes: [], requiredFields: [] },
+        { from: customStatus.id, to: 'todo', issueTypes: [], requiredFields: [] }] })).status, 200);
+
+    for (const invalid of [null, 'true', 1, {}]) assert.equal((await saveGuard(primaryWorkflow.data, invalid)).status, 400);
+    const enabled = await saveGuard(primaryWorkflow.data, true);
+    assert.equal(enabled.status, 200);
+    const legacyClient = await f.request<ProjectWorkflow>(path, 'PATCH', { ...enabled.data, expectedVersion: enabled.data.version,
+      transitions: enabled.data.transitions.map(({ from, to, issueTypes, requiredFields }) => ({ from, to, issueTypes, requiredFields })).reverse() });
+    assert.equal(legacyClient.status, 200);
+    assert.equal(legacyClient.data.transitions.find(isGuardedEdge)?.requireResolvedBlockers, true);
+    assert.equal(legacyClient.data.transitions.filter(edge => edge.requireResolvedBlockers).length, 1);
+
+    const ordinaryEdit = await f.request<Issue>(`/issues/${current.id}`, 'PATCH', { expectedVersion: current.version, title: '차단 중 세부 내용 편집' });
+    assert.equal(ordinaryEdit.status, 200);
+    current = ordinaryEdit.data;
+    assert.deepEqual(await changeStatus(current, 'done'), { status: 422, data: blocked });
+    assert.equal((await changeStatus(localCurrent, 'done')).status, 200);
+    assert.equal((await link(foreign, target, 'blocks')).status, 201);
+    const key = await f.request<ApiKeyCreated>('/api-keys', 'POST', { name: '대상 프로젝트 전용', access: 'write', projectIds: [primary] });
+    assert.equal(key.status, 201);
+    const headers = { Authorization: `Bearer ${key.data.token}` };
+    const guarded = await f.request(`/v1/issues/${current.id}`, 'PATCH', { expectedVersion: current.version, status: 'done' }, headers);
+    assert.deepEqual(guarded, { status: 422, data: blocked });
+
+    const closedBlocker = await changeStatus(foreignCurrent, customStatus.id);
+    assert.equal(closedBlocker.status, 200);
+    const closed = await changeStatus(current, 'done');
+    assert.equal(closed.status, 200);
+    assert.equal(closed.data.status, 'done');
+    const reopened = await changeStatus(closed.data, 'todo');
+    assert.equal(reopened.status, 200);
+    assert.equal((await changeStatus(closedBlocker.data, 'todo')).status, 200);
+    assert.equal((await changeStatus(reopened.data, 'done')).status, 422);
+    const disabled = await saveGuard(legacyClient.data, false);
+    assert.equal(disabled.status, 200);
+    assert.equal(Object.hasOwn(disabled.data.transitions.find(isGuardedEdge)!, 'requireResolvedBlockers'), false);
+    assert.equal((await changeStatus(reopened.data, 'done')).status, 200);
   } finally { await f.close(); f.remove(); }
 });
 

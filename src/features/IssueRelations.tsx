@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from 'react';
 import { Link2, Pencil, Plus, RefreshCw, SquareChartGantt, Unlink2 } from 'lucide-react';
 import { issueRelationScheduleMode, type IssueRelationScheduleMode } from '../../shared/issue-relations';
 import type { FeatureProps, Issue, IssueRelation, IssueRelationDirection, IssueRelationType } from '../../shared/types';
+import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import './issue-relations.css';
 
@@ -20,10 +21,13 @@ const dateFormat = new Intl.DateTimeFormat('ko-KR', { dateStyle: 'medium' });
 
 type Choice = keyof typeof CHOICES;
 type Draft = { original?: IssueRelation; otherIssueId: string; choice: Choice; query: string };
+export interface IssueRelationsHandle { focusBlockers: () => void }
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   issueId: string;
   refreshKey: number;
   disabled: boolean;
+  highlightOpenBlockers: boolean;
+  controlsRef: Ref<IssueRelationsHandle>;
   onReviewSchedule: (opener: HTMLButtonElement, relation: IssueRelation, mode: IssueRelationScheduleMode, reload: () => Promise<void>) => void;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
 };
@@ -51,7 +55,9 @@ export function IssueRelations(props: Props) {
   return <RelationList key={props.issueId} {...props} />;
 }
 
-function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, disabled, onReviewSchedule, onDraftChange }: Props) {
+function RelationList({
+  issueId, refreshKey, data, openIssue, refresh, notify, disabled, highlightOpenBlockers, controlsRef, onReviewSchedule, onDraftChange,
+}: Props) {
   const editHeading = useId(), removeHeading = useId();
   const [relations, setRelations] = useState<IssueRelation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -70,6 +76,7 @@ function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, d
   const otherSelect = useRef<HTMLSelectElement>(null);
   const typeSelect = useRef<HTMLSelectElement>(null);
   const cancelUnlink = useRef<HTMLButtonElement>(null);
+  const section = useRef<HTMLElement>(null);
 
   const path = `/issues/${encodeURIComponent(issueId)}/relations`;
   const issueById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
@@ -90,11 +97,34 @@ function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, d
   const shownMatches = matches.slice(0, MATCH_LIMIT);
   const selectedIssue = draft && issueById.get(draft.otherIssueId);
   const activeOffset = Math.min(offset, lastOffset(relations.length));
+  const { workflows, issueSchemas } = data;
+  const openBlockerStatuses = useMemo(() => {
+    const statuses = new Map<string, string>();
+    if (!highlightOpenBlockers) return statuses;
+    for (const relation of relations) {
+      if (relation.origin !== 'teamspace' || relation.type !== 'blocks' || relation.targetIssueId !== issueId) continue;
+      const source = issueById.get(relation.sourceIssueId);
+      if (!source || source.id === issueId) continue;
+      const status = statusMeta({ workflows, issueSchemas }, source.projectId, source.status);
+      if (status.category !== 'done' && status.category !== 'cancelled') statuses.set(relation.id, status.label);
+    }
+    return statuses;
+  }, [highlightOpenBlockers, relations, issueById, issueId, workflows, issueSchemas]);
+  const displayRelations = useMemo(() => openBlockerStatuses.size === 0 ? relations : [
+    ...relations.filter(relation => openBlockerStatuses.has(relation.id)),
+    ...relations.filter(relation => !openBlockerStatuses.has(relation.id)),
+  ], [openBlockerStatuses, relations]);
   const captured = draft?.original ?? unlinkTarget;
   const current = captured && relations.find(relation => relation.id === captured.id);
   const stale = Boolean(captured && (!current || current.version !== captured.version));
   const edited = Boolean(draft && (draft.original ? draft.choice !== choiceFor(draft.original, issueId)
     : draft.otherIssueId || draft.query.trim() || draft.choice !== 'related'));
+
+  useImperativeHandle(controlsRef, () => ({ focusBlockers() {
+    setOffset(0);
+    section.current?.focus({ preventScroll: true });
+    section.current?.scrollIntoView({ block: 'start' });
+  } }), []);
 
   const load = useCallback(async () => {
     getRequest.current?.abort();
@@ -239,7 +269,7 @@ function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, d
     return `${issue.key} · ${issue.title} · ${projectNames.get(issue.projectId) ?? '프로젝트 없음'}`;
   }
 
-  return <section className="issue-related-section issue-relations" aria-label="업무 관계">
+  return <section ref={section} className="issue-related-section issue-relations" aria-label="업무 관계" tabIndex={-1}>
     <header className="issue-relations-header">
       <h3><Link2 size={16} aria-hidden="true" />업무 관계 <span>{relations.length}</span></h3>
       <div className="issue-relations-actions">
@@ -297,7 +327,7 @@ function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, d
       </footer>
     </div>}
     {!!relations.length && <ul className="issue-relations-list">
-      {relations.slice(activeOffset, activeOffset + PAGE_SIZE).map((relation, index) => {
+      {displayRelations.slice(activeOffset, activeOffset + PAGE_SIZE).map((relation, index) => {
         const targetId = otherId(relation, issueId);
         const other = issueById.get(targetId);
         const scheduleMode = currentIssue && other && other.id !== issueId && currentIssue.projectId === other.projectId
@@ -306,13 +336,16 @@ function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, d
         const label = local ? CHOICES[choiceFor(relation, issueId)].label : relation.type;
         const labelId = `${editHeading}-${activeOffset + index}`;
         const created = new Date(relation.createdAt);
-        return <li className="issue-relations-row" key={relation.id}>
+        const blockerStatus = openBlockerStatuses.get(relation.id);
+        return <li className="issue-relations-row" key={relation.id} data-open-blocker={blockerStatus !== undefined ? '' : undefined}>
           <div className="issue-relations-label">
             <strong id={labelId}>{label}</strong>
+            {blockerStatus !== undefined && <small className="issue-relations-open-blocker"><strong>열린 차단 업무</strong><span> · {blockerStatus}</span></small>}
             {!local && <small>이관 관계 · {relation.sourceIssueId === issueId ? '이 업무가 출발' : '이 업무가 도착'}</small>}
             {Number.isFinite(created.getTime()) && <time dateTime={relation.createdAt}>{dateFormat.format(created)}</time>}
           </div>
-          {other ? <button className="btn btn-ghost issue-relations-target" type="button" onClick={() => openIssue(targetId)}>
+          {other ? <button className="btn btn-ghost issue-relations-target" type="button"
+            aria-label={blockerStatus !== undefined ? `${other.key} 업무 열기` : undefined} onClick={() => openIssue(targetId)}>
             <span><strong>{other.key}</strong> · {other.title}</span><small>{projectNames.get(other.projectId)}</small>
           </button> : <span className="issue-relations-hint">현재 목록에 없는 업무 · {targetId}</span>}
           {local && other && <div className="issue-relations-row-actions">

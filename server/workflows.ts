@@ -15,10 +15,11 @@ function fields(value: unknown, schema: ProjectIssueSchema): IssueRequiredField[
   return [...new Set(value)] as IssueRequiredField[];
 }
 function nonempty(value: unknown, label: string, limit: number): string { if (typeof value !== 'string' || !value.trim() || value.trim().length > limit) invalid(`${label}을(를) 확인해 주세요.`); return value.trim(); }
-function config(projectId: string, value: unknown, version: number, updatedAt: string, schema: ProjectIssueSchema, previousStatuses: readonly WorkflowStatus[] = []): ProjectWorkflow {
+function config(projectId: string, value: unknown, version: number, updatedAt: string, schema: ProjectIssueSchema, previous?: ProjectWorkflow): ProjectWorkflow {
   const source = object(value);
   const issueTypes = new Set(schema.issueTypes.map(type => type.id));
-  const previousLimits = new Map(previousStatuses.map(status => [status.id, status.wipLimit]));
+  const previousLimits = new Map(previous?.statuses.map(status => [status.id, status.wipLimit]));
+  const previousBlockerGuards = new Set(previous?.transitions.filter(edge => edge.requireResolvedBlockers).map(edge => `${edge.from}:${edge.to}`));
   if (!Array.isArray(source.statuses) || source.statuses.length < 1 || source.statuses.length > 40) invalid('상태는 1~40개여야 합니다.');
   const statuses: WorkflowStatus[] = source.statuses.map(value => {
     const status = object(value), id = nonempty(status.id, '상태 ID', 48), label = nonempty(status.label, '상태 이름', 40);
@@ -44,7 +45,12 @@ function config(projectId: string, value: unknown, version: number, updatedAt: s
     const pair = `${edge.from}:${edge.to}`;
     if (pairs.has(pair)) invalid('같은 상태 사이의 전이는 한 번만 설정해 주세요.'); pairs.add(pair);
     if (!Array.isArray(edge.issueTypes) || !edge.issueTypes.every(type => typeof type === 'string' && issueTypes.has(type))) invalid('전이의 업무 유형을 확인해 주세요.');
-    return { from: edge.from, to: edge.to, issueTypes: [...new Set(edge.issueTypes)] as string[], requiredFields: fields(edge.requiredFields, schema) };
+    if (Object.hasOwn(edge, 'requireResolvedBlockers') && typeof edge.requireResolvedBlockers !== 'boolean') {
+      invalid('열린 차단 업무 제한은 true 또는 false여야 합니다.');
+    }
+    const requireResolvedBlockers = edge.requireResolvedBlockers ?? previousBlockerGuards.has(pair);
+    return { from: edge.from, to: edge.to, issueTypes: [...new Set(edge.issueTypes)] as string[], requiredFields: fields(edge.requiredFields, schema),
+      ...(requireResolvedBlockers ? { requireResolvedBlockers: true } : {}) };
   });
   if (!Array.isArray(source.fieldRules) || source.fieldRules.length > 1000) invalid('유형·상태별 필수 속성 규칙을 확인해 주세요.');
   const rules = new Set<string>();
@@ -91,7 +97,7 @@ export class WorkflowService {
       if (!Number.isInteger(expectedVersion)) invalid('expectedVersion이 필요합니다.');
       if (expectedVersion !== previous.version) invalid('다른 작업자가 워크플로를 변경했습니다. 최신 설정을 불러온 뒤 다시 편집해 주세요.', 409, { currentVersion: previous.version });
       const schema = this.issueSchemas?.get(projectId) ?? defaultIssueSchema(projectId);
-      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), schema, previous.statuses);
+      const next = config(projectId, input, previous.version + 1, new Date().toISOString(), schema, previous);
       const statusIds = new Set(next.statuses.map(status => status.id));
       const visibilityFields = visibilityFieldsWithMissingStatuses(schema, statusIds);
       if (visibilityFields.length) invalid('필드 표시 조건에서 참조하는 상태입니다. 표시 조건을 변경한 뒤 상태를 삭제해 주세요.', 409, { fieldIds: visibilityFields.map(field => field.id) });
@@ -121,6 +127,9 @@ export class WorkflowService {
     if (previous && previous.status !== next.status && options.checkTransition !== false) {
       const edge = workflow.transitions.find(edge => edge.from === previous.status && edge.to === next.status && (!edge.issueTypes.length || edge.issueTypes.includes(next.type)));
       if (!edge) invalid(`허용되지 않은 상태 전이입니다: ${previous.status} → ${next.status}`, 422);
+      if (edge.requireResolvedBlockers && this.hasOpenBlockers(next.id, workflow)) {
+        invalid('열린 차단 업무를 해결한 뒤 상태를 변경해 주세요.', 422, { reason: 'open_issue_blockers' });
+      }
       required.push(...edge.requiredFields);
     }
     if (options.checkFields === false) return;
@@ -130,6 +139,24 @@ export class WorkflowService {
       const value = next[field as keyof Issue]; return value === null || value === undefined || (typeof value === 'string' && !value.trim()) || (Array.isArray(value) && !value.some(item => typeof item === 'string' && item.trim()));
     });
     if (missing.length) invalid(`필수 속성을 입력해 주세요: ${requiredFieldLabels({ issueSchemas: [schema] }, next.projectId, missing).join(', ')}`, 422, { requiredFields: missing });
+  }
+  private hasOpenBlockers(issueId: string, targetWorkflow: ProjectWorkflow): boolean {
+    const sources = this.store.db.prepare(`SELECT source.project_id AS projectId, json_extract(source.json, '$.status') AS status
+      FROM issue_relations AS relation JOIN issues AS source ON source.id=relation.source_issue_id
+      WHERE relation.target_issue_id=? AND relation.source_issue_id<>relation.target_issue_id
+        AND json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'`)
+      .iterate(issueId) as Iterable<{ projectId: string; status: string }>;
+    const workflows = new Map([[targetWorkflow.projectId, targetWorkflow]]);
+    for (const { projectId, status } of sources) {
+      let workflow = workflows.get(projectId);
+      if (!workflow) {
+        workflow = this.get(projectId);
+        workflows.set(projectId, workflow);
+      }
+      const category = workflow.statuses.find(value => value.id === status)?.category;
+      if (category !== 'done' && category !== 'cancelled') return true;
+    }
+    return false;
   }
   validateImport(value: unknown, projects: Project[], issues: Issue[], issueSchemas: ProjectIssueSchema[] = []) { return validateWorkflowImport(value, projects, issues, issueSchemas); }
   replaceImported(workflows: ProjectWorkflow[]): void { this.store.db.exec('DELETE FROM workflows'); workflows.forEach(workflow => this.store.put('workflows', workflow)); }

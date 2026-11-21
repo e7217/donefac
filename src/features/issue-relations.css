@@ -15,6 +15,15 @@
   margin: 0;
 }
 
+.issue-relations:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: 3px;
+}
+
+.issue-transition-blocker-action {
+  margin-top: 6px;
+}
+
 .issue-relations-editor {
   display: grid;
   gap: 10px;
@@ -84,6 +93,11 @@
 .issue-relations-target small {
   color: #546d5e;
   font-size: 10px;
+}
+
+.issue-relations-label .issue-relations-open-blocker {
+  color: #8a4319;
+  font-size: 11px;
 }
 
 .issue-relations-target.btn {

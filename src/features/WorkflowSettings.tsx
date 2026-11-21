@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowDown, ArrowRight, ArrowRightLeft, ArrowUp, ChevronDown, GitBranch, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
-import { type FeatureProps, type IssueRequiredField, type ProjectWorkflow, type WorkflowStatus } from '../../shared/types';
+import { type FeatureProps, type IssueRequiredField, type ProjectWorkflow, type WorkflowStatus, type WorkflowTransition } from '../../shared/types';
 import { MAX_WORKFLOW_WIP_LIMIT, projectWorkflow, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { api, patch } from '../lib/api';
@@ -18,6 +18,7 @@ function workflowDraft(value: ProjectWorkflow): WorkflowDraft {
   return {
     ...value,
     statuses: value.statuses.map(({ wipLimit, ...status }) => ({ ...status, wipLimitText: String(wipLimit ?? '') })),
+    transitions: value.transitions.map(edge => ({ ...edge, requireResolvedBlockers: edge.requireResolvedBlockers === true })),
   };
 }
 
@@ -74,9 +75,21 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
   }
   function removeStatus(id: string) { setDraft(previous => ({ ...previous, statuses: previous.statuses.filter(status => status.id !== id), transitions: previous.transitions.filter(edge => edge.from !== id && edge.to !== id), fieldRules: previous.fieldRules.filter(rule => rule.statusId !== id) })); }
   function moveStatus(index: number, offset: number) { setDraft(previous => { const statuses = [...previous.statuses]; [statuses[index], statuses[index + offset]] = [statuses[index + offset], statuses[index]]; return { ...previous, statuses }; }); }
+  function updateTransition(index: number, changes: Partial<WorkflowTransition>) {
+    setDraft(previous => ({ ...previous, transitions: previous.transitions.map((edge, row) => row === index ? { ...edge, ...changes } : edge) }));
+  }
   function addTransition() {
-    for (const from of draft.statuses) for (const to of draft.statuses) if (from.id !== to.id && !draft.transitions.some(edge => edge.from === from.id && edge.to === to.id)) { setDraft(previous => ({ ...previous, transitions: [...previous.transitions, { from: from.id, to: to.id, issueTypes: [], requiredFields: [] }] })); return; }
+    for (const from of draft.statuses) for (const to of draft.statuses) if (from.id !== to.id && !draft.transitions.some(edge => edge.from === from.id && edge.to === to.id)) { setDraft(previous => ({ ...previous, transitions: [...previous.transitions, { from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false }] })); return; }
     notify('모든 상태 사이의 전이가 이미 설정되어 있습니다.', 'error');
+  }
+  function addMissingTransitions() {
+    setDraft(previous => {
+      const present = new Set(previous.transitions.map(({ from, to }) => `${from}:${to}`));
+      const added = previous.statuses.flatMap(from => previous.statuses
+        .filter(to => from.id !== to.id && !present.has(`${from.id}:${to.id}`))
+        .map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false })));
+      return added.length ? { ...previous, transitions: [...previous.transitions, ...added] } : previous;
+    });
   }
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -145,7 +158,41 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
           ...previous, statuses: [...previous.statuses, { id: `state_${Date.now().toString(36)}`, label: '새 상태', color: '#588b9c', category: 'todo', wipLimitText: '' }],
         }))}><Plus size={14} /> 상태 추가</button>
       </div>}
-      {tab === 'transitions' && <div className="workflow-tab-content"><div className="workflow-section-actions"><p>등록한 방향으로만 상태를 변경할 수 있습니다. 같은 상태에서 속성을 수정하는 것은 허용됩니다.</p><button type="button" className="btn" onClick={addTransition}><Plus size={14} />전이 추가</button></div><div className="workflow-transition-controls"><select className="field" aria-label="출발 상태로 전이 필터" value={transitionFilter} onChange={event => setTransitionFilter(event.target.value)}><option value="all">모든 출발 상태</option>{stateOptions}</select><button type="button" className="btn btn-ghost" onClick={() => setDraft(previous => ({ ...previous, transitions: previous.statuses.flatMap(from => previous.statuses.filter(to => to.id !== from.id).map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [] }))) }))}>모든 전이 허용</button><button type="button" className="btn btn-ghost" onClick={() => setDraft(previous => ({ ...previous, transitions: [] }))}>전이 모두 비우기</button></div><div className="workflow-rules-table"><div className="workflow-rule-header"><span>출발 상태</span><span /><span>도착 상태</span><span>업무 유형</span><span>전이 시 필수 속성</span><span /></div>{draft.transitions.map((edge, index) => transitionFilter !== 'all' && edge.from !== transitionFilter ? null : <div className="workflow-transition-row" key={index}><select className="field" aria-label={`전이 ${index + 1} 출발 상태`} value={edge.from} onChange={event => setDraft(previous => ({ ...previous, transitions: previous.transitions.map((value, row) => row === index ? { ...value, from: event.target.value } : value) }))}>{stateOptions}</select><ArrowRight size={13} /><select className="field" aria-label={`전이 ${index + 1} 도착 상태`} value={edge.to} onChange={event => setDraft(previous => ({ ...previous, transitions: previous.transitions.map((value, row) => row === index ? { ...value, to: event.target.value } : value) }))}>{stateOptions}</select><MultiSelect label={`전이 ${index + 1} 업무 유형`} options={typeLabels} value={edge.issueTypes} emptyLabel="모든 유형" hint="선택하지 않으면 모든 유형에 적용됩니다." onChange={values => setDraft(previous => ({ ...previous, transitions: previous.transitions.map((value, row) => row === index ? { ...value, issueTypes: values } : value) }))} /><MultiSelect label={`전이 ${index + 1} 필수 속성`} options={requirementLabels} disabledOptions={archivedRequirements} value={edge.requiredFields} emptyLabel="없음" onChange={values => setDraft(previous => ({ ...previous, transitions: previous.transitions.map((value, row) => row === index ? { ...value, requiredFields: values as IssueRequiredField[] } : value) }))} /><button type="button" className="issue-icon-button" aria-label={`전이 ${index + 1} 삭제`} onClick={() => setDraft(previous => ({ ...previous, transitions: previous.transitions.filter((_, row) => row !== index) }))}><Trash2 size={14} /></button></div>)}</div>{!draft.transitions.length && <div className="workflow-empty">허용 전이가 없습니다. 업무 속성 수정은 가능하며 상태 변경은 제한됩니다.</div>}</div>}
+      {tab === 'transitions' && <div className="workflow-tab-content">
+        <div className="workflow-section-actions">
+          <p>등록한 방향으로만 상태를 변경할 수 있습니다. 같은 상태에서 속성을 수정하는 것은 허용됩니다.</p>
+          <button type="button" className="btn" onClick={addTransition}><Plus size={14} />전이 추가</button>
+        </div>
+        <div className="workflow-transition-controls">
+          <select className="field" aria-label="출발 상태로 전이 필터" value={transitionFilter} onChange={event => setTransitionFilter(event.target.value)}>
+            <option value="all">모든 출발 상태</option>{stateOptions}
+          </select>
+          <button type="button" className="btn btn-ghost" onClick={addMissingTransitions}>빠진 전이 모두 추가</button>
+          <button type="button" className="btn btn-ghost" onClick={() => setDraft(previous => ({ ...previous, transitions: [] }))}>전이 모두 비우기</button>
+        </div>
+        <div className="workflow-rules-table">
+          <div className="workflow-rule-header"><span>출발 상태</span><span /><span>도착 상태</span><span>업무 유형</span><span>전이 시 필수 속성</span><span /></div>
+          {draft.transitions.map((edge, index) => transitionFilter !== 'all' && edge.from !== transitionFilter ? null : <div className="workflow-transition-row" key={index}>
+            <select className="field" aria-label={`전이 ${index + 1} 출발 상태`} value={edge.from}
+              onChange={event => updateTransition(index, { from: event.target.value })}>{stateOptions}</select>
+            <ArrowRight size={13} aria-hidden="true" />
+            <select className="field" aria-label={`전이 ${index + 1} 도착 상태`} value={edge.to}
+              onChange={event => updateTransition(index, { to: event.target.value })}>{stateOptions}</select>
+            <MultiSelect label={`전이 ${index + 1} 업무 유형`} options={typeLabels} value={edge.issueTypes} emptyLabel="모든 유형"
+              hint="선택하지 않으면 모든 유형에 적용됩니다." onChange={issueTypes => updateTransition(index, { issueTypes })} />
+            <MultiSelect label={`전이 ${index + 1} 필수 속성`} options={requirementLabels} disabledOptions={archivedRequirements}
+              value={edge.requiredFields} emptyLabel="없음" onChange={values => updateTransition(index, { requiredFields: values as IssueRequiredField[] })} />
+            <button type="button" className="issue-icon-button" aria-label={`전이 ${index + 1} 삭제`}
+              onClick={() => setDraft(previous => ({ ...previous, transitions: previous.transitions.filter((_, row) => row !== index) }))}><Trash2 size={14} /></button>
+            <label className="workflow-transition-blockers">
+              <input type="checkbox" aria-label={`전이 ${index + 1} 열린 차단 업무 해결 필요`} checked={edge.requireResolvedBlockers === true}
+                onChange={event => updateTransition(index, { requireResolvedBlockers: event.target.checked })} />
+              열린 차단 업무 해결 필요
+            </label>
+          </div>)}
+        </div>
+        {!draft.transitions.length && <div className="workflow-empty">허용 전이가 없습니다. 업무 속성 수정은 가능하며 상태 변경은 제한됩니다.</div>}
+      </div>}
       {tab === 'fields' && <div className="workflow-tab-content"><div className="workflow-section-actions"><p>선택한 유형과 상태의 업무에 적용됩니다. 기존 업무는 다음 수정부터 검사합니다.</p><button type="button" className="btn" onClick={() => setDraft(previous => ({ ...previous, fieldRules: [...previous.fieldRules, { issueType: '*', statusId: previous.statuses[0]?.id || '', requiredFields: [] }] }))}><Plus size={14} />규칙 추가</button></div><div className="workflow-field-rule-header"><span>업무 유형</span><span>적용 상태</span><span>필수 속성</span><span /></div>{draft.fieldRules.map((rule, index) => <div className="workflow-field-rule" key={index}><select className="field" aria-label={`규칙 ${index + 1} 업무 유형`} value={rule.issueType} onChange={event => setDraft(previous => ({ ...previous, fieldRules: previous.fieldRules.map((value, row) => row === index ? { ...value, issueType: event.target.value } : value) }))}><option value="*">모든 유형</option>{rule.issueType !== '*' && !Object.hasOwn(typeLabels, rule.issueType) && <option value={rule.issueType}>사용할 수 없는 유형 · {rule.issueType}</option>}{issueTypes.map(type => <option key={type.id} value={type.id}>{typeLabels[type.id]}</option>)}</select><select className="field" aria-label={`규칙 ${index + 1} 상태`} value={rule.statusId} onChange={event => setDraft(previous => ({ ...previous, fieldRules: previous.fieldRules.map((value, row) => row === index ? { ...value, statusId: event.target.value } : value) }))}>{stateOptions}</select><MultiSelect label={`규칙 ${index + 1} 필수 속성`} options={requirementLabels} disabledOptions={archivedRequirements} value={rule.requiredFields} emptyLabel="없음" onChange={values => setDraft(previous => ({ ...previous, fieldRules: previous.fieldRules.map((value, row) => row === index ? { ...value, requiredFields: values as IssueRequiredField[] } : value) }))} /><button type="button" className="issue-icon-button" aria-label={`규칙 ${index + 1} 삭제`} onClick={() => setDraft(previous => ({ ...previous, fieldRules: previous.fieldRules.filter((_, row) => row !== index) }))}><Trash2 size={14} /></button></div>)}{!draft.fieldRules.length && <div className="workflow-empty">추가 필수 속성 규칙이 없습니다. 제목 등 기본 입력 검사는 유지됩니다.</div>}</div>}
       </fieldset>{error && <div className="issue-form-error" role="alert">{error} 입력한 설정은 유지됩니다.</div>}<div className="workflow-footer"><span>{loading ? '설정을 불러오는 중…' : '저장하면 업무 목록·보드·간트에 반영됩니다.'}</span><button type="button" className="btn" onClick={reload} disabled={saving || loading}><RefreshCw size={14} />최신 설정 불러오기</button><button type="submit" className="btn btn-primary" disabled={saving || loading || !dirty}><Save size={14} />{saving ? '저장 중…' : '워크플로 저장'}</button></div></form>
     {migrationOpen && <WorkflowStatusMigration actorId={actorId} savedWorkflow={baseline} users={data.users} refresh={refresh} notify={notify} onClose={closeMigration} />}

@@ -1962,6 +1962,9 @@ export function createApp(options: {
     if(data.schemaVersion<56&&Array.isArray(data.workflows)&&data.workflows.some((workflow:{statuses?:unknown}|null)=>
       Array.isArray(workflow?.statuses)&&workflow.statuses.some((status:{wipLimit?:unknown}|null)=>status?.wipLimit!=null)
     ))fail('상태별 보드 업무 한도가 있는 백업은 schemaVersion 56이 필요합니다.');
+    if (data.schemaVersion < 81 && Array.isArray(data.workflows) && data.workflows.some((workflow: { transitions?: unknown } | null) =>
+      Array.isArray(workflow?.transitions) && workflow.transitions.some((edge: { requireResolvedBlockers?: unknown } | null) => edge?.requireResolvedBlockers === true)
+    )) fail('차단 업무 해결 전이 규칙이 있는 백업은 schemaVersion 81이 필요합니다.');
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
     validateVisibilityStatuses(importedSchemas,importedWorkflows);
     if(data.schemaVersion<13&&Array.isArray(data.savedViews)&&data.savedViews.some((value:unknown)=>
