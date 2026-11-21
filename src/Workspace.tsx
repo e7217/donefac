@@ -56,13 +56,14 @@ type WorkspaceRoute = {
   blockerScope?: DeliveryBlockerDraftScope | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
+  documentCommentId?: string | null;
   documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
 };
-type NotificationCommentFocus = {
+type WorkspaceCommentFocus = {
   targetType: 'issue' | 'document';
   targetId: string;
-  actorId: string;
+  actorId: string | null;
   commentId: string;
   activation: number;
 };
@@ -87,7 +88,10 @@ function routeHash(route: WorkspaceRoute) {
     query.set('publication', route.publication.kind);
     query.set('revision', route.publication.revisionId);
   }
-  if (route.view === 'documents' && route.documentId && route.sectionId) query.set('section', route.sectionId);
+  if (route.view === 'documents' && route.documentId) {
+    if (route.documentCommentId && !route.issueId && !route.publication) query.set('comment', route.documentCommentId);
+    else if (route.sectionId) query.set('section', route.sectionId);
+  }
   if (route.view === 'documents' && route.documentLabel) query.set('label', route.documentLabel);
   if (route.view === 'teamoverview' && route.teamOverviewFilters) {
     const { projectId, memberId, date, issueMetric, issueOffset } = route.teamOverviewFilters;
@@ -132,7 +136,7 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   if (previous?.issueId && previous.documentPreviewId !== next.documentPreviewId &&
       routeHash({ ...previous, documentPreviewId: null }) === routeHash({ ...next, documentPreviewId: null })) return true;
   if (previous && previous.projectId === next.projectId && hasSameDocumentContext(previous, next)) {
-    if (previous.issueId === next.issueId && previous.sectionId !== next.sectionId &&
+    if (previous.issueId === next.issueId && (previous.sectionId !== next.sectionId || previous.documentCommentId !== next.documentCommentId) &&
         previous.documentPreviewId === next.documentPreviewId) return true;
     return dispatchWorkspaceNavigation(previous.documentId);
   }
@@ -183,8 +187,10 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
+  const requestedComment = parameters.get('comment');
+  const documentCommentId = view === 'documents' && documentId && !issueId && !publication && isRelationId(requestedComment) ? requestedComment : null;
   const section = parameters.get('section');
-  const sectionId = view === 'documents' && documentId && isDocumentSectionId(section) ? section : null;
+  const sectionId = view === 'documents' && documentId && !documentCommentId && isDocumentSectionId(section) ? section : null;
   const documentLabel = view === 'documents' ? normalizeDocumentLabelKey(parameters.get('label')) : null;
   const teamProject = parameters.get('teamProject'), teamMember = parameters.get('teamMember'), teamDate = parameters.get('teamDate');
   const teamQueue = parameters.get('teamQueue'), teamQueueOffset = parameters.get('teamQueueOffset');
@@ -197,7 +203,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
     issueMetric, issueOffset,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentLabel, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -218,7 +224,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
   const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
-  const [notificationCommentFocus, setNotificationCommentFocus] = useState<NotificationCommentFocus | null>(null);
+  const [commentFocus, setCommentFocus] = useState<WorkspaceCommentFocus | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
   const [sectionId, setSectionId] = useState<string | null>(null);
@@ -230,6 +236,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const acceptedRouteRef = useRef<WorkspaceRoute | null>(null);
   const publicationOpenRequest = useRef(0);
   const notificationOpenRequest = useRef(0);
+  const commentFocusActivation = useRef(0);
   const routeIndexRef = useRef(0);
   const rollbackHashRef = useRef<string | null>(null);
   const overlayIssueOpener = useRef<HTMLElement | null>(null);
@@ -272,6 +279,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, []);
   const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace') => {
     const previous = acceptedRouteRef.current;
+    const { documentId, documentCommentId } = route;
+    const linkedComment: WorkspaceCommentFocus | null = documentId && documentCommentId &&
+      (previous?.documentId !== documentId || previous.documentCommentId !== documentCommentId)
+      ? { targetType: 'document', targetId: documentId, actorId: null, commentId: documentCommentId, activation: ++commentFocusActivation.current }
+      : null;
     const boardTrigger = boardIssueOpener.current;
     if (boardTrigger) {
       const sameBoard = previous?.view === 'issues' && route.view === 'issues' && previous.projectId === route.projectId &&
@@ -312,8 +324,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
-    setNotificationCommentFocus(focus => {
+    setCommentFocus(focus => {
+      if (linkedComment) return linkedComment;
       if (!focus) return null;
+      if (focus.actorId === null) return route.documentCommentId === focus.commentId ? focus : null;
       if (focus.targetType === 'issue') return route.issueId === focus.targetId ? focus : null;
       return route.view === 'documents' && route.documentId === focus.targetId && !route.issueId && !route.publication ? focus : null;
     });
@@ -454,13 +468,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     if (!active()) return false;
     const snapshot = dataRef.current;
-    const openTarget = (targetType: NotificationCommentFocus['targetType'], route: WorkspaceRoute) => {
+    const openTarget = (targetType: WorkspaceCommentFocus['targetType'], route: WorkspaceRoute) => {
       const { targetId, commentId } = notification;
       const previous = acceptedRouteRef.current;
       if (commentId && targetType === 'issue' && previous && routeHash(previous) === routeHash(route) &&
           !window.dispatchEvent(new CustomEvent('teamspace:focus-issue-comment', { cancelable: true, detail: { issueId: targetId } }))) return false;
       if (!requestRoute(route)) return false;
-      setNotificationCommentFocus(commentId ? { targetType, targetId, actorId, commentId, activation: request } : null);
+      setCommentFocus(commentId ? { targetType, targetId, actorId, commentId, activation: ++commentFocusActivation.current } : null);
       return true;
     };
     if (notification.kind.startsWith('issue-')) {
@@ -509,6 +523,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const automaticSelection = previous?.view === 'documents' && !previous.documentId;
     writeRoute(route, routeIndexRef.current + (automaticSelection ? 0 : 1), automaticSelection ? 'replace' : 'push');
   };
+  const copyDocumentCommentLink = async (commentId: string) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'documents' || !current.documentId || !isRelationId(commentId)) return;
+    const url = new URL(location.href);
+    url.hash = routeHash({ projectId: current.projectId, view: 'documents', documentId: current.documentId, issueId: null, documentCommentId: commentId });
+    try {
+      await navigator.clipboard.writeText(url.href);
+      notify('댓글 링크를 복사했습니다.');
+    } catch {
+      notify('댓글 링크를 복사하지 못했습니다.', 'error');
+    }
+  };
 
   if (!data) return <div className="loading-screen"><div className="brand-mark"><Command size={26}/></div><h1>Teamspace</h1>{failure ? <><p className="error-text">{failure}</p><button className="btn btn-primary" onClick={() => refresh().catch(e => setFailure(e.message))}>다시 연결</button><p className="muted">API 서버가 실행 중인지 확인해주세요.</p></> : <><LoaderCircle className="spin"/><p className="muted">팀의 업무 공간을 불러오는 중입니다</p></>}</div>;
   const project = data.projects.find(p => p.id === projectId) || data.projects[0];
@@ -520,7 +546,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
-  const activeCommentFocus = notificationCommentFocus?.actorId === actorId ? notificationCommentFocus : undefined;
+  const activeCommentFocus = commentFocus && (commentFocus.actorId === null || commentFocus.actorId === actorId) ? commentFocus : undefined;
   const boardIssueFocus = Boolean(openedIssue && openedIssue.id === boardDialogIssueId);
   const workspaceObscured = documentIssueOpen || reportIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
 
@@ -552,7 +578,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         <div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {
           if(!dispatchWorkspaceNavigation())return;
           publicationOpenRequest.current++;notificationOpenRequest.current++;
-          setNotificationCommentFocus(null);
+          setCommentFocus(focus => focus?.actorId === null ? focus : null);
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
@@ -578,6 +604,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
+          onCopyCommentLink={copyDocumentCommentLink}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {
             const current = acceptedRouteRef.current;
             if (current?.view === 'documents') requestRoute({...current, documentLabel:label});

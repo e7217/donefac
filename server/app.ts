@@ -24,6 +24,7 @@ import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent }
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
+import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
@@ -1508,6 +1509,14 @@ export function createApp(options: {
     });
     res.status(result.duplicate?200:201).json(result);
   });
+  app.patch('/api/documents/:id/selection-comments/:commentId/resolution', (req, res) => {
+    const actorId = req.header('X-Actor-Id');
+    if (!actorId) return fail('등록된 작업자를 선택해 주세요.');
+    const comment = updateDocumentCommentResolution(store, {
+      documentId: String(req.params.id), commentId: String(req.params.commentId), actorId, body: req.body,
+    });
+    res.set('Cache-Control', 'no-store').json(comment);
+  });
   app.delete('/api/comments/:id',(req,res)=>{
     const trashItemId=store.transaction(()=>{
       const comment=get<Comment>('comments',req.params.id);
@@ -2019,6 +2028,10 @@ export function createApp(options: {
     const legacyConfluenceRevisionIds = new Set(importedSources.records.filter(record =>
       record.source.product === 'confluence' && record.targetType === 'revision').map(record => record.targetId));
     for (const comment of allImportedComments) {
+      if (data.schemaVersion < 73 && Object.hasOwn(comment, 'resolution')) {
+        fail('문장 댓글 해결 상태를 포함한 백업은 schemaVersion 73이 필요합니다.');
+      }
+      validateDocumentCommentResolution(comment, importedUserIds);
       if (!Object.hasOwn(comment, 'documentSource')) continue;
       if (data.schemaVersion < 50) fail('문장 댓글을 포함한 백업은 schemaVersion 50이 필요합니다.');
       const invalidSource = '문장 댓글의 선택 범위와 원문 저장본을 확인해 주세요.';
@@ -2102,10 +2115,17 @@ export function createApp(options: {
       // Remember prior versions even if their links were deleted before this import.
       let previousDependencyVersion=dependencyVersionFloor();
       for(const dependency of store.all<Dependency>('dependencies'))previousDependencyVersion=Math.max(previousDependencyVersion,dependency.version??1);
-      for(const entry of trash.all()){
+      const previousTrash=trash.all();
+      for(const entry of previousTrash){
         const versions=entry.resourceType==='issue'?previousIssues:previousDocuments;
         versions.set(entry.resourceId,Math.max(versions.get(entry.resourceId)||0,entry.resource.version));
         for(const dependency of entry.dependencies)previousDependencyVersion=Math.max(previousDependencyVersion,dependency.version??1);
+      }
+      if (allImportedComments.some(comment => comment.resolution)) {
+        advanceRestoredCommentResolutionVersions(allImportedComments, [
+          ...store.all<Comment>('comments'), ...previousTrash.flatMap(entry => entry.comments),
+          ...trashItems.all().flatMap(entry => entry.itemType === 'comment' ? [entry.item] : []),
+        ]);
       }
       for(const entry of importedTrash){
         const versions=entry.resourceType==='issue'?previousIssues:previousDocuments;
@@ -2207,6 +2227,7 @@ export function createApp(options: {
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});

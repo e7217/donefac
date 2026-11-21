@@ -805,6 +805,13 @@ export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; dup
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
 export const MAX_COMMENT_MENTIONS = 50;
 export interface CommentMention { userId: string; from: number; to: number }
+export type DocumentCommentResolutionState = 'open' | 'resolved';
+export interface DocumentCommentResolution {
+  state: DocumentCommentResolutionState;
+  version: number;
+  changedAt: string;
+  actorId: string;
+}
 export interface Comment {
   id: string;
   resourceType: 'issue' | 'document';
@@ -814,6 +821,7 @@ export interface Comment {
   createdAt: string;
   documentSource?: DocumentDecisionSource;
   mentions?: CommentMention[];
+  resolution?: DocumentCommentResolution;
 }
 export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }

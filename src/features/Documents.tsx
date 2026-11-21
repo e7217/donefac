@@ -10,7 +10,7 @@ import {
   Code2, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
-  Table2, TableOfContents, Tag, Trash2, Unlink, X,
+  RotateCcw, Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
@@ -50,6 +50,7 @@ import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
 import { hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
 import './documents.css';
+import './document-comment-review.css';
 
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
@@ -61,6 +62,7 @@ type Props = FeatureProps & {
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
   issueDrawerOpen?: boolean;
   commentFocus?: { commentId: string; activation: number };
+  onCopyCommentLink?: (commentId: string) => void;
 };
 type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
   | { kind: 'comment'; source: SelectionCommentSource; initialDraft: CommentDraft };
@@ -73,6 +75,10 @@ type Draft = DocumentMetadata & {
   baseMetadata?: DocumentMetadata;
 };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
+type CommentFilter = 'all' | 'open' | 'resolved';
+const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
+const COMMENT_FILTERS: CommentFilter[] = ['all', 'open', 'resolved'];
+const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
@@ -96,7 +102,7 @@ const draftFromPage = (page: DocPage): Draft => {
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false, commentFocus }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false, commentFocus, onCopyCommentLink }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const listDrafts = useRef(new Set<string>());
@@ -127,6 +133,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sideTab, setSideTab] = useState<SideTab>('comments');
   const [comments, setComments] = useState<Comment[]>([]);
+  const [commentFilter, setCommentFilter] = useState<CommentFilter>('all');
+  const activeCommentFilter = useRef<HTMLButtonElement>(null);
+  const [resolvingCommentId, setResolvingCommentId] = useState<string | null>(null);
+  const [resolutionError, setResolutionError] = useState('');
+  const resolutionRequest = useRef<CommentContext | null>(null);
   const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
   const commentDraftRef = useRef(commentDraft);
   const commentContextRef = useRef<CommentContext | null>(null);
@@ -618,15 +629,23 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   const documentId = draft?.id;
   const commentActivation = documentId === selectedDocumentId ? commentFocus?.activation : undefined;
+  const focusedComment = commentFocus && comments.find(comment => comment.id === commentFocus.commentId);
+  const linkedCommentMissing = commentActivation !== undefined && loadedCommentActivation === commentActivation && !focusedComment && !commentError;
+  const visibleComments = commentFilter === 'all' ? comments : comments.filter(comment => commentFilterFor(comment) === commentFilter);
   useEffect(() => {
     if (!documentId) return;
     rememberComment();
     const context = { actorId, documentId };
     commentContextRef.current = context;
+    resolutionRequest.current = null;
     let cached = emptyCommentDraft();
     try { cached = decodeCommentDraft(localStorage.getItem(commentCacheKey(actorId, documentId))); } catch { setStorageProblem(true); }
     commentDraftRef.current = cached;
     setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentError('');
+    setCommentFilter('all'); setResolvingCommentId(null); setResolutionError('');
+    return () => {
+      if (resolutionRequest.current === context) resolutionRequest.current = null;
+    };
   }, [documentId, actorId, rememberComment]);
 
   useEffect(() => {
@@ -676,12 +695,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       setSideTab('comments');
       return;
     }
+    if (focusedComment && commentFilter !== 'all' && commentFilterFor(focusedComment) !== commentFilter) {
+      setCommentFilter(commentFilterFor(focusedComment));
+      return;
+    }
     const target = document.getElementById(`document-comment-${commentFocus.commentId}`) ?? commentsHeading.current;
     if (!target || target.closest('[inert]')) return;
     handledCommentActivation.current = commentFocus.activation;
     target.scrollIntoView({ block: 'nearest' });
     target.focus({ preventScroll: true });
-  }, [commentFocus, commentActivation, loadedCommentActivation, issueDrawerOpen, publicationOpen, documentAction,
+  }, [commentFocus, commentActivation, loadedCommentActivation, focusedComment, commentFilter, issueDrawerOpen, publicationOpen, documentAction,
     newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
   useEffect(() => {
@@ -890,6 +913,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const current = commentContextRef.current;
       if (current?.documentId === context.documentId && current.actorId === context.actorId && activeActorRef.current === context.actorId) {
         setComments(items => items.some(item => item.id === result.id) ? items : [...items, result]);
+        setCommentFilter('all');
         if (sameCommentDraft(commentDraftPayload(commentDraftRef.current), payload)) updateCommentDraft(emptyCommentDraft());
       } else {
         try {
@@ -910,12 +934,58 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (current?.documentId === comment.resourceId && current.actorId === comment.authorId && activeActorRef.current === comment.authorId) {
       focusCommentId.current = comment.id;
       setComments(items => [...items.filter(item => item.id !== comment.id), comment]);
+      setCommentFilter(previous => previous === 'all' ? previous : commentFilterFor(comment));
       setSidebarOpen(true);
       setSideTab('comments');
     }
     window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
     void refresh().catch(() => undefined);
     notify('발췌 댓글을 등록했습니다.', 'success');
+  }
+
+  async function changeCommentResolution(comment: Comment, trigger: HTMLButtonElement) {
+    const context = commentContextRef.current;
+    if (!context?.actorId || !comment.documentSource || context.documentId !== comment.resourceId
+      || context.actorId !== activeActorRef.current || resolutionRequest.current) return;
+    const state = comment.resolution?.state === 'resolved' ? 'open' : 'resolved';
+    const currentContext = () => resolutionRequest.current === context && activeActorRef.current === context.actorId;
+    resolutionRequest.current = context;
+    setResolvingCommentId(comment.id);
+    setResolutionError('');
+    try {
+      const updated = await api<Comment>(`/documents/${encodeURIComponent(context.documentId)}/selection-comments/${encodeURIComponent(comment.id)}/resolution`, {
+        method: 'PATCH', headers: { 'X-Actor-Id': context.actorId },
+        body: JSON.stringify({ state, expectedVersion: comment.resolution?.version ?? 0 }),
+      });
+      if (currentContext()) {
+        const filterButton = activeCommentFilter.current;
+        if (document.activeElement === trigger && filterButton && filterButton.value !== 'all' && filterButton.value !== state) {
+          filterButton.focus();
+        }
+        setComments(previous => previous.map(item => item.id === updated.id && (item.resolution?.version ?? 0) <= (updated.resolution?.version ?? 0)
+          ? updated : item));
+        notify(state === 'resolved' ? '문장 댓글을 해결 처리했습니다.' : '문장 댓글을 다시 열었습니다.');
+      }
+    } catch (error) {
+      if (currentContext()) {
+        const reason = error instanceof ApiError && error.status === 409
+          ? (error.details as { reason?: string } | undefined)?.reason : undefined;
+        if (reason === 'resolution_version_changed') {
+          setResolutionError('다른 사용자가 댓글 상태를 변경했습니다. 최신 상태를 확인해 주세요.');
+          if (document.activeElement === trigger && activeCommentFilter.current?.value !== 'all') {
+            activeCommentFilter.current?.focus();
+          }
+        } else {
+          setResolutionError(error instanceof ApiError ? error.message : '댓글 상태를 변경했는지 확인할 수 없습니다. 최신 상태를 확인해 주세요.');
+        }
+      }
+    } finally {
+      if (resolutionRequest.current === context) {
+        resolutionRequest.current = null;
+        setResolvingCommentId(null);
+      }
+      window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
+    }
   }
 
   async function restoreRevision(revision: DocRevision) {
@@ -1410,18 +1480,31 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
             {sideTab === 'comments' && <>
               <div className="docs-panel-heading"><h3 tabIndex={-1} ref={commentsHeading}>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
+              <div className="docs-comment-filters" role="group" aria-label="문서 댓글 상태">
+                {COMMENT_FILTERS.map(filter => <button key={filter} type="button" value={filter}
+                  ref={filter === commentFilter ? activeCommentFilter : undefined} aria-pressed={filter === commentFilter}
+                  onClick={() => setCommentFilter(filter)}>{COMMENT_FILTER_LABELS[filter]}</button>)}
+              </div>
               {commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}
               {commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}
-              {!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}
-              {comments.map(comment => {
+              {resolutionError && <p className="docs-panel-error" role="alert">{resolutionError}</p>}
+              {linkedCommentMissing && <p className="docs-panel-muted" role="status">이동할 댓글을 찾을 수 없습니다.</p>}
+              {!commentsLoading && !commentError && !visibleComments.length && (commentFilter === 'all'
+                ? <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>
+                : <p className="docs-panel-muted">{commentFilter === 'resolved' ? '해결된 문장 댓글이 없습니다.' : '미해결 문장 댓글이 없습니다.'}</p>)}
+              {visibleComments.map(comment => {
                 const user = data.users.find(item => item.id === comment.authorId);
+                const resolution = comment.resolution;
+                const resolved = resolution?.state === 'resolved';
+                const resolutionActor = resolution && data.users.find(item => item.id === resolution.actorId);
+                const pending = resolvingCommentId === comment.id;
                 return <article className="docs-comment" id={`document-comment-${comment.id}`} tabIndex={-1} key={comment.id}>
                   <div className="docs-comment-head">
                     <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
                     <strong>{user?.name || '팀원'}</strong>
                     <time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time>
                     <CommentTrashButton comment={comment} actorId={actorId} notify={notify} refresh={refresh}
-                      disabled={commentBusy || saving || comment.resourceId !== documentId}
+                      disabled={commentBusy || saving || pending || comment.resourceId !== documentId}
                       onArchived={removed => {
                         const current = commentContextRef.current;
                         if (current?.documentId === removed.resourceId && current.actorId === actorId && activeActorRef.current === actorId) {
@@ -1435,6 +1518,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                       label={selectedPage.title} sourceLabel="댓글 원문 저장본" selection={comment.documentSource} />
                   </section>}
                   <p><CommentMentionText comment={comment} /></p>
+                  {comment.documentSource && <div className="docs-comment-review">
+                    <span className="docs-comment-state" data-resolved={resolved}>
+                      {COMMENT_FILTER_LABELS[resolved ? 'resolved' : 'open']}
+                    </span>
+                    {resolution && <span className="docs-comment-review-record">
+                      {resolutionActor?.name || '팀원'} · <time dateTime={resolution.changedAt}>{when(resolution.changedAt)}</time>
+                    </span>}
+                    <div className="docs-comment-review-actions">
+                      <button type="button" className="btn btn-ghost" aria-disabled={Boolean(resolvingCommentId) || !actorId}
+                        onClick={event => void changeCommentResolution(comment, event.currentTarget)}>
+                        {pending ? <Loader2 size={14} className="docs-spin" aria-hidden="true" />
+                          : resolved ? <RotateCcw size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+                        {pending ? '저장 중…' : resolved ? '다시 열기' : '해결 처리'}
+                      </button>
+                      {onCopyCommentLink && <button type="button" className="btn btn-ghost"
+                        aria-label="댓글 링크 복사" title="댓글 링크 복사" onClick={() => onCopyCommentLink(comment.id)}>
+                        <Link2 size={14} aria-hidden="true" />
+                      </button>}
+                    </div>
+                  </div>}
                 </article>;
               })}
               <form className="docs-comment-form" onSubmit={submitComment}>

@@ -237,6 +237,12 @@ curl --fail-with-body \
 
 일반 댓글 조회는 문장 댓글의 `documentSource: {revisionId,from,to,text}`를 포함한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`로 읽는다. 범위 제한 `/api/v1/comments` 조회에서는 키로 읽을 수 있는 원문 저장본의 발췌를 반환한다. 자체 백업 형식 50은 활성 댓글과 휴지통 댓글의 발췌를 보존한다.
 
+### 문장 댓글 해결과 재개
+
+브라우저의 `PATCH /api/documents/:id/selection-comments/:commentId/resolution`에 `X-Actor-Id`와 `{state,expectedVersion}`을 보낸다. `state`는 `open` 또는 `resolved`다. 최초 열린 댓글은 별도 `resolution` 없이 버전 0으로 읽는다. 변경 응답은 `resolution`의 상태·버전·`changedAt`·`actorId`를 포함한 전체 댓글이다. 현재 버전에 같은 상태를 요청하면 같은 값을 돌려준다. 편집 버전이 오래되면 `409`와 `details.reason`의 `resolution_version_changed`, `currentVersion`을 반환한다. 경로는 해당 문서에서 현재 열 수 있는 문장 댓글을 대상으로 한다.
+
+댓글 목록과 문장 댓글 등록의 재시도 응답에도 현재 상태가 표시된다. 자체 백업 형식 73은 활성·휴지통 문장 댓글의 처리 기록을 보존하며, 같은 작업공간의 이전 기록을 되돌릴 때 편집 버전을 높여 이전 화면의 덮어쓰기를 막는다. 댓글 주소의 `?comment=<ID>`는 문서에서 해당 댓글을 연다.
+
 ### 댓글 멘션
 
 일반 댓글 `POST /api/comments`와 문장 댓글 등록 요청에 `mentions` 배열을 추가할 수 있다. 각 항목은 `userId`, `from`, `to`를 사용한다. 양 끝의 공백을 정리한 `body`에서 `from`을 포함하고 `to`는 제외하는 UTF-16 위치다. 범위는 시작 위치순으로 최대 50개를 보내며, 각 범위가 겹치지 않고 `@`와 현재 팀원 이름을 정확히 담아야 한다. 같은 이름의 팀원은 ID로 구분한다. 배열을 생략하거나 비우면 일반 댓글과 같은 방식으로 처리한다.
