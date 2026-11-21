@@ -7,6 +7,7 @@ import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorable
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import type { Store } from './store.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -308,7 +309,7 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
   }};
 }
 
-/** All external writes are local links; remote calls are explicit read-only syncs. */
+/** GitLab activity reads and explicit project webhook setup use the saved connection. */
 export class GitlabIntegrationService{
   // Branch list snapshots have no revision number for reconciling overlapping manual scans.
   private historySyncActive=false;
@@ -316,7 +317,8 @@ export class GitlabIntegrationService{
   private readonly pendingBranchReads=new Map<string,{count:number;webUrl:string}>();
   private readonly manualLinkRows:StatementSync;
   private readonly linkedMergeRequestRows:StatementSync;
-  constructor(private readonly store:Store,private readonly hooks:Hooks){
+  private readonly projectWebhooks: GitlabProjectWebhookSetup;
+  constructor(private readonly store:Store,private readonly hooks:Hooks,webhookPublicOrigin?:string){
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
@@ -325,9 +327,17 @@ export class GitlabIntegrationService{
     this.manualLinkRows=store.db.prepare(`SELECT json FROM gitlab_links WHERE id>=? AND id<?
       AND json_extract(json,'$.manualLinkId') IS NOT NULL`);
     this.linkedMergeRequestRows=store.db.prepare('SELECT json FROM gitlab_links WHERE id>=? AND id<?');
+    this.projectWebhooks = new GitlabProjectWebhookSetup(store, () => {
+      const saved = this.raw();
+      const authMode = saved.signingToken ? 'signature' : saved.webhookSecret ? 'secret' : null;
+      return { baseUrl: saved.baseUrl, version: saved.version, projectIds: saved.projectIds, authMode,
+        readToken: () => saved.token ? this.store.unseal(saved.token) : null,
+        matchesCredential: value => this.sameWebhookCredential(authMode === 'signature' ? saved.signingToken : saved.webhookSecret, value),
+      };
+    }, webhookPublicOrigin);
   }
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
-  private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{})};}
+  private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{}),...(this.projectWebhooks.receiverUrl?{webhookReceiverUrl:this.projectWebhooks.receiverUrl}:{})};}
   settings():GitlabSettings{return this.public(this.raw());}
   webhookStatus(): GitlabWebhookStatus {
     const settings = this.raw();
@@ -946,7 +956,7 @@ export class GitlabIntegrationService{
       options.signal?.throwIfAborted();
       try { reads.push({ projectId, plan: await readProjectPlan(connection, projectId, options) }); }
       catch (error) {
-        if (!(error instanceof GitlabReadError)) throw error;
+        if (!(error instanceof GitlabReadError) || error.stage === 'webhooks') throw error;
         const { stage, httpStatus, message } = error;
         reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
       }
@@ -1053,6 +1063,24 @@ export class GitlabIntegrationService{
     });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));
+    const projectWebhookRequest = (operation: 'review' | 'register') => async (req: Request, res: Response) => {
+      res.set('Cache-Control', 'no-store');
+      const actorId = hooks.actor(req);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.projectWebhooks[operation](req.body, actorId, controller.signal);
+        if (result.state === 'created') {
+          try { hooks.activity(req, 'integration', 'gitlab', 'GitLab 웹훅 등록', `저장소 ${result.repositoryId}`); }
+          catch { console.error('[teamspace GitLab] 웹훅 등록 활동을 기록하지 못했습니다.'); }
+        }
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
+    };
+    app.post('/api/integrations/gitlab/project-webhook-review', projectWebhookRequest('review'));
+    app.post('/api/integrations/gitlab/project-webhook-register', projectWebhookRequest('register'));
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;
     app.post('/api/issues/:id/gitlab-links',async(req,res)=>{
       hooks.actor(req);

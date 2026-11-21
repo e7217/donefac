@@ -306,6 +306,8 @@ curl --fail-with-body \
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
 | `GET /api/integrations/gitlab/webhook-status` | 저장한 연결 설정 버전과 허용 저장소별 최근 인증 수신 요약 |
+| `POST /api/integrations/gitlab/project-webhook-review` | 저장한 저장소의 프로젝트 웹훅을 조회하고 수신 주소와 이벤트 설정 점검 |
+| `POST /api/integrations/gitlab/project-webhook-register` | 점검에서 누락된 저장소 한 곳에 프로젝트 웹훅 등록 |
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
 | `POST /api/automation-rules` | 규칙 생성 |
 | `PATCH /api/automation-rules/:id` · `DELETE /api/automation-rules/:id` | `expectedVersion`으로 변경·삭제 |
@@ -331,6 +333,16 @@ curl --fail-with-body \
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
 
 `webhook-status`는 `settingsVersion`과 `repositories`를 반환한다. 각 저장소에 `repositoryId`와 `lastDelivery`가 들어간다. `lastDelivery`는 인증된 수신이 없으면 `null`이다. 수신이 있으면 `event`, `authentication`, 서버의 `receivedAt`, `duplicate`, 업무 연결 반영 수 `linked`, 자동화 기록 수 `automationRuns`를 포함한다. 자동화 기록 수에는 차단이나 무시 결과도 포함될 수 있다. 원문, 헤더, 비밀값은 수신 요약에 저장하지 않는다. 주소나 웹훅 인증값을 바꾸면 요약을 초기화하고, 저장소 제거와 Jira 매핑 변경은 해당 저장소에만 적용한다. 읽기 토큰 변경은 수신 요약을 유지한다. 별도 물리 복원은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
+
+### GitLab 프로젝트 웹훅 점검과 등록
+
+팀 접속 모드의 `TEAMSPACE_PILOT_ORIGIN`으로 검증한 HTTPS 주소에서 수신 경로 `/api/integrations/gitlab/webhook`을 구성한다. 설정 조회의 `webhookReceiverUrl`로 확인한다. 점검과 등록에는 저장된 GitLab 주소와 저장소를 사용한다.
+
+점검은 `{expectedVersion,repositoryId,managementToken?}`을 받는다. 관리 토큰을 생략하면 저장한 읽기 토큰으로 조회한다. 페이지당 100개씩 최대 10페이지를 읽고, 다음 페이지나 응답을 검증할 수 없으면 누락을 판정하지 않는다. 응답은 `settingsVersion`, `repositoryId`, `receiverUrl`, `authMode`, `state`와 같은 수신 경로의 `hooks` ID·설정 여부를 담는다. 필요 설정이 갖춰지면 `configured`, 주소의 세부 경로나 이벤트·SSL·브랜치·전송 조건을 검토해야 하면 `review`, 누락이 확인되면 `missing`이다. 기존 등록의 인증 성공 여부는 `webhook-status`에서 확인한다. [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab API 페이지 처리](https://docs.gitlab.com/api/rest/#pagination)
+
+등록은 `{expectedVersion,repositoryId,reviewId,managementToken,webhookCredential}`을 받는다. `reviewId`는 인증 값이 설정된 누락 저장소의 점검 결과에 표시되며, 같은 작업자·저장소·연결 버전으로 10분간 유효하다. 관리 토큰은 저장소의 Maintainer·Owner 권한 또는 관리자 권한과 `api` 범위가 필요하다. 다시 입력한 웹훅 인증 값을 저장한 값과 대조하며, Signing Token이 설정된 경우 기능 플래그 없이 서명 등록을 지원하는 GitLab 19.1 이상인지 먼저 확인한다. 등록용 자격 증명은 저장하지 않는다. [GitLab 토큰 범위](https://docs.gitlab.com/security/tokens/access_token_scopes/) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab 버전 조회](https://docs.gitlab.com/api/metadata/)
+
+등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline과 SSL 검증을 켜고 `created`로 반환한다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
 
 ### 이관한 Jira 키로 연결
 

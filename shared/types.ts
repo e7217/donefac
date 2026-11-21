@@ -883,7 +883,7 @@ export interface GitlabMergeReadiness {
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness }
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
-export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[] }
+export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[]; webhookReceiverUrl?: string }
 export interface GitlabRepositoryCandidate { id: number; name: string; pathWithNamespace: string; webUrl: string }
 export interface GitlabRepositorySearch {
   settingsVersion: number;

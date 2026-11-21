@@ -7,6 +7,7 @@ import { api, ApiError, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { GitlabProjectWebhookPanel } from './GitlabProjectWebhookPanel';
 import { GitlabRepositoryPicker } from './GitlabRepositoryPicker';
 import { GitlabWebhookStatusPanel } from './GitlabWebhookStatusPanel';
 import { WebhookSettings } from './WebhookSettings';
@@ -222,8 +223,9 @@ export function Development(props:FeatureProps){
     </form>
     {preview && <GitlabPreview preview={preview} projects={props.data.projects} openIssue={props.openIssue}/>}
     {syncRun && <GitlabSyncReport run={syncRun} busy={busy} onRetry={ids => void sync(ids)} />}
+    {settings && <GitlabProjectWebhookPanel key={`project-webhook:${props.actorId}:${settings.version}:${settings.webhookReceiverUrl ?? ''}`} settings={settings} />}
     {settings && <GitlabWebhookStatusPanel key={settings.version} settings={settings} />}
-    <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 새 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>지금 동기화는 저장한 연결 설정을 사용합니다. 기존 브랜치·커밋을 포함하면 웹훅 설정 전의 활동도 찾을 수 있습니다.</li></ul><p className="help-text">GitLab에서 접근 가능한 배포 주소에 웹훅 경로 <code>/api/integrations/gitlab/webhook</code>를 설정하세요.</p></section></div>
+    <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 새 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>지금 동기화는 저장한 연결 설정을 사용합니다. 기존 브랜치·커밋을 포함하면 웹훅 설정 전의 활동도 찾을 수 있습니다.</li></ul></section></div>
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
     <section className="card linked-development" aria-label="연결된 개발 활동">
       <div className="card-heading gitlab-activity-header"><h2>연결된 개발 활동 <span className="count-pill">{links.length}</span></h2><GitlabActivityRefresh refresh={props.refresh} notify={notify} /></div>

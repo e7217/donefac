@@ -149,6 +149,12 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 기준일은 서울 시간입니다. 마감은 목표 마감일을 우선하고 계획 종료일을 대신 사용할 수 있습니다. GitLab은 기준일을 포함한 최근 7일간 저장된 티켓 연결을 표시합니다. 업무 상태와 검토 대기 목록은 조회할 때의 상태를 표시합니다.
 
+## GitLab 프로젝트 웹훅 설정
+
+팀 접속 HTTPS 주소를 갖춘 파일럿의 **개발 · GitLab → GitLab 프로젝트 웹훅 설정**에서 저장소를 골라 점검합니다. 저장된 GitLab 주소와 Teamspace 수신 주소가 표시됩니다. 같은 경로에 기존 웹훅이 있으면 이벤트 종류, SSL 검증, 브랜치 필터와 전송 상태를 확인할 수 있습니다.
+
+수신 주소에 웹훅이 없다면 GitLab에서 해당 저장소의 Maintainer 또는 Owner 권한으로 발급한 `api` 토큰과 Teamspace에 저장한 웹훅 인증 값을 입력한 뒤 **GitLab에 웹훅 등록**을 누릅니다. Push·Merge Request·Pipeline 이벤트와 SSL 검증을 켭니다. 응답이 끊기면 **다시 점검**으로 목록을 확인합니다. 실제 인증 수신은 아래 **GitLab 웹훅 수신 확인**에서 볼 수 있습니다. [Teamspace API](docs/API.md#gitlab-프로젝트-웹훅-점검과-등록) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/)
+
 ## GitLab 상태로 업무 찾기
 
 **업무**의 목록과 보드에서 열린 MR, 병합 확인이 필요한 MR, 실패하거나 진행 중인 파이프라인을 볼 수 있습니다. **GitLab 조건**에서 원하는 상태를 고른 뒤 **현재 보기 저장**을 누르면 팀원이 같은 조건을 열 수 있습니다. 저장된 보기를 간트나 문서의 업무 목록·현황에도 사용할 수 있습니다.

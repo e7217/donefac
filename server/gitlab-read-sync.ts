@@ -1,9 +1,10 @@
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
+import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
 import type { GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
-export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits';
+export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks';
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -26,6 +27,9 @@ const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
 const COMMIT_PAGE_SIZE = 100;
 const REPOSITORY_SEARCH_PAGE_SIZE = 20;
+const WEBHOOK_PAGE_SIZE = 100;
+const MAX_WEBHOOK_PAGES = 10;
+const WEBHOOK_RECEIVER_PATH = '/api/integrations/gitlab/webhook';
 export const GITLAB_REPOSITORY_SEARCH_MAX_PAGE = 20;
 
 const stageNames: Record<GitlabReadStage, string> = {
@@ -34,6 +38,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   project: '저장소',
   branches: '브랜치',
   commits: '커밋',
+  webhooks: '프로젝트 웹훅',
 };
 
 export class GitlabReadError extends Error {
@@ -60,16 +65,20 @@ function isReadObject(value: unknown): value is GitlabReadObject {
 }
 
 async function readJson(url: URL, headers: Record<string, string>, stage: GitlabReadStage, parentSignal?: AbortSignal,
-  receiveHeaders?: (headers: Headers) => void): Promise<unknown> {
+  receiveHeaders?: (headers: Headers) => void, postBody?: GitlabReadObject): Promise<unknown> {
   const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const signal = parentSignal ? AbortSignal.any([parentSignal, deadline]) : deadline;
   try {
-    const response = await fetch(url, { headers, signal, redirect: 'manual' });
+    const request = postBody ? { method: 'POST', body: JSON.stringify(postBody), headers: { ...headers, 'Content-Type': 'application/json' } } : { headers };
+    const response = await fetch(url, { ...request, signal, redirect: 'manual' });
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
       throw new GitlabReadError(stage, 'http', response.status);
     }
-    if (!response.body) throw new GitlabReadError(stage, 'invalid-response');
+    if (!response.body || (postBody && response.status !== 201)) {
+      void response.body?.cancel().catch(() => {});
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
     if (Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) {
       void response.body.cancel().catch(() => {});
       throw new GitlabReadError(stage, 'response-too-large');
@@ -158,6 +167,127 @@ function projectReadRequest(connection: Connection, projectId: number, stage: Gi
   const { base, headers, projectsUrl: projectUrl } = projectsReadRequest(connection, stage);
   projectUrl.pathname += `/${projectId}`;
   return { base, headers, projectUrl };
+}
+
+function invalidWebhookResponse(): never { throw new GitlabReadError('webhooks', 'invalid-response'); }
+
+function webhookAddress(value: unknown): URL | null {
+  if (typeof value !== 'string' || value.length > 4000 || !value.isWellFormed() ||
+      !/^https?:\/\//iu.test(value) || /[\u0000-\u0020\u007f\\]/u.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url : null;
+  } catch { return null; }
+}
+
+function webhookReceiver(receiverUrl: string): string {
+  const address = webhookAddress(receiverUrl);
+  if (!address || address.protocol !== 'https:' || address.pathname !== WEBHOOK_RECEIVER_PATH ||
+      address.username || address.password || receiverUrl.includes('?') || receiverUrl.includes('#')) {
+    throw new GitlabReadError('webhooks', 'network');
+  }
+  return address.href;
+}
+
+function webhookIdentity(row: GitlabReadObject, projectId: number, requireProject: boolean) {
+  const { id, url, project_id: actualProjectId } = row;
+  const address = webhookAddress(url);
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 || !address ||
+      ((requireProject || actualProjectId !== undefined) && actualProjectId !== projectId)) invalidWebhookResponse();
+  return { id, url: address.href };
+}
+
+function webhookFlags(row: GitlabReadObject, id: number): GitlabProjectWebhook {
+  const { push_events: pushEvents, merge_requests_events: mergeRequestEvents, pipeline_events: pipelineEvents,
+    enable_ssl_verification: sslVerification, push_events_branch_filter: filter, branch_filter_strategy: strategy,
+    custom_webhook_template: template, alert_status: status } = row;
+  if (typeof pushEvents !== 'boolean' || typeof mergeRequestEvents !== 'boolean' || typeof pipelineEvents !== 'boolean' ||
+      typeof sslVerification !== 'boolean' || [filter, strategy, template, status].some(value => value != null && typeof value !== 'string')) {
+    invalidWebhookResponse();
+  }
+  const active = status === 'executable' ? true : status === 'disabled' || status === 'temporarily_disabled' ? false : null;
+  const unfilteredPush = strategy === 'all_branches' || ((strategy == null || strategy === 'wildcard') && (filter == null || filter === ''));
+  return { id, pushEvents, mergeRequestEvents, pipelineEvents, sslVerification, unfilteredPush, standardPayload: template == null || template === '', active };
+}
+
+function webhookNextPage(headers: Headers, url: URL, page: number, rowCount: number): boolean {
+  const next = headers.get('x-next-page');
+  if (next !== null && next !== '' && next !== String(page + 1)) invalidWebhookResponse();
+  let nextLink = false;
+  const links = headers.get('link');
+  if (links) for (const item of links.split(/,(?=\s*<)/u)) {
+    const match = /^\s*<([^<>]+)>\s*;\s*rel\s*=\s*(?:"([^"<>]+)"|([\w-]+))\s*$/iu.exec(item);
+    if (!match) invalidWebhookResponse();
+    if (!(match[2] ?? match[3]).toLowerCase().split(/\s+/u).includes('next')) continue;
+    if (nextLink) invalidWebhookResponse();
+    let target: URL;
+    try { target = new URL(match[1], url); }
+    catch { invalidWebhookResponse(); }
+    const perPage = target.searchParams.getAll('per_page');
+    const pages = target.searchParams.getAll('page');
+    if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
+        pages.length !== 1 || pages[0] !== String(page + 1) || perPage.length > 1 || (perPage.length && perPage[0] !== String(WEBHOOK_PAGE_SIZE)) ||
+        [...target.searchParams.keys()].some(key => key !== 'page' && key !== 'per_page')) invalidWebhookResponse();
+    nextLink = true;
+  }
+  if ((next === '' && nextLink) || (rowCount === 0 && (Boolean(next) || nextLink))) invalidWebhookResponse();
+  return next !== null ? next !== '' : nextLink || rowCount === WEBHOOK_PAGE_SIZE;
+}
+
+export async function listGitlabProjectWebhooks(connection: Connection, projectId: number, receiverUrl: string, signal?: AbortSignal): Promise<GitlabProjectWebhook[]> {
+  const receiver = webhookReceiver(receiverUrl);
+  const trusted = new URL(receiver);
+  const { headers, projectUrl } = projectReadRequest(connection, projectId, 'webhooks');
+  projectUrl.pathname += '/hooks';
+  const hooks: GitlabProjectWebhook[] = [];
+  const seen = new Set<number>();
+  for (let page = 1; page <= MAX_WEBHOOK_PAGES; page++) {
+    projectUrl.search = new URLSearchParams({ per_page: String(WEBHOOK_PAGE_SIZE), page: String(page) }).toString();
+    let pagination = new Headers();
+    const rows = await readPage(projectUrl, headers, 'webhooks', WEBHOOK_PAGE_SIZE, signal, value => { pagination = value; });
+    for (const row of rows) {
+      const identity = webhookIdentity(row, projectId, false);
+      if (seen.has(identity.id)) invalidWebhookResponse();
+      seen.add(identity.id);
+      const address = new URL(identity.url);
+      if (identity.url === receiver) hooks.push(webhookFlags(row, identity.id));
+      else if (address.origin === trusted.origin && address.pathname.replace(/\/$/u, '') === trusted.pathname) {
+        hooks.push({ ...webhookFlags(row, identity.id), receiverExact: false });
+      }
+    }
+    if (!webhookNextPage(pagination, projectUrl, page, rows.length)) return hooks;
+  }
+  return invalidWebhookResponse();
+}
+
+export async function createGitlabProjectWebhook(connection: Connection, projectId: number, receiverUrl: string,
+  credential: { mode: GitlabProjectWebhookAuthMode; value: string }, signal?: AbortSignal): Promise<GitlabProjectWebhook> {
+  const receiver = webhookReceiver(receiverUrl);
+  const { headers, projectUrl } = projectReadRequest(connection, projectId, 'webhooks');
+  projectUrl.pathname += '/hooks';
+  const { mode, value } = credential;
+  if ((mode !== 'secret' && mode !== 'signature') || typeof value !== 'string' || !value || value.length > 2000 || /[\r\n]/u.test(value)) {
+    throw new GitlabReadError('webhooks', 'network');
+  }
+  const response = await readJson(projectUrl, headers, 'webhooks', signal, undefined, {
+    url: receiver, push_events: true, merge_requests_events: true, pipeline_events: true, enable_ssl_verification: true,
+    [mode === 'signature' ? 'signing_token' : 'token']: value,
+  });
+  if (!isReadObject(response)) invalidWebhookResponse();
+  const identity = webhookIdentity(response, projectId, true);
+  if (identity.url !== receiver) invalidWebhookResponse();
+  return webhookFlags(response, identity.id);
+}
+
+export async function supportsGitlabProjectWebhookSigning(connection: Connection, signal?: AbortSignal): Promise<boolean> {
+  const { headers, projectsUrl } = projectsReadRequest(connection, 'webhooks');
+  projectsUrl.pathname = projectsUrl.pathname.replace(/\/projects$/u, '/version');
+  const response = await readJson(projectsUrl, headers, 'webhooks', signal);
+  const match = isReadObject(response) && typeof response.version === 'string'
+    ? /^(\d{1,4})\.(\d{1,4})\.\d{1,4}(?:$|[-+])/u.exec(response.version) : null;
+  if (!match) return invalidWebhookResponse();
+  const major = Number(match[1]);
+  return major > 19 || (major === 19 && Number(match[2]) >= 1);
 }
 
 function canonicalPath(pathname: string): string | null {

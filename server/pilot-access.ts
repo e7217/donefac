@@ -13,6 +13,7 @@ const logoutPath = `${accessPath}/logout`;
 
 type Session = { expiry: NodeJS.Timeout; sockets: Set<Duplex> };
 export interface PilotAccess {
+  origin: string;
   middleware: RequestHandler;
   authorizeUpgrade(request: IncomingMessage, socket: Duplex): { status: 401 | 403 | 421 } | null;
   close(): void;
@@ -161,6 +162,7 @@ export function createPilotAccess(env: NodeJS.ProcessEnv = process.env): PilotAc
   };
 
   return {
+    origin: origin.origin,
     middleware,
     authorizeUpgrade(request, socket) {
       if (!isHost(request)) return {status: 421};

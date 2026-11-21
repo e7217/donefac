@@ -37,6 +37,7 @@ import { exportAutomationRunHistory, restoreAutomationRunHistory, validateAutoma
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
 import { GitlabIntegrationService, GitlabIntegrationError, branchObjectId } from './gitlab-integration.js';
+import { GitlabProjectWebhookSetupError } from './gitlab-project-webhook-setup.js';
 import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -136,7 +137,7 @@ function shiftDate(value: string, days: number, working: boolean): string {
   return d.toISOString().slice(0,10);
 }
 
-export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean; atlassianEnv?: NodeJS.ProcessEnv} = {}) {
+export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean; atlassianEnv?: NodeJS.ProcessEnv; gitlabWebhookPublicOrigin?: string} = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
   const dependencyVersionFloor=()=>{
@@ -459,7 +460,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
     jiraSources:()=>gitlabJiraSources(store),
     jiraOriginalKeys:route=>gitlabJiraOriginalKeys(store,route),
-  });
+  },options.gitlabWebhookPublicOrigin);
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
   sourcePreservation.registerRoutes(app);
@@ -2080,6 +2081,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

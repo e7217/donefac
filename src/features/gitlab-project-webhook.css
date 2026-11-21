@@ -1,0 +1,72 @@
+.gitlab-project-webhook {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 20px;
+  color: #375649;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.gitlab-project-webhook h2 { margin: 0 0 8px; }
+.gitlab-project-webhook h3 { margin: 0; font-size: 14px; color: #274c3c; }
+.gitlab-project-webhook p { margin: 4px 0; overflow-wrap: anywhere; }
+
+.gitlab-project-webhook-address,
+.gitlab-project-webhook-fields {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 12px 0 6px;
+}
+
+.gitlab-project-webhook label {
+  display: grid;
+  flex: 1 1 190px;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  color: #2d5040;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gitlab-project-webhook .field {
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  box-sizing: border-box;
+}
+
+.gitlab-project-webhook .btn { flex-shrink: 0; min-height: 38px; }
+.gitlab-project-webhook-address input { font-family: ui-monospace, monospace; }
+.gitlab-project-webhook .gitlab-project-webhook-note { color: #506f61; font-size: 13px; }
+
+.gitlab-project-webhook-result {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #dae8e1;
+  border-radius: 6px;
+  background: #f9fbfa;
+}
+
+.gitlab-project-webhook-result > p:first-child { font-weight: 650; }
+
+.gitlab-project-webhook-hooks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gitlab-project-webhook-hooks > li { padding: 8px; border: 1px solid #dae8e1; border-radius: 5px; background: #fff; }
+.gitlab-project-webhook-events { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 6px 0; padding: 0; list-style: none; }
+.gitlab-project-webhook-events > li { padding: 1px 5px; border-radius: 4px; color: #285e49; background: #e8f3eb; font-size: 12px; }
+.gitlab-project-webhook-events > li[data-enabled="false"] { color: #75472f; background: #fff0e2; }
+
+@media (max-width: 600px) {
+  .gitlab-project-webhook { padding: 14px; }
+  .gitlab-project-webhook label { flex-basis: 100%; }
+}
