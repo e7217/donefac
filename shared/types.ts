@@ -1295,6 +1295,17 @@ export interface ScheduleBulkDateInput {
   issues: { id: string; expectedVersion: number }[];
   changes: ScheduleBulkDateChanges;
 }
+type ScheduleRowIssue = { id: string; expectedVersion: number };
+export type ScheduleRowDependencyEdit =
+  | { action: 'add'; relatedIssue: ScheduleRowIssue; direction: 'predecessor' | 'successor'; type: DependencyType; lagDays: number }
+  | { action: 'update'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue; type: DependencyType; lagDays: number }
+  | { action: 'remove'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue };
+export interface ScheduleRowEditInput {
+  projectId: string;
+  issue: ScheduleRowIssue;
+  changes: ScheduleBulkDateChanges;
+  dependency?: ScheduleRowDependencyEdit;
+}
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {
   previewId: string | null;

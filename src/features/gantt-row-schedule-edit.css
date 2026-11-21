@@ -1,0 +1,182 @@
+.gantt-row-schedule-edit {
+  width: 720px;
+  max-height: 92dvh;
+  overflow-wrap: anywhere;
+}
+
+.gantt-row-schedule-edit > header p {
+  margin: 0.3rem 0 0;
+  color: #526d5d;
+  font-size: 0.875rem;
+}
+
+.gantt-row-schedule-edit .gantt-row-edit-fields {
+  margin-bottom: 0.85rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #dce7e1;
+}
+
+.gantt-row-edit-fields legend {
+  padding-inline-end: 0.55rem;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.gantt-row-edit-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.4rem), 1fr));
+  gap: 0.35rem 0.65rem;
+}
+
+.gantt-row-edit-control {
+  min-width: 0;
+  margin-bottom: 0.5rem;
+}
+
+.gantt-row-edit-control > label {
+  margin-bottom: 0;
+}
+
+.gantt-row-edit-fields .field {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  margin-top: 0.25rem;
+}
+
+.gantt-row-edit-date {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.gantt-row-edit-date .btn {
+  flex: none;
+  align-self: stretch;
+  margin-top: 0.25rem;
+  padding-inline: 0.45rem;
+}
+
+.gantt-row-edit-existing,
+.gantt-row-edit-selection,
+.gantt-row-edit-suggestion,
+.gantt-row-edit-diff,
+.gantt-row-edit-link-diff {
+  margin: 0.5rem 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #dce7e1;
+  border-radius: 7px;
+  background: #f5f9f6;
+}
+
+.gantt-row-edit-existing summary {
+  cursor: pointer;
+  color: #526d5d;
+  font-size: 0.875rem;
+}
+
+.gantt-row-edit-existing ul,
+.gantt-row-edit-results {
+  max-height: 11rem;
+  overflow: auto;
+  margin: 0.45rem 0 0;
+  list-style: none;
+  padding-inline: 0;
+}
+
+.gantt-row-edit-existing li {
+  display: grid;
+  margin: 0.35rem 0;
+  font-size: 0.875rem;
+}
+
+.gantt-row-edit-existing li span,
+.gantt-row-edit-review dl dt,
+.gantt-row-schedule-edit .gantt-row-edit-hint {
+  color: #526d5d;
+  font-size: 0.8125rem;
+}
+
+.gantt-row-edit-results:not(:empty) {
+  margin: 0 0 0.65rem;
+  padding: 0.25rem;
+  border: 1px solid #dce7e1;
+  border-radius: 7px;
+}
+
+.gantt-row-edit-results .btn {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: start;
+  white-space: normal;
+}
+
+.gantt-row-edit-actions,
+.gantt-row-edit-selection,
+.gantt-row-edit-suggestion {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.6rem;
+}
+
+.gantt-row-edit-suggestion,
+.gantt-row-edit-selection {
+  justify-content: space-between;
+  font-size: 0.875rem;
+}
+
+.gantt-row-schedule-edit > .gantt-row-edit-missing {
+  margin-inline: 1.5rem;
+}
+
+.gantt-row-edit-review {
+  border-top: 1px solid #dce7e1;
+}
+
+.gantt-row-edit-review section > ul {
+  padding-inline-start: 1.7rem;
+}
+
+.gantt-row-edit-diff > div {
+  display: grid;
+  grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
+  gap: 0.3rem;
+}
+
+.gantt-row-edit-diff dd {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.gantt-row-edit-link-diff h4,
+.gantt-row-edit-link-diff p {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 480px) {
+  .gantt-row-schedule-edit .btn,
+  .gantt-row-schedule-edit .field {
+    min-height: 44px;
+  }
+
+  .gantt-row-schedule-edit .field {
+    font-size: 1rem;
+  }
+
+  .gantt-row-edit-date .btn {
+    min-width: 44px;
+  }
+
+  .gantt-row-edit-review dl > div {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .gantt-row-schedule-edit > .gantt-row-edit-missing {
+    margin-inline: 1rem;
+  }
+}

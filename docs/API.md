@@ -688,6 +688,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `POST /api/schedule/paste-apply`에 `{previewId}`를 보낸다. 미리보기 작업자와 정책·달력·선후행·업무 버전을 검사해 30분 이내의 계획을 적용한다. 연결을 추가할 때 최종 그래프의 순환 여부도 검사한다. 같은 ID의 적용을 7일 안에 재요청하면 같은 `{undoId,updated,warnings}`를 반환하며 연결 변경이 있으면 `dependencyChanges` 건수도 포함한다. 날짜·연결·이력·되돌리기 기록·적용 응답을 같은 트랜잭션으로 저장한다. `POST /api/schedule/undo`는 대상 업무와 연결이 현재 상태와 일치하고 복구할 연결이 순환을 만들지 않을 때 두 변경을 함께 복원한다. 미리보기와 영수증은 자체 백업 범위 밖에 있으며 복원 시 초기화한다.
 
+## 간트 업무의 날짜와 연결 함께 편집
+
+`POST /api/schedule/row-edit/preview`는 `{projectId,issue:{id,expectedVersion},changes?,dependency?}`를 받는다. `changes`는 `startDate`, `endDate`, `dueDate` 중 바꿀 항목을 보낸다. 날짜는 `YYYY-MM-DD`로 지정하며 `null`로 비운다. `dependency.relatedIssue`도 `{id,expectedVersion}`으로 지정한다. 두 업무는 모두 현재 같은 프로젝트에 있어야 한다.
+
+연결을 추가할 때 `dependency`는 `{action:'add',relatedIssue,direction,type,lagDays}`를 사용한다. `direction`이 `predecessor`이면 `relatedIssue`가 기준 업무의 선행 업무이며, `successor`이면 후행 업무다. 기존 연결의 유형·간격 변경은 `{action:'update',id,expectedVersion,relatedIssue,type,lagDays}`를 사용하고, 해제는 `{action:'remove',id,expectedVersion,relatedIssue}`를 사용한다. 유형은 `FS`, `SS`, `FF`, `SF`를 지원하며 간격은 -3,650~3,650의 정수 근무일이다.
+
+응답은 일정 붙여넣기와 같은 변경 전후·경고·진단 정보를 제공한다. 유효한 변경이 있으면 `previewId`를 발급한다. `POST /api/schedule/row-edit/apply`에 `{previewId}`를 보내 날짜와 연결을 같은 트랜잭션에서 저장한다. 적용 시 두 업무와 연결, 달력·워크플로·업무 양식의 변경을 확인한다. 같은 작업자가 같은 ID를 재전송하면 이미 저장한 결과를 받는다. `POST /api/schedule/undo`에 결과의 `{undoId}`를 보내 날짜와 연결을 함께 되돌릴 수 있다.
+
 ## 사이클 완료와 업무 이월
 
 `POST /api/planning-items/:id/complete/preview`는 `{expectedVersion,destinationId}`를 받는다. 원래 사이클은 진행 중이어야 한다. 같은 프로젝트의 다른 계획·진행 중 사이클로 보내려면 ID를, 백로그에 두려면 명시적으로 `null`을 보낸다. `/api/v1`의 두 완료 경로에는 해당 프로젝트의 쓰기 키가 필요하다.

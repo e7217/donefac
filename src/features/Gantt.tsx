@@ -29,6 +29,7 @@ import { GanttCascadeDialog, type CascadeAnchorChange } from './GanttCascadeDial
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { SchedulePasteDialog } from './SchedulePasteDialog';
+import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import { GanttPlanningControls } from './GanttPlanningControls';
 import { GanttPlanAssignment } from './GanttPlanAssignment';
 import { PlanScheduleShiftDialog } from './PlanScheduleShiftDialog';
@@ -72,6 +73,7 @@ type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolea
 type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
+type RowScheduleEdit = { issue: Issue; opener: HTMLButtonElement };
 type TimelineRange = { start: number; end: number };
 type IssueRow = { issue: Issue; index: number };
 const PLANNING_KINDS: PlanningKind[] = ['cycle', 'module', 'release'];
@@ -156,6 +158,7 @@ function ProjectGantt(props: GanttProps) {
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
+  const [rowScheduleEdit, setRowScheduleEdit] = useState<RowScheduleEdit | null>(null);
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
   const [reservationsOpen, setReservationsOpen] = useState(false);
   const [analysisOpen, setAnalysisOpen] = useState(false);
@@ -187,6 +190,7 @@ function ProjectGantt(props: GanttProps) {
     if (shiftOpen) setShiftOpen(false);
     if (autoOpen) setAutoOpen(false);
     if (bulkDateSelection) setBulkDateSelection(null);
+    if (rowScheduleEdit) setRowScheduleEdit(null);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
   const handledFocusRequest = useRef<string | null>(null);
@@ -246,15 +250,22 @@ function ProjectGantt(props: GanttProps) {
             if (discardPaste) setPasteOpen(false);
             if (discardPlanShift) setPlanShift(null);
             if (discardBulkDates) setBulkDateSelection(null);
+            setRowScheduleEdit(null);
             setDraftEpoch(value => value + 1);
             if (awaitingCreationResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
           });
         }
-      }
+      } else afterAcceptedNavigation(event, () => setRowScheduleEdit(null));
     };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
+    const importReset = () => setRowScheduleEdit(null);
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
-    return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
+    window.addEventListener('teamspace:workspace-imported', importReset);
+    return () => {
+      window.removeEventListener('teamspace:navigate', guard);
+      window.removeEventListener('beforeunload', unload);
+      window.removeEventListener('teamspace:workspace-imported', importReset);
+    };
   }, [notify, refresh]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function finishCreating() {
@@ -285,6 +296,12 @@ function ProjectGantt(props: GanttProps) {
     notify(`과부하를 줄이는 ${result.updated.length}개 업무의 일정을 적용했습니다.`);
   }
   const projectIssues = useMemo(() => data.issues.filter(i => (!projectId || projectId === 'all' || i.projectId === projectId)), [data.issues, projectId]);
+  const rowEditProjectId = rowScheduleEdit?.issue.projectId;
+  const rowEditIssues = useMemo(() => rowEditProjectId ? projectIssues.filter(issue => issue.projectId === rowEditProjectId) : [],
+    [projectIssues, rowEditProjectId]);
+  const rowEditCalendar = useMemo(() => rowEditProjectId
+    ? data.calendars?.find(value => value.projectId === rowEditProjectId) ?? defaultWorkCalendar(rowEditProjectId)
+    : undefined, [data.calendars, rowEditProjectId]);
   const editingDependency = linkEditor?.dependency;
   const latestDependency = editingDependency && data.dependencies.find(link => link.id === editingDependency.id);
   const staleDependencyMessage = editingDependency && (!latestDependency
@@ -659,6 +676,18 @@ function ProjectGantt(props: GanttProps) {
       setLinkPicker(null);
       setDatePicker(null);
       setLinkEditor({ ...options, opener });
+    });
+  }
+  function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement) {
+    if (!canLeave()) return;
+    queueMicrotask(() => setRowScheduleEdit({ issue, opener }));
+  }
+  function closeRowScheduleEdit() {
+    const opener = rowScheduleEdit?.opener;
+    setRowScheduleEdit(null);
+    requestAnimationFrame(() => {
+      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+      else scrollRef.current?.focus({ preventScroll: true });
     });
   }
   function cancelLinkPicking() {
@@ -1065,6 +1094,12 @@ function ProjectGantt(props: GanttProps) {
           <div className="gantt-left">
             <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
             <div className="gantt-issue-cell">
+              {!linkPicker && <button type="button" className="issue-icon-button gantt-row-schedule-trigger"
+                aria-label={`${issue.key} 일정과 연결 편집`} title="일정과 연결 편집" data-schedule-owner={issue.id}
+                disabled={busy || Boolean(activeDatePicker)}
+                onPointerDown={event => {
+                  if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
+                }} onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><Pencil size={15} aria-hidden="true" /></button>}
               {hasSchedule && !linkPicker && datePickerTrigger(issue, 'issue-icon-button gantt-row-date-picker', true)}
               <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
                 aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
@@ -1170,6 +1205,19 @@ function ProjectGantt(props: GanttProps) {
         notify(`${changes.join(' · ')}을 변경했습니다.`);
       }}
     />}
+    {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
+      issue={rowScheduleEdit.issue} issues={rowEditIssues} dependencies={data.dependencies} calendar={rowEditCalendar}
+      actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
+      onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        await refresh();
+        closeRowScheduleEdit();
+        const datesChanged = result.updated.length > 0;
+        const linksChanged = Boolean(result.dependencyChanges);
+        notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
+          : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
+      }} />}
     {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch} issues={projectIssues} dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
       staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={() => { if (canLeave()) closeLinkEditor(); }} onSubmit={saveDependency} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
