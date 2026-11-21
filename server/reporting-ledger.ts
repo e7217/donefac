@@ -40,6 +40,20 @@ function parseState(value: unknown): ReportIssueState {
 }
 function same(a: ReportIssueState | null, b: ReportIssueState | null): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 function jsonRows<T>(rows: unknown): T[] { return (rows as { json: string }[]).map(row => JSON.parse(row.json) as T); }
+export type PreviousIssueKey = { projectId: string; key: string };
+
+export function previousIssueKeys(store: Store): Map<string, PreviousIssueKey[]> {
+  const rows = store.db.prepare(`SELECT json_extract(json,'$.issueId') AS issueId, project_id AS projectId,
+    json_extract(json,'$.before.key') AS key FROM reporting_events WHERE json_extract(json,'$.kind')='moved_out' ORDER BY sequence`)
+    .all() as (PreviousIssueKey & { issueId: string })[];
+  const result = new Map<string, PreviousIssueKey[]>();
+  for (const { issueId, projectId, key } of rows) {
+    const entries = result.get(issueId);
+    if (entries) entries.push({ projectId, key });
+    else result.set(issueId, [{ projectId, key }]);
+  }
+  return result;
+}
 
 /** A permanent observation ledger. Baselines say what was known at collection time,
  * never when an imported or previously existing issue supposedly changed state. */
@@ -53,6 +67,7 @@ export class ReportingLedger {
       CREATE INDEX IF NOT EXISTS reporting_events_project_time ON reporting_events(project_id,occurred_at,sequence);
       CREATE INDEX IF NOT EXISTS reporting_events_time ON reporting_events(occurred_at,sequence);
       CREATE INDEX IF NOT EXISTS reporting_events_issue_sequence ON reporting_events(coverage_id,project_id,sequence);
+      CREATE INDEX IF NOT EXISTS reporting_moved_out ON reporting_events(sequence) WHERE json_extract(json,'$.kind')='moved_out';
     `);
   }
   private states(projectId?: string): Issue[] {
@@ -121,6 +136,14 @@ export class ReportingLedger {
     if (change.table === 'issues') {
       const before = change.before as Issue | undefined, after = change.after as Issue | undefined;
       if (!before && !after) return;
+      if (before && after && before.projectId !== after.projectId) {
+        const source = this.lookup(before.projectId);
+        const target = this.lookup(after.projectId);
+        const at = this.time();
+        this.append('moved_out', this.state(before, source), null, change.context, source.version, at);
+        this.append('moved_in', null, this.state(after, target), change.context, target.version, at);
+        return;
+      }
       const workflow = this.lookup((after || before)!.projectId), oldState = before ? this.state(before, workflow) : null, newState = after ? this.state(after, workflow) : null;
       if (same(oldState, newState)) return;
       const kind = !before ? (change.context.origin === 'restore' ? 'restored' : 'created') : !after ? 'deleted' : 'changed';
@@ -181,6 +204,7 @@ export class ReportingLedger {
     });
     const byCoverage = new Map(coverage.map(value => [value.id, value])), states = new Map<string, ReportIssueState | null>();
     let lastAt = '', lastSequence = 0;
+    let transfer: { state: ReportIssueState; coverageId: string; actorId: string | null; occurredAt: string; sequence: number } | null = null;
     const events: IssueReportEvent[] = source.events.map(raw => {
       const value = object(raw), id = text(value.id, '보고 사건 ID'), sequence = positive(value.sequence, '보고 사건 순번'), coverageId = text(value.coverageId, '수집 구간 ID'), projectId = text(value.projectId, '프로젝트 ID'), issueId = text(value.issueId, '업무 ID');
       const occurredAt = instant(value.occurredAt, '보고 사건 시각'), epoch = byCoverage.get(coverageId), actorId = nullableText(value.actorId, '작업자 ID'), workflowVersion = positive(value.workflowVersion, '워크플로 버전');
@@ -189,19 +213,31 @@ export class ReportingLedger {
           typeof value.origin !== 'string' || !origins.has(value.origin as MutationOrigin)) {
         invalid('보고 사건의 참조·순서·발생 시각이 올바르지 않습니다.');
       }
-      if (!['baseline', 'created', 'changed', 'reclassified', 'deleted', 'restored'].includes(String(value.kind)) || (value.kind === 'restored') !== (value.origin === 'restore')) invalid('보고 사건 종류를 확인해 주세요.');
+      if (!['baseline', 'created', 'changed', 'reclassified', 'deleted', 'restored', 'moved_out', 'moved_in'].includes(String(value.kind)) || (value.kind === 'restored') !== (value.origin === 'restore')) invalid('보고 사건 종류를 확인해 주세요.');
       const before = value.before === null ? null : parseState(value.before), after = value.after === null ? null : parseState(value.after), kind = value.kind as IssueReportEvent['kind'];
       for (const state of [before, after]) if (state && (state.issueId !== issueId || state.projectId !== projectId)) invalid('보고 사건과 업무 상태의 ID가 다릅니다.');
-      const invalidCreation = (kind === 'baseline' || kind === 'created' || kind === 'restored') && (before !== null || after === null);
-      const invalidDeletion = kind === 'deleted' && (before === null || after !== null);
+      const invalidCreation = (kind === 'baseline' || kind === 'created' || kind === 'restored' || kind === 'moved_in') && (before !== null || after === null);
+      const invalidDeletion = (kind === 'deleted' || kind === 'moved_out') && (before === null || after !== null);
       const invalidChange = (kind === 'changed' || kind === 'reclassified') && (before === null || after === null || same(before, after));
       if (invalidCreation || invalidDeletion || invalidChange) invalid('보고 사건의 이전·이후 상태가 올바르지 않습니다.');
+      if (transfer || kind === 'moved_in') {
+        if (!transfer || kind !== 'moved_in' || value.origin !== 'user' || !after || transfer.state.issueId !== issueId ||
+          transfer.state.projectId === projectId || transfer.state.key === after.key || transfer.coverageId !== coverageId ||
+          transfer.actorId !== actorId || transfer.occurredAt !== occurredAt || transfer.sequence + 1 !== sequence) {
+          invalid('업무 프로젝트 이동의 출발·도착 보고 기록이 일치하지 않습니다.');
+        }
+        transfer = null;
+      } else if (kind === 'moved_out') {
+        if (value.origin !== 'user' || !before) invalid('업무 프로젝트 이동의 출발 보고 기록이 올바르지 않습니다.');
+        transfer = { state: before, coverageId, actorId, occurredAt, sequence };
+      }
       const key = `${coverageId}\0${issueId}`, previous = states.get(key) || null;
       if (!same(previous, before) || kind === 'baseline' && states.has(key)) invalid('같은 수집 구간의 업무 변경 이력이 이어지지 않습니다.');
       if (kind === 'reclassified' && !same({ ...before!, category: after!.category, statusLabel: after!.statusLabel }, after)) invalid('워크플로 재분류 사건에 업무 자체 변경이 섞여 있습니다.');
       eventIds.add(id); sequences.add(sequence); states.set(key, after); lastAt = occurredAt; lastSequence = sequence;
       return { id, sequence, coverageId, projectId, issueId, occurredAt, kind, actorId, origin: value.origin as MutationOrigin, workflowVersion, before, after };
     });
+    if (transfer) invalid('업무 프로젝트 이동의 도착 보고 기록이 없습니다.');
     return { coverage, events };
   }
   replaceRestored(data: ReportingLedgerData, at: string): void {

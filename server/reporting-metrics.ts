@@ -247,6 +247,14 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
   const currentState = emptyState();
   const current = input.current.filter(matches);
   const currentIds = new Set<string>();
+  const movedOutIds = new Set<string>();
+  for (const epoch of epochs) {
+    for (const { event, at } of epoch.events) {
+      if (at > generated || event.projectId !== query.projectId) continue;
+      if (event.kind === 'moved_out') movedOutIds.add(event.issueId);
+      else if (event.after) movedOutIds.delete(event.issueId);
+    }
+  }
   const issueMetrics = new Map<string, ReportIssueMetric>();
   const latestMetricEvent = new Map<string, { at: number; sequence: number }>();
   const latestCompletion = new Map<string, { at: number; sequence: number }>();
@@ -278,13 +286,15 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
     if (!value) {
       if (issueMetrics.size >= MAX_REPORT_ISSUES)
         fail(413, '보고서 업무가 5,000개를 초과했습니다. 기간·유형·담당자를 좁혀 주세요.');
+      const movedOut = !currentIds.has(issue.issueId) && movedOutIds.has(issue.issueId);
       value = {
         issue: structuredClone(issue),
         completed: 0,
         reopened: 0,
         lastCompletedAt: null,
         cycleHours: null,
-        deleted: !currentIds.has(issue.issueId),
+        deleted: !currentIds.has(issue.issueId) && !movedOut,
+        ...(movedOut ? { movedOut: true as const } : {}),
       };
       issueMetrics.set(issue.issueId, value);
     }
@@ -338,7 +348,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
         if (enteredAt === undefined) visits.unknownEntries++;
         else visits.hours.push((at - enteredAt) / HOUR);
       }
-      if (statusChanged || (event.kind === 'created' && before === null && after !== null)) {
+      if (statusChanged || ((event.kind === 'created' || event.kind === 'moved_in') && before === null && after !== null)) {
         statusEnteredAt.set(event.issueId, at);
       }
       // Baselines and restores establish a state without establishing its entry time.
@@ -362,7 +372,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
       const cycle = isCompletion && cycleStartedAt.has(event.issueId)
         ? (at - cycleStartedAt.get(event.issueId)!) / HOUR
         : null;
-      if (event.kind === 'baseline' || event.kind === 'restored')
+      if (event.kind === 'baseline' || event.kind === 'restored' || event.kind === 'moved_in')
         cycleStartedAt.delete(event.issueId);
       else if (event.kind === 'reclassified') {
         if (before?.category !== after?.category)
@@ -383,7 +393,7 @@ export function aggregateProjectReport(rawQuery: ReportQuery, input: {
         return;
       const day = local.day(at);
       const reportDay = dayMap.get(day);
-      const eventState = event.kind === 'deleted' ? before : after;
+      const eventState = event.kind === 'deleted' || event.kind === 'moved_out' ? before : after;
       if (!reportDay || !matches(eventState))
         return;
       const issueMetric = ensureIssueMetric(eventState);

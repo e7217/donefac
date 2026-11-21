@@ -57,7 +57,7 @@ import { SourcePreservationService, SourcePreservationError } from './source-pre
 import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
-import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
+import { ReportingLedger, ReportingLedgerError, previousIssueKeys } from './reporting-ledger.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
@@ -79,6 +79,7 @@ import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { TrashItemsService, trashItemComments, trashItemFiles, validateCommentReplyTopology } from './trash-items.js';
 import { DocumentTreeMoveError, DocumentTreeMoveService } from './document-tree-move.js';
+import { IssueProjectMoveError, IssueProjectMoveService } from './issue-project-move.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
 import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
@@ -289,13 +290,14 @@ export function createApp(options: {
     const old=before as Issue | undefined, issue=after as Issue | undefined;
     if(!old || !issue)return;
     const statusChanged=old.status!==issue.status;
+    const projectChanged=old.projectId!==issue.projectId;
     const datesChanged=old.dueDate!==issue.dueDate||old.endDate!==issue.endDate;
-    if((!statusChanged&&!datesChanged) || !context.actorId ||
+    if((!statusChanged&&!projectChanged&&!datesChanged) || !context.actorId ||
       (context.origin!=='user' && context.origin!=='automation') || !store.get('users',context.actorId)) return;
     if(statusChanged){
       notifyIssue(issue,context.actorId,'issue-status-changed',issueSubscribers(issue),issue.updatedAt);
-      blockerNotifications.sourceStatusChanged(old,issue,context.actorId,issue.updatedAt);
     }
+    if(statusChanged||projectChanged)blockerNotifications.sourceStatusChanged(old,issue,context.actorId,issue.updatedAt);
     if(!datesChanged)return;
     const previousDeadline=issueDeadline(old),deadline=issueDeadline(issue);
     if(!previousDeadline||!deadline||deadline.value<=previousDeadline.value||
@@ -320,19 +322,24 @@ export function createApp(options: {
     const documents = documentRows.map(row => JSON.parse(row.json) as DocPage);
     const data = Object.fromEntries(Object.entries(tables).map(([key, table]) =>
       [key, table === 'issues' ? issues : table === 'documents' ? documents : store.all(table)]));
+    const activeIssueIds = new Set(issues.map(issue => issue.id));
+    const issueMoveOrigins = purpose === 'workspace' ? [...previousIssueKeys(store)]
+      .filter(([id]) => activeIssueIds.has(id))
+      .map(([id, origins]) => [id, [...new Set(origins.map(origin => origin.projectId))]]) : [];
     return {
       ...data,
       workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
       workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
       baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
       issueOrders: issueOrders.snapshot(data.projects, issues),
+      ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
     } as unknown as WorkspaceSnapshot;
   };
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
-  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean;moveParents?:ReadonlyMap<string,Issue>}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -346,7 +353,7 @@ export function createApp(options: {
     validatePlannedEffortMinutes(i.plannedEffortMinutes);
     planning.validateIssueReferences(i,previous,{allowArchived:options?.allowArchivedPlanning});
     let parentId=i.parentId;const visited=new Set([i.id]);
-    while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
+    while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=options?.moveParents?.get(parentId)??get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
     workflows.validateIssue(i,previous,options);return i;
   };
   const validateDocument = (d: DocPage, previous?: DocPage, options: {allowMissing?: boolean;skipReferences?:boolean} = {}) => {
@@ -528,7 +535,17 @@ export function createApp(options: {
     findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
     jiraSources:()=>gitlabJiraSources(store),
     jiraOriginalKeys:route=>gitlabJiraOriginalKeys(store,route),
+    previousIssueKeys:()=>previousIssueKeys(store),
   },options.gitlabWebhookPublicOrigin);
+  const issueProjectMove = new IssueProjectMoveService(store, {
+    schema: projectId => issueSchemas.get(projectId), workflow: projectId => workflows.get(projectId),
+    calendar: projectId => calendars.get(projectId), order: projectId => issueOrders.get(projectId),
+    plans: projectId => planning.forProject(projectId),
+    validate: (issue, moveParents) => { validateIssue(issue, undefined, { moveParents }); },
+    validationMessage: error => (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
+      error instanceof PlanningError || error instanceof WorkloadError) && error.status < 500 ? error.message : null,
+    appendOrder: (order, ids) => issueOrders.appendTransferredIssues(order, ids),
+  });
   const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
   legacyImport.registerRoutes(app,{actor,activity});
   sourcePreservation.registerRoutes(app);
@@ -1045,7 +1062,7 @@ export function createApp(options: {
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
   const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions) => {
-    if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
+    if(values.projectId&&values.projectId!==old.projectId)fail('다른 프로젝트로 옮기려면 업무 상세에서 프로젝트 이동 미리보기를 사용해 주세요.');
     const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
     const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
     return {...prepareIssueChange(old,proposed,options),fields};
@@ -1304,6 +1321,15 @@ export function createApp(options: {
       onLinked: (issue, document) => { activity(req, 'issue', issue.id, '문서 결정 근거 연결', document.title); },
     });
     res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.post('/api/issues/:id/project-move/preview', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(issueProjectMove.preview(req.params.id, actor(req), req.body));
+  });
+  app.post('/api/issues/:id/project-move/apply', (req, res) => {
+    const result = issueProjectMove.apply(req.params.id, actor(req), req.body, (before, after) => {
+      activity(req, 'issue', after.id, '업무를 다른 프로젝트로 이동', `${before.key} → ${after.key}`);
+    });
+    res.set('Cache-Control', 'no-store').json(result);
   });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
@@ -2123,6 +2149,7 @@ export function createApp(options: {
     if(data.schemaVersion<16&&Array.isArray(data.attachmentVersions)&&data.attachmentVersions.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'localRevision')))fail('새 첨부 버전을 포함한 백업은 schemaVersion 16이 필요합니다.');
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
+    if(data.schemaVersion<83&&importedReportLedger.events.some(event=>event.kind==='moved_out'||event.kind==='moved_in'))fail('업무 프로젝트 이동 이력이 있는 백업에는 schemaVersion 83이 필요합니다.');
     if(data.schemaVersion<55&&Array.isArray(data.reportSnapshots)&&data.reportSnapshots.some((snapshot:ReportSnapshot|null)=>
       snapshot?.report?.definitionVersion===2||snapshot?.report?.statusDuration!==undefined
     ))fail('상태 체류 시간이 있는 보고서 보관본에는 schemaVersion 55 백업이 필요합니다.');
@@ -2380,6 +2407,7 @@ export function createApp(options: {
       documentCommentReplies.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      issueProjectMove.clearForImport();
       issuePaste.resetForImport();
       documentCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
@@ -2478,7 +2506,7 @@ export function createApp(options: {
     if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});

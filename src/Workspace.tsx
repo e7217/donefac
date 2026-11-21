@@ -236,12 +236,20 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
+  if (ganttFocusIssueId && !ganttScope) {
+    const focusedIssue = snapshot.issues.find(value => value.id === ganttFocusIssueId);
+    const moveOrigins = snapshot.issueMoveOrigins?.[ganttFocusIssueId];
+    if (focusedIssue && (!issue || issue.id === focusedIssue.id) && Array.isArray(moveOrigins) && moveOrigins.includes(parts[0])) {
+      projectId = focusedIssue.projectId;
+    }
+  }
   const requestedFocusDate = parameters.get('focusDate');
   const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
   const planningId = (view === 'planning' || view === 'backlog' || view === 'gantt' && !ganttScope && !ganttFocusIssueId) && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId &&
       (view !== 'backlog' || item.kind === 'cycle' && (item.status === 'planned' || item.status === 'active'))) ? parts[2] : null;
-  const savedViewId = view === 'issues' || (view === 'gantt' && !ganttScope && !ganttFocusIssueId) ? parameters.get('savedView') || null : null;
+  const savedViewId = (view === 'issues' || (view === 'gantt' && !ganttScope && !ganttFocusIssueId)) && (!issue || projectId === parts[0])
+    ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
@@ -479,7 +487,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     // A refreshed workspace can update the space of the document already open.
     const movedOpenDocument = previous && location.hash === previousHash && hasSameDocumentContext(previous, incoming) &&
       previous.projectId !== incoming.projectId && routeHash({ ...incoming, projectId: previous.projectId }) === previousHash;
-    if (previous && previousHash && routeHash(incoming) !== previousHash && !movedOpenDocument && !confirmRouteNavigation(previous, incoming)) {
+    const movedOpenIssue = previous && location.hash === previousHash && previous.issueId !== null && previous.issueId === incoming.issueId &&
+      previous.projectId !== incoming.projectId && previous.view === incoming.view &&
+      routeHash({ ...previous, projectId: incoming.projectId, planningId: null, savedViewId: null,
+        ganttFocusIssueId: incoming.ganttFocusIssueId, ganttFocusDate: incoming.ganttFocusDate }) === routeHash(incoming);
+    if (previous && previousHash && routeHash(incoming) !== previousHash && !movedOpenDocument && !movedOpenIssue && !confirmRouteNavigation(previous, incoming)) {
       const delta = routeIndexRef.current - index;
       if (delta) { rollbackHashRef.current = previousHash; history.go(delta); }
       else history.replaceState({...history.state, teamspaceRouteIndex:routeIndexRef.current}, '', previousHash);

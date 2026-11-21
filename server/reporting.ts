@@ -58,8 +58,8 @@ const reportBase = z.object({
       endDate: day.nullable(), dueDate: day.nullable(),
     }).strict(),
     completed: count, reopened: count, lastCompletedAt: timestamp.nullable(),
-    cycleHours: duration, deleted: z.boolean(),
-  }).strict()).max(5000),
+    cycleHours: duration, deleted: z.boolean(), movedOut: z.literal(true).optional(),
+  }).strict().refine(row => !row.deleted || !row.movedOut)).max(5000),
 }).strict();
 const reportShape = z.discriminatedUnion('definitionVersion', [
   reportBase.extend({ definitionVersion: z.literal(1) }),
@@ -94,7 +94,7 @@ function validateStatusDuration(report: DwellReport): void {
     statusIds.add(visit.statusId);
   }
 
-  const reportIssues = new Set(report.issues.filter(row => !row.deleted).map(row => row.issue.issueId));
+  const reportIssues = new Set(report.issues.filter(row => !row.deleted && !row.movedOut).map(row => row.issue.issueId));
   const openIds = new Set<string>();
   const openCounts = { backlog: 0, todo: 0, in_progress: 0, review: 0 };
   const generatedAt = Date.parse(report.generatedAt);
@@ -220,7 +220,7 @@ export class ReportingService {
       .sort((a, b) => b.completed - a.completed || b.reopened - a.reopened || a.issue.key.localeCompare(b.issue.key)).slice(0, 30 - dwellIds.size);
     if (items.length) content.push(heading(`관련 업무 ${items.length}/${report.issues.length - dwellIds.size}개`));
     for (const row of items) {
-      addIssue(row.issue.issueId, `${row.issue.key} ${row.issue.title}`, row.deleted);
+      addIssue(row.issue.issueId, `${row.issue.key} ${row.issue.title}`, row.deleted || Boolean(row.movedOut));
     }
     content.push(heading('회의 메모'), {type:'paragraph'});
     return {content:{type:'doc',content},issueIds};

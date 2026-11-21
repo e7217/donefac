@@ -987,6 +987,7 @@ function IssueRow({
           </span>
         )}
         {row.deleted && <small>삭제됨</small>}
+        {row.movedOut && <small>다른 프로젝트로 이동</small>}
       </td>
       <td>
         <span className="reports-status">

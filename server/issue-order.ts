@@ -155,6 +155,12 @@ export class IssueOrderService {
     return this.read(projectId);
   }
 
+  appendTransferredIssues(previous: ProjectIssueOrder, issueIds: string[]): void {
+    if (!this.store.db.isTransaction) return fail('업무 이동 트랜잭션 안에서 순서를 저장해야 합니다.', 500);
+    // Moved rows keep their rowids, which may precede tasks already in this project.
+    this.put(previous.projectId, [...previous.issueIds, ...issueIds]);
+  }
+
   snapshot(projects: Project[], issues: Issue[]): ProjectIssueOrder[] {
     const rows = this.store.db.prepare('SELECT project_id, issue_ids, revision FROM project_issue_orders').all() as StoredOrder[];
     const byProject = new Map(rows.map(row => [row.project_id, row]));

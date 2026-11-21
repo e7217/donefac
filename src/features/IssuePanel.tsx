@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, Copy, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -25,6 +25,7 @@ import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
+import { IssueProjectMove } from './IssueProjectMove';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
@@ -138,7 +139,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     cloneReturnFocus.current = null;
     (target ?? cloneCreationTrigger.current)?.focus({ preventScroll: true });
   }, [cloneCreation, createdClone]);
-  const refreshAfterClone = useCallback(async () => {
+  const refreshIssueRelations = useCallback(async () => {
     await refresh();
     setRelationsRefreshKey(key => key + 1);
   }, [refresh]);
@@ -155,7 +156,16 @@ function IssuePanelContent(props: IssuePanelProps) {
     });
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor);
+  const [projectMove, setProjectMove] = useState<{ draftMessage: string | null } | null>(null);
+  const projectMoveTrigger = useRef<HTMLButtonElement>(null);
+  const projectMoveGuard = useRef({ dirty: false, pending: false, uncertain: false });
+  const trackProjectMoveDraft = useCallback((dirty: boolean, pending: boolean, uncertain = false) => { projectMoveGuard.current = { dirty, pending, uncertain }; }, []);
+  const closeProjectMove = useCallback((restoreFocus = true) => {
+    trackProjectMoveDraft(false, false);
+    setProjectMove(null);
+    if (restoreFocus) requestAnimationFrame(() => projectMoveTrigger.current?.focus({ preventScroll: true }));
+  }, [trackProjectMoveDraft]);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || projectMove);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
@@ -230,13 +240,20 @@ function IssuePanelContent(props: IssuePanelProps) {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
-      if (savingRef.current || childDrafts.some(value => value?.pending) || dependencyBusyRef.current) {
+      if (savingRef.current || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || projectMoveGuard.current.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
       }
       const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
       if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
+      const moveGuard = projectMoveGuard.current;
+      const moveDiscard = moveGuard.uncertain ? '이동 결과를 아직 확인하지 못했습니다. 다른 화면으로 이동할까요?' : '작성 중인 프로젝트 이동 설정을 버릴까요?';
+      if (moveGuard.dirty && !dirtyRef.current && !childNames.length && !window.confirm(moveDiscard)) {
+        event.preventDefault();
+        return;
+      }
+      if (moveGuard.dirty && (dirtyRef.current || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
       if (dirtyRef.current || childNames.length) {
         const message = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
@@ -249,14 +266,16 @@ function IssuePanelContent(props: IssuePanelProps) {
           setCommentDraft(emptyCommentDraft()); setError(null); setConflict(false);
         });
       }
+      if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current) return;
+      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
+          !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify, tab]);
+  }, [issue, notify, tab, projectMove, closeProjectMove]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -365,6 +384,16 @@ function IssuePanelContent(props: IssuePanelProps) {
     ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
     : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
       ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
+  function projectMoveDraftMessage() {
+    const childDrafts = [childDraft.current, gitlabDraft.current];
+    if (savingRef.current || commenting || linkingRef.current || dependencyBusyRef.current || childDrafts.some(value => value?.pending)) {
+      return '현재 작업을 저장한 뒤 프로젝트를 이동해 주세요.';
+    }
+    if (dirty || commentDraft.body.trim() || dependencyDraftRef.current || childDrafts.some(value => value?.dirty)) {
+      return '이동을 적용하려면 창을 닫고 저장하지 않은 업무 변경사항이나 작성 중인 댓글·연결을 먼저 정리해 주세요.';
+    }
+    return null;
+  }
   function update<K extends keyof Issue>(key: K, value: Issue[K]) {
     if ((key === 'status' || key === 'type') && draft?.[key] !== value && error?.openBlockers) setError(null);
     setDraft(previous => previous ? { ...previous, [key]: value } : previous);
@@ -556,6 +585,11 @@ function IssuePanelContent(props: IssuePanelProps) {
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">
+        {data.projects.some(project => project.id !== issue.projectId) && <button ref={projectMoveTrigger}
+          className="btn btn-ghost issue-move-trigger" type="button" aria-haspopup="dialog" aria-label="프로젝트 이동" title="프로젝트 이동"
+          disabled={saving || commenting || dependencyBusy || linking} onClick={() => setProjectMove({ draftMessage: projectMoveDraftMessage() })}>
+          <FolderInput size={14} aria-hidden="true" /><span>프로젝트 이동</span>
+        </button>}
         <button ref={cloneCreationTrigger} className="btn btn-ghost issue-clone-trigger" type="button" aria-haspopup="dialog"
           aria-label="업무 복제" title="업무 복제" disabled={saving || dependencyBusy} onClick={() => setCloneCreation(issue)}>
           <Copy size={14} aria-hidden="true" /><span>업무 복제</span>
@@ -742,7 +776,9 @@ function IssuePanelContent(props: IssuePanelProps) {
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {cloneCreation && <NewIssueModal {...props} cloneIssue={cloneCreation} onClose={closeCloneCreation}
-      onCloneCreated={showCreatedClone} refresh={refreshAfterClone} />}
+      onCloneCreated={showCreatedClone} refresh={refreshIssueRelations} />}
+    {projectMove && <IssueProjectMove data={data} issue={issue} draftMessage={projectMove.draftMessage} beforeApply={projectMoveDraftMessage}
+      onDraftChange={trackProjectMoveDraft} onClose={closeProjectMove} refresh={refreshIssueRelations} />}
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
       onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}

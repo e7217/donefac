@@ -26,7 +26,7 @@ export interface IssueReportEvent {
   projectId: string;
   issueId: string;
   occurredAt: string;
-  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted' | 'restored';
+  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted' | 'restored' | 'moved_out' | 'moved_in';
   actorId: string | null;
   origin: MutationOrigin;
   workflowVersion: number;
@@ -57,6 +57,7 @@ export interface ReportIssueMetric {
   lastCompletedAt: string | null;
   cycleHours: number | null;
   deleted: boolean;
+  movedOut?: true;
 }
 export interface ReportStatusVisitMetric {
   statusId: string;
@@ -1275,6 +1276,7 @@ export interface WorkspaceSnapshot {
   teamWorkloadCapacity?: TeamWorkloadCapacity;
   issueSchemas?: ProjectIssueSchema[];
   issueOrders?: ProjectIssueOrder[];
+  issueMoveOrigins?: Record<string, string[]>;
   documentOrders?: DocumentSiblingOrder[];
 }
 export interface ScheduleChange {

@@ -201,6 +201,16 @@ curl --fail-with-body \
 
 생성된 업무와 두 업무의 관련 관계를 함께 저장하고 `{issue,relation,duplicate}`를 반환한다. 최초 생성은 `201`, 같은 요청의 재확인은 `200`과 현재 저장 업무를 반환한다. 재확인 전에 관계를 해제하면 `relation`은 `null`이다. 원본 버전이 다르면 첫 저장에서 `409`와 `details.reason: 'source_version_changed'`, `currentVersion`을 반환한다. 백업 복원은 일반 업무와 관련 관계의 기존 규칙을 사용한다.
 
+## 업무 프로젝트 이동
+
+브라우저의 `POST /api/issues/:id/project-move/preview`는 `{expectedVersion, projectId, includeConnected, mappings}`를 받는다. `projectId`는 대상 프로젝트이고 `mappings`의 각 행은 `issueId`와 선택한 `type`, `status`, `customFields`, `cycleId`, `moduleId`, `releaseId`를 받는다. `includeConnected`를 켜면 같은 프로젝트의 상하위 업무와 선후행 연결을 따라 최대 100개를 함께 검토한다. 응답에는 업무별 새 키와 선택 값, 이동을 막는 `blockers`, 적용 시 달라지는 항목의 `warnings`가 있다. 적용할 수 있는 미리보기에는 `token`이 있다.
+
+검토한 동일한 요청에 `token`을 추가해 `POST /api/issues/:id/project-move/apply`로 보낸다. 업무와 연결, 두 프로젝트의 설정 및 발급할 키가 미리보기와 일치할 때 한 트랜잭션으로 저장한다. `{issues, duplicate}`의 `issues`는 이동 당시 저장 결과다. 같은 작업자의 같은 요청을 재전송하면 같은 결과와 `duplicate: true`를 반환한다. 자체 백업을 가져오면 이전 미리보기와 적용 결과 확인이 만료된다.
+
+업무 ID와 댓글·첨부·업무 관계·문서 연결·GitLab 연결, 함께 이동한 업무 사이의 일정과 상하위 구조를 보존한다. 작업 시간 기록, 기준선·완료 사이클 이력, Jira 이관 원본 연결처럼 현재 프로젝트에 귀속된 기록과 일부 휴지통 관계는 미리보기에서 이동을 막는다. 자체 백업 형식 83은 출발·도착 프로젝트의 관측 기록과 이전 업무 키를 보존한다.
+
+이동 이력이 있는 활성 업무가 있으면 브라우저의 `GET /api/workspace`에 `issueMoveOrigins`가 포함된다. 업무 ID별 출발 프로젝트 ID 목록이며, 이전 프로젝트의 간트 위치 주소를 현재 프로젝트로 연결하는 데 사용한다. 백업을 복원하면 이동 이력에서 목록을 다시 구성한다.
+
 ## 상위 업무에서 하위 업무 만들기
 
 브라우저의 `POST /api/issues/:id/children`에 `{requestId, expectedParentVersion, issue}`를 보낸다. `requestId`는 UUID v4다. `issue`에는 업무 생성과 같은 속성을 보낸다. `projectId`와 `parentId`는 현재 상위 업무에서 정해지며, 함께 보낼 경우 같은 ID여야 한다. 현재 프로젝트의 유형·워크플로·필수 속성을 검사한 뒤 하위 업무와 번호, 상위·하위 업무 변경 기록을 한 트랜잭션에 저장한다.

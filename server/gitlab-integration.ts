@@ -12,6 +12,7 @@ import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
 import type { GitlabDeployment, GitlabDeploymentSyncResult } from '../shared/types.js';
 import type { Store } from './store.js';
+import type { PreviousIssueKey } from './reporting-ledger.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new GitlabIntegrationError(status,message,details);}
@@ -28,6 +29,7 @@ type Hooks={
   findArchivedBranchLink?:(cursorId:string)=>GitlabLink|undefined;
   jiraSources?:()=>GitlabJiraSource[];
   jiraOriginalKeys?:(route:GitlabJiraRoute)=>Map<string,JiraKeyBinding|null>;
+  previousIssueKeys?: () => ReadonlyMap<string, PreviousIssueKey[]>;
 };
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
 type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number};
@@ -35,7 +37,7 @@ type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
 type SyncOptions=Pick<ReadOptions,'includeHistory'> & { expectedVersion?: unknown; repositoryIds?: unknown };
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
 type WorkflowGitlabKind=Extract<GitlabLink['kind'],'merge_request'|'pipeline'>;
-type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'>;
+type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'> & { previousKeys?: PreviousIssueKey[] };
 type JiraKeyBinding={issueId:string;originalJiraKey:string};
 type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
 type KeyReader=(...values:unknown[])=>string[];
@@ -134,18 +136,30 @@ function retainOriginalJiraKey(link:GitlabLink,existing?:GitlabLink):GitlabLink{
 
 function makeTicketMatcher(issues:IssueMatch[],route:GitlabJiraRoute|undefined,originals:Map<string,JiraKeyBinding|null>):TicketMatcher{
   const scoped=route?issues.filter(issue=>issue.projectId===route.projectId):issues;
+  const normalizeKey = (key: string) => route ? key.toUpperCase() : key;
   const byId=new Map(scoped.map(issue=>[issue.id,issue]));
-  const byKey=new Map(scoped.map(issue=>[route?issue.key.toUpperCase():issue.key,issue]));
+  const byKey=new Map(scoped.map(issue=>[normalizeKey(issue.key),issue]));
+  const previousByKey = new Map<string, IssueMatch | null>();
+  for (const issue of issues) {
+    for (const previous of issue.previousKeys ?? []) {
+      if (route && previous.projectId !== route.projectId) continue;
+      const key = normalizeKey(previous.key);
+      const existing = previousByKey.get(key);
+      previousByKey.set(key, existing === undefined || existing?.id === issue.id ? issue : null);
+      byId.set(issue.id, issue);
+    }
+  }
   const ambiguousKeys=new Set<string>();
 
   function fromKey(key:string):TicketMatch|undefined{
-    const normalized=route?key.toUpperCase():key;
-    const current=byKey.get(normalized),alias=originals.get(normalized);
-    if(alias===null||current&&alias&&current.id!==alias.issueId){
+    const normalized = normalizeKey(key);
+    const current = byKey.get(normalized), previous = previousByKey.get(normalized), alias = originals.get(normalized);
+    const identities = new Set([current?.id, previous?.id, alias?.issueId].filter(Boolean));
+    if (previous === null || alias === null || identities.size > 1) {
       if(ambiguousKeys.size<AMBIGUOUS_KEY_LIMIT)ambiguousKeys.add(normalized);
       return;
     }
-    const issue=current??(alias?byId.get(alias.issueId):undefined);
+    const issue = current ?? previous ?? (alias ? byId.get(alias.issueId) : undefined);
     return issue?{issue,...(alias?{originalJiraKey:alias.originalJiraKey}:{})}:undefined;
   }
 
@@ -952,7 +966,8 @@ export class GitlabIntegrationService{
   }
 
   private syncIssues():IssueMatch[]{
-    return this.store.all<Issue>('issues').map(({id,key,title,projectId})=>({id,key,title,projectId}));
+    const previous = this.hooks.previousIssueKeys?.();
+    return this.store.all<Issue>('issues').map(({id,key,title,projectId})=>({id,key,title,projectId,previousKeys:previous?.get(id)}));
   }
 
   private currentForSync(version:number):RawSettings{

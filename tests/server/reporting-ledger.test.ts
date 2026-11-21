@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Issue, Project, ReportingLedgerData } from '../../shared/types.js';
-import { ReportingLedger, ReportingLedgerError } from '../../server/reporting-ledger.js';
+import { ReportingLedger, ReportingLedgerError, previousIssueKeys } from '../../server/reporting-ledger.js';
+import { aggregateProjectReport } from '../../server/reporting-metrics.js';
 import { Store } from '../../server/store.js';
 import { WorkflowService } from '../../server/workflows.js';
 
@@ -68,6 +69,48 @@ test('transaction failures roll back source mutation, sequence and every ledger 
     assert.equal(f.store.get('issues', 'bad'), undefined); assert.deepEqual(f.ledger.read('p'), before);
     f.store.put('issues', issue('valid'));
     assert.equal(f.ledger.read('p').events.at(-1)?.sequence, 2);
+  } finally { f.close(); }
+});
+
+test('project transfer observes both memberships and reserves the previous key without reporting a creation, completion or deletion', () => {
+  const f = fixture();
+  try {
+    const workflow = f.workflows.get('p');
+    f.workflows.save('p', { ...workflow, statuses: [...workflow.statuses, { id: 'local_intake', label: '원래 프로젝트 접수', category: 'review', color: '#5065aa' }] }, workflow.version);
+    const before = issue('existing', { status: 'local_intake', key: 'SYN0-3', version: 2 });
+    f.store.put('issues', before);
+    f.setClock(tomorrow);
+    f.store.withMutationContext({ actorId: 'actor', origin: 'user' }, () => {
+      f.store.put('issues', { ...before, projectId: 'q', key: 'SYN1-7', status: 'done', version: 3, updatedAt: tomorrow, completedAt: tomorrow });
+    });
+    const archived = f.ledger.exportData(restoredAt);
+    const [out, into] = archived.events.slice(-2);
+    assert.equal(out.kind, 'moved_out');
+    assert.deepEqual(out.before, { ...out.before!, projectId: 'p', key: 'SYN0-3', statusId: 'local_intake', statusLabel: '원래 프로젝트 접수', category: 'review' });
+    assert.equal(into.kind, 'moved_in');
+    assert.equal(into.projectId, 'q');
+    assert.equal(into.after?.key, 'SYN1-7');
+    assert.equal(into.after?.category, 'done');
+    assert.equal(into.sequence, out.sequence + 1);
+    assert.deepEqual(previousIssueKeys(f.store).get(before.id), [{ projectId: 'p', key: 'SYN0-3' }]);
+    assert.deepEqual(f.ledger.validateRestore(archived, restoredAt, restoredAt, f.projects), archived);
+    const unpaired = copy(archived); unpaired.events.pop();
+    assert.throws(() => f.ledger.validateRestore(unpaired, restoredAt, restoredAt, f.projects), invalid);
+    const wrongActor = copy(archived); wrongActor.events.at(-1)!.actorId = 'another';
+    assert.throws(() => f.ledger.validateRestore(wrongActor, restoredAt, restoredAt, f.projects), invalid);
+
+    const report = (projectId: string) => aggregateProjectReport({ projectId, startDate: '2026-11-20', endDate: '2026-11-20', timeZone: 'UTC', issueType: null, assigneeId: null },
+      { current: f.ledger.current(projectId), ledger: f.ledger.read(projectId), generatedAt: restoredAt });
+    const source = report('p'), target = report('q');
+    for (const view of [source, target]) {
+      assert.equal(view.period.deleted, 0);
+      assert.equal(view.period.created, 0);
+      assert.equal(view.period.completionTransitions, 0);
+    }
+    assert.equal(source.issues.find(row => row.issue.issueId === before.id)?.movedOut, true);
+    assert.equal(source.issues.find(row => row.issue.issueId === before.id)?.deleted, false);
+    assert.equal(source.current.total, 0);
+    assert.equal(target.current.state.done, 1);
   } finally { f.close(); }
 });
 
