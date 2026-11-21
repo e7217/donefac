@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-react';
-import { documentPlainText, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy } from '../../shared/document-nodes';
+import { documentPlainText, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, isLiveDocumentInclude } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
 import type {
   DocPage,
@@ -61,15 +61,16 @@ function snapshotContent(node: RichContent): RichContent {
       content: [{ type: 'text', text: `업무 목록 · ${label || projectId || '이름 없음'} · 이 저장본에는 목록 조건이 보관됩니다.` }],
     };
   }
-  if (node.type === 'documentInclude') {
+  if (isLiveDocumentInclude(node.type)) {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
     const id = typeof node.attrs?.documentId === 'string' ? node.attrs.documentId : '';
+    const referenceLabel = node.type === 'documentExcerptInclude' ? '문서 발췌 포함' : '포함 문서';
     return {
       type: 'paragraph',
       content: [
         {
           type: 'text',
-          text: `포함 문서: ${label || id || '이름 없음'}${label && id ? ` (${id})` : ''} · 이 저장본에는 포함 대상의 본문이 고정되어 있지 않습니다.`,
+          text: `${referenceLabel}: ${label || id || '이름 없음'}${label && id ? ` (${id})` : ''} · 이 저장본에는 포함 대상의 본문이 고정되어 있지 않습니다.`,
         },
       ],
     };

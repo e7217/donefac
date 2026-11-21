@@ -1604,6 +1604,91 @@ function labelListExport(target: MigrationFixture, instance: string, name: strin
   return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
 }
 
+test('Confluence excerpt migration upgrades verified older projections while preserving independently edited bodies', async t => {
+  const initial = await fixture(), restored = await fixture();
+  t.after(() => Promise.all([initial.close(), restored.close()]));
+  const instance = 'synthetic-legacy-excerpt-checkpoint';
+  const sourceTitle = '합성 재사용 원문';
+  const excerpt = '<ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="hidden">true</ac:parameter><ac:rich-text-body><p>공통 <strong>설치 절차</strong></p></ac:rich-text-body></ac:structured-macro>';
+  const include = `<ac:macro ac:name="excerpt-include"><ac:default-parameter>${sourceTitle}</ac:default-parameter><ac:parameter ac:name="nopanel">true</ac:parameter></ac:macro>`;
+  const rows = [
+    { id: '100', title: sourceTitle, body: excerpt },
+    { id: '101', title: '해시로 확인할 포함 문서', body: include },
+    { id: '102', title: '본문으로 확인할 포함 문서', body: include },
+    { id: '103', title: '팀에서 편집한 포함 문서', body: include },
+  ];
+  const first = await labelListExport(initial, instance, 'excerpts-v1', rows);
+  const plan = await initial.preview(await initial.configuration(first, 'EXCERPT'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(!plan.notices.some(({ code }) => code.includes('EXCERPT')));
+  const applied = await initial.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await initial.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const documents = backup.documents.filter(document => document.projectId === projectId);
+  const source = documents.find(document => document.title === sourceTitle)!;
+  assert.ok(source);
+  assert.equal(source.content.content?.[0].type, 'documentExcerpt');
+  assert.equal(source.content.content?.[0].attrs?.hidden, true);
+  const consumers = documents.filter(document => document.id !== source.id);
+  assert.equal(consumers.length, 3);
+  for (const document of consumers) {
+    assert.deepEqual(document.content.content?.map(node => node.type), ['documentExcerptInclude']);
+    assert.deepEqual({ ...document.content.content?.[0].attrs }, { documentId: source.id, label: sourceTitle, noPanel: true });
+  }
+  assert.ok(backup.sourceRecords.find(record => record.record.sourceId === '101')?.record.references
+    .some(reference => reference.kind === 'page' && reference.relation === 'include-macro' && reference.sourceId === '100'));
+
+  const priorSource = normalizeDocumentContent({ type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: '공통 ' }, { type: 'text', text: '설치 절차', marks: [{ type: 'bold' }] }] },
+  ] });
+  const priorInclude = normalizeDocumentContent({ type: 'doc', content: [
+    { type: 'codeBlock', content: [{ type: 'text', text: include }] },
+  ] });
+  const edited = documents.find(document => document.title === rows[3].title)!;
+  const editedBody = normalizeDocumentContent({ type: 'doc', content: [
+    ...priorInclude.content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀에서 보탠 문단' }] },
+  ] });
+  const documentIds = new Set(documents.map(document => document.id));
+  const stored = documents.find(document => document.title === rows[1].title)!;
+  backup.schemaVersion = 68;
+  for (const receipt of backup.sourceImports) delete receipt.integrity;
+  for (const record of backup.sourceRecords) {
+    if (record.targetId === stored.id && record.confluencePageFieldHashes) {
+      record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(priorInclude.content)])));
+    } else delete record.confluencePageFieldHashes;
+  }
+  for (const document of documents) {
+    Object.assign(document, document.id === edited.id ? editedBody : document.id === source.id ? priorSource : priorInclude);
+  }
+  for (const revision of backup.revisions.filter(revision => documentIds.has(revision.documentId))) {
+    Object.assign(revision, revision.documentId === source.id ? priorSource : priorInclude);
+  }
+  const restoredBackup = await restored.call('/import', 'POST', { data: backup });
+  assert.equal(restoredBackup.status, 200, JSON.stringify(restoredBackup.data));
+
+  const next = await labelListExport(restored, instance, 'excerpts-v2', rows.map(row => ({ ...row, version: 2 })));
+  const config = await restored.configuration(next);
+  const refresh = await restored.preview({ ...config, appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(refresh.canApply, true, JSON.stringify(refresh.notices));
+  for (const document of documents) {
+    const decision = refresh.documentRefresh?.find(row => row.documentId === document.id)?.fields.find(field => field.field === 'content')?.decision;
+    assert.equal(decision, document.id === edited.id ? 'conflict' : 'apply', document.title);
+  }
+  const refreshed = await restored.apply(refresh);
+  assert.equal(refreshed.status, 201, JSON.stringify(refreshed.data));
+  const current = (await restored.call<WorkspaceSnapshot>('/workspace')).data.documents;
+  assert.equal(current.find(document => document.id === source.id)?.content.content?.[0].type, 'documentExcerpt');
+  for (const document of consumers.filter(document => document.id !== edited.id)) {
+    const latest = current.find(value => value.id === document.id)!;
+    assert.deepEqual(contentReferences(latest.content).map(reference => [reference.kind, reference.id]), [['include', source.id]]);
+  }
+  assert.deepEqual(current.find(document => document.id === edited.id)?.content, JSON.parse(JSON.stringify(editedBody.content)));
+});
+
 test('Confluence label-list XML migrates into a proven project and refreshes exact legacy code after restore', async t => {
   const initial = await fixture(), f = await fixture();
   t.after(() => Promise.all([initial.close(), f.close()]));

@@ -3,7 +3,7 @@ import { documentChildLists, MAX_DOCUMENT_CHILD_LISTS, normalizeDocumentChildLis
 import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
-  isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeLabel, isStatusBadgeTone,
+  isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
   MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
@@ -74,11 +74,17 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
         sectionIds.add(id);
       }
     }
-    if(['issueReference','documentReference','documentInclude','documentRevisionInclude'].includes(node.type)){
+    if (isLiveDocumentInclude(node.type) || ['issueReference','documentReference','documentRevisionInclude'].includes(node.type)) {
       const key=node.type==='issueReference'?'issueId':'documentId',id=attributes[key];
       if(!referenceId(id))invalid('참조 대상 ID는 1~200자여야 합니다.');
       if(!referenceLabel(attributes.label))invalid('참조 이름은 300자 이하여야 합니다.');
       if(node.type==='documentRevisionInclude'&&!referenceId(attributes.revisionId))invalid('포함할 문서 저장본 ID는 1~200자여야 합니다.');
+    }
+    if (node.type === 'documentExcerpt' && attributes.hidden !== undefined && typeof attributes.hidden !== 'boolean') {
+      invalid('원본 문서의 발췌 표시 설정을 확인해 주세요.');
+    }
+    if (node.type === 'documentExcerptInclude' && attributes.noPanel !== undefined && typeof attributes.noPanel !== 'boolean') {
+      invalid('포함한 발췌의 원본 안내 표시 설정을 확인해 주세요.');
     }
     if (node.type === 'issueList' || node.type === 'issueSummary') {
       const label = node.type === 'issueList' ? '업무 목록' : '업무 현황';

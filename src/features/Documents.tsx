@@ -7,18 +7,18 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, FileCheck2, FileClock, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
-  PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
+  PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
-import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
-import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
+import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
@@ -1041,6 +1041,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); closeAnnotation();
   }
 
+  function insertExcerpt() {
+    if (!editor?.isEditable) return;
+    if (findDocumentExcerpt(editor.getJSON() as RichContent)) {
+      notify('이 문서에 이미 발췌 구역이 있습니다.', 'error');
+      return;
+    }
+    if (!insertDocumentExcerpt(editor)) notify('이 위치에는 발췌 구역을 넣을 수 없습니다.', 'error');
+  }
+
   function insertDocumentList(type: 'documentLabelList' | 'documentChildList') {
     if (!editor?.isEditable || !selectedPage) return;
     const isChildList = type === 'documentChildList';
@@ -1071,6 +1080,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: () => insertDocumentList('documentLabelList') },
     { label: '하위 문서 목록', search: 'children child pages descendants tree 하위 문서 목록', action: () => insertDocumentList('documentChildList') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
+    { label: '발췌 구역', search: 'excerpt source 발췌 구역', action: insertExcerpt },
+    { label: '발췌 포함', search: 'excerpt include 발췌 포함', action: () => openReference('documentExcerptInclude') },
     { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
     { label: '본문 목차', search: 'toc table of contents 본문 목차', action: () => insertDocumentToc(editor) },
     { label: '안내 상자', search: 'callout info note warning tip panel 안내 상자', annotation: 'callout' },
@@ -1305,6 +1316,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('라벨별 문서 목록 삽입', <Files size={15} />, () => insertDocumentList('documentLabelList'))}
                 {button('하위 문서 목록 삽입', <ListTree size={15} />, () => insertDocumentList('documentChildList'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
+                {button('발췌 구역 삽입', <Scissors size={15} />, insertExcerpt)}
+                {button('발췌 포함 삽입', <FileInput size={15} />, () => openReference('documentExcerptInclude'))}
                 {button('문서 버전 포함 삽입', <FileClock size={15} />, () => openReference('documentRevisionInclude'))}
                 {button('본문 목차 삽입', <TableOfContents size={15} />, () => insertDocumentToc(editor))}
                 {button('안내 상자 삽입', <Info size={15} />, event => { if (editor) openAnnotation(editor, 'callout', event.currentTarget); })}

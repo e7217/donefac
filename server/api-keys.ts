@@ -7,6 +7,7 @@ import { listIssueRelations } from './issue-relations.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelLists } from '../shared/document-label-list.js';
+import { documentNodes } from '../shared/document-references.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -113,19 +114,25 @@ export class ApiKeyService {
   }
   private canReadDocumentBody(key: ApiKeyRecord, content: RichContent): boolean {
     const projects = key.projectIds;
-    return projects === null || (
+    if (projects === null) return true;
+    const allowsDocument = (id: string) => {
+      const target = this.store.get<DocPage>('documents', id);
+      return !target || (target.projectId !== null && projects.includes(target.projectId));
+    };
+    for (const node of documentNodes(content)) {
+      if (node.type === 'documentExcerptInclude' && typeof node.attrs?.documentId === 'string' && !allowsDocument(node.attrs.documentId)) return false;
+    }
+    return (
       documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId)) &&
       documentLabelLists(content).every(({ projectId }) => projectId !== null && projects.includes(projectId)) &&
       documentChildLists(content).every(({ scope, projectId, documentId }) => {
         if (scope === 'space') return projectId !== null && projects.includes(projectId);
-        if (scope !== 'document' || !documentId) return true;
-        const target = this.store.get<DocPage>('documents', documentId);
-        return !target || (target.projectId !== null && projects.includes(target.projectId));
+        return scope !== 'document' || !documentId || allowsDocument(documentId);
       })
     );
   }
   private requireDocumentBody(key: ApiKeyRecord, content: RichContent) {
-    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키의 범위를 벗어난 업무 현황, 라벨별 문서 목록 또는 하위 문서 목록이 있습니다.');
+    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키의 범위를 벗어난 업무 현황, 문서 목록 또는 발췌가 있습니다.');
   }
   authorizeDocumentBody(request: Request, content: RichContent) {
     const context = this.contexts.get(request);

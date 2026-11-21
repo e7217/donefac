@@ -282,11 +282,12 @@ test('Confluence attachments carry the declared owner to link and image resoluti
 });
 
 test('unsupported macros, script/HTML, unresolved references and unsafe URLs stay visible with diagnostics and no active unsafe nodes', () => {
-  const xml = '<p><a href="javascript:alert(1)">위험 링크</a></p><script>dangerous()</script><ac:structured-macro ac:name="unknown-widget"><ac:parameter ac:name="value">보존해야 할 값</ac:parameter><ac:rich-text-body><p>미지원 본문</p></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="excerpt-include"><ac:parameter ac:name="">Target</ac:parameter></ac:structured-macro><ac:image><ri:url ri:value="https://example.test/remote.png"/></ac:image><ac:link><ri:page ri:content-title="Missing"/></ac:link>';
+  const xml = '<p><a href="javascript:alert(1)">위험 링크</a></p><script>dangerous()</script><ac:structured-macro ac:name="unknown-widget"><ac:parameter ac:name="value">보존해야 할 값</ac:parameter><ac:rich-text-body><p>미지원 본문</p></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="excerpt-include"><ac:parameter ac:name="">Missing excerpt</ac:parameter></ac:structured-macro><ac:image><ri:url ri:value="https://example.test/remote.png"/></ac:image><ac:link><ri:page ri:content-title="Missing"/></ac:link>';
   const result = convertLegacyContent(source('confluence-storage', xml), resolver()); canonical(result);
   for (const value of ['javascript:alert(1)', 'dangerous()', '보존해야 할 값', '미지원 본문', 'excerpt-include', 'https://example.test/remote.png', 'Missing']) assert.ok(result.plainText.includes(value), value);
   assert.equal(nodes(result.content, 'image').length, 0); assert.equal(nodes(result.content, 'documentInclude').length, 0);
   assert.ok(result.diagnostics.some(value => value.code === 'UNSAFE_URL')); assert.ok(result.diagnostics.some(value => value.code === 'UNSUPPORTED_MACRO')); assert.ok(result.diagnostics.some(value => value.code === 'REMOTE_IMAGE_NOT_EMBEDDED')); assert.ok(result.diagnostics.some(value => value.code === 'UNRESOLVED_REFERENCE'));
+  assert.ok(result.diagnostics.some(value => value.code === 'UNRESOLVED_EXCERPT_INCLUDE'));
   assert.ok(!nodes(result.content, 'text').some(node => node.marks?.some(mark => mark.type === 'link' && String(mark.attrs?.href).startsWith('javascript:'))));
 });
 

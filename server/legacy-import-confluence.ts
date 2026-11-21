@@ -335,7 +335,24 @@ function analyzeStorage(data:LegacyDataset,row:LegacyRecord,context:StorageConte
     if(node.name==='ac:structured-macro'||node.name==='ac:macro'){
       const name=node.attributes['ac:name']??'(unnamed)';macros.set(name,(macros.get(name)??0)+1);if(!KNOWN_MACROS.has(name))unknown.set(name,(unknown.get(name)??0)+1);
       if(name==='jira'||name==='jiraissues')for(const parameter of node.children.filter(item=>item.name==='ac:parameter'&&['key','issueKey'].includes(item.attributes['ac:name']??''))){const key=parameter.text.trim();if(key)addReference(row,'issue',key,'jira-macro');}
-      if(name==='include'||name==='excerpt-include')for(const parameter of node.children.filter(item=>item.name==='ac:parameter'&&['','page','pageTitle'].includes(item.attributes['ac:name']??''))){if(parameter.children.some(item=>item.name==='ri:page'))continue;const value=parameter.text.trim();if(value){const colon=value.indexOf(':'),spaceKey=colon>0?value.slice(0,colon):'',title=colon>0?value.slice(colon+1):value;pageTarget({name:'ri:page',attributes:{'ri:content-title':title,...(spaceKey?{'ri:space-key':spaceKey}:{})},children:[],text:''},'include-macro');}}
+      if (name === 'include' || name === 'excerpt-include') {
+        const parameters = node.children.filter(item => (
+          item.name === 'ac:parameter' && ['', 'page', 'pageTitle'].includes(item.attributes['ac:name'] ?? '')
+        ) || (name === 'excerpt-include' && (item.name === 'ac:default-parameter' ||
+          item.name === 'ac:parameter' && item.attributes['ac:name'] === 'default-parameter')));
+        for (const parameter of parameters) {
+          if (name === 'include' ? parameter.children.some(item => item.name === 'ri:page') : parameter.children.length > 0) continue;
+          const value = parameter.text.trim();
+          if (!value) continue;
+          const colon = value.indexOf(':');
+          const separator = name === 'include' || /^(?:[A-Za-z0-9]+|~[^\s:]+)$/u.test(value.slice(0, colon)) ? colon : -1;
+          const spaceKey = separator > 0 ? value.slice(0, separator) : '';
+          const title = separator > 0 ? value.slice(separator + 1) : value;
+          if (title) pageTarget({ name: 'ri:page', attributes: {
+            'ri:content-title': name === 'include' ? title : title.trim(), ...(spaceKey ? { 'ri:space-key': spaceKey } : {}),
+          }, children: [], text: '' }, 'include-macro');
+        }
+      }
     }
     if(node.name==='ri:page')pageTarget(node,'page-link');
     if(node.name==='ri:attachment')unresolved.push({kind:'attachment',filename:node.attributes['ri:filename']??'',note:'storage reference retained; filename is not a unique attachment ID'});

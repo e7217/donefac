@@ -123,6 +123,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 11 && backupVersion < 69) fail('문서 발췌를 포함한 백업은 schemaVersion 69가 필요합니다.');
   if (version >= 10 && backupVersion < 67) fail('하위 문서 목록을 포함한 백업은 schemaVersion 67이 필요합니다.');
   if (version >= 9 && backupVersion < 59) fail('라벨별 문서 목록을 포함한 백업은 schemaVersion 59가 필요합니다.');
   if (version >= 8 && backupVersion < 54) fail('본문 목차를 포함한 백업은 schemaVersion 54가 필요합니다.');
@@ -1748,6 +1749,9 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
     const importedTemplates=data.schemaVersion>=63?documentTemplates.validateRestore(data.documentTemplates,data.projects,data.users,data.exportedAt):[];
+    if (data.schemaVersion < 69 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 11)) {
+      fail('문서 발췌가 있는 템플릿에는 schemaVersion 69 백업이 필요합니다.');
+    }
     if (data.schemaVersion < 67 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 10)) {
       fail('하위 문서 목록이 있는 문서 템플릿에는 schemaVersion 67 백업이 필요합니다.');
     }

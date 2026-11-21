@@ -155,3 +155,69 @@
   .doc-revision-chooser-source { padding-inline: 12px; }
   .doc-reference-results > button > time { display: none; }
 }
+
+.document-excerpt-definition {
+  margin: 14px 0;
+  min-width: 0;
+  border: 1px solid #cadcd8;
+  border-radius: 8px;
+}
+
+.document-excerpt-definition.is-selected {
+  outline: 2px solid #80b5a7;
+  outline-offset: 3px;
+}
+
+.document-excerpt-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  padding: 5px 10px;
+  border-bottom: 1px solid #dce8e2;
+  border-radius: 7px 7px 0 0;
+  background: #f1f6f4;
+  color: #385447;
+  font-size: 12px;
+}
+
+.document-excerpt-heading strong {
+  margin-inline-end: auto;
+}
+
+.document-excerpt-body {
+  min-width: 0;
+  padding: 4px 10px;
+  overflow-wrap: anywhere;
+}
+
+.document-excerpt-heading label,
+.document-excerpt-panel-toggle {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding-block: 4px;
+  color: #436858;
+  font-size: 12px;
+}
+
+.document-excerpt-heading input,
+.document-excerpt-panel-toggle input {
+  margin: 0;
+  accent-color: #27806f;
+}
+
+.document-excerpt-panel-toggle {
+  margin-block: 3px;
+}
+
+.doc-included-content.is-panel-hidden {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.doc-included-content.is-panel-hidden > .doc-readonly-content {
+  padding: 0;
+}

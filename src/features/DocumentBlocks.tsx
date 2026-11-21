@@ -1,13 +1,13 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
-import { NodeViewWrapper, ReactNodeViewRenderer, type Editor, type NodeViewProps } from '@tiptap/react';
+import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type Editor, type NodeViewProps } from '@tiptap/react';
 import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
-import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText } from '../../shared/document-nodes';
+import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
@@ -26,7 +26,7 @@ import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
 import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
 
-export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude';
+export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude' | 'documentExcerptInclude';
 export type ReferenceSelection = { kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string };
 const MAX_INCLUDE_DEPTH = 5, TOTAL_INCLUDE_NODES = 4000;
 type Context = { data: WorkspaceSnapshot; documentId: string | null; openIssue: (id: string) => void; openDocument: (id: string) => void; openIssueBlock?: OpenIssueBlock; onListDraftChange?: (id: string, dirty: boolean) => void; includeBudget: number };
@@ -204,15 +204,26 @@ function imageUrl(raw: unknown, pinned?: PinnedSource) {
   return safeUrl(raw, true);
 }
 
-function renderIncluded(context: Context, id: string, label: string, state: RenderState, key: string): ReactNode {
+function renderIncluded(context: Context, id: string, label: string, state: RenderState, key: string, {
+  excerpt = false, noPanel = false,
+}: { excerpt?: boolean; noPanel?: boolean } = {}): ReactNode {
   const document = context.data.documents.find(item => item.id === id);
   if (!document) return <Notice key={key}>포함 문서를 찾을 수 없습니다: {label || id}</Notice>;
   if (state.visited.has(id)) return <Notice key={key}>순환 문서 포함을 중단했습니다: {document.title}</Notice>;
   if (state.includeDepth >= MAX_INCLUDE_DEPTH) return <Notice key={key}>문서 포함 깊이 제한(5단계)에 도달했습니다: {document.title}</Notice>;
+  const definition = excerpt ? findDocumentExcerpt(document.content) : undefined;
+  if (excerpt && !definition) return <Notice key={key}>발췌 구역을 찾을 수 없습니다: {document.title}</Notice>;
   const next = { ...state, documentId: id, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined, excerpt: undefined };
-  const rendered = renderNode(document.content, context, next, `${key}:body`);
+  const body: RichContent = definition ? { type: 'doc', content: definition.content } : document.content;
+  const rendered = renderNode(body, context, next, `${key}:body`);
   state.remaining = next.remaining; state.exhausted = next.exhausted;
-  return <section className="doc-included-content" key={key} aria-label={`포함된 문서 ${document.title}`}>{documentCard(context, id, label, true)}<div className="doc-readonly-content" data-document-outline-root="">{rendered}{state.includeDepth === 0 && state.exhausted && <Notice>포함된 내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div></section>;
+  return <section className={`doc-included-content${noPanel ? ' is-panel-hidden' : ''}`} key={key}
+    aria-label={`${excerpt ? '발췌한 문서' : '포함된 문서'} ${document.title}`}>
+    {!noPanel && documentCard(context, id, label, true)}
+    <div className="doc-readonly-content" data-document-outline-root="">{rendered}
+      {state.includeDepth === 0 && state.exhausted && <Notice>포함된 내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}
+    </div>
+  </section>;
 }
 function excerptMark(content: ReactNode, state: RenderState, key: string) {
   const anchor = state.excerpt?.anchor === key;
@@ -244,7 +255,8 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (node.type === 'documentRevisionInclude' && state.mode !== 'pinned') {
     return pinnedRevision(textAttr(node, 'documentId'), textAttr(node, 'revisionId'), textAttr(node, 'label'), Math.min(state.remaining, context.includeBudget), key);
   }
-  if (state.mode && ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList', 'documentChildList'].includes(node.type)) {
+  if (state.mode && (isLiveDocumentInclude(node.type) ||
+      ['issueReference', 'documentReference', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList', 'documentChildList'].includes(node.type))) {
     return <p className="doc-pinned-reference" key={key}>{documentPlainText(node)}</p>;
   }
   if (node.type === 'issueReference') {
@@ -252,7 +264,10 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     return issueCard(context, id, textAttr(node, 'label'), key, state.includeDepth === 0 && id === state.referenceIssueId);
   }
   if (node.type === 'documentReference') return documentCard(context, textAttr(node, 'documentId'), textAttr(node, 'label'), false, key);
-  if (node.type === 'documentInclude') return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key);
+  if (isLiveDocumentInclude(node.type)) return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key, {
+    excerpt: node.type === 'documentExcerptInclude', noPanel: node.attrs?.noPanel === true,
+  });
+  if (node.type === 'documentExcerpt' && node.attrs?.hidden === true && !state.mode) return null;
   if (node.type === 'documentToc') return <ReadonlyDocumentToc key={key} entries={state.outline} attrs={node.attrs} />;
   if (node.type === 'documentChildList') {
     const options = normalizeDocumentChildListOptions(node.attrs);
@@ -309,6 +324,12 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'taskItem': return <li key={key} className="doc-readonly-task"><input type="checkbox" checked={attrs.checked === true} disabled readOnly aria-label={attrs.checked ? '완료된 할 일' : '미완료 할 일'} /><div>{children}</div></li>;
     case 'blockquote': return <blockquote key={key}>{children}</blockquote>;
     case 'callout': return <ReadonlyCallout key={key} attrs={attrs}>{children}</ReadonlyCallout>;
+    case 'documentExcerpt': return state.mode
+      ? <aside key={key} className="document-excerpt-definition" aria-label="저장된 발췌 구역">
+        <div className="document-excerpt-heading"><strong>발췌 구역{attrs.hidden === true ? ' · 원본 숨김' : ''}</strong></div>
+        <div className="document-excerpt-body">{children}</div>
+      </aside>
+      : <div key={key}>{children}</div>;
     case 'codeBlock': return <pre key={key}><code>{children}</code></pre>;
     case 'hardBreak': return <br key={key} />;
     case 'horizontalRule': return <hr key={key} />;
@@ -379,15 +400,53 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
     <div className="doc-readonly-content" data-document-outline-root="" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }
-function ReferenceNodeView({ node, selected, deleteNode, editor }: NodeViewProps) {
+function ReferenceNodeView({ node, selected, deleteNode, updateAttributes, editor }: NodeViewProps) {
   const context = contextOf(useContext(BlockContext));
   const label = typeof node.attrs.label === 'string' ? node.attrs.label : '';
-  const included = node.type.name === 'documentInclude';
+  const included = isLiveDocumentInclude(node.type.name);
+  const excerpt = node.type.name === 'documentExcerptInclude';
   const pinned = node.type.name === 'documentRevisionInclude';
+  const noPanel = excerpt && node.attrs.noPanel === true;
+  const blockLabel = pinned ? '문서 버전 포함' : excerpt ? '발췌 포함' : included ? '문서 포함' : '참조';
   const state: RenderState = { documentId: context.documentId, remaining: context.includeBudget, exhausted: false, visited: new Set(context.documentId ? [context.documentId] : []), includeDepth: 0, structuralDepth: 0, outline: [] };
   return <NodeViewWrapper className={`doc-reference-node ${selected ? 'is-selected' : ''}`} contentEditable={false} data-teamspace-node={node.type.name} data-reference-id={node.attrs.issueId || node.attrs.documentId}>
-    {node.type.name === 'issueReference' ? issueCard(context, node.attrs.issueId, label) : pinned ? pinnedRevision(node.attrs.documentId, node.attrs.revisionId, label, context.includeBudget, 'pin') : included ? renderIncluded(context, node.attrs.documentId, label, state, 'include') : documentCard(context, node.attrs.documentId, label)}
-    {editor.isEditable && <button className="doc-reference-remove" type="button" aria-label={`${pinned ? '문서 버전 포함' : included ? '문서 포함' : '참조'} 블록 삭제`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (editor.isEditable) deleteNode(); }}><X size={12} /></button>}
+    {node.type.name === 'issueReference' ? issueCard(context, node.attrs.issueId, label) : pinned
+      ? pinnedRevision(node.attrs.documentId, node.attrs.revisionId, label, context.includeBudget, 'pin') : included
+        ? renderIncluded(context, node.attrs.documentId, label, state, 'include', { excerpt, noPanel })
+        : documentCard(context, node.attrs.documentId, label)}
+    {excerpt && editor.isEditable && <label className="document-excerpt-panel-toggle">
+      <input type="checkbox" checked={noPanel} onChange={event => {
+        if (editor.isEditable) updateAttributes({ noPanel: event.target.checked });
+      }} /> 원본 안내 숨기기
+    </label>}
+    {editor.isEditable && <button className="doc-reference-remove" type="button" aria-label={`${blockLabel} 블록 삭제`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); if (editor.isEditable) deleteNode(); }}><X size={12} /></button>}
+  </NodeViewWrapper>;
+}
+function DocumentExcerptNodeView({ node, selected, editor, getPos, updateAttributes }: NodeViewProps) {
+  function unwrapExcerpt() {
+    if (!editor.isEditable) return;
+    const position = getPos();
+    if (typeof position !== 'number') return;
+    const { state, view } = editor;
+    const current = state.doc.nodeAt(position);
+    if (current?.type.name !== 'documentExcerpt') return;
+    const tr = state.tr.replaceWith(position, position + current.nodeSize, current.content);
+    tr.setSelection(TextSelection.near(tr.doc.resolve(position)));
+    view.dispatch(tr);
+    view.focus();
+  }
+
+  return <NodeViewWrapper as="section" className={`document-excerpt-definition${selected ? ' is-selected' : ''}`}
+    data-teamspace-node="documentExcerpt" aria-label="발췌 구역">
+    <div className="document-excerpt-heading" contentEditable={false}>
+      <strong>발췌 구역</strong>
+      {editor.isEditable && <>
+        <label><input type="checkbox" checked={node.attrs.hidden === true}
+          onChange={event => { if (editor.isEditable) updateAttributes({ hidden: event.target.checked }); }} /> 원본에서 숨기기</label>
+        <button className="btn btn-ghost" type="button" onClick={unwrapExcerpt}>발췌 구역 해제</button>
+      </>}
+    </div>
+    <NodeViewContent className="document-excerpt-body" />
   </NodeViewWrapper>;
 }
 function IssueBlockNodeView({ node, selected, getPos, deleteNode, editor }: NodeViewProps) {
@@ -451,12 +510,29 @@ export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExten
     return ReactNodeViewRenderer(DocumentChildListNodeView);
   } }) : extension.name === 'documentLabelList' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentLabelListNodeView);
-  } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
+  } }) : extension.name === 'documentExcerpt' ? extension.extend({ addNodeView() {
+    return ReactNodeViewRenderer(DocumentExcerptNodeView);
+  } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : (isLiveDocumentInclude(extension.name) || ['issueReference', 'documentReference', 'documentRevisionInclude'].includes(extension.name)) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
     addNodeView(): NodeViewRenderer { return ({ node }) => { const dom = document.createElement('details'); dom.open = true; dom.className = 'doc-details-block'; dom.dataset.teamspaceNode = 'details'; return { dom, contentDOM: dom, update: updated => updated.type === node.type, ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom && mutation.attributeName === 'open' }; }; },
     addKeyboardShortcuts() { return { Enter: () => detailsBody(this.editor), ArrowDown: () => this.editor.state.selection.$from.parentOffset === this.editor.state.selection.$from.parent.content.size && detailsBody(this.editor) }; },
   }) : decorateDocumentAnnotation(extension));
 }
 export function insertDetails(editor: Editor | null) { return editor?.chain().focus().insertContent({ type: 'details', content: [{ type: 'detailsSummary', content: [{ type: 'text', text: '내용 더 보기' }] }, { type: 'detailsContent', content: [{ type: 'paragraph' }] }] }).run(); }
+export function insertDocumentExcerpt(editor: Editor) {
+  if (!editor.isEditable) return false;
+  if (!editor.state.selection.empty) return editor.chain().focus().wrapIn('documentExcerpt', { hidden: false }).run();
+  return editor.chain().focus().insertContent([
+    { type: 'documentExcerpt', attrs: { hidden: false }, content: [{ type: 'paragraph' }] },
+    { type: 'paragraph' },
+  ]).command(({ tr }) => {
+    tr.doc.descendants((node, position) => {
+      if (node.type.name !== 'documentExcerpt') return;
+      tr.setSelection(TextSelection.near(tr.doc.resolve(position + 2)));
+      return false;
+    });
+    return true;
+  }).run();
+}
 export function unfoldDetails(editor: Editor | null) { if (!editor) return; for (const element of editor.view.dom.querySelectorAll<HTMLDetailsElement>('details[data-teamspace-node="details"]')) element.open = true; }
 export function unwrapDetails(editor: Editor | null) {
   if (!editor) return false;
@@ -523,6 +599,7 @@ function RevisionChoices({ source, onBack, onChoose }: { source: DocPage; onBack
 export function ReferenceChooser({ selection, onClose, notify }: { selection: ReferenceSelection; onClose: () => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
   const context = contextOf(useContext(BlockContext)), [query, setQuery] = useState('');
   const [source, setSource] = useState<DocPage | null>(null);
+  const [noPanel, setNoPanel] = useState(false);
   const bookmark = useRef(selection.bookmark);
   useEffect(() => {
     const map = ({ transaction }: { transaction: Transaction }) => { bookmark.current = bookmark.current.map(transaction.mapping); };
@@ -532,15 +609,19 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
     return () => { selection.editor.off('transaction', map); window.removeEventListener('keydown', escape); };
   }, [selection.editor, onClose]);
   const issueMode = selection.kind === 'issueReference', includeMode = selection.kind === 'documentInclude', pinnedMode = selection.kind === 'documentRevisionInclude';
-  const dialogLabel = issueMode ? '업무 참조 삽입' : includeMode ? '문서 포함 삽입' : pinnedMode ? '문서 버전 포함 삽입' : '문서 참조 삽입';
-  const heading = issueMode ? '업무를 참조하세요' : includeMode ? '문서 내용을 포함하세요' : pinnedMode ? '포함할 문서 버전을 고르세요' : '문서를 참조하세요';
-  const description = includeMode ? '원본을 읽기 전용으로 표시합니다. 변경된 내용은 참조 새로고침으로 불러오세요.' : pinnedMode ? '문서를 고른 뒤 그 문서의 저장 버전을 선택하세요.' : '이름이 바뀌어도 같은 항목을 가리킵니다.';
-  const results = issueMode ? context.data.issues.filter(issue => issueSearchText(context.data, issue).toLowerCase().includes(query.toLowerCase())).slice(0, 40) : context.data.documents.filter(page => `${page.title} ${page.plainText}`.toLowerCase().includes(query.toLowerCase())).slice(0, 40);
+  const excerptMode = selection.kind === 'documentExcerptInclude';
+  const dialogLabel = excerptMode ? '문서 발췌 포함' : issueMode ? '업무 참조 삽입' : includeMode ? '문서 포함 삽입' : pinnedMode ? '문서 버전 포함 삽입' : '문서 참조 삽입';
+  const heading = excerptMode ? '발췌할 문서를 고르세요' : issueMode ? '업무를 참조하세요' : includeMode ? '문서 내용을 포함하세요' : pinnedMode ? '포함할 문서 버전을 고르세요' : '문서를 참조하세요';
+  const description = includeMode || excerptMode ? '원본을 읽기 전용으로 표시합니다. 변경된 내용은 참조 새로고침으로 불러오세요.' : pinnedMode ? '문서를 고른 뒤 그 문서의 저장 버전을 선택하세요.' : '이름이 바뀌어도 같은 항목을 가리킵니다.';
+  const search = query.toLowerCase();
+  const results = issueMode ? context.data.issues.filter(issue => issueSearchText(context.data, issue).toLowerCase().includes(search)).slice(0, 40)
+    : context.data.documents.filter(page => `${page.title} ${page.plainText}`.toLowerCase().includes(search) &&
+      (!excerptMode || Boolean(findDocumentExcerpt(page.content)))).slice(0, 40);
   function insert(id: string, label: string, revisionId?: string) {
     if (!selection.editor.isEditable || selection.editor.isDestroyed || context.documentId !== selection.documentId) { notify('현재 편집할 문서를 다시 확인해주세요.', 'error'); return; }
     try {
       const resolved = bookmark.current.resolve(selection.editor.state.doc);
-      const attrs = { [issueMode ? 'issueId' : 'documentId']: id, label, ...(revisionId ? { revisionId } : {}) };
+      const attrs = { [issueMode ? 'issueId' : 'documentId']: id, label, ...(revisionId ? { revisionId } : {}), ...(excerptMode ? { noPanel } : {}) };
       const success = selection.editor.chain().focus().command(({ tr }) => { tr.setSelection(resolved); return true; }).insertContent([{ type: selection.kind, attrs }, { type: 'paragraph' }]).run();
       if (!success) throw new Error('이 위치에는 참조 블록을 넣을 수 없습니다.');
       onClose();
@@ -551,16 +632,18 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
       <header><div><h3>{heading}</h3><p>{description}</p></div><button type="button" className="btn btn-ghost" aria-label="참조 삽입 닫기" onClick={onClose}><X size={16} /></button></header>
       {source ? <RevisionChoices key={source.id} source={source} onBack={() => setSource(null)} onChoose={revision => insert(source.id, revision.title, revision.id)} /> : <>
         <label><Search size={15} /><input className="field" aria-label="참조할 항목 검색" placeholder={issueMode ? '업무 번호, 제목, 속성 검색' : '문서 제목 또는 내용 검색'} autoFocus value={query} onChange={event => setQuery(event.target.value)} /></label>
+        {excerptMode && <label className="document-excerpt-panel-toggle"><input type="checkbox" checked={noPanel}
+          onChange={event => setNoPanel(event.target.checked)} /> 원본 안내 숨기기</label>}
         <div className="doc-reference-results">
           {results.map(item => {
             const issue = 'key' in item ? item : null, page = issue ? null : item as DocPage;
-            const cycle = !!page && includeMode && createsIncludeCycle(context.data, selection.documentId, page.id);
+            const cycle = !!page && (includeMode || excerptMode) && createsIncludeCycle(context.data, selection.documentId, page.id);
             return <button type="button" key={item.id} disabled={cycle} title={cycle ? '자기 자신 또는 순환하는 문서는 포함할 수 없습니다.' : undefined}
               onClick={() => { if (pinnedMode && page) setSource(page); else insert(item.id, issue ? `${issue.key} ${issue.title}` : item.title); }}>
               <span>{issue?.key || context.data.projects.find(project => project.id === page?.projectId)?.name || '팀 공통 문서'}</span><strong>{item.title}</strong>{cycle ? <small>순환 포함 불가</small> : <ChevronRight size={15} />}
             </button>;
           })}
-          {!results.length && <p>조건에 맞는 항목이 없습니다.</p>}
+          {!results.length && <p>{excerptMode ? '조건에 맞는 발췌 문서가 없습니다.' : '조건에 맞는 항목이 없습니다.'}</p>}
         </div>
       </>}
     </section>

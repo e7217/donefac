@@ -7,7 +7,7 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 10;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 11;
 export type DocumentTocLevel = 1 | 2 | 3;
 export type DocumentTocLayout = 'list' | 'flat';
 export interface DocumentTocOptions {
@@ -34,11 +34,12 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
   neutral: '기본', blue: '파랑', green: '초록', amber: '주황', red: '빨강', purple: '보라',
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
-const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
+const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'documentExcerptInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentExcerpt' || nodeType === 'documentExcerptInclude') return 11;
   if (nodeType === 'documentChildList') return 10;
   if (nodeType === 'documentLabelList') return 9;
   if (nodeType === 'documentToc') return 8;
@@ -48,6 +49,15 @@ export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<strin
   if (nodeType === 'issueSummary') return 4;
   if (nodeType === 'issueList') return 3;
   return versionTwoNodes.has(nodeType) ? 2 : 1;
+}
+
+export function isLiveDocumentInclude(type: string): boolean {
+  return type === 'documentInclude' || type === 'documentExcerptInclude';
+}
+
+export function findDocumentExcerpt(content: RichContent): RichContent | undefined {
+  for (const node of documentNodes(content)) if (node.type === 'documentExcerpt') return node;
+  return undefined;
 }
 
 export function documentContentSchemaVersion(content: RichContent): DocumentSchemaVersion {
@@ -135,6 +145,37 @@ function referenceNode(name: string, idAttribute: string, label: string) {
 export const IssueReference = referenceNode('issueReference', 'issueId', '업무 참조');
 export const DocumentReference = referenceNode('documentReference', 'documentId', '문서 참조');
 export const DocumentInclude = referenceNode('documentInclude', 'documentId', '문서 포함');
+export const DocumentExcerptInclude = referenceNode('documentExcerptInclude', 'documentId', '문서 발췌 포함').extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      noPanel: {
+        default: false,
+        parseHTML: element => element.getAttribute('data-no-panel') === 'true',
+        renderHTML: attributes => ({ 'data-no-panel': attributes.noPanel ? 'true' : 'false' }),
+      },
+    };
+  },
+});
+export const DocumentExcerpt = Node.create({
+  name: 'documentExcerpt',
+  group: 'block',
+  content: 'block+',
+  defining: true,
+  addAttributes() {
+    return {
+      hidden: {
+        default: false,
+        parseHTML: element => element.getAttribute('data-excerpt-hidden') === 'true',
+        renderHTML: attributes => ({ 'data-excerpt-hidden': attributes.hidden ? 'true' : 'false' }),
+      },
+    };
+  },
+  parseHTML() { return [{ tag: 'div[data-teamspace-node="documentExcerpt"]' }]; },
+  renderHTML({ HTMLAttributes }) {
+    return ['div', mergeAttributes(HTMLAttributes, { 'data-teamspace-node': 'documentExcerpt' }), 0];
+  },
+});
 export const DocumentRevisionInclude = referenceNode('documentRevisionInclude', 'documentId', '문서 버전 포함').extend({
   addAttributes() {
     return {
@@ -343,7 +384,10 @@ export const StatusBadge = Node.create({
 });
 
 export function documentNodeExtensions() {
-  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList, DocumentChildList];
+  return [
+    IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, DocumentExcerpt, DocumentExcerptInclude,
+    IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList, DocumentChildList,
+  ];
 }
 
 export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {
@@ -375,7 +419,7 @@ export function contentReferences(content: RichContent): ContentReference[] {
     if (typeof id !== 'string' || !id) continue;
     const pinned = node.type === 'documentRevisionInclude';
     const revisionId = pinned && typeof node.attrs?.revisionId === 'string' ? node.attrs.revisionId : undefined;
-    references.push({ type, id, kind: pinned || node.type === 'documentInclude' ? 'include' : 'reference',
+    references.push({ type, id, kind: pinned || isLiveDocumentInclude(node.type) ? 'include' : 'reference',
       label: typeof node.attrs?.label === 'string' ? node.attrs.label : '', ...(revisionId ? { revisionId } : {}) });
   }
   return references;
@@ -397,6 +441,7 @@ export function documentPlainText(node: RichContent): string {
     const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');
     const label = String(node.attrs?.label || id);
     if (node.type === 'documentRevisionInclude') return `[문서 버전 포함: ${label} (${id} @ ${String(node.attrs?.revisionId || '')})]`;
+    if (node.type === 'documentExcerptInclude') return `[문서 발췌 포함: ${label} (${id})]`;
     return `[${node.type === 'issueReference' ? '업무' : node.type === 'documentInclude' ? '문서 포함' : '문서'}: ${label} (${id})]`;
   }
   if (node.type === 'issueList' || node.type === 'issueSummary') {

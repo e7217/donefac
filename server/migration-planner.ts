@@ -124,12 +124,17 @@ const lossyConfluenceCalloutConversions = new Set([
   'CALLOUT_PRESENTATION_UNSUPPORTED', 'CALLOUT_TITLE_UNSUPPORTED',
   'STATUS_COLOR_UNSUPPORTED', 'STATUS_LABEL_UNSUPPORTED', 'STATUS_PRESENTATION_UNSUPPORTED',
 ]);
+const lossyConfluenceExcerptConversions = new Set([
+  'EXCERPT_PARAMETERS_UNSUPPORTED', 'EXCERPT_FIRST_DEFINITION_UNAVAILABLE',
+  'EXCERPT_INCLUDE_PARAMETERS_UNSUPPORTED', 'UNRESOLVED_EXCERPT_INCLUDE',
+]);
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
   'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
   'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'LEGACY_TOC_REPRESENTATION',
   'LEGACY_LABEL_LIST_REPRESENTATION', 'CHILD_LIST_PARAMETERS_UNSUPPORTED', 'CHILD_LIST_SCOPE_UNRESOLVED',
-  'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', ...lossyConfluenceCalloutConversions,
+  'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
+  ...lossyConfluenceCalloutConversions, ...lossyConfluenceExcerptConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -139,6 +144,14 @@ function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>
 
 function hasConfluenceBody(record: LegacyRecord): boolean {
   return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
+}
+
+function hasConfluenceExcerptMacro(record: LegacyRecord): boolean {
+  const macros = record.metadata.macros;
+  return Array.isArray(macros) && macros.some(macro => {
+    const { name } = object(macro);
+    return name === 'excerpt' || name === 'excerpt-include';
+  });
 }
 
 function previousConfluencePageFieldDigests(archive: SourceRecordArchive, currentContent: DocPage['content']): ConfluenceMigrationPageFieldHashes {
@@ -156,13 +169,17 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     const currentHash = confluencePageFieldDigest('content', currentContent);
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
       // An older document can still exactly match a former renderer's conversion.
-      const earlierContent = { legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
-      for (const legacyOptions of [{}, earlierContent, { ...earlierContent, legacyAnnotations: true }]) {
-        const legacy = convertLegacyContent(record, { resolveReference, legacyDocumentChildList: true, ...legacyOptions });
+      const earlierContent = { legacyDocumentChildList: true, legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
+      const legacyOptions = [
+        ...(hasConfluenceExcerptMacro(record) ? [{}] : []),
+        { legacyDocumentChildList: true }, earlierContent, { ...earlierContent, legacyAnnotations: true },
+      ];
+      for (const options of legacyOptions) {
+        const legacy = convertLegacyContent(record, { resolveReference, legacyDocumentExcerpt: true, ...options });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
           !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION',
-            'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION'].includes(item.code)) });
+            'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION'].includes(item.code)) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -883,16 +900,18 @@ class Planner{
       if (newer && (!title || title.length > 300)) {
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
-      const bodyChanged = newer && hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
-      const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
+      const needsBodyReview = newer && hasConfluenceBody(row) &&
+        (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row));
+      const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
           resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
           resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, append.project.id) }) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
-      if (bodyChanged && !safeBody) {
+      if (needsBodyReview && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
-          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
+          if (lossyConfluenceCalloutConversions.has(diagnostic.code) || lossyConfluenceExcerptConversions.has(diagnostic.code) ||
+            ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
             'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_PARAMETERS_UNSUPPORTED',
             'CHILD_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_EXCERPT_UNSUPPORTED'].includes(diagnostic.code)) {
             this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test as base, type APIRequestContext, type Page } from '@playwright/test';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes';
 import type { DocPage, DocRevision, DocumentTreeMovePreview, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 const paragraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
@@ -136,7 +137,7 @@ test('360px에서 하위 문서 목록을 저장하고 계층 이동·이름 변
   await page.locator('.docs-save-button').click();
   const saved = await pending;
   expect(saved.status(), await saved.text()).toBe(200);
-  expect(saved.request().postDataJSON().contentSchemaVersion).toBe(10);
+  expect(saved.request().postDataJSON().contentSchemaVersion).toBe(DOCUMENT_CONTENT_SCHEMA_VERSION);
   const savedDocument = await saved.json() as DocPage;
   expect(savedDocument.content.content?.find(node => node.type === 'documentChildList')?.attrs).toMatchObject({
     scope: 'current', documentId: null, projectId: null, depth: 2, first: 1, sort: 'title', descending: true, style: 'list', title: '배포 절차 색인',

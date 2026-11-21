@@ -31,7 +31,8 @@ export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'c
 }
 
 export function hasDocumentAnnotations(node: RichContent): boolean {
-  return node.type === 'callout' || node.type === 'statusBadge' || (node.content?.some(hasDocumentAnnotations) ?? false);
+  return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude'].includes(node.type) ||
+    (node.content?.some(hasDocumentAnnotations) ?? false);
 }
 
 function escapeHtml(value: string) {
@@ -122,6 +123,17 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
     case 'issueReference': return `[${String(node.attrs?.label || node.attrs?.issueId || '업무').replace(/([\\\[\]])/g, '\\$1')}](#/all/issues?issue=${encodeURIComponent(String(node.attrs?.issueId || ''))})\n\n`;
     case 'documentReference': return `[${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
     case 'documentInclude': return `> 문서 포함: [${String(node.attrs?.label || node.attrs?.documentId || '문서').replace(/([\\\[\]])/g, '\\$1')}](#/all/documents/${encodeURIComponent(String(node.attrs?.documentId || ''))})\n\n`;
+    case 'documentExcerpt': {
+      const title = node.attrs?.hidden === true ? '**발췌 구역 · 원본 숨김**' : '**발췌 구역**';
+      const body = inline().trim();
+      return [title, ...(body ? ['', ...body.split('\n')] : [])].map(line => line ? `> ${line}` : '>').join('\n') + '\n\n';
+    }
+    case 'documentExcerptInclude': {
+      const id = String(node.attrs?.documentId ?? '');
+      const label = String(node.attrs?.label || id || '문서').replace(/\s+/g, ' ').replace(/([\\`*_\[\]<>])/g, '\\$1');
+      const href = encodeURIComponent(id).replace(/\(/g, '%28').replace(/\)/g, '%29');
+      return `> 문서 발췌 포함 · [${label}](#/all/documents/${href})${node.attrs?.noPanel === true ? ' · 원본 안내 숨김' : ''}\n\n`;
+    }
     case 'documentRevisionInclude': {
       const documentId = encodeURIComponent(String(node.attrs?.documentId || ''));
       const revisionId = encodeURIComponent(String(node.attrs?.revisionId || ''));
