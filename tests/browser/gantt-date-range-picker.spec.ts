@@ -151,3 +151,146 @@ test('360px에서 간트 날짜를 키보드로 고르고 이미 저장한 날�
     await removeIssues(request, issues);
   }
 });
+
+test('360px 주·월 간트에서 저장한 양끝을 차트로 다시 선택하고 취소·적용·되돌리기 한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project] } = await workspace(request);
+  const prefix = `차트 일정 다시 선택 ${randomUUID()}`;
+  const date = datesNearToday();
+  const original = { startDate: date(-1), endDate: date(1) };
+  const replacement = { startDate: date(3), endDate: date(6) };
+  const issues: Issue[] = [];
+  try {
+    const issue = await createIssue(request, issues, project.id, prefix, original);
+    const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { chart, picker, day, prompt, preview, undo } = await openChart(page, project.id, prefix, date(-3));
+    const opener = picker(issue);
+    const scale = (label: string) => page.locator('.gantt-zoom').getByRole('button', { name: label, exact: true });
+    const weekday = chart.locator(`.gantt-days > span[data-date="${original.startDate}"] > small`);
+    const originalWeekday = ['일', '월', '화', '수', '목', '금', '토'][new Date(original.startDate).getUTCDay()];
+    const status = prompt.getByRole('status');
+    const originalIssue = { ...original, version: issue.version };
+
+    await scale('월').click();
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill(date(20));
+    await expect(chart.locator(`.gantt-days > span[data-date="${original.startDate}"]`)).toHaveCount(0);
+    await chart.scrollIntoViewIfNeeded();
+    await expect(opener).toBeInViewport();
+    await expect(weekday).toHaveCount(0);
+    await opener.press('Enter');
+    await expect(prompt).toBeVisible();
+    await expect(weekday).toHaveText(originalWeekday);
+    await expect(day(issue, original.startDate)).toBeFocused();
+    await expect(day(issue, date(-2))).toBeEnabled();
+    await day(issue, replacement.endDate).tap();
+    await expect(status).toContainText(`첫 날짜 ${replacement.endDate}`);
+    await expect(preview).toHaveCount(0);
+    expect(await stored()).toMatchObject(originalIssue);
+    await page.keyboard.press('Escape');
+    await expect(prompt).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await expect(scale('월')).toHaveClass(/active/);
+    await expect(weekday).toHaveCount(0);
+
+    await opener.click();
+    await day(issue, replacement.endDate).tap();
+    await day(issue, replacement.startDate).tap();
+    await expect(preview).toBeVisible();
+    await expect(preview).toBeFocused();
+    const reviewRow = preview.getByRole('row').filter({ hasText: issue.key });
+    await expect(reviewRow.getByRole('cell').nth(1)).toHaveText(new RegExp(`^${original.startDate}\\s*${original.endDate}$`));
+    await expect(reviewRow.locator('.gantt-new-dates')).toHaveText(new RegExp(`^${replacement.startDate}\\s*${replacement.endDate}$`));
+    expect(await stored()).toMatchObject(originalIssue);
+    await preview.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(preview).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await expect(scale('월')).toHaveClass(/active/);
+    await expect(weekday).toHaveCount(0);
+    expect(await stored()).toMatchObject(originalIssue);
+
+    await scale('주').click();
+    await opener.tap();
+    await expect(weekday).toHaveText(originalWeekday);
+    await day(issue, replacement.startDate).tap();
+    await expect(preview).toHaveCount(0);
+    await day(issue, replacement.endDate).tap();
+    await expect(reviewRow.locator('.gantt-new-dates')).toHaveText(new RegExp(`^${replacement.startDate}\\s*${replacement.endDate}$`));
+    expect(await stored()).toMatchObject(originalIssue);
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    await expect.poll(stored).toMatchObject({ ...replacement, version: issue.version + 1 });
+    await expect(preview).toHaveCount(0);
+    await expect(scale('주')).toHaveClass(/active/);
+    await expect(weekday).toHaveCount(0);
+    await undo.click();
+    await expect.poll(stored).toMatchObject({ ...original, version: issue.version + 2 });
+
+    const afterUndo = await stored();
+    await opener.click();
+    await day(issue, original.startDate).tap();
+    await day(issue, original.endDate).tap();
+    await expect(page.getByText('현재 일정과 같은 날짜입니다.', { exact: true })).toBeVisible();
+    await expect(prompt).toHaveCount(0);
+    await expect(preview).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    expect(await stored()).toEqual(afterUndo);
+  } finally {
+    await removeIssues(request, issues);
+  }
+});
+
+test('다른 탭에서 바꾼 일정은 덮어쓰지 않고 다시 선택할 때 최신 범위를 검토한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project] } = await workspace(request);
+  const title = `차트 일정 동시 변경 ${randomUUID()}`;
+  const date = datesNearToday();
+  const original = { startDate: date(-1), endDate: date(1) };
+  const competing = { startDate: date(0), endDate: date(2) };
+  const proposed = { startDate: date(3), endDate: date(6) };
+  const issues: Issue[] = [];
+  try {
+    const issue = await createIssue(request, issues, project.id, title, original);
+    const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { picker, day, preview } = await openChart(page, project.id, title, date(-3));
+    const openProposal = async () => {
+      await picker(issue).click();
+      await day(issue, proposed.startDate).click();
+      await day(issue, proposed.endDate).click();
+      await expect(preview).toBeVisible();
+    };
+    const row = preview.getByRole('row').filter({ hasText: issue.key });
+    const calendarRange = (dates: typeof original) => new RegExp(`^${dates.startDate}\\s*${dates.endDate}$`);
+    await openProposal();
+    await expect(row.getByRole('cell').nth(1)).toHaveText(calendarRange(original));
+
+    const otherTab = await page.context().newPage();
+    try {
+      await otherTab.goto(`/#/${project.id}/gantt`);
+      await otherTab.getByLabel('간트 업무 검색', { exact: true }).fill(title);
+      const start = otherTab.getByLabel(`${issue.key} 시작일`, { exact: true });
+      const end = otherTab.getByLabel(`${issue.key} 종료일`, { exact: true });
+      await start.fill(competing.startDate);
+      await end.fill(competing.endDate);
+      await end.press('Enter');
+      await expect.poll(stored).toMatchObject(competing);
+    } finally { await otherTab.close(); }
+
+    const conflict = page.waitForResponse(response => response.url().endsWith('/api/schedule/apply') && response.request().method() === 'POST');
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    const result = await conflict;
+    expect(result.status()).toBe(409);
+    expect(result.request().postDataJSON()).toMatchObject({ changes: [{ id: issue.id, expectedVersion: issue.version, ...proposed }] });
+    await expect(preview.getByRole('alert')).toBeVisible();
+    await expect(row.getByRole('cell').nth(1)).toHaveText(calendarRange(original));
+    await expect(row.locator('.gantt-new-dates')).toHaveText(calendarRange(proposed));
+    expect(await stored()).toMatchObject(competing);
+    await preview.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(picker(issue)).toBeFocused();
+    await expect(page.getByLabel('간트 업무 검색', { exact: true })).toHaveValue(title);
+    await openProposal();
+    await expect(row.getByRole('cell').nth(1)).toHaveText(calendarRange(competing));
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    await expect.poll(stored).toMatchObject(proposed);
+  } finally {
+    await removeIssues(request, issues);
+  }
+});

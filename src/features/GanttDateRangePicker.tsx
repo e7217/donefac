@@ -4,21 +4,25 @@ import { useEffect, useEffectEvent, useId, useRef, useState, type KeyboardEvent 
 import { isoDay, todayDate } from './schedule-utils';
 import './gantt-date-range-picker.css';
 
+export type FixedDateEdge = { kind: 'start' | 'end'; date: string };
+
 type DateRangePromptProps = {
   issueKey: string;
   issueTitle: string;
-  fixedEdge?: { kind: 'start' | 'end'; date: string };
+  fixedEdge?: FixedDateEdge;
+  currentRange?: { start: string; end: string };
   firstDate: string | null;
   onReset: () => void;
   onCancel: () => void;
 };
 
-export function GanttDateRangePrompt({ issueKey, issueTitle, fixedEdge, firstDate, onReset, onCancel }: DateRangePromptProps) {
+export function GanttDateRangePrompt({ issueKey, issueTitle, fixedEdge, currentRange, firstDate, onReset, onCancel }: DateRangePromptProps) {
   const nextDate = fixedEdge ? fixedEdge.kind === 'end' ? '시작일' : '종료일' : firstDate ? '나머지 날짜' : '첫 날짜';
   return (
     <section className="gantt-date-range-prompt" aria-label="차트 날짜 선택">
       <div className="gantt-date-range-instructions">
         <strong>{issueKey} · {issueTitle}</strong>
+        {currentRange && <p>현재 일정 {currentRange.start} ~ {currentRange.end}</p>}
         <p role="status" aria-atomic="true">
           {fixedEdge ? <>{fixedEdge.kind === 'start' ? '시작일' : '종료일'} {fixedEdge.date} 유지 · </>
             : firstDate && <>첫 날짜 {firstDate} · </>}

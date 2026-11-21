@@ -39,7 +39,7 @@ import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityE
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDependencyFindings';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
-import { GanttDateRangeLane, GanttDateRangePrompt } from './GanttDateRangePicker';
+import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
 import './issues.css';
 import './gantt.css';
@@ -69,7 +69,7 @@ type DependencyEditor = {
   opener: HTMLButtonElement;
 };
 type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolean };
-type DateRangePick = { issue: Issue; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
+type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
 type TimelineRange = { start: number; end: number };
@@ -107,6 +107,11 @@ function focusGanttDate(chart: Element | null, issueId: string, edge: 'start' | 
 
 function focusDateFromControl(control: HTMLButtonElement, issue: Issue, edge: 'start' | 'end' = issue.startDate ? 'end' : 'start') {
   focusGanttDate(control.closest('.gantt-feature'), issue.id, edge);
+}
+
+function getFixedDateEdge({ startDate, endDate }: Issue): FixedDateEdge | undefined {
+  if (startDate && !endDate) return { kind: 'start', date: startDate };
+  if (endDate && !startDate) return { kind: 'end', date: endDate };
 }
 
 export function Gantt(props: GanttProps) {
@@ -545,7 +550,14 @@ function ProjectGantt(props: GanttProps) {
       finally { restoreDatePreviewFocus(); }
       notify(`${value.changes.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 의존성 경고를 확인하세요.' : ''}`);
       return result;
-    } catch (err) { if (preview) setPreviewError(errorMessage(err)); notify(errorMessage(err), 'error'); return null; } finally { markBusy(false); }
+    } catch (err) {
+      if (preview) {
+        setPreviewError(errorMessage(err));
+        if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => {});
+      }
+      notify(errorMessage(err), 'error');
+      return null;
+    } finally { markBusy(false); }
   }
   async function saveDates(issue: Issue, startDate: string | null, endDate: string | null) {
     if (startDate === issue.startDate && endDate === issue.endDate) return issue;
@@ -750,14 +762,14 @@ function ProjectGantt(props: GanttProps) {
   }
   function startDatePicking(issue: Issue, opener: HTMLButtonElement) {
     if (busyRef.current || !canLeave()) return;
-    const fixed = issue.startDate || issue.endDate;
-    const initialDay = fixed ? dayNumber(fixed) : Math.min(range.end, Math.max(range.start, dayNumber(todayDate())));
+    const anchor = issue.startDate || issue.endDate;
+    const initialDay = anchor ? dayNumber(anchor) : Math.min(range.end, Math.max(range.start, dayNumber(todayDate())));
     queueMicrotask(() => {
       setDrag(null);
       setLinkPicker(null);
       setShiftOpen(false);
-      if (fixed && outside(fixed)) setWindowStart(windowForDate(fixed));
-      setDatePicker({ issue, firstDate: null, initialDay, opener });
+      if (anchor && outside(anchor)) setWindowStart(windowForDate(anchor));
+      setDatePicker({ issue, fixedEdge: getFixedDateEdge(issue), firstDate: null, initialDay, opener });
     });
   }
   function cancelDatePicking() {
@@ -768,24 +780,33 @@ function ProjectGantt(props: GanttProps) {
     if (!activeDatePicker) return;
     setDatePicker({ ...activeDatePicker, firstDate: null });
   }
-  function datePickerTrigger(issue: Issue, className: string) {
-    return <button type="button" className={className} aria-label={`${issue.key} 차트에서 날짜 선택`} data-date-picker-issue={issue.id}
-      disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => startDatePicking(issue, event.currentTarget)}>
-      <CalendarRange size={13} aria-hidden="true" />차트에서 날짜 선택
+  function datePickerTrigger(issue: Issue, className: string, iconOnly = false) {
+    const label = '차트에서 날짜 선택';
+    return <button type="button" className={className} aria-label={`${issue.key} ${label}`} title={iconOnly ? label : undefined}
+      data-date-picker-issue={issue.id} data-schedule-owner={issue.id} disabled={busy || Boolean(linkPicker || activeDatePicker)}
+      onPointerDown={event => {
+        if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
+      }} onClick={event => startDatePicking(issue, event.currentTarget)}>
+      <CalendarRange size={iconOnly ? 16 : 13} aria-hidden="true" />{!iconOnly && label}
     </button>;
   }
   function chooseIssueDate(day: number) {
     if (!activeDatePicker || busyRef.current) return;
-    const { issue, firstDate, opener } = activeDatePicker;
+    const { issue, fixedEdge, firstDate, opener } = activeDatePicker;
     const date = isoDay(day);
-    if (!issue.startDate && !issue.endDate && !firstDate) {
+    if (!fixedEdge && !firstDate) {
       setDatePicker({ ...activeDatePicker, firstDate: date });
       return;
     }
-    const toStart = issue.startDate ?? (firstDate && firstDate < date ? firstDate : date);
-    const toEnd = issue.endDate ?? (firstDate && firstDate > date ? firstDate : date);
+    const toStart = fixedEdge?.kind === 'start' ? fixedEdge.date : firstDate && firstDate < date ? firstDate : date;
+    const toEnd = fixedEdge?.kind === 'end' ? fixedEdge.date : firstDate && firstDate > date ? firstDate : date;
     if (toStart > toEnd) return;
     setDatePicker(null);
+    if (toStart === issue.startDate && toEnd === issue.endDate) {
+      focusAfterDatePicking(opener);
+      notify('현재 일정과 같은 날짜입니다.');
+      return;
+    }
     setDatePreviewFocusTarget(opener);
     previewIssueDates(issue, toStart, toEnd);
   }
@@ -956,11 +977,11 @@ function ProjectGantt(props: GanttProps) {
     {workloadView === 'team' && <TeamWorkload key={draftEpoch} {...props} initialStartDate={isoDay(range.start)}
       onDraftChange={trackDraft} onBeforeLevel={canOpenWorkloadLevel} scheduleBusy={busy} onScheduleApplied={onWorkloadLevelApplied} />}
     {activeDatePicker && <GanttDateRangePrompt issueKey={activeDatePicker.issue.key} issueTitle={activeDatePicker.issue.title}
-      fixedEdge={activeDatePicker.issue.startDate ? { kind:'start', date:activeDatePicker.issue.startDate }
-        : activeDatePicker.issue.endDate ? { kind:'end', date:activeDatePicker.issue.endDate } : undefined}
+      fixedEdge={activeDatePicker.fixedEdge} currentRange={activeDatePicker.issue.startDate && activeDatePicker.issue.endDate
+        ? { start: activeDatePicker.issue.startDate, end: activeDatePicker.issue.endDate } : undefined}
       firstDate={activeDatePicker.firstDate} onReset={resetDatePicking} onCancel={cancelDatePicking} />}
     <div className="gantt-scroll" ref={scrollRef} tabIndex={-1} role="region" aria-label="간트 차트"><div className="gantt-canvas" style={{ width: LEFT_WIDTH + timelineWidth, '--gantt-day-width': `${dayWidth}px` } as CSSProperties}>
-      <div className="gantt-chart-header"><div className="gantt-left gantt-left-header"><label><input type="checkbox" aria-label="표시된 업무 전체 선택" checked={issues.length > 0 && issues.every(i => selected.has(i.id))} onChange={e => setSelected(e.target.checked ? new Set(issues.map(i => i.id)) : new Set())} /></label><span>업무 <small>{issues.length}</small></span><span>시작일</span><span>종료일</span></div><div className="gantt-date-header" style={{ width: timelineWidth }}><div className="gantt-months">{months.map((tick, index) => <span key={tick.iso} style={{ left: tick.index * dayWidth, width: ((months[index + 1]?.index ?? range.days) - tick.index) * dayWidth }}>{tick.date.getUTCFullYear()}년 {tick.date.getUTCMonth() + 1}월</span>)}</div><div className="gantt-days">{ticks.map(tick => <span key={tick.iso} data-date={tick.iso} className={`${!calendarMath.isWorking(tick.iso) ? 'weekend' : ''} ${tick.iso === todayDate() ? 'today' : ''}`} style={{ width: dayWidth }}>{zoom === 'day' ? <>{tick.date.getUTCDate()}<small>{['일', '월', '화', '수', '목', '금', '토'][tick.weekday]}</small></> : zoom === 'week' && (tick.weekday === 1 || tick.index === 0) ? tick.date.getUTCDate() : zoom === 'month' && tick.date.getUTCDate() === 15 ? '15' : ''}</span>)}</div></div></div>
+      <div className="gantt-chart-header"><div className="gantt-left gantt-left-header"><label><input type="checkbox" aria-label="표시된 업무 전체 선택" checked={issues.length > 0 && issues.every(i => selected.has(i.id))} onChange={e => setSelected(e.target.checked ? new Set(issues.map(i => i.id)) : new Set())} /></label><span>업무 <small>{issues.length}</small></span><span>시작일</span><span>종료일</span></div><div className="gantt-date-header" style={{ width: timelineWidth }}><div className="gantt-months">{months.map((tick, index) => <span key={tick.iso} style={{ left: tick.index * dayWidth, width: ((months[index + 1]?.index ?? range.days) - tick.index) * dayWidth }}>{tick.date.getUTCFullYear()}년 {tick.date.getUTCMonth() + 1}월</span>)}</div><div className="gantt-days">{ticks.map(tick => <span key={tick.iso} data-date={tick.iso} className={`${!calendarMath.isWorking(tick.iso) ? 'weekend' : ''} ${tick.iso === todayDate() ? 'today' : ''}`} style={{ width: dayWidth }}>{chartZoom === 'day' ? <>{tick.date.getUTCDate()}<small>{['일', '월', '화', '수', '목', '금', '토'][tick.weekday]}</small></> : chartZoom === 'week' && (tick.weekday === 1 || tick.index === 0) ? tick.date.getUTCDate() : chartZoom === 'month' && tick.date.getUTCDate() === 15 ? '15' : ''}</span>)}</div></div></div>
       {ticks.filter(t => !calendarMath.isWorking(t.iso)).map(tick => <div key={tick.iso} className="gantt-weekend-band" style={{ left: LEFT_WIDTH + tick.index * dayWidth, width: dayWidth, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />)}
       {todayPosition >= 0 && todayPosition < timelineWidth && <div className="gantt-today-line" style={{ left: LEFT_WIDTH + todayPosition + dayWidth / 2, top: HEADER_HEIGHT, height: chartRowCount * ROW_HEIGHT }} />}
       <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true">
@@ -999,11 +1020,12 @@ function ProjectGantt(props: GanttProps) {
         const barClass = `gantt-bar ${dragging ? 'is-dragging' : ''} ${status.category === 'done' ? 'is-done' : ''}`;
         const isFocused = focusedIssue?.id === issue.id;
         const rowDatePicker = activeDatePicker?.issue.id === issue.id ? activeDatePicker : null;
-        const fixedOrFirst = rowDatePicker && (rowDatePicker.firstDate ?? rowDatePicker.issue.startDate ?? rowDatePicker.issue.endDate);
+        const fixedOrFirst = rowDatePicker && (rowDatePicker.firstDate ?? rowDatePicker.fixedEdge?.date);
         return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
             <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
             <div className="gantt-issue-cell">
+              {hasSchedule && !linkPicker && datePickerTrigger(issue, 'issue-icon-button gantt-row-date-picker', true)}
               <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
                 aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
                 onClick={() => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssue(issue.id)}>
@@ -1021,8 +1043,8 @@ function ProjectGantt(props: GanttProps) {
           <div className="gantt-row-timeline" style={{ width: timelineWidth }}>
           {captured?.startDate && captured.endDate && <div className="gantt-baseline-bar" role="img" aria-label={`${captured.key} 기준선 ${captured.startDate} ~ ${captured.endDate}`} title={`${baseline!.name}: ${captured.title} · ${captured.startDate} ~ ${captured.endDate}`} style={capturedStyle(captured.startDate, captured.endDate)} />}
           {rowDatePicker ? <GanttDateRangeLane issueKey={issue.key} rangeStart={range.start} rangeEnd={range.end}
-            minDay={rowDatePicker.issue.startDate ? dayNumber(rowDatePicker.issue.startDate) : range.start}
-            maxDay={rowDatePicker.issue.endDate ? dayNumber(rowDatePicker.issue.endDate) : range.end}
+            minDay={rowDatePicker.fixedEdge?.kind === 'start' ? dayNumber(rowDatePicker.fixedEdge.date) : range.start}
+            maxDay={rowDatePicker.fixedEdge?.kind === 'end' ? dayNumber(rowDatePicker.fixedEdge.date) : range.end}
             initialDay={rowDatePicker.initialDay} selectedDay={fixedOrFirst ? dayNumber(fixedOrFirst) : null}
             onPick={chooseIssueDate} onFocusDay={focusPickedDay} />
           : visibleSchedule ? <div className={`gantt-task-range ${dragging ? 'is-dragging' : ''}`} style={{ left: (visibleStart - range.start) * dayWidth + BAR_EDGE_INSET, width: (visibleEnd - visibleStart + 1) * dayWidth - 2 * BAR_EDGE_INSET, '--bar-color': status.color } as CSSProperties}>

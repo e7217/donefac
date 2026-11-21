@@ -1,3 +1,15 @@
+.gantt-issue-cell > .gantt-row-date-picker {
+  flex: 0 0 38px;
+  min-block-size: 38px;
+  margin-inline: 0;
+  color: #2c6b60;
+}
+
+.gantt-row-date-picker:focus-visible {
+  outline: 2px solid #12685f;
+  outline-offset: -2px;
+}
+
 .gantt-date-range-prompt {
   display: flex;
   align-items: center;
