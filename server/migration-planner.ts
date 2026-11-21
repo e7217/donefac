@@ -12,7 +12,8 @@ import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migrat
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
-import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
+import { confluenceMigrationPageAddress, isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase,
+  type ConfluenceMigrationPageAddress, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
 import { jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
@@ -323,6 +324,7 @@ type KnownIssue = { issueId: string; projectId: string | null };
 type KnownPage = MigrationPageAppendContext['knownPages'][number];
 type LabelListProjectScope = { source: string; origin?: string };
 type ResolvedReference = { id: string; label: string; url?: string };
+type ResolvedConfluencePage = { sourceId: string; entry?: Entry; reference: ResolvedReference };
 type AttachmentOwner = Binding & {type: 'issue' | 'document'};
 interface ConfluenceAttachmentSeries {
   sourceRootId: string;
@@ -2091,14 +2093,15 @@ class Planner{
     const project = this.sourceEntry(candidate, 'project', candidate.container)?.row;
     return [project?.metadata.spaceKey, project?.metadata.key, project?.metadata.pkey].includes(spaceKey);
   }
-  private confluencePage(entry: Entry, { sourceId, title, spaceKey }: MigrationPageIdentity): { entry?: Entry; reference: ResolvedReference } | null {
+  private confluencePage(entry: Entry, { sourceId, title, spaceKey }: MigrationPageIdentity, verifiedOrigin?: string): ResolvedConfluencePage | null {
     const append = this.input.appendPages;
-    let candidates = this.confluenceCandidates(entry, 'page', sourceId, title);
+    const atOrigin = (candidate: Entry) => verifiedOrigin === undefined || this.originIdentity(candidate) === verifiedOrigin;
+    let candidates = this.confluenceCandidates(entry, 'page', sourceId, title).filter(atOrigin);
     let spaceId: string | null = null;
     if (spaceKey || !sourceId || append) {
       let spaceOrigin: string | undefined;
       if (spaceKey) {
-        const spaces = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []);
+        const spaces = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []).filter(atOrigin);
         const spaceIds = new Set(spaces.map(space => space.row.sourceId));
         if (append && spaceKey === append.sourceSpaceKey) spaceIds.add(append.sourceSpaceId);
         if (spaceIds.size !== 1 || !this.uniqueConfluenceOrigin(spaces)) return null;
@@ -2119,12 +2122,12 @@ class Planner{
     }
     if (ids.size !== 1 || !this.uniqueConfluenceOrigin(candidates)) return null;
     const [id] = ids;
-    if (this.restrictedSourcePages.has(id)) return null;
+    if (this.restrictedSourcePages.has(id) || candidates.some(candidate => this.restricted(candidate))) return null;
     const imported = candidates.filter(candidate => this.bindings.get(candidate.key)?.type === 'document');
-    if (imported.length === 1) return { entry: imported[0], reference: this.resolvedReference(imported[0]) };
-    if (imported.length || candidates.some(candidate => this.excluded.has(candidate.key) || this.restricted(candidate))) return null;
+    if (imported.length === 1) return { sourceId: id, entry: imported[0], reference: this.resolvedReference(imported[0]) };
+    if (imported.length || candidates.some(candidate => this.excluded.has(candidate.key))) return null;
     const known = this.originalPage(id);
-    return known ? { reference: { id: known.documentId, label: title || known.sourceTitle || known.sourceId } } : null;
+    return known ? { sourceId: id, reference: { id: known.documentId, label: title || known.sourceTitle || known.sourceId } } : null;
   }
   private confluenceSectionProjection(entry: Entry, documentId: string): ReadonlyMap<string, string> {
     const cached = this.confluenceSectionProjections.get(entry);
@@ -2139,20 +2142,37 @@ class Planner{
   private confluenceSectionPage(entry: Entry, request: MigrationReferenceInput) {
     if (!request.url) return this.confluencePage(entry, request);
     const base = this.originBases.get(entry.pkg.summary.id);
-    if (!base) return null;
-    try {
-      const url = new URL(request.url, base.origin);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
-          url.searchParams.has('focusedCommentId') || !isWithinMigrationOrigin(url, base)) return null;
-      const sourceId = url.searchParams.get('pageId') || /\/pages\/(\d+)(?:\/|$)/.exec(url.pathname)?.[1];
-      if (sourceId) return this.confluencePage(entry, { sourceId });
-      const display = /\/display\/([^/]+)\/([^/]+)\/?$/.exec(url.pathname);
-      if (display) return this.confluencePage(entry, {
-        spaceKey: decodeURIComponent(display[1]),
-        title: decodeURIComponent(display[2].replaceAll('+', ' ')),
-      });
-    } catch { /* Leave invalid or unverified source URLs visible as text. */ }
-    return null;
+    const address = base && confluenceMigrationPageAddress(request.url, base);
+    return address ? this.confluencePage(entry, address.identity, `${address.origin}${address.contextPath}`) : null;
+  }
+  private confluenceAbsolutePage(address: ConfluenceMigrationPageAddress): ResolvedConfluencePage | null {
+    const origin = `${address.origin}${address.contextPath}`;
+    const atAddress = (candidate: Entry) => candidate.pkg.dataset.source.product === 'confluence'
+      && this.originIdentity(candidate) === origin;
+    const sourceKey = (candidate: Entry, sourceId: string) => JSON.stringify([candidate.pkg.dataset.source.instanceKey, sourceId]);
+    const { sourceId, spaceKey, title } = address.identity;
+    const indexKey = JSON.stringify(['page', sourceId ? 'id' : 'title', sourceId ?? title]);
+    let candidates = (this.referenceIndex.get(indexKey) ?? []).filter(atAddress);
+    if (spaceKey) {
+      const spaces = (this.confluenceSpacesByKey.get(spaceKey) ?? []).filter(atAddress);
+      const ids = new Set(spaces.map(space => sourceKey(space, space.row.sourceId)));
+      if (ids.size !== 1) return null;
+      candidates = candidates.filter(candidate => ids.has(sourceKey(candidate, candidate.container)));
+    }
+    const identities = new Set(candidates.map(candidate => sourceKey(candidate, candidate.row.sourceId)));
+    if (identities.size !== 1 || candidates.some(candidate => this.restricted(candidate))) return null;
+    const imported = candidates.filter(candidate => !this.excluded.has(candidate.key) && this.bindings.get(candidate.key)?.type === 'document');
+    return imported.length === 1 ? { sourceId: imported[0].row.sourceId, reference: this.resolvedReference(imported[0]) } : null;
+  }
+  private confluencePageHref(entry: Entry, url: string, declaredSourceId?: string): ResolvedReference | null {
+    const base = entry.pkg.dataset.source.product === 'confluence' ? this.originBases.get(entry.pkg.summary.id) : undefined;
+    const local = base && confluenceMigrationPageAddress(url, base);
+    const address = local || confluenceMigrationPageAddress(url);
+    if (!address) return null;
+    const page = local
+      ? this.confluencePage(entry, address.identity, `${address.origin}${address.contextPath}`)
+      : this.confluenceAbsolutePage(address);
+    return page && (!declaredSourceId || page.sourceId === declaredSourceId) ? page.reference : null;
   }
   private confluenceSectionLinks(entry: Entry, documentId: string) {
     return {
@@ -2313,12 +2333,14 @@ class Planner{
   }
   resolve(entry: Entry, request: MigrationReferenceInput): ResolvedReference | null {
     const scoped = this.isConfluenceStorageReference(entry, request);
-    const space = scoped ? this.confluenceSpace(entry) : null;
+    const pageHref = request.kind === 'page' ? request.url : undefined;
+    const space = scoped || (pageHref && entry.pkg.dataset.source.product === 'confluence') ? this.confluenceSpace(entry) : null;
     const owner = request.kind === 'attachment' ? this.ownerEntry(entry)?.key : null;
     const key = JSON.stringify([entry.pkg.summary.id, scoped, space, owner, request]);
     if (this.resolutionCache.has(key)) return this.resolutionCache.get(key)!;
     let value: ResolvedReference | null;
-    if (scoped && request.kind === 'page') value = this.confluencePage(entry, request)?.reference ?? null;
+    if (pageHref) value = this.confluencePageHref(entry, pageHref, request.sourceId);
+    else if (scoped && request.kind === 'page') value = this.confluencePage(entry, request)?.reference ?? null;
     else if (scoped) {
       const boundPageId = this.boundConfluenceAttachmentPage(entry, request);
       if (boundPageId) value = this.lookupBoundConfluenceAttachment(entry, boundPageId, request);
@@ -2345,12 +2367,6 @@ class Planner{
       if (sourceMatches.some(candidate => this.excluded.has(candidate.key))) return null;
       const existing = this.originalIssue(requestedId);
       if (existing) return { id: existing.id, label: requestedId };
-    }
-    if (!candidates.length && request.kind === 'page' && requestedId && requestedUrl && this.input.appendPages) {
-      const base = this.originBases.get(entry.pkg.summary.id);
-      if (base && isWithinMigrationOrigin(requestedUrl, base)) {
-        return this.confluencePage(entry, { sourceId: requestedId, spaceKey: request.spaceKey })?.reference ?? null;
-      }
     }
     return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }

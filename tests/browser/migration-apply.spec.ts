@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { contentReferences } from '../../shared/document-nodes';
 import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
@@ -689,6 +690,120 @@ test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집�
     await expect(page.locator('.docs-prose')).toContainText(localParentBody);
   } finally {
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamspace 문서를 연다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), spaceKey = `CFL${id}`, spaceName = `링크 이관 공간 ${id}`;
+  const origin = 'https://confluence.example.test', base = `${origin}/wiki`;
+  const sourceTitle = `본문 링크가 있는 문서 ${id}`, targetTitle = `팀 절차 안내 ${id}`;
+  const targetBody = '이관 후 Teamspace에서 열리는 절차 본문';
+  const titleLabel = '제목 경로로 절차 열기', idLabel = '페이지 ID로 절차 열기', missingLabel = '이관 대상이 없는 페이지';
+  const titlePath = `${base}/display/${spaceKey}/${encodeURIComponent(targetTitle).replaceAll('%20', '+')}`;
+  const idPath = '/wiki/pages/viewpage.action?pageId=31002';
+  const missingPath = '/wiki/pages/viewpage.action?pageId=31999';
+  const sourceBody = [
+    `<p><a href="${titlePath}">${titleLabel}</a></p>`,
+    `<p><a href="${idPath}">${idLabel}</a></p>`,
+    `<p><a href="${missingPath}">${missingLabel}</a></p>`,
+  ].join('\n');
+  const pageRow = (sourceId: number, title: string, body: string) => `
+    <object class="Page"><id name="id">${sourceId}</id><property name="title">${title}</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      <property name="creationDate">2020-01-02T00:00:00Z</property>
+    </object>
+    <object class="BodyContent"><id name="id">${sourceId + 300}</id><property name="body"><![CDATA[${body}]]></property>
+      <property name="content" class="Page"><id name="id">${sourceId}</id></property>
+    </object>`;
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">${spaceName}</property></object>
+    ${pageRow(31001, sourceTitle, sourceBody)}
+    ${pageRow(31002, targetTitle, `<p>${targetBody}</p>`)}
+  </hibernate-generic>`;
+  const filename = `confluence-body-links-${id}.zip`;
+  const pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `confluence-body-links-${id}`);
+  const originalRequests: string[] = [];
+  const isOriginalRequest = (url: URL) => url.origin === origin || url.pathname.startsWith('/wiki/');
+  let readerIssue: Issue | undefined;
+  const importedDocuments: DocPage[] = [];
+
+  await page.context().route(isOriginalRequest, async route => {
+    originalRequests.push(route.request().url());
+    await route.abort();
+  });
+  try {
+    const { settings, workspace } = await open(page, request);
+    await selectPackage(settings, filename);
+    await settings.getByText('원본 주소와 제외 항목', { exact: true }).click();
+    await settings.getByLabel(`원본 주소 ${filename}`, { exact: true }).fill(base);
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.configuration.sourceBaseUrls[pkg.id]).toBe(base);
+    expect(plan.counts.documents).toBe(2);
+    expect(plan.notices).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'UNRESOLVED_REFERENCE' })]));
+    const sample = plan.samples.find(item => item.title === sourceTitle);
+    for (const label of [titleLabel, idLabel, missingLabel]) expect(sample?.plainText).toContain(label);
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(review.locator('.migration-notice').filter({ hasText: 'UNRESOLVED_REFERENCE' })).toBeVisible();
+    await review.getByText('변환된 내용 견본', { exact: true }).click();
+    await expect(review).toContainText(missingLabel);
+    await acknowledge(review, plan);
+    const applied = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applyResponse = await applied;
+    expect(applyResponse.status(), await applyResponse.text()).toBe(201);
+    const { import: receipt } = await applyResponse.json() as MigrationApplyResult;
+    const [projectId] = receipt.projectIds;
+    await expect(settings.getByLabel('이관 영수증 상세', { exact: true })).toContainText('원본 기록과 생성 프로젝트');
+    await expect(settings.getByText('실제 이관 적용 중…', { exact: true })).toHaveCount(0);
+    const after = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    importedDocuments.push(...after.documents.filter(document => document.projectId === projectId));
+    const source = importedDocuments.find(document => document.title === sourceTitle)!;
+    const target = importedDocuments.find(document => document.title === targetTitle)!;
+    expect(source).toBeTruthy();
+    expect(target).toBeTruthy();
+    expect(contentReferences(source.content)).toEqual([titleLabel, idLabel].map(label => ({
+      type: 'document', kind: 'reference', id: target.id, label,
+    })));
+
+    const issueProject = workspace.projects[0];
+    const created = await request.post('/api/issues', { data: { projectId: issueProject.id, title: `이관 문서 읽기 ${id}` } });
+    expect(created.status(), await created.text()).toBe(201);
+    readerIssue = await created.json() as Issue;
+    const linked = await request.post('/api/resource-links', { data: { issueId: readerIssue.id, documentId: source.id, kind: 'related' } });
+    expect(linked.status(), await linked.text()).toBe(201);
+    const readerPath = `/#/${issueProject.id}/issues?${new URLSearchParams({ issue: readerIssue.id, documentPreview: source.id })}`;
+    await page.goto(`/#/${issueProject.id}/issues`);
+    await page.reload();
+    await page.getByRole('button', { name: new RegExp(readerIssue.title) }).click();
+    await page.getByRole('dialog', { name: readerIssue.title, exact: true })
+      .getByRole('button', { name: `${sourceTitle} 미리보기`, exact: true }).click();
+    const reader = page.getByRole('dialog', { name: '연결 문서 미리보기', exact: true });
+    for (const index of [0, 1]) {
+      if (index) await page.goto(readerPath);
+      await expect(reader).toBeVisible();
+      const body = reader.getByRole('region', { name: '미리보기 본문', exact: true });
+      await expect(body.locator('[contenteditable="true"]')).toHaveCount(0);
+      await expect(body).toContainText(missingLabel);
+      await expect(body.getByRole('link', { name: new RegExp(missingLabel) })).toHaveCount(0);
+      const references = body.getByRole('button', { name: `참조 문서 열기 ${targetTitle}`, exact: true });
+      await expect(references).toHaveCount(2);
+      await references.nth(index).click();
+      await expect(page).toHaveURL(new RegExp(`/#/${projectId}/documents/${target.id}$`));
+      await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(targetTitle);
+      await expect(page.locator('.docs-prose')).toContainText(targetBody);
+    }
+    expect(originalRequests).toEqual([]);
+    expect(page.context().pages()).toEqual([page]);
+  } finally {
+    await page.context().unroute(isOriginalRequest);
+    if (readerIssue) await request.delete(`/api/issues/${readerIssue.id}`);
+    for (const document of importedDocuments) await request.delete(`/api/documents/${document.id}`);
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
 });
 

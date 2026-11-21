@@ -556,6 +556,221 @@ test('Confluence section references use source page scope and preserve verified 
   assert.ok(notices(plan).has('SECTION_LINK_UNRESOLVED'));
 });
 
+const confluenceBodyHref = (href: string, label: string) =>
+  `<p><a href="${href.replaceAll('&', '&amp;')}">${label}</a></p>`;
+
+test('Confluence page hrefs preserve verified mount, title encoding and page or section identity', () => {
+  const origin = 'https://wiki.example.test';
+  const mount = '/tools/wiki';
+  const title = '배포 + 기록';
+  const display = `display/TEAM/${encodeURIComponent(title).replaceAll('%20', '+')}`;
+  const numeric = 'pages/viewpage.action?pageId=200';
+  const modern = 'spaces/TEAM/pages/200/Release+notes';
+  const supported = [
+    [`${origin}${mount}/${display}`, '절대 제목 링크'],
+    [`${mount}/${display}`, '루트 기준 제목 링크'],
+    [`./${display}`, '서비스 기준 제목 링크'],
+    [`${origin}${mount}/${numeric}`, '절대 페이지 ID 링크'],
+    [`${mount}/${numeric}`, '루트 기준 페이지 ID 링크'],
+    [numeric, '서비스 기준 페이지 ID 링크'],
+    ['viewpage.action?pageId=200', '페이지 화면의 상대 주소'],
+    ['?pageId=200', '페이지 ID만 지정한 상대 주소'],
+    [`${origin}${mount}/${modern}`, '절대 페이지 경로'],
+    [`${mount}/${modern}`, '루트 기준 페이지 경로'],
+    [`./${modern}`, '서비스 기준 페이지 경로'],
+  ];
+  const avoided = [
+    [`/${display}`, '서비스 밖 경로'],
+    [`${origin}${mount}-other/${display}`, '혼동 가능한 서비스 경로'],
+    [`${origin}${mount}/other/${display}`, '마운트 안의 다른 앱 경로'],
+    [`${origin}${mount}/../wiki/${display}`, '정규화 때 같은 서비스가 되는 경로'],
+    [`${origin}${mount}/${numeric}&pageId=200`, '중복 페이지 ID'],
+    [`${origin}${mount}/${numeric}&focusedCommentId=9`, '특정 댓글 주소'],
+    [`${origin}${mount}/${display}#comment-9`, '댓글 절 주소'],
+    [`https://reviewer:synthetic-secret@wiki.example.test${mount}/${display}`, '자격 정보 포함 주소'],
+    [`//wiki.example.test${mount}/${display}`, '프로토콜 생략 주소'],
+  ];
+  const source = pkg('wiki-hrefs', 'confluence', [
+    record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } }),
+    page('100', { title: '링크를 포함한 원본', authorId: null, text: [
+      ...supported.map(([href, label]) => confluenceBodyHref(href, label)),
+      confluenceBodyHref(`${mount}/${display}#ReleaseNotes`, '같은 문서의 절'),
+      ...avoided.map(([href, label]) => confluenceBodyHref(href, label)),
+      confluenceBodyHref('https://outside.example.test/pages/123', '일반 외부 링크'),
+    ].join('') }),
+    page('200', { title, authorId: null, text: '<h2>Release Notes</h2>' }),
+    page('201', { title: '배포   기록', authorId: null }),
+  ]);
+  const request = input([source]);
+  request.configuration.sourceBaseUrls = { [source.summary.id]: `${origin}${mount}` };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const original = plan.documents.find(document => document.title === '링크를 포함한 원본')!;
+  const target = plan.documents.find(document => document.title === title)!;
+  assert.deepEqual(contentReferences(original.content).map(({ id, label }) => [id, label]),
+    supported.map(([, label]) => [target.id, label]));
+  const sectionId = target.content.content?.[0].attrs?.sectionId as string;
+  const linkedSection = original.content.content?.find(node => node.content?.[0].text === '같은 문서의 절');
+  assert.equal(linkedSection?.content?.[0].marks?.[0].attrs?.href, documentSectionHash(target.id, sectionId));
+  const external = original.content.content?.find(node => node.content?.[0].text === '일반 외부 링크');
+  assert.equal(external?.content?.[0].marks?.[0].attrs?.href, 'https://outside.example.test/pages/123');
+  for (const [, label] of avoided) {
+    const paragraph = original.content.content?.find(node => node.content?.some(child => child.text?.includes(label)));
+    assert.ok(paragraph, label);
+    assert.ok(!paragraph.content?.some(child => child.marks?.some(mark => mark.type === 'link')), label);
+  }
+  assert.ok(plan.preview.notices.some(notice => notice.recordId === `${source.summary.id}/page:100` && notice.code === 'UNRESOLVED_REFERENCE'));
+  const unconfigured = buildMigrationPlan(input([source]));
+  const unresolvedBody = unconfigured.documents.find(document => document.title === original.title)!;
+  assert.deepEqual(contentReferences(unresolvedBody.content), []);
+  assert.ok(notices(unconfigured).has('UNRESOLVED_REFERENCE'));
+});
+
+test('absolute Confluence body hrefs cross configured sources only through an unambiguous source locator', () => {
+  const home = 'https://wiki-home.example.test/wiki';
+  const peer = 'https://wiki-peer.example.test/wiki';
+  const source = pkg('wiki-home', 'confluence', [
+    record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } }),
+    page('100', { authorId: null, text: [
+      confluenceBodyHref(`${peer}/display/QA/Peer+target`, '확인한 상대 서버의 문서 제목'),
+      confluenceBodyHref(`${peer}/pages/viewpage.action?pageId=200`, '확인한 상대 서버의 문서 ID'),
+      confluenceBodyHref('display/QA/Peer+target', '현재 서버에 없는 상대 경로'),
+      confluenceBodyHref('/wiki/pages/viewpage.action?pageId=200', '현재 서버에 없는 상대 ID'),
+      confluenceBodyHref(`${peer}/display/QA/Shared+title`, '원본 제목이 중복된 문서'),
+      confluenceBodyHref(`${peer}/display/QA/Excluded`, '제외한 원본 문서'),
+      confluenceBodyHref(`${peer}/display/QA/Restricted`, '제한된 원본 문서'),
+    ].join('') }),
+  ]);
+  const peerSource = pkg('wiki-peer', 'confluence', [
+    record('project', 'qa', { title: '상대 서버 공간', metadata: { spaceKey: 'QA' } }),
+    page('200', { title: 'Peer target', containerId: 'qa', authorId: null }),
+    page('201', { title: 'Shared title', containerId: 'qa', authorId: null }),
+    page('202', { title: 'Shared title', containerId: 'qa', authorId: null }),
+    page('203', { title: 'Excluded', containerId: 'qa', authorId: null }),
+    page('204', { title: 'Restricted', containerId: 'qa', authorId: null, metadata: { version: '1', restricted: true } }),
+  ]);
+  const configured = (peers: MigrationPackage[], exclusions: string[]) => {
+    const request = input([source, ...peers]);
+    request.configuration.sourceBaseUrls = { [source.summary.id]: home, ...Object.fromEntries(peers.map(pkg => [pkg.summary.id, peer])) };
+    request.configuration.excludedRecords = exclusions;
+    return buildMigrationPlan(request);
+  };
+  const exclusions = ['wiki-peer/page:201', 'wiki-peer/page:203'];
+  const restricted = configured([peerSource], exclusions);
+  assert.equal(restricted.preview.canApply, false);
+  assert.ok(notices(restricted).has('RESTRICTED_CONTENT'));
+
+  const verified = configured([peerSource], [...exclusions, 'wiki-peer/page:204']);
+  assert.equal(verified.preview.canApply, true, JSON.stringify(verified.preview.notices));
+  const sourceContent = (plan: typeof verified) => plan.documents.find(document => document.title === '문서 100')!;
+  const target = verified.documents.find(document => document.title === 'Peer target')!;
+  assert.deepEqual(contentReferences(sourceContent(verified).content).map(({ id, label }) => [id, label]), [
+    [target.id, '확인한 상대 서버의 문서 제목'], [target.id, '확인한 상대 서버의 문서 ID'],
+  ]);
+  for (const label of ['현재 서버에 없는 상대 경로', '현재 서버에 없는 상대 ID', '원본 제목이 중복된 문서', '제외한 원본 문서', '제한된 원본 문서']) {
+    assert.ok(sourceContent(verified).plainText.includes(label));
+  }
+  assert.ok(notices(verified).has('UNRESOLVED_REFERENCE'));
+
+  const otherInstance = pkg('wiki-peer-other', 'confluence', [
+    record('project', 'qa-other', { title: '같은 주소의 다른 인스턴스', metadata: { spaceKey: 'QA' } }),
+    page('200', { title: 'Peer target', containerId: 'qa-other', authorId: null }),
+  ]);
+  const ambiguous = configured([peerSource, otherInstance], [...exclusions, 'wiki-peer/page:204']);
+  assert.deepEqual(contentReferences(sourceContent(ambiguous).content), []);
+  assert.ok(notices(ambiguous).has('UNRESOLVED_REFERENCE'));
+});
+
+test('Confluence hrefs verify the sibling package mount even within the same instance', () => {
+  const base = 'https://wiki.example.test/tools/wiki';
+  const source = pkg('wiki-href-source', 'confluence', [
+    record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } }),
+    page('100', { authorId: null, text: [
+      confluenceBodyHref(`${base}/display/QA/Target`, '확인된 주소의 제목 경로'),
+      confluenceBodyHref('/tools/wiki/pages/viewpage.action?pageId=200', '확인된 주소의 페이지 ID'),
+      confluenceBodyHref('display/QA/Target', '서비스 기준 제목 경로'),
+      '<ac:link><ri:page ri:space-key="QA" ri:content-title="Target"/><ac:link-body>원본의 구조화된 참조</ac:link-body></ac:link>',
+    ].join('') }),
+  ]);
+  const sibling = pkg('wiki-href-sibling', 'confluence', [
+    record('project', 'qa', { title: '같은 인스턴스의 검토 공간', metadata: { spaceKey: 'QA' } }),
+    page('200', { title: 'Target', containerId: 'qa', authorId: null }),
+  ]);
+  sibling.dataset.source.instanceKey = source.dataset.source.instanceKey;
+  const request = input([source, sibling]);
+  request.configuration.sourceBaseUrls[source.summary.id] = base;
+  const unverified = buildMigrationPlan(request);
+  assert.equal(unverified.preview.canApply, true, JSON.stringify(unverified.preview.notices));
+  const refs = (plan: typeof unverified) => contentReferences(plan.documents.find(document => document.title === '문서 100')!.content);
+  assert.deepEqual(refs(unverified).map(({ label }) => label), ['원본의 구조화된 참조']);
+  assert.ok(notices(unverified).has('UNRESOLVED_REFERENCE'));
+
+  request.configuration.sourceBaseUrls[sibling.summary.id] = base;
+  const verified = buildMigrationPlan(request);
+  assert.equal(verified.preview.canApply, true, JSON.stringify(verified.preview.notices));
+  const targetId = verified.documents.find(document => document.title === 'Target')!.id;
+  assert.deepEqual(refs(verified).map(({ id, label }) => [id, label]), [
+    [targetId, '확인된 주소의 제목 경로'], [targetId, '확인된 주소의 페이지 ID'],
+    [targetId, '서비스 기준 제목 경로'], [targetId, '원본의 구조화된 참조'],
+  ]);
+  assert.ok(!notices(verified).has('UNRESOLVED_REFERENCE'));
+});
+
+test('Confluence append and refresh resolve hrefs to an already imported page absent from incoming records', () => {
+  const base = 'https://wiki.example.test/tools/wiki';
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const writer = page('100', { title: '이미 옮긴 원본 문서', authorId: null });
+  const target = page('200', { title: 'Retained target', authorId: null });
+  const baselineSource = pkg('wiki-href-initial', 'confluence', [space, writer, target]);
+  const initial = input([baselineSource]);
+  initial.configuration.sourceBaseUrls[baselineSource.summary.id] = base;
+  const baseline = buildMigrationPlan(initial);
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const project = baseline.projects[0];
+  const current = baseline.documents.find(document => document.title === writer.title)!;
+  const retained = baseline.documents.find(document => document.title === target.title)!;
+  const previous = baseline.sourceRecords.find(row => row.targetId === current.id)!;
+  assert.ok(previous.confluencePageFieldHashes?.content);
+
+  const refresh = (local = current) => {
+    const delta = pkg('wiki-href-delta', 'confluence', [{ ...space },
+      { ...writer, text: confluenceBodyHref('display/TEAM/Retained+target', '기존 원본 제목으로 연결'), metadata: { version: '4' } },
+      page('300', { title: '새로 옮길 원본 문서', authorId: null,
+        text: confluenceBodyHref('/tools/wiki/pages/viewpage.action?pageId=200', '기존 원본 ID로 연결') }),
+    ]);
+    delta.dataset.source.instanceKey = baselineSource.dataset.source.instanceKey;
+    const request = input([delta]);
+    request.configuration.sourceBaseUrls[delta.summary.id] = base;
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = {
+      project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'append-wiki-hrefs',
+      knownPages: ([[writer, local], [target, retained]] as const).map(([source, document]) => ({
+        sourceId: source.sourceId, sourceTitle: source.title, documentId: document.id, projectId: document.projectId, sourceSpaceId: 's',
+      })),
+      refreshDocuments: [{ document: local, previous, previousTimezone: 'UTC' }],
+    };
+    return buildMigrationPlan(request);
+  };
+  const incoming = refresh();
+  assert.equal(incoming.preview.canApply, true, JSON.stringify(incoming.preview.notices));
+  assert.equal(incoming.documents.length, 1);
+  assert.deepEqual(contentReferences(incoming.documents[0].content).map(({ id, label }) => [id, label]), [[retained.id, '기존 원본 ID로 연결']]);
+  assert.equal(incoming.documentUpdates?.[0].documentId, current.id);
+  assert.equal(incoming.documentUpdates?.[0].expectedVersion, current.version);
+  const content = incoming.documentUpdates?.[0].changes.content;
+  assert.ok(content);
+  assert.deepEqual(contentReferences(content).map(({ id, label }) => [id, label]), [[retained.id, '기존 원본 제목으로 연결']]);
+
+  const local = { ...current, version: current.version + 1, plainText: '팀에서 편집한 본문', content: {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '팀에서 편집한 본문' }] }],
+  } };
+  const conflicted = refresh(local);
+  assert.equal(conflicted.preview.canApply, true, JSON.stringify(conflicted.preview.notices));
+  assert.equal(conflicted.preview.documentRefresh?.[0].fields.find(field => field.field === 'content')?.decision, 'conflict');
+  assert.deepEqual(conflicted.documentUpdates, []);
+  assert.deepEqual(contentReferences(conflicted.documents[0].content).map(({ id }) => id), [retained.id]);
+});
+
 test('all available attachment versions retain distinct files and a missing newest version requires acknowledgement',()=>{
   const source=confluence(),sha1=createHash('sha256').update('one').digest('hex'),sha2=createHash('sha256').update('two').digest('hex');source.dataset.records.push(record('attachment','a3',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'3'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a2',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'2',currentVersionId:'a3',packagePath:'attachments/two',sha256:sha2,size:3,mimeType:'text/html'},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}),record('attachment','a1',{title:'image.png',containerId:'10',authorId:'bob',createdAt:created,metadata:{version:'1',currentVersionId:'a3',packagePath:'attachments/one',sha256:sha1,size:3},references:[{kind:'page',sourceId:'10',relation:'container-content'}]}));source.dataset.records.find(row=>row.id==='page:10')!.text='<ac:image><ri:attachment ri:filename="image.png"/></ac:image>';const request=input([source]);request.fileInfo={wiki:{'attachments/one':{size:3,sha256:sha1,mimeType:'image/png'},'attachments/two':{size:3,sha256:sha2,mimeType:'image/png'}}};const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.attachments.length,1);assert.equal(plan.attachmentVersions.length,2);assert.equal(plan.fileCopies.length,2);const latest=plan.attachmentVersions.find(version=>version.versionLabel==='2')!;assert.equal(plan.attachments[0].id,latest.id);assert.equal(plan.attachments[0].mimeType,'image/png');assert.ok(plan.attachmentVersions.every(version=>version.attachmentId===latest.id));assert.equal(new Set(plan.fileCopies.map(file=>file.fileId)).size,2);assert.ok(plan.preview.requiredAcknowledgements.includes('ATTACHMENT_LATEST_MISSING'));const absent=plan.sourceRecords.find(row=>row.record.id==='attachment:a3')!;assert.equal(absent.targetId,null);assert.equal(absent.ownerId,plan.documents[0].id);assert.equal(plan.sourceRecords.find(row=>row.record.id==='attachment:a1')!.targetId,plan.attachmentVersions.find(version=>version.versionLabel==='1')!.id);assert.ok(JSON.stringify(plan.documents[0].content).includes(`attachments/${latest.id}/content?inline=1`));
 });
@@ -840,6 +1055,33 @@ test('attachment owner and filename ambiguity remain unresolved even when exclus
 
 test('source issue links remain typed relations and document links do not become scheduling dependencies',()=>{
   const source=jira(),wiki=confluence();source.dataset.records.push(record('relation','remote',{title:'문서 연결',metadata:{url:'https://wiki.test/pages/viewpage.action?pageId=10'},references:[{kind:'issue',sourceId:'1',relation:'source'},{kind:'page',sourceId:'10',relation:'externalDocument'}]}));wiki.dataset.records.find(row=>row.id==='page:10')!.text='<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>';const request=input([source,wiki]);request.configuration.sourceBaseUrls.wiki='https://wiki.test';const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true);assert.equal(plan.issueRelations.length,1);assert.equal(plan.issueRelations[0].type,'Blocks');assert.equal(plan.resourceLinks.length,1);assert.ok(!Object.hasOwn(plan,'dependencies'));
+});
+
+test('Jira remote Confluence relations only link a page consistent with the declared source ID', () => {
+  const source = jira(), wiki = confluence();
+  const base = 'https://wiki.example.test/wiki';
+  wiki.dataset.records.find(row => row.id === 'page:10')!.title = 'Declared target';
+  wiki.dataset.records.push(page('20', { authorId: null, title: 'Different target' }));
+  const relation = (id: string, issueId: string, path: string) => record('relation', id, {
+    title: '원본 문서 관계', metadata: { url: `${base}/${path}` }, references: [
+      { kind: 'issue', sourceId: issueId, relation: 'source' }, { kind: 'page', sourceId: '10', relation: 'externalDocument' },
+    ],
+  });
+  source.dataset.records.push(
+    relation('remote-number-matches', '1', 'pages/viewpage.action?pageId=10'),
+    relation('remote-title-matches', '2', 'display/TEAM/Declared+target'),
+    relation('remote-number-conflict', '1', 'pages/viewpage.action?pageId=20'),
+    relation('remote-title-conflict', '2', 'display/TEAM/Different+target'),
+  );
+  const request = input([source, wiki]);
+  request.configuration.sourceBaseUrls.wiki = base;
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const targetId = plan.documents.find(document => document.title === 'Declared target')!.id;
+  assert.deepEqual(plan.resourceLinks.map(({ issueId, documentId }) => [issueId, documentId]),
+    plan.issues.map(({ id }) => [id, targetId]));
+  assert.deepEqual(plan.preview.notices.filter(notice => notice.code === 'DOCUMENT_ISSUE_LINK_UNRESOLVED').map(notice => notice.recordId),
+    ['jira/relation:remote-number-conflict', 'jira/relation:remote-title-conflict']);
 });
 
 test('migration origins use each package base and the original key or current page ID', () => {

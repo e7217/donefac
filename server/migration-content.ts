@@ -292,8 +292,9 @@ class Converter {
   span(value: unknown): number { const number = Number(value ?? 1); if (!Number.isSafeInteger(number) || number < 1 || number > 100) { this.warn('TABLE_SPAN_NORMALIZED', '잘못되었거나 너무 큰 표 셀 병합 수를 1로 바꿨습니다.'); return 1; } return number; }
   headingLevel(value: unknown): number { const level = Number(value || 1); if (![1, 2, 3].includes(level)) this.warn('HEADING_LEVEL_NORMALIZED', '편집기가 지원하는 제목 1~3단계로 정규화했습니다.'); return Math.max(1, Math.min(3, Number.isFinite(level) ? level : 1)); }
   urlReference(url: string): MigrationReferenceInput | null {
-    if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(url)) return { kind: 'issue', url };
-    if (/[?&]pageId=|\/(?:display|spaces)\//.test(url)) return { kind: 'page', url };
+    const address = url.trim();
+    if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(address)) return { kind: 'issue', url };
+    if (/[?&]pageId=|(?:^|\/)(?:display|spaces)\//.test(address)) return { kind: 'page', url };
     return null;
   }
   adf(value: unknown, depth = 0): RichContent[] {
