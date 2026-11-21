@@ -552,6 +552,110 @@ test('sync commits complete healthy repositories, rolls back audit failures, and
   } finally { await mock.close(); f.close(); }
 });
 
+test('sync status invalidates only the affected Jira mapping and preserves prior success after a rolled-back save', async t => {
+  const route = { projectId: 'project-neo', jiraInstanceKey: 'synthetic-activity-mapping' };
+  const f = fixture([route]);
+  t.after(f.close);
+  let sequence = 1;
+  const at = new Date(Date.now() - 10_000).toISOString();
+  const mock = await mockServer((raw, response) => {
+    const path = new URL(raw, 'https://git.example.test').pathname;
+    const match = /^\/api\/v4\/projects\/(\d+)(?:\/(.+))?$/.exec(path);
+    if (!match) return response.writeHead(404).end();
+    const id = Number(match[1]);
+    const url = `${mock.url}/team/repo-${id}`;
+    response.setHeader('Content-Type', 'application/json');
+    if (!match[2]) return response.end(JSON.stringify({ id, path_with_namespace: `team/repo-${id}`, web_url: url }));
+    if (match[2] === 'merge_requests') return response.end(JSON.stringify([{
+      id: id * 100 + sequence, iid: sequence, title: 'NEO-1 합성 MR', state: 'opened', updated_at: at,
+      web_url: `${url}/-/merge_requests/${sequence}`,
+    }]));
+    response.end('[]');
+  });
+  t.after(mock.close);
+  const saved = f.configure({ baseUrl: mock.url, projectIds: [42, 77] });
+  await f.service.sync();
+  await f.service.syncDeployments({ expectedVersion: saved.version, repositoryId: 42 });
+  const before = f.service.syncStatus();
+  const [left, right] = before.repositories;
+  const existing = links(f);
+  assert.equal(existing.length, 2);
+  assert.equal(left.activity?.result.status, 'ok');
+  assert.equal(right.activity?.result.status, 'ok');
+  assert.equal(left.deployments?.status, 'ok');
+
+  sequence++;
+  const afterSyncError = 'synthetic diagnostic must not save the thrown message';
+  await assert.rejects(f.service.sync(() => { throw new Error(afterSyncError); }, { expectedVersion: saved.version, repositoryIds: [42] }),
+    (error: unknown) => error instanceof GitlabIntegrationError && error.status === 502);
+  const rolledBack = f.service.syncStatus();
+  assert.equal(rolledBack.repositories[0].activity?.result.error?.stage, 'save');
+  assert.equal(rolledBack.repositories[0].activity?.lastSuccessfulAt, left.activity?.lastSuccessfulAt);
+  assert.deepEqual(rolledBack.repositories[0].deployments, left.deployments);
+  assert.deepEqual(rolledBack.repositories[1], right);
+  assert.ok(!JSON.stringify(rolledBack).includes(afterSyncError));
+  assert.deepEqual(links(f), existing);
+
+  const configure = (changes: Record<string, unknown>, callback?: () => void) =>
+    f.service.configure({ expectedVersion: f.service.settings().version, ...changes }, callback);
+  const webhookOnly = configure({ webhookSecret: 'a different inbound secret' });
+  assert.deepEqual(f.service.syncStatus(), { ...rolledBack, settingsVersion: webhookOnly.version });
+  const jiraRoutes = [{ repositoryId: 42, ...route }];
+  assert.throws(() => configure({ jiraRoutes }, () => { throw new Error('synthetic setup save rollback'); }), /synthetic setup save rollback/);
+  assert.deepEqual(f.service.syncStatus(), { ...rolledBack, settingsVersion: webhookOnly.version });
+  const mapped = configure({ jiraRoutes });
+  assert.deepEqual(f.service.syncStatus(), { settingsVersion: mapped.version, repositories: [{ ...left, activity: null }, right] });
+  configure({ projectIds: [42] });
+  assert.deepEqual(f.service.syncStatus().repositories, [{ ...left, activity: null }]);
+  configure({ projectIds: [42, 77] });
+  assert.deepEqual(f.service.syncStatus().repositories, [{ ...left, activity: null }, { repositoryId: 77, activity: null, deployments: null }]);
+  assert.deepEqual(links(f), existing);
+});
+
+test('the older GitLab activity read can commit links without replacing the newer attempt outcome', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const held = Promise.withResolvers<ServerResponse>();
+  let sentFirst = false;
+  let unavailable = true;
+  const at = new Date(Date.now() - 10_000).toISOString();
+  const objects = [{ id: 4201, iid: 1, title: 'NEO-1 늦게 도착한 MR', state: 'opened', updated_at: at, web_url: 'https://git.example.test/42/-/merge_requests/1' }];
+  const mock = await mockServer((path, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (path.includes('/merge_requests?') && !sentFirst) {
+      sentFirst = true;
+      held.resolve(response);
+      return;
+    }
+    if (path.includes('/merge_requests?')) return response.end(JSON.stringify(objects));
+    if (path.includes('/pipelines?') && unavailable) return response.writeHead(403).end('{}');
+    response.end('[]');
+  });
+  t.after(mock.close);
+  const settings = f.configure({ baseUrl: mock.url });
+  const older = f.service.sync();
+  const response = await held.promise;
+  try {
+    await assert.rejects(f.service.sync(undefined, { expectedVersion: settings.version, repositoryIds: [42] }),
+      (error: unknown) => error instanceof GitlabIntegrationError && error.status === 502);
+    const failed = f.service.syncStatus().repositories[0].activity;
+    assert.ok(failed);
+    assert.equal(failed.result.error?.stage, 'pipelines');
+    assert.equal(failed.lastSuccessfulAt, null);
+    unavailable = false;
+    response.end(JSON.stringify(objects));
+    assert.equal((await older).linked, 1);
+    const latest = f.service.syncStatus().repositories[0].activity;
+    assert.ok(latest?.lastSuccessfulAt);
+    assert.deepEqual({ ...latest, lastSuccessfulAt: null }, failed);
+    assert.ok(Date.parse(latest.lastSuccessfulAt) >= Date.parse(failed.completedAt));
+    assert.equal(links(f).length, 1);
+  } finally {
+    if (!response.writableEnded) response.end(JSON.stringify(objects));
+    await older.catch(() => {});
+  }
+});
+
 test('preview only reuses a saved token on its own URL and rejects settings changed in flight', async () => {
   const f = fixture();
   const token = `synthetic-stored-${randomUUID()}`;

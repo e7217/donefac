@@ -10,7 +10,8 @@ import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadErro
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
-import type { GitlabDeployment, GitlabDeploymentSyncResult } from '../shared/types.js';
+import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
+import type { GitlabDeployment, GitlabDeploymentSyncResult, GitlabSyncStatus } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -350,9 +351,11 @@ export class GitlabIntegrationService{
   private readonly linkedMergeRequestRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
   private readonly deploymentSyncs = new Set<string>();
+  private readonly syncAttempts: GitlabManualSyncStatus;
   readonly deployments: GitlabDeployments;
   constructor(private readonly store:Store,private readonly hooks:Hooks,webhookPublicOrigin?:string){
     this.deployments=new GitlabDeployments(store);
+    this.syncAttempts = new GitlabManualSyncStatus(store);
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
@@ -366,13 +369,17 @@ export class GitlabIntegrationService{
       const authMode = saved.signingToken ? 'signature' : saved.webhookSecret ? 'secret' : null;
       return { baseUrl: saved.baseUrl, version: saved.version, projectIds: saved.projectIds, authMode,
         readToken: () => saved.token ? this.store.unseal(saved.token) : null,
-        matchesCredential: value => this.sameWebhookCredential(authMode === 'signature' ? saved.signingToken : saved.webhookSecret, value),
+        matchesCredential: value => this.sameCredential(authMode === 'signature' ? saved.signingToken : saved.webhookSecret, value),
       };
     }, webhookPublicOrigin);
   }
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
   private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{}),...(this.projectWebhooks.receiverUrl?{webhookReceiverUrl:this.projectWebhooks.receiverUrl}:{})};}
   settings():GitlabSettings{return this.public(this.raw());}
+  syncStatus(): GitlabSyncStatus {
+    const settings = this.raw();
+    return this.syncAttempts.list(settings.version, settings.projectIds);
+  }
   webhookStatus(): GitlabWebhookStatus {
     const settings = this.raw();
     const deliveries = new Map(this.store.all<StoredWebhookDelivery>('gitlab_webhook_deliveries').map(({ id, delivery }) => [id, delivery]));
@@ -505,21 +512,21 @@ export class GitlabIntegrationService{
     const jiraRoutes=this.submittedJiraRoutes(input,old,next.baseUrl,next.projectIds);
     if(jiraRoutes.length)next.jiraRoutes=jiraRoutes;
     else delete next.jiraRoutes;
-    let webhookCredentialsChanged = false;
+    let webhookCredentialsChanged = false, readCredentialChanged = false;
     for (const field of ['token', 'webhookSecret', 'signingToken'] as const) {
       if (!Object.hasOwn(input, field)) continue;
       const submitted = credential(input[field]);
       if (submitted && field === 'signingToken') signingKey(submitted);
-      if (field !== 'token') {
-        if (this.sameWebhookCredential(old[field], submitted)) continue;
-        webhookCredentialsChanged = true;
-      }
+      if (this.sameCredential(next[field], submitted)) continue;
+      if (field === 'token') readCredentialChanged = true;
+      else webhookCredentialsChanged = true;
       next[field] = submitted ? this.store.seal(submitted) : null;
     }
     this.invalidateWebhookDeliveries(old, next, webhookCredentialsChanged);
+    this.invalidateSyncAttempts(old, next, readCredentialChanged);
     next.version=old.version+1;this.store.setSetting('gitlab',next);this.hooks.onConnectionChanged(this.public(old),this.public(next));afterSave?.(this.public(next));return this.public(next);
   });}
-  private sameWebhookCredential(stored: string | null | undefined, submitted: string): boolean {
+  private sameCredential(stored: string | null | undefined, submitted: string): boolean {
     if (!stored) return !submitted;
     if (!submitted) return false;
     try { return constantEqual(this.store.unseal(stored), submitted); }
@@ -537,8 +544,22 @@ export class GitlabIntegrationService{
       if (!allowed.has(id) || previousRoutes.get(id) !== nextRoutes.get(id)) this.store.remove('gitlab_webhook_deliveries', String(id));
     }
   }
+  private invalidateSyncAttempts(previous: RawSettings, next: RawSettings, readCredentialChanged: boolean): void {
+    if (previous.baseUrl !== next.baseUrl || readCredentialChanged) {
+      this.syncAttempts.clear();
+      return;
+    }
+    const allowed = new Set(next.projectIds);
+    const previousRoutes = new Map((previous.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
+    const nextRoutes = new Map((next.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
+    for (const id of previous.projectIds) {
+      if (!allowed.has(id)) this.syncAttempts.remove(id);
+      else if (previousRoutes.get(id) !== nextRoutes.get(id)) this.syncAttempts.remove(id, 'activity');
+    }
+  }
   resetForImport(branchLinks: Iterable<GitlabLink> = []): void {
     this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;DELETE FROM gitlab_push_cursors;DELETE FROM gitlab_webhook_deliveries;');
+    this.syncAttempts.clear();
     const observations = new Map<string, PushObservation>();
     for (const link of branchLinks) {
       const observed = pushObservationFromLink(link);
@@ -1049,18 +1070,23 @@ export class GitlabIntegrationService{
     if (this.deploymentSyncs.has(key)) return fail('이 저장소의 배포 이력을 동기화 중입니다.', 409);
     const token = saved.token ? this.store.unseal(saved.token) : null;
     const capturedAt = Date.now();
+    const sequence = this.syncAttempts.start();
+    let saving = false;
     this.deploymentSyncs.add(key);
     try {
       signal?.throwIfAborted();
       const history = await readGitlabDeploymentHistory({ baseUrl: saved.baseUrl, token }, repositoryId, signal);
       signal?.throwIfAborted();
+      saving = true;
       return this.store.transaction(() => {
         this.currentForSync(saved.version);
         const { stored, mergeRequestsStored } = this.deployments.recordSync(instance, repositoryId, history.deployments, capturedAt);
-        const result = { repositoryId, settingsVersion: saved.version, deploymentsRead: history.scanned,
+        const summary = { repositoryId, deploymentsRead: history.scanned,
           deploymentsStored: stored, mergeRequestsStored,
           associationUnavailable: history.associationUnavailable, associationLimited: history.associationLimited,
-          deploymentLimitReached: history.deploymentLimitReached } satisfies GitlabDeploymentSyncResult;
+          deploymentLimitReached: history.deploymentLimitReached };
+        this.syncAttempts.deployments(repositoryId, sequence, now(), { status: 'ok', result: summary, error: null });
+        const result = { ...summary, settingsVersion: saved.version } satisfies GitlabDeploymentSyncResult;
         if (stored || mergeRequestsStored) afterSave?.(result);
         return result;
       });
@@ -1068,11 +1094,22 @@ export class GitlabIntegrationService{
       signal?.throwIfAborted();
       this.currentForSync(saved.version);
       if (error instanceof GitlabReadError) {
+        const stage = error.stage === 'deployment-merge-requests' ? error.stage : 'deployments';
+        this.store.transaction(() => {
+          this.currentForSync(saved.version);
+          this.syncAttempts.deployments(repositoryId, sequence, now(), { status: 'error', result: null,
+            error: { stage, httpStatus: error.httpStatus, message: error.message } });
+        });
         const denied = error.httpStatus === 401 || error.httpStatus === 403;
         const message = denied ? 'GitLab 배포 이력을 읽을 수 없습니다. 읽기 토큰과 접근 권한을 확인해 주세요.'
           : 'GitLab 배포 이력을 읽지 못했습니다. 저장소 주소와 연결 상태를 확인해 주세요.';
         return fail(message, 502, { stage: error.stage, httpStatus: error.httpStatus, reason: error.message });
       }
+      if (saving) this.store.transaction(() => {
+        this.currentForSync(saved.version);
+        this.syncAttempts.deployments(repositoryId, sequence, now(), { status: 'error', result: null,
+          error: { stage: 'save', httpStatus: null, message: 'GitLab 배포 이력 동기화 결과를 저장하지 못했습니다.' } });
+      });
       throw error;
     } finally {
       this.deploymentSyncs.delete(key);
@@ -1116,10 +1153,13 @@ export class GitlabIntegrationService{
     const selected=repositoryIds===undefined?captured.projectIds:projectIds(repositoryIds);
     if(!selected.length||selected.some(id=>!captured.projectIds.includes(id)))fail('저장한 GitLab 연결의 저장소를 선택해 주세요.');
     if(includeHistory&&this.historySyncActive)fail('기존 브랜치·커밋 동기화가 진행 중입니다.',409);
+    const sequence = this.syncAttempts.start();
+    let readOutcomes: ProjectReadOutcome[] | undefined;
     if(includeHistory)this.historySyncActive=true;
     try{
       const connection={...captured,projectIds:selected,token:captured.token?this.store.unseal(captured.token):null};
       const reads=await this.readRepositories(connection,{includeHistory});
+      readOutcomes = reads;
       const failures=reads.flatMap(read=>'failure'in read?[read.failure]:[]);
       const partial=failures.length>0;
       const failureSummary=`저장소 ${failures.length}곳을 조회하지 못했습니다.`;
@@ -1129,6 +1169,7 @@ export class GitlabIntegrationService{
         this.store.transaction(()=>{
           const current=this.currentForSync(captured.version);
           this.store.setSetting('gitlab',{...current,lastError:reason});
+          this.syncAttempts.activity(sequence, now(), includeHistory, failures);
         });
         fail('GitLab 동기화에 실패했습니다.',502,details);
       }
@@ -1152,7 +1193,9 @@ export class GitlabIntegrationService{
             historyLimits.commits||=plan.history.limits.commits;
           }
         }
-        this.store.setSetting('gitlab',{...current,lastSyncAt:now(),lastError:partial?failureSummary:null});
+        const completedAt = now();
+        this.store.setSetting('gitlab',{...current,lastSyncAt:completedAt,lastError:partial?failureSummary:null});
+        this.syncAttempts.activity(sequence, completedAt, includeHistory, repositories);
         afterSync?.(scanned,linked,failures.length);
       });
       const notice=includeHistory ? '저장소당 브랜치 최대 500개와 최근 커밋 100개를 함께 확인했습니다. 업무 상태는 자동 변경하지 않습니다.'
@@ -1162,12 +1205,22 @@ export class GitlabIntegrationService{
       this.currentForSync(captured.version);
       if(error instanceof GitlabIntegrationError)throw error;
       const message='GitLab 동기화 결과를 저장하지 못했습니다.';
-      this.store.transaction(()=>{const current=this.currentForSync(captured.version);this.store.setSetting('gitlab',{...current,lastError:message});});
+      this.store.transaction(()=>{
+        const current=this.currentForSync(captured.version);
+        this.store.setSetting('gitlab',{...current,lastError:message});
+        if (readOutcomes) this.syncAttempts.activity(sequence, now(), includeHistory, readOutcomes.map(read => 'failure' in read
+          ? read.failure : { projectId: read.projectId, status: 'error', counts: emptyCounts(includeHistory), error: { stage: 'save', httpStatus: null, message } }));
+      });
       return fail('GitLab 동기화에 실패했습니다.',502,{reason:message});
     }finally{if(includeHistory)this.historySyncActive=false;}
   }
   registerRoutes(app:Express,hooks:RouteHooks):void{
     app.get('/api/integrations/gitlab',(_req,res)=>res.json(this.settings()));
+    app.get('/api/integrations/gitlab/sync-status',(req,res)=>{
+      res.set('Cache-Control','no-store');
+      if (Object.keys(req.query).length) fail('동기화 상태 조회 조건을 확인해 주세요.');
+      res.json(this.syncStatus());
+    });
     app.get('/api/integrations/gitlab/jira-sources',(_req,res)=>res.set('Cache-Control','no-store').json(this.jiraSources()));
     app.get('/api/integrations/gitlab/webhook-status',(req,res)=>{
       res.set('Cache-Control','no-store');

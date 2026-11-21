@@ -1094,7 +1094,7 @@ interface GitlabSyncRepositoryCounts {
 }
 export interface GitlabSyncRepositoryFailure extends GitlabSyncRepositoryCounts {
   status: 'error';
-  error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits'; httpStatus: number | null; message: string };
+  error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'save'; httpStatus: number | null; message: string };
 }
 export type GitlabSyncRepositoryResult = GitlabSyncRepositoryFailure | (GitlabSyncRepositoryCounts & {
   status: 'ok'; error: null;
@@ -1111,6 +1111,22 @@ export interface GitlabSyncPreview {
   settingsVersion: number; baseUrl: string; projectIds: number[];
   repositories: GitlabSyncRepositoryResult[];
   counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
+}
+export interface GitlabActivitySyncAttempt {
+  completedAt: string;
+  lastSuccessfulAt: string | null;
+  includeHistory: boolean;
+  result: GitlabSyncRepositoryResult;
+}
+export type GitlabDeploymentSyncAttempt = { completedAt: string; lastSuccessfulAt: string | null } & (
+  | { status: 'ok'; result: Omit<GitlabDeploymentSyncResult, 'settingsVersion'>; error: null }
+  | { status: 'error'; result: null; error: {
+    stage: 'deployments' | 'deployment-merge-requests' | 'save'; httpStatus: number | null; message: string;
+  } }
+);
+export interface GitlabSyncStatus {
+  settingsVersion: number;
+  repositories: { repositoryId: number; activity: GitlabActivitySyncAttempt | null; deployments: GitlabDeploymentSyncAttempt | null }[];
 }
 export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed' | 'deployment.succeeded';
 export interface AutomationRule {

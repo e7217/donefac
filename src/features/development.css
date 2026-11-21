@@ -24,7 +24,10 @@
 .gitlab-preview .card-heading h2{display:flex;gap:8px;align-items:center}
 .gitlab-preview p,.gitlab-sync-result p,.gitlab-webhook-status p{margin:6px 0;overflow-wrap:anywhere}
 .gitlab-sync-result-heading{flex-wrap:wrap;gap:8px 12px}
+.gitlab-sync-result-actions{display:flex;flex-wrap:wrap;gap:8px;min-width:0}
 .gitlab-sync-result>.gitlab-preview-repositories{margin-top:12px}
+.gitlab-sync-result-meta{margin:6px 0;color:#526e60;font-size:12px;font-variant-numeric:tabular-nums}
+.gitlab-sync-row-retry{margin-top:6px}
 .gitlab-preview-summary{display:flex;flex-wrap:wrap;gap:8px 16px;padding:12px 0}
 .gitlab-preview-summary span{display:inline-flex;gap:6px;align-items:center}
 .gitlab-preview-summary strong{color:#264538;font-variant-numeric:tabular-nums}

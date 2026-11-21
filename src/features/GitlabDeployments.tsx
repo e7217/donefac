@@ -3,8 +3,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Download, ExternalLink, RefreshCw, Rocket } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
-import type { GitlabDeployment, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings } from '../../shared/types';
-import { api } from '../lib/api';
+import type { GitlabDeployment, GitlabDeploymentPage, GitlabDeploymentSyncAttempt, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabSyncStatus } from '../../shared/types';
+import { api, ApiError } from '../lib/api';
 import { gitlabActivityUrl } from './GitlabActivity';
 import './gitlab-deployments.css';
 
@@ -25,7 +25,7 @@ const tierLabels: ReadonlyMap<string, string> = new Map([
 type DeploymentRequest = { scope: string; offset: number };
 type DeploymentResponse = { scope: string; request: DeploymentRequest; links?: readonly GitlabLink[] } &
   ({ page: GitlabDeploymentPage } | { error: string });
-type SyncState = { pending: true } | { pending: false; result: GitlabDeploymentSyncResult } | { pending: false; error: string };
+type SyncState = { pending: boolean; receipt?: GitlabDeploymentSyncResult; previousCompletedAt?: string; error?: string };
 
 function deploymentSource({ jobUrl, projectUrl, sha }: GitlabDeployment) {
   const project = gitlabActivityUrl(projectUrl, 'commit');
@@ -66,10 +66,28 @@ function DeploymentRow({ deployment, showRepository }: { deployment: GitlabDeplo
   </li>;
 }
 
-function DeploymentSync({ repositoryId, settingsVersion, refreshPage }: {
+const deploymentSyncFailureLabels: Record<NonNullable<GitlabDeploymentSyncAttempt['error']>['stage'], string> = {
+  deployments: '배포 조회 실패',
+  'deployment-merge-requests': '포함 MR 조회 실패',
+  save: '결과 저장 실패',
+};
+
+function knownDeploymentFailure(cause: ApiError): GitlabDeploymentSyncAttempt['error'] {
+  const details = cause.details;
+  if (cause.status !== 502 || !details || typeof details !== 'object') return null;
+  const { stage, httpStatus, reason } = details as { stage?: unknown; httpStatus?: unknown; reason?: unknown };
+  if (stage !== 'project' && stage !== 'deployments' && stage !== 'deployment-merge-requests' && stage !== 'save') return null;
+  if ((httpStatus !== null && typeof httpStatus !== 'number') || typeof reason !== 'string') return null;
+  return { stage: stage === 'project' ? 'deployments' : stage, httpStatus, message: reason };
+}
+
+function DeploymentSync({ repositoryId, settingsVersion, attempt, statusAvailable, refreshPage, onSyncSettled }: {
   repositoryId: number;
   settingsVersion: number;
+  attempt: GitlabDeploymentSyncAttempt | null;
+  statusAvailable: boolean;
   refreshPage: () => void;
+  onSyncSettled: () => Promise<GitlabSyncStatus | null>;
 }) {
   const [state, setState] = useState<SyncState | null>(null);
   const activeRequest = useRef<AbortController | null>(null);
@@ -80,6 +98,9 @@ function DeploymentSync({ repositoryId, settingsVersion, refreshPage }: {
     const controller = new AbortController();
     activeRequest.current = controller;
     setState({ pending: true });
+    let confirmed: GitlabDeploymentSyncResult | undefined;
+    let error: string | undefined;
+    let knownFailure: GitlabDeploymentSyncAttempt['error'] = null;
     try {
       const result = await api<GitlabDeploymentSyncResult>('/integrations/gitlab/deployments/sync', {
         method: 'POST',
@@ -90,34 +111,61 @@ function DeploymentSync({ repositoryId, settingsVersion, refreshPage }: {
       if (result?.repositoryId !== repositoryId || result.settingsVersion !== settingsVersion) {
         throw new Error('이 저장소의 배포 동기화 결과를 확인하지 못했습니다.');
       }
-      setState({ pending: false, result });
+      confirmed = result;
       refreshPage();
     } catch (cause) {
-      if (!controller.signal.aborted) {
-        setState({ pending: false, error: cause instanceof Error ? cause.message : 'GitLab 배포 이력을 동기화하지 못했습니다.' });
+      if (controller.signal.aborted) return;
+      if (cause instanceof ApiError) knownFailure = knownDeploymentFailure(cause);
+      if (cause instanceof ApiError && (cause.status < 500 || knownFailure)) error = cause.message;
+      else {
+        error = 'GitLab 배포 동기화 응답을 확인하지 못했습니다. 서버에 저장된 최근 결과를 확인해 주세요.';
+        refreshPage();
       }
     } finally {
-      activeRequest.current = null;
+      if (!controller.signal.aborted) {
+        const status = await onSyncSettled();
+        const latest = status?.repositories.find(repository => repository.repositoryId === repositoryId)?.deployments;
+        const shownFailure = knownFailure && latest?.error?.stage === knownFailure.stage &&
+          latest.error.httpStatus === knownFailure.httpStatus && latest.error.message === knownFailure.message;
+        if (!controller.signal.aborted) setState({ pending: false, error: shownFailure ? undefined : error,
+          receipt: latest ? undefined : confirmed, previousCompletedAt: attempt?.completedAt });
+      }
+      if (activeRequest.current === controller) activeRequest.current = null;
     }
   }
 
-  const result = state && 'result' in state ? state.result : null;
+  const receipt = attempt?.completedAt === state?.previousCompletedAt ? state?.receipt : undefined;
+  const persisted = receipt ? null : attempt;
+  const result = receipt ?? persisted?.result;
   return <div className="gitlab-deployment-sync">
     <button className="btn" type="button" aria-disabled={state?.pending ?? false} onClick={() => void syncDeployments()}>
       <Download size={14} aria-hidden="true" />배포 이력 동기화
     </button>
     {state?.pending && <p className="gitlab-deployment-hint" role="status">GitLab에서 배포 이력을 읽고 있습니다.</p>}
-    {state && 'error' in state && <p className="error-text" role="alert">{state.error}</p>}
-    {result && <div className="gitlab-deployment-sync-report" role="status" aria-label="배포 이력 동기화 결과">
-      <p>배포 {result.deploymentsRead}건 조회 · {result.deploymentsStored}건 반영 · 포함 MR {result.mergeRequestsStored}건 반영</p>
-      {result.deploymentLimitReached && <p>배포 조회 한도에 도달했습니다.</p>}
-      {result.associationUnavailable > 0 && <p>포함 MR을 조회하지 못한 배포 {result.associationUnavailable}건</p>}
-      {result.associationLimited > 0 && <p>포함 MR 조회 한도에 도달한 배포 {result.associationLimited}건</p>}
+    {state?.error && <p className="error-text" role="alert">{state.error}</p>}
+    {(persisted || result) && <div className="gitlab-deployment-sync-report" role="status" aria-label="배포 이력 동기화 결과">
+      {persisted && <div className="gitlab-deployment-sync-meta">
+        <p>최근 시도 <time dateTime={persisted.completedAt}>{new Date(persisted.completedAt).toLocaleString('ko-KR')}</time></p>
+        <p>마지막 성공 {persisted.lastSuccessfulAt
+          ? <time dateTime={persisted.lastSuccessfulAt}>{new Date(persisted.lastSuccessfulAt).toLocaleString('ko-KR')}</time>
+          : '기록 없음'}</p>
+      </div>}
+      {persisted?.status === 'error' && <div className="error-text">
+        <strong>{deploymentSyncFailureLabels[persisted.error.stage]}</strong>
+        <p>{persisted.error.message}</p>
+      </div>}
+      {result && <>
+        <p>배포 {result.deploymentsRead}건 조회 · {result.deploymentsStored}건 반영 · 포함 MR {result.mergeRequestsStored}건 반영</p>
+        {result.deploymentLimitReached && <p>배포 조회 한도에 도달했습니다.</p>}
+        {result.associationUnavailable > 0 && <p>포함 MR을 조회하지 못한 배포 {result.associationUnavailable}건</p>}
+        {result.associationLimited > 0 && <p>포함 MR 조회 한도에 도달한 배포 {result.associationLimited}건</p>}
+      </>}
     </div>}
+    {statusAvailable && !persisted && !result && !state?.pending && <p className="gitlab-deployment-hint">배포 이력 동기화 기록이 없습니다.</p>}
   </div>;
 }
 
-function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, renderSyncControl }: {
+function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, onRefresh, renderSyncControl }: {
   path: string;
   repositoryId?: number;
   settingsVersion?: number;
@@ -125,6 +173,7 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   heading: ReactNode;
   description: string;
   empty: string;
+  onRefresh?: () => void;
   renderSyncControl?: (refreshPage: () => void) => ReactNode;
 }) {
   const scope = JSON.stringify([path, repositoryId, settingsVersion]);
@@ -163,7 +212,11 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   return <>
     <div className="gitlab-deployment-heading">
       {heading}
-      <button className="btn btn-ghost" type="button" aria-disabled={pending} onClick={() => browse(0)}>
+      <button className="btn btn-ghost" type="button" aria-disabled={pending} onClick={() => {
+        if (pending) return;
+        browse(0);
+        onRefresh?.();
+      }}>
         <RefreshCw size={14} aria-hidden="true" />배포 새로고침
       </button>
     </div>
@@ -196,12 +249,17 @@ export function IssueGitlabDeployments({ issueId, links }: { issueId: string; li
   </section>;
 }
 
-export function RepositoryGitlabDeployments({ settings }: { settings: GitlabSettings }) {
+export function RepositoryGitlabDeployments({ settings, syncStatus, onSyncSettled }: {
+  settings: GitlabSettings;
+  syncStatus: GitlabSyncStatus | null;
+  onSyncSettled: () => Promise<GitlabSyncStatus | null>;
+}) {
   const headingId = useId();
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<number>();
   const { projectIds, version, baseUrl } = settings;
   const repositoryId = selectedRepositoryId !== undefined && projectIds.includes(selectedRepositoryId) ? selectedRepositoryId : projectIds[0];
   if (!baseUrl || repositoryId === undefined) return null;
+  const attempt = syncStatus?.repositories.find(repository => repository.repositoryId === repositoryId)?.deployments ?? null;
   return <section className="card gitlab-deployments" aria-labelledby={headingId}>
     <DeploymentHistory path="/integrations/gitlab/deployments" repositoryId={repositoryId} settingsVersion={version}
       heading={<><h2 id={headingId}><Rocket size={18} aria-hidden="true" />GitLab 배포 기록</h2>
@@ -211,8 +269,9 @@ export function RepositoryGitlabDeployments({ settings }: { settings: GitlabSett
           </select>
         </label></>}
       description="선택한 저장소의 배포 웹훅과 GitLab에서 동기화한 배포를 확인합니다."
+      onRefresh={() => void onSyncSettled()}
       renderSyncControl={refreshPage => <DeploymentSync key={`${baseUrl}:${version}:${repositoryId}`} repositoryId={repositoryId}
-        settingsVersion={version} refreshPage={refreshPage} />}
+        settingsVersion={version} attempt={attempt} statusAvailable={syncStatus !== null} refreshPage={refreshPage} onSyncSettled={onSyncSettled} />}
       empty="이 저장소에 저장된 GitLab 배포가 없습니다." />
   </section>;
 }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
-import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncRepositoryResult, GitlabSyncResult, Project } from '../../shared/types';
+import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
@@ -19,7 +19,8 @@ const empty:Draft={baseUrl:'',ids:'',token:'',secret:'',signingToken:'',jiraRout
 const sortedRoutes = (routes: GitlabJiraRoute[]) => [...routes].sort((a, b) => a.repositoryId - b.repositoryId);
 const draftOf=(settings:GitlabSettings):Draft=>({...empty,baseUrl:settings.baseUrl,ids:settings.projectIds.join(', '),jiraRoutes:sortedRoutes(settings.jiraRoutes ?? [])});
 type PreviewState = { state: 'loading' } | { state: 'failed'; error: string } | { state: 'ready'; result: GitlabSyncPreview; jiraRoutes: GitlabJiraRoute[] };
-type SyncRun = { settingsVersion: number; includeHistory: boolean; repositories: GitlabSyncRepositoryResult[] };
+type SyncStatusRead = { version: number; status: GitlabSyncStatus | null; loading: boolean; error: string; settingsChanged: boolean };
+type SyncRetry = { repositoryIds: number[]; includeHistory: boolean };
 type JiraSources = { items: GitlabJiraSource[]; loading: boolean; error: string };
 const maxGitlabRepositories = 100;
 function HistoryLimitNote({ limits }: { limits?: GitlabHistoryLimits }) {
@@ -59,10 +60,12 @@ export function Development(props:FeatureProps){
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [includeHistory, setIncludeHistory] = useState(false);
-  const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
+  const [syncRead, setSyncRead] = useState<SyncStatusRead | null>(null);
   const [jiraSources, setJiraSources] = useState<JiraSources>({ items: [], loading: true, error: '' });
   const [repositorySearchRevision, setRepositorySearchRevision] = useState(0);
   const previewRequest = useRef<AbortController | null>(null);
+  const syncStatusRequest = useRef<AbortController | null>(null);
+  const syncStatusVersion = useRef<number | null>(null);
   const jiraSourcesRequest = useRef<AbortController | null>(null);
   const connectionForm = useRef<HTMLFormElement>(null);
   const pending=useRef(false),dirtyRef=useRef(false),alive=useRef(true);
@@ -77,8 +80,64 @@ export function Development(props:FeatureProps){
     setPreview(null);
   }, []);
   const clearRepositorySearch = useCallback(() => setRepositorySearchRevision(value => value + 1), []);
-  const accept=useCallback((value:GitlabSettings)=>{clearPreview();clearRepositorySearch();setSyncRun(null);setSettings(value);const next=draftOf(value);setDraft(next);setBaseline(next);dirtyRef.current=false;setError('');},[clearPreview,clearRepositorySearch]);
-  useEffect(()=>{alive.current=true;let cancelled=false;void api<GitlabSettings>('/integrations/gitlab').then(value=>{if(!cancelled)accept(value);}).catch(e=>{if(!cancelled)setError((e as Error).message);});return()=>{cancelled=true;alive.current=false;previewRequest.current?.abort();previewRequest.current=null;};},[accept]);
+  const readSyncStatus = useCallback(async (version: number): Promise<GitlabSyncStatus | null> => {
+    if (!alive.current || syncStatusVersion.current !== version) return null;
+    syncStatusRequest.current?.abort();
+    const controller = new AbortController();
+    syncStatusRequest.current = controller;
+    setSyncRead(current => ({ version, status: current?.version === version ? current.status : null, loading: true, error: '', settingsChanged: false }));
+    try {
+      const status = await api<GitlabSyncStatus>('/integrations/gitlab/sync-status', { cache: 'no-store', signal: controller.signal });
+      if (syncStatusRequest.current !== controller) return null;
+      if (!Array.isArray(status?.repositories)) throw new Error('Unexpected GitLab sync status');
+      if (status.settingsVersion !== version) {
+        setSyncRead({ version, status: null, loading: false, settingsChanged: true,
+          error: '연결 설정이 변경되었습니다. 최신 설정을 불러온 뒤 동기화 결과를 다시 확인하세요.' });
+        return null;
+      }
+      setSyncRead({ version, status, loading: false, error: '', settingsChanged: false });
+      return status;
+    } catch {
+      if (syncStatusRequest.current === controller) {
+        setSyncRead(current => ({ version, status: current?.version === version ? current.status : null, loading: false,
+          error: '저장된 GitLab 동기화 결과를 불러오지 못했습니다.', settingsChanged: false }));
+      }
+      return null;
+    } finally {
+      if (syncStatusRequest.current === controller) syncStatusRequest.current = null;
+    }
+  }, []);
+  const accept=useCallback((value:GitlabSettings)=>{
+    clearPreview();
+    clearRepositorySearch();
+    setSettings(value);
+    const next = draftOf(value);
+    setDraft(next);
+    setBaseline(next);
+    dirtyRef.current = false;
+    setError('');
+    syncStatusVersion.current = value.baseUrl && value.projectIds.length ? value.version : null;
+    if (syncStatusVersion.current !== null) void readSyncStatus(value.version);
+    else {
+      syncStatusRequest.current?.abort();
+      syncStatusRequest.current = null;
+      setSyncRead(null);
+    }
+  },[clearPreview,clearRepositorySearch,readSyncStatus]);
+  useEffect(()=>{
+    alive.current=true;
+    let cancelled=false;
+    void api<GitlabSettings>('/integrations/gitlab').then(value=>{if(!cancelled)accept(value);}).catch(e=>{if(!cancelled)setError((e as Error).message);});
+    return()=>{
+      cancelled=true;
+      alive.current=false;
+      previewRequest.current?.abort();
+      previewRequest.current=null;
+      syncStatusRequest.current?.abort();
+      syncStatusRequest.current=null;
+      syncStatusVersion.current=null;
+    };
+  },[accept]);
   const loadJiraSources = useCallback(async () => {
     jiraSourcesRequest.current?.abort();
     const controller = new AbortController();
@@ -140,38 +199,36 @@ export function Development(props:FeatureProps){
     const saved=await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,baseUrl:draft.baseUrl,projectIds,...(jiraRoutes.length||settings.jiraRoutes?.length?{jiraRoutes}:{}),...(draft.token?{token:draft.token}:{}),...(draft.secret?{webhookSecret:draft.secret}:{}),...(draft.signingToken?{signingToken:draft.signingToken}:{})});accept(saved);window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 연결 설정을 저장했습니다.');
   });}
   async function disconnect(){if(!settings||!window.confirm('GitLab 자격 증명을 삭제하고 상태 자동화를 비활성화할까요? 입력 중인 연결 설정도 초기화합니다. 기존 개발 활동 기록은 유지됩니다.'))return;await execute(async()=>{accept(await patch<GitlabSettings>('/integrations/gitlab',{expectedVersion:settings.version,token:'',webhookSecret:'',signingToken:''}));window.dispatchEvent(new Event('teamspace:gitlab-settings-changed'));props.notify('GitLab 자격 증명을 삭제했습니다.');});}
-  async function sync(repositoryIds?: number[]) {
+  async function sync(retry?: SyncRetry) {
     if (!settings) return;
     const expectedVersion = settings.version;
-    const scanHistory = repositoryIds ? syncRun?.includeHistory === true : includeHistory;
+    const scanHistory = retry?.includeHistory ?? includeHistory;
     await execute(async () => {
-      function recordRun(repositories: GitlabSyncRepositoryResult[]) {
-        setSyncRun(current => {
-          if (!repositoryIds || current?.settingsVersion !== expectedVersion) {
-            return { settingsVersion: expectedVersion, includeHistory: scanHistory, repositories };
-          }
-          const replacements = new Map(repositories.map(repository => [repository.projectId, repository]));
-          return { ...current, repositories: current.repositories.map(repository => replacements.get(repository.projectId) ?? repository) };
-        });
-      }
-      let result: GitlabSyncResult;
+      let result: GitlabSyncResult | undefined;
       try {
         result = await post<GitlabSyncResult>('/integrations/gitlab/sync', {
-          expectedVersion, ...(scanHistory ? { includeHistory: true } : {}), ...(repositoryIds ? { repositoryIds } : {}),
+          expectedVersion, ...(scanHistory ? { includeHistory: true } : {}), ...(retry ? { repositoryIds: retry.repositoryIds } : {}),
         });
+        if (!result?.ok || result.settings.version !== expectedVersion) throw new Error('Unexpected GitLab sync response');
       } catch (cause) {
+        if (!alive.current) return;
         const failure = syncFailure(cause, expectedVersion);
-        if (!failure) throw cause;
-        if (alive.current) {
-          recordRun(failure.repositories);
-          props.notify('요청한 저장소를 조회하지 못했습니다. 동기화 결과를 확인하세요.', 'error');
+        const refreshed = readSyncStatus(expectedVersion);
+        if (failure) {
+          await refreshed;
+          if (alive.current) props.notify('요청한 저장소를 조회하지 못했습니다. 동기화 결과를 확인하세요.', 'error');
+          return;
         }
-        return;
+        if (cause instanceof ApiError && cause.status < 500) {
+          await refreshed;
+          throw cause;
+        }
+        await Promise.all([refreshed, props.refresh().catch(() => undefined)]);
+        throw new Error('GitLab 동기화 응답을 확인하지 못했습니다. 서버에 저장된 최근 결과를 확인해 주세요.');
       }
       if (!alive.current) return;
-      recordRun(result.repositories);
       setSettings(result.settings);
-      await props.refresh();
+      await Promise.all([readSyncStatus(expectedVersion), props.refresh()]);
       if (alive.current) {
         if (result.partial) props.notify(`조회한 저장소에서 ${result.linked}개 연결을 저장했습니다. 실패한 저장소는 동기화 결과에서 확인하세요.`);
         else props.notify(`GitLab 동기화를 완료했습니다. ${result.linked}개 연결`);
@@ -201,6 +258,9 @@ export function Development(props:FeatureProps){
   const issueKeys = new Map(props.data.issues.filter(issue => issue.projectId === props.projectId).map(issue => [issue.id, issue.key]));
   const links = props.data.gitlabLinks.filter(link => issueKeys.has(link.issueId));
   const repositoryIds = editableRepoIds(draft.ids);
+  const currentSyncRead = syncRead?.version === settings?.version ? syncRead : null;
+  const syncStatus = currentSyncRead?.status ?? null;
+  const legacySyncFallback = Boolean(currentSyncRead?.error && !currentSyncRead.settingsChanged && !syncStatus);
   return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div><button className="btn btn-primary" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={() => void sync()}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button></div>
     {error&&<div className="inline-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}
     <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
@@ -220,14 +280,16 @@ export function Development(props:FeatureProps){
         <p className="help-text" id="gitlab-history-help">미리보기와 지금 동기화에 적용합니다. 저장소별로 브랜치 최대 500개와 최근 커밋 최대 100개를 읽습니다.</p>
       </div>
       <div className="data-actions"><button className="btn btn-primary" disabled={!dirty}>연결 설정 저장</button><button type="button" className="btn" disabled={!draft.baseUrl.trim() || !draft.ids.trim() || preview?.state === 'loading'} onClick={() => void requestPreview()}><Search size={15} aria-hidden="true"/>연결 미리보기</button>{(settings?.tokenConfigured||settings?.webhookSecretConfigured||settings?.signingTokenConfigured)&&<button className="btn btn-ghost" type="button" onClick={disconnect}>연결 해제</button>}</div>
-    </fieldset>{settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{settings?.lastError&&!syncRun&&<p className="error-text">{settings.lastError}</p>}
+    </fieldset>{legacySyncFallback&&settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{legacySyncFallback&&settings?.lastError&&<p className="error-text">{settings.lastError}</p>}
     </form>
     {preview && <GitlabPreview preview={preview} projects={props.data.projects} openIssue={props.openIssue}/>}
-    {syncRun && <GitlabSyncReport run={syncRun} busy={busy} onRetry={ids => void sync(ids)} />}
+    {settings?.baseUrl && settings.projectIds.length > 0 && <GitlabSyncReport read={currentSyncRead} busy={busy}
+      onReload={() => void readSyncStatus(settings.version)} onRetry={options => void sync(options)} />}
     {settings && <GitlabProjectWebhookPanel key={`project-webhook:${props.actorId}:${settings.version}:${settings.webhookReceiverUrl ?? ''}`} settings={settings} />}
     {settings && <GitlabWebhookStatusPanel key={settings.version} settings={settings} />}
     <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 새 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>지금 동기화는 저장한 연결 설정을 사용합니다. 기존 브랜치·커밋을 포함하면 웹훅 설정 전의 활동도 찾을 수 있습니다.</li></ul></section></div>
-    {settings && <RepositoryGitlabDeployments settings={settings} />}
+    {settings && <RepositoryGitlabDeployments settings={settings} syncStatus={syncStatus}
+      onSyncSettled={() => readSyncStatus(settings.version)} />}
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
     <section className="card linked-development" aria-label="연결된 개발 활동">
       <div className="card-heading gitlab-activity-header"><h2>연결된 개발 활동 <span className="count-pill">{links.length}</span></h2><GitlabActivityRefresh refresh={props.refresh} notify={notify} /></div>
@@ -297,7 +359,7 @@ function JiraRouteSettings({ repositoryIds, routes, sources, projects, onRetry, 
 
 const candidateAction = { create: '신규 연결', update: '갱신', unchanged: '유지' } as const;
 const candidateKind = { merge_request: 'MR', pipeline: '파이프라인', branch: '브랜치', commit: '커밋' } as const;
-const readStage = { project: '저장소 정보', 'merge-requests': 'MR', pipelines: '파이프라인', branches: '브랜치', commits: '커밋' } as const;
+const readStage = { project: '저장소 정보', 'merge-requests': 'MR', pipelines: '파이프라인', branches: '브랜치', commits: '커밋', save: '결과 저장' } as const;
 const repositoryReadHints: Partial<Record<number, string>> = {
   401: '저장한 읽기 API 토큰이 유효한지 확인하세요.',
   403: '읽기 API 토큰에 이 저장소를 조회할 권한이 있는지 확인하세요.',
@@ -322,35 +384,74 @@ function RepositoryCounts({ counts }: { counts: GitlabSyncPreviewCounts }) {
   </>;
 }
 
-function GitlabSyncReport({ run, busy, onRetry }: { run: SyncRun; busy: boolean; onRetry: (repositoryIds: number[]) => void }) {
-  const failed = run.repositories.flatMap(repository => repository.status === 'error' ? [repository.projectId] : []);
-  const completed = run.repositories.length - failed.length;
-  const branches = run.repositories.reduce((total, repository) => total + (repository.counts.branches ?? 0), 0);
-  const commits = run.repositories.reduce((total, repository) => total + (repository.counts.commits ?? 0), 0);
+function GitlabSyncReport({ read, busy, onReload, onRetry }: {
+  read: SyncStatusRead | null;
+  busy: boolean;
+  onReload: () => void;
+  onRetry: (options: SyncRetry) => void;
+}) {
+  const repositories = read?.status?.repositories ?? [];
+  const failed = repositories.flatMap(({ repositoryId, activity }) => activity?.result.status === 'error'
+    ? [{ repositoryId, includeHistory: activity.includeHistory }] : []);
+  const completed = repositories.filter(repository => repository.activity?.result.status === 'ok');
+  const history = completed.filter(repository => repository.activity?.includeHistory);
+  const branches = history.reduce((total, repository) => total + (repository.activity?.result.counts.branches ?? 0), 0);
+  const commits = history.reduce((total, repository) => total + (repository.activity?.result.counts.commits ?? 0), 0);
+  const untried = repositories.length - completed.length - failed.length;
+  const retryMode = failed[0]?.includeHistory;
+  const aggregateRetry = retryMode !== undefined && failed.every(repository => repository.includeHistory === retryMode);
+  const disabled = busy || Boolean(read?.loading);
   return <section className="card gitlab-sync-result" aria-labelledby="gitlab-sync-result-title">
     <div className="card-heading gitlab-sync-result-heading">
       <h2 id="gitlab-sync-result-title">GitLab 동기화 결과</h2>
-      {failed.length > 0 && <button className="btn" type="button" disabled={busy} onClick={() => onRetry(failed)}>
-        <RefreshCw size={15} aria-hidden="true" />실패한 저장소 다시 시도
-      </button>}
+      <div className="gitlab-sync-result-actions">
+        <button className="btn" type="button" disabled={disabled} onClick={onReload}>
+          <RefreshCw size={15} aria-hidden="true" />동기화 결과 새로고침
+        </button>
+        {aggregateRetry && <button className="btn" type="button" disabled={disabled}
+          onClick={() => onRetry({ repositoryIds: failed.map(repository => repository.repositoryId), includeHistory: retryMode })}>
+          <RefreshCw size={15} aria-hidden="true" />실패한 저장소 다시 시도
+        </button>}
+      </div>
     </div>
-    <p role="status">저장소 {completed}곳 동기화 완료 · {failed.length}곳 조회 실패</p>
-    {run.includeHistory && completed > 0 && <div className="gitlab-history-result" role="status" aria-label="기존 개발 이력 동기화 결과">
+    {read?.error && <p className="error-text" role="alert">{read.error}</p>}
+    {read?.loading && !read.status && <p role="status">동기화 결과를 불러오는 중입니다.</p>}
+    {read?.status && <p role="status">저장소 {completed.length}곳 동기화 완료 · {failed.length}곳 실패{untried > 0 && ` · ${untried}곳 기록 없음`}</p>}
+    {history.length > 0 && <div className="gitlab-history-result" role="status" aria-label="기존 개발 이력 동기화 결과">
       <p>브랜치 {branches}개 · 커밋 {commits}개 조회</p>
     </div>}
-    <ul className="gitlab-preview-repositories" aria-label="저장소별 동기화 결과">
-      {run.repositories.map(repository => <li key={repository.projectId}>
-        <section aria-label={`저장소 ${repository.projectId}`}>
-          <h3>저장소 {repository.projectId} <span className={`badge gitlab-preview-${repository.status}`}>
-            {repository.status === 'error' ? `${readStage[repository.error.stage]} 조회 실패` : '동기화 완료'}
-          </span></h3>
-          {repository.status === 'error' ? <RepositoryReadError error={repository.error} /> : <>
-            <RepositoryCounts counts={repository.counts} />
-            <HistoryLimitNote limits={repository.historyLimits} />
-          </>}
-        </section>
-      </li>)}
-    </ul>
+    {repositories.length > 0 && <ul className="gitlab-preview-repositories" aria-label="저장소별 동기화 결과">
+      {repositories.map(({ repositoryId, activity }) => {
+        const result = activity?.result;
+        return <li key={repositoryId}>
+          <section aria-label={`저장소 ${repositoryId}`}>
+            <h3>저장소 {repositoryId} <span className={`badge ${result ? `gitlab-preview-${result.status}` : 'gitlab-webhook-waiting'}`}>
+              {result?.status === 'ok' ? '동기화 완료' : result?.status === 'error'
+                ? result.error.stage === 'save' ? '결과 저장 실패' : `${readStage[result.error.stage]} 조회 실패`
+                : '동기화 기록 없음'}
+            </span></h3>
+            {activity && <div className="gitlab-sync-result-meta">
+              <p>최근 시도 <time dateTime={activity.completedAt}>{new Date(activity.completedAt).toLocaleString('ko-KR')}</time></p>
+              <p>마지막 성공 {activity.lastSuccessfulAt
+                ? <time dateTime={activity.lastSuccessfulAt}>{new Date(activity.lastSuccessfulAt).toLocaleString('ko-KR')}</time>
+                : '기록 없음'}</p>
+              <p>{activity.includeHistory ? '브랜치·커밋 포함' : 'MR·파이프라인'}</p>
+            </div>}
+            {result?.status === 'error' && <>
+              <RepositoryReadError error={result.error} />
+              {!aggregateRetry && activity && <button className="btn btn-ghost gitlab-sync-row-retry" type="button" disabled={disabled}
+                onClick={() => onRetry({ repositoryIds: [repositoryId], includeHistory: activity.includeHistory })}>
+                <RefreshCw size={14} aria-hidden="true" />저장소 {repositoryId} 다시 시도
+              </button>}
+            </>}
+            {result?.status === 'ok' && <>
+              <RepositoryCounts counts={result.counts} />
+              <HistoryLimitNote limits={result.historyLimits} />
+            </>}
+          </section>
+        </li>;
+      })}
+    </ul>}
   </section>;
 }
 

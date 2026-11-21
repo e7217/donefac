@@ -423,7 +423,7 @@ const gitlab = createServer((request, response) => {
   } else if (url.pathname === `${projectEndpoint}/merge_requests`) {
     payload = [{ id: 530, iid: 12, title: 'OLD-1 파일럿 원본 업무', source_branch: 'feature/OLD-1',
       web_url: `${project}/-/merge_requests/12`, state: 'merged', updated_at: '2020-01-02T01:02:00Z' }];
-  } else if (url.pathname === `${projectEndpoint}/pipelines`) {
+  } else if (url.pathname === `${projectEndpoint}/pipelines` || url.pathname === `${projectEndpoint}/deployments`) {
     payload = [];
   } else {
     response.writeHead(404).end();
@@ -778,6 +778,27 @@ async function runStandardPilot() {
   assert.equal(gitlabWebhookStatus.repositories[0].lastDelivery.authentication, 'secret-token');
   const firstSync = await (await call(pilot.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(firstSync.linked,1);
+  const { settingsVersion, ...deploymentResult } = await (await call(pilot.url, '/integrations/gitlab/deployments/sync', {
+    method: 'POST', body: { repositoryId: 42, expectedVersion: gitlabSettings.version },
+  })).json();
+  assert.equal(settingsVersion, gitlabSettings.version);
+  assert.equal(deploymentResult.deploymentsRead, 0);
+  const syncStatusPath = '/integrations/gitlab/sync-status';
+  const readsBeforeStatus = authenticatedReads;
+  const syncStatusResponse = await call(pilot.url, syncStatusPath);
+  assert.equal(syncStatusResponse.headers.get('cache-control'), 'no-store');
+  const syncStatus = await syncStatusResponse.json();
+  assert.equal(authenticatedReads, readsBeforeStatus);
+  assert.equal(syncStatus.settingsVersion, gitlabSettings.version);
+  assert.equal(syncStatus.repositories.length, 1);
+  const [repositoryStatus] = syncStatus.repositories;
+  assert.equal(repositoryStatus.repositoryId, 42);
+  assert.equal(repositoryStatus.activity.includeHistory, false);
+  assert.deepEqual(repositoryStatus.activity.result, firstSync.repositories[0]);
+  assert.equal(repositoryStatus.activity.lastSuccessfulAt, repositoryStatus.activity.completedAt);
+  assert.equal(repositoryStatus.deployments.status, 'ok');
+  assert.deepEqual(repositoryStatus.deployments.result, deploymentResult);
+  assert.equal(repositoryStatus.deployments.lastSuccessfulAt, repositoryStatus.deployments.completedAt);
   const gitlabActivity = await (await call(pilot.url,gitlabLinksPath)).json();
   assert.deepEqual(gitlabActivity.links.map(link => [link.issueId, link.originalJiraKey]), [[sourceAudit.issue.id, 'OLD-1']]);
   const attachDevelopment = async url => (await call(pilot.url,gitlabIssuePath,{
@@ -905,6 +926,9 @@ async function runStandardPilot() {
   assert.deepEqual((await (await call(copy.url,restoredBranchPath)).json()).links,[manualBranch]);
   assert.deepEqual((await (await call(copy.url,`${gitlabIssuePath}?kind=commit`)).json()).links,[manualCommit]);
   assert.deepEqual(await (await call(copy.url, webhookStatusPath)).json(), gitlabWebhookStatus);
+  const readsBeforeRestoredStatus = authenticatedReads;
+  assert.deepEqual(await (await call(copy.url, syncStatusPath)).json(), syncStatus);
+  assert.equal(authenticatedReads, readsBeforeRestoredStatus);
   assert.equal((await (await call(copy.url, '/integrations/gitlab/webhook', gitlabWebhook)).json()).duplicate, true);
   const nextHead = 'e'.repeat(40);
   const afterRestore = await (await call(copy.url, '/integrations/gitlab/webhook', {
@@ -921,7 +945,7 @@ async function runStandardPilot() {
   assert.equal(updatedMigratedIssue.version, restoredAudit.issue.version + 1);
   const restoredSync = await (await call(copy.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(restoredSync.linked,0);
-  assert.equal(authenticatedReads - readsAfterDiscovery, 8);
+  assert.equal(authenticatedReads - readsAfterDiscovery, 10);
   await stop(copy);
   console.log('Pilot rehearsal passed for browser workflows, Jira and Confluence migration, GitLab activity, cold backup integrity, ticket creation retries, ticket form conditions, automation history, time reservations and individual trash restore.');
 }

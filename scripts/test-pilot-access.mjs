@@ -117,6 +117,7 @@ async function verifyIntegrations(session, anonymous, origin) {
   const gitlabPath = '/api/integrations/gitlab';
   const repositorySearchPath = `${gitlabPath}/repository-search`;
   const webhookStatusPath = `${gitlabPath}/webhook-status`;
+  const syncStatusPath = `${gitlabPath}/sync-status`;
   const settings = await (await call(session, 'GET', gitlabPath, 200)).json();
   const savedSettings = await (await call(session, 'PATCH', gitlabPath, 200, {
     headers: { Origin: origin },
@@ -179,6 +180,13 @@ async function verifyIntegrations(session, anonymous, origin) {
   assert.equal(repository.repositoryId, 42);
   assert.equal(repository.lastDelivery.authentication, 'secret-token');
   assert.equal(repository.lastDelivery.linked, 1);
+  await call(anonymous, 'GET', syncStatusPath, 401, { headers: { 'X-Gitlab-Token': gitlabSecret } });
+  const syncStatus = await call(session, 'GET', syncStatusPath, 200);
+  assert.equal(syncStatus.headers()['cache-control'], 'no-store');
+  assert.deepEqual(await syncStatus.json(), {
+    settingsVersion: savedSettings.version,
+    repositories: [{ repositoryId: 42, activity: null, deployments: null }],
+  });
 
   await call(session, 'GET', '/api/v1/issues/issue-1', 401);
   const key = await (await call(session, 'POST', '/api/api-keys', 201, {
@@ -194,6 +202,8 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'GET', '/api/workspace', 401, { headers: bearer });
   await call(anonymous, 'GET', webhookStatusPath, 401, { headers: bearer });
   await call(anonymous, 'GET', '/api/v1/integrations/gitlab/webhook-status', 403, { headers: bearer });
+  await call(anonymous, 'GET', syncStatusPath, 401, { headers: bearer });
+  await call(anonymous, 'GET', '/api/v1/integrations/gitlab/sync-status', 403, { headers: bearer });
   await call(anonymous, 'POST', repositorySearchPath, 401, { headers: { ...bearer, Origin: origin }, data: searchWithoutQuery });
   await call(anonymous, 'POST', '/api/v1/integrations/gitlab/repository-search', 403, { headers: bearer, data: searchWithoutQuery });
 
@@ -337,7 +347,8 @@ async function verifyBrowser(origin) {
       await expectSoon(board.getByRole('button', { name: 'NEO-1 업무 열기', exact: true })).toHaveCount(0);
       await expectSoon(boardPage).toHaveURL(boardUrl);
     } finally { await boardPage.close(); }
-    for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab', '/api/integrations/gitlab/webhook-status']) {
+    for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab',
+      '/api/integrations/gitlab/webhook-status', '/api/integrations/gitlab/sync-status']) {
       const response = await call(session.request, 'GET', path, 200);
       checkCredentials(await response.body(), path);
     }

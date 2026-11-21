@@ -450,6 +450,7 @@ curl --fail-with-body \
 | `POST /api/integrations/gitlab/repository-search` | 저장 전 주소와 읽기 토큰으로 프로젝트 이름·네임스페이스 검색 또는 전체 경로 조회 |
 | `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인 및 선택한 저장소 이력의 티켓 연결 후보 확인 |
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
+| `GET /api/integrations/gitlab/sync-status` | 저장한 연결 설정 버전과 저장소별 최근 활동·배포 수동 동기화 결과 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
 | `GET /api/integrations/gitlab/webhook-status` | 저장한 연결 설정 버전과 허용 저장소별 최근 인증 수신 요약 |
 | `POST /api/integrations/gitlab/project-webhook-review` | 저장한 저장소의 프로젝트 웹훅을 조회하고 수신 주소와 이벤트 설정 점검 |
@@ -467,6 +468,8 @@ curl --fail-with-body \
 **연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`, `jiraRoutes`를 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
 
 수동 동기화는 조회를 완료한 저장소를 반영하고 `repositories`에 저장소별 결과를 돌려준다. 성공과 실패가 섞이면 `partial: true`가 표시된다. 요청한 저장소가 모두 실패하면 새 링크를 저장하지 않고 502 응답에 저장소별 실패 사유를 전달한다. `{repositoryIds,expectedVersion,includeHistory?}`로 현재 설정에 있는 저장소만 골라 다시 시도할 수 있다. 그 사이 연결 설정이 변경되면 선택 재시도를 거절한다.
+
+`sync-status`는 Teamspace에 저장된 `settingsVersion`과 `{repositoryId,activity,deployments}` 배열을 `repositories`로 반환한다. 각 종류의 결과가 아직 없으면 `null`이다. 기록이 있으면 이미 완료된 시도 중 가장 최근에 시작한 시도의 `completedAt`과 마지막 성공 시각 `lastSuccessfulAt`이 들어간다. 이전 성공 기록이 없으면 `lastSuccessfulAt`은 `null`이다. `activity`는 `includeHistory`와 저장소별 `result`, `deployments`는 `status`와 성공 통계 `result` 또는 오류 `error`를 담는다. 오류 요약에는 단계, 확인된 HTTP 상태와 고정 메시지만 들어간다. GitLab 주소나 읽기 토큰이 바뀌면 두 종류의 요약을 초기화한다. 저장소 제거는 해당 저장소의 두 요약, Jira 매핑 변경은 해당 저장소의 활동 요약에 적용한다. 물리 백업은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 

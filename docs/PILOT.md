@@ -40,6 +40,8 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 처음 연결할 때는 **개발 · GitLab → GitLab 저장소 찾기**를 사용한다. GitLab 서비스 주소와 읽기 토큰을 입력하고 저장소 이름이나 `group/subgroup/repository` 전체 경로로 검색한다. 결과의 **추가**를 누르면 GitLab 프로젝트 ID 입력에 반영된다. 알고 있는 숫자 ID도 직접 입력할 수 있다. **연결 미리보기**에서 티켓 연결을 확인한 뒤 **연결 설정 저장**과 **지금 동기화**를 실행한다. [GitLab 저장소 조회](https://docs.gitlab.com/api/projects/#list-all-projects)
 
+동기화 후 화면을 다시 열고 **GitLab 동기화 결과**에서 저장소별 완료 시각과 마지막 성공 시각을 확인한다. 실패하면 표시된 조회 단계를 확인하고 해당 저장소만 다시 시도한다. **GitLab 배포 기록**에서도 저장소를 바꿔 최근 배포 동기화 결과와 부분 조회 여부를 확인한다.
+
 **개발 · GitLab → GitLab 웹훅 수신 확인**에서 저장소별 마지막 인증 수신을 확인한다. 업무 연결이 0건이어도 수신 시각과 이벤트가 표시된다. GitLab에서 이벤트를 보낸 뒤 **수신 상태 새로고침**을 누른다. 수신이 표시되지 않으면 GitLab의 **Settings → Webhooks → Edit → Recent events**에서 전송 결과를 확인할 수 있다. [GitLab 웹훅 전송 이력](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
 
 기존 훅으로 배포를 받으려면 GitLab 프로젝트의 웹훅 설정에서 **Deployment events**를 켠다. 정상 배포 이벤트가 기록되면 수신 확인에 **배포 기록 반영**이 표시된다. **GitLab 배포 기록**에서 저장소를 선택해 환경·상태·시각을 대조하고, 연결된 커밋이나 병합 MR이 있으면 해당 티켓의 배포 목록에서 같은 항목을 확인한다. 새 수신부터 기록한다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
