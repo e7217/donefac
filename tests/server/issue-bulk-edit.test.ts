@@ -9,7 +9,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
-  type IssueBulkEditPreview, type IssueBulkEditResult, type ProjectWorkflow, type TeamNotificationPage,
+  type IssueBulkEditPreview, type IssueBulkEditResult, type IssueFieldBreakdown, type IssueFieldBreakdownPage, type ProjectWorkflow, type SavedView, type TeamNotificationPage,
   type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -178,6 +178,106 @@ test('bulk review shows blocked and unchanged rows, assigns automatically, and r
   assert.ok(!JSON.stringify(backup).includes(valid.previewId));
   await f.expectStatus(200, '/import', 'POST', { data: backup });
   assert.equal((await f.apply(valid.previewId)).status, 404);
+});
+
+test('field breakdown bulk requires exact cohort and matching revision until a bound receipt commits', async t => {
+  const f = await fixture(t);
+  const prefix = '보고서 편집 범위';
+  const first = await f.createIssue(`${prefix} 대상 첫째`, { labels: ['첫 근거', '공통'] });
+  const second = await f.createIssue(`${prefix} 대상 둘째`, { labels: ['공통', '둘 근거'] });
+  const otherAssignee = await f.createIssue(`${prefix} 다른 열`, { assigneeId: alternate });
+  const otherStatus = await f.createIssue(`${prefix} 다른 행`, { status: 'review' });
+  const outsideView = await f.createIssue('저장된 보기 밖의 업무');
+  const otherProject = await f.createIssue(`${prefix} 다른 프로젝트`, { projectId: otherProjectId });
+  const filters = { query: prefix, status: 'all', assigneeId: 'all', type: 'all' };
+  let view = await f.expectStatus<SavedView>(201, '/views', 'POST', { projectId, name: '검토 업무 범위', layout: 'board', filters });
+  const viewPath = `/views/${view.id}`;
+  const path = `/projects/${projectId}/field-breakdown`;
+  const query = { groupBy: 'status', comparisonBy: 'assignee', savedViewId: view.id };
+  const selection = [first, second];
+  const compareIssue = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
+  const changes = { assigneeId: reviewer };
+
+  async function currentCell() {
+    const report = await f.expectStatus<IssueFieldBreakdown>(200, path, 'POST', query);
+    const row = report.groups.find(group => group.count === 3);
+    const column = report.comparison?.columns.find(column => column.label === '미지정');
+    assert.ok(row && column);
+    return { ...query, revision: report.revision, bucketId: row.id, comparisonBucketId: column.id };
+  }
+  const propose = (fieldBreakdown: Awaited<ReturnType<typeof currentCell>>) =>
+    f.expectStatus<IssueBulkEditPreview>(200, `${bulkPath()}-preview`, 'POST', { issues: issueVersions(selection), changes, fieldBreakdown });
+  async function stalePreview(fieldBreakdown: Awaited<ReturnType<typeof currentCell>>, issues: Issue[]) {
+    const rejected = await f.expectStatus<{ details: { reason: string } }>(409, `${bulkPath()}-preview`, 'POST', {
+      issues: issueVersions(issues), changes, fieldBreakdown,
+    });
+    assert.equal(rejected.details.reason, 'field_breakdown_stale');
+  }
+
+  await f.enableEndpoint();
+  const initial = await currentCell();
+  const plain = await f.expectStatus<IssueFieldBreakdownPage>(200, `${path}/issues`, 'POST', initial);
+  assert.equal(plain.editTargets, undefined);
+  const editable = await f.expectStatus<IssueFieldBreakdownPage>(200, `${path}/issues`, 'POST', { ...initial, includeEditTargets: true });
+  assert.deepEqual(editable.issues, plain.issues);
+  assert.deepEqual(editable.editTargets?.map(target => target.id), editable.issues.map(issue => issue.id));
+  assert.deepEqual(editable.editTargets?.slice().sort(compareIssue), selection.map(({ id, version, labels }) => ({ id, version, labels })).sort(compareIssue));
+  const page = await f.expectStatus<IssueFieldBreakdownPage>(200, `${path}/issues`, 'POST', { ...initial, includeEditTargets: true, offset: 1 });
+  assert.deepEqual(page.editTargets, editable.editTargets?.slice(1));
+
+  const before = await f.snapshot();
+  for (const ineligible of [otherAssignee, otherStatus, outsideView, otherProject]) await stalePreview(initial, [first, ineligible]);
+  assert.deepEqual(await f.snapshot(), before);
+  assert.deepEqual(await f.deliveries(), []);
+  assert.equal(f.database.prepare('SELECT COUNT(*) AS count FROM issue_bulk_edit_previews').get()?.count, 0);
+
+  const wholeRow = await f.expectStatus<IssueBulkEditPreview>(200, `${bulkPath()}-preview`, 'POST', {
+    issues: issueVersions([first, otherAssignee]), changes, fieldBreakdown: { ...initial, comparisonBucketId: undefined },
+  });
+  assert.ok(wholeRow.previewId);
+  assert.deepEqual(wholeRow.rows.map(row => row.id), [first.id, otherAssignee.id]);
+  assert.deepEqual(await f.snapshot(), before);
+
+  view = await f.expectStatus<SavedView>(200, viewPath, 'PATCH', { expectedVersion: view.version, name: '같은 업무의 새 보기 버전' });
+  await stalePreview(initial, selection);
+  const secondRevision = await currentCell();
+  assert.notEqual(secondRevision.revision, initial.revision);
+  const pending = await propose(secondRevision);
+  assert.ok(pending.previewId);
+  assert.deepEqual(pending.rows.map(row => row.id), selection.map(issue => issue.id));
+  view = await f.expectStatus<SavedView>(200, viewPath, 'PATCH', {
+    expectedVersion: view.version, filters: { ...filters, query: `${prefix} 대상 첫째` },
+  });
+  const staleApply = await f.expectStatus<{ details: { reason: string } }>(409, `${bulkPath()}-apply`, 'POST', { previewId: pending.previewId });
+  assert.equal(staleApply.details.reason, 'field_breakdown_stale');
+  assert.deepEqual((await f.snapshot()).issues, before.issues);
+  assert.deepEqual(await f.deliveries(), []);
+
+  view = await f.expectStatus<SavedView>(200, viewPath, 'PATCH', { expectedVersion: view.version, filters });
+  const latest = await currentCell();
+  assert.notEqual(latest.revision, secondRevision.revision);
+  const ready = await propose(latest);
+  assert.ok(ready.previewId);
+  assert.equal(ready.changed, 2);
+  assert.equal(ready.blocked, 0);
+  assert.equal((await f.apply(ready.previewId, reviewer)).status, 404);
+  const saved = await f.apply(ready.previewId);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.deepEqual(saved.data.updated, selection.map(issue => ({ id: issue.id, key: issue.key, version: issue.version + 1 })));
+  const applied = await f.snapshot();
+  for (const issue of selection) assert.equal(applied.issues.find(row => row.id === issue.id)?.assigneeId, reviewer);
+  for (const issue of [otherAssignee, otherStatus, outsideView, otherProject]) {
+    assert.deepEqual(applied.issues.find(row => row.id === issue.id), issue);
+  }
+  await f.expectStatus(409, `${path}/issues`, 'POST', latest);
+  const deliveries = await f.deliveries();
+  assert.equal(deliveries.length, 2);
+  await f.expectStatus(200, `${viewPath}?expectedVersion=${view.version}`, 'DELETE');
+  await f.restart();
+  assert.deepEqual(await f.apply(ready.previewId), saved);
+  assert.equal((await f.apply(ready.previewId, reviewer)).status, 404);
+  assert.deepEqual((await f.snapshot()).issues, applied.issues);
+  assert.deepEqual(await f.deliveries(), deliveries);
 });
 
 test('bulk due dates and label edits preserve unrelated labels and replay the same applied receipt', async t => {

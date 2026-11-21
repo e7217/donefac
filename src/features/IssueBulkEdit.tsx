@@ -4,11 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ListChecks, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import {
-  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type FeatureProps, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
-  type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditValues, type Priority, type WorkflowStatus,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type FeatureProps, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditTarget, type IssueBulkEditValues, type IssueFieldBreakdownSelection,
+  type Priority, type WorkflowStatus,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './issue-bulk-edit.css';
 
@@ -42,8 +43,15 @@ function discardPrompt(uncertain: boolean) {
   return uncertain ? '적용 결과를 확인하지 않은 채 일괄 편집을 닫을까요?' : '작성 중인 일괄 편집을 버릴까요?';
 }
 
-export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: FeatureProps, visible: Issue[]) {
-  const scope = JSON.stringify([projectId, actorId]);
+type ReportSelection = {
+  fieldBreakdown?: IssueFieldBreakdownSelection;
+  pageTargets: readonly IssueBulkEditTarget[];
+};
+
+export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: FeatureProps, visible: readonly IssueBulkEditTarget[], report?: ReportSelection) {
+  const selection = report?.fieldBreakdown;
+  const scope = JSON.stringify([projectId, actorId, report ? [selection?.fieldId, selection?.groupBy, selection?.savedViewId,
+    selection?.comparisonBy, selection?.bucketId, selection?.comparisonBucketId] : null]);
   const [session, setSession] = useState<EditSession | null>(null);
   const [busy, setBusy] = useState(false);
   const pending = useRef<AbortController | null>(null);
@@ -72,10 +80,16 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
   const dirty = active && (selected.length > 0 || changeCount > 0 || dueDateMode !== 'keep' || Boolean(addLabelsText) || applyUncertain);
   const input = JSON.stringify({
     issues: selected.map(({ id, version }) => ({ id, expectedVersion: version })), changes,
+    ...(report?.fieldBreakdown ? { fieldBreakdown: report.fieldBreakdown } : {}),
   } satisfies IssueBulkEditPreviewInput);
   const stalePreview = active && !applyUncertain && Boolean(session.preview && session.preview.input !== input);
   const preview = active && !stalePreview ? session.preview?.result : undefined;
   const path = `/projects/${encodeURIComponent(projectId)}/issues`;
+  const reportScoped = Boolean(report);
+  const pageTargets = report?.pageTargets ?? [];
+  const pageSelectedCount = active ? pageTargets.filter(issue => session.ids.has(issue.id)).length : 0;
+  const canTogglePage = active && !busy && !applyUncertain && pageTargets.length > 0 &&
+    (pageSelectedCount === pageTargets.length || selected.length + pageTargets.length - pageSelectedCount <= ISSUE_BULK_EDIT_LIMIT);
 
   if (session && !active) {
     setSession(null);
@@ -107,6 +121,8 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
       if (pending.current) {
         event.preventDefault();
         notify('일괄 편집 요청이 끝난 뒤 이동해 주세요.', 'error');
+      } else if (reportScoped && isReportPreservedByNavigation(event)) {
+        return;
       } else if (!dirty || window.confirm(discardPrompt(applyUncertain))) {
         afterAcceptedNavigation(event, reset);
       } else {
@@ -124,7 +140,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
       window.removeEventListener('teamspace:navigate', guard);
       window.removeEventListener('beforeunload', unload);
     };
-  }, [active, applyUncertain, dirty, notify, reset]);
+  }, [active, applyUncertain, dirty, notify, reportScoped, reset]);
 
   function close() {
     if (pending.current || (dirty && !window.confirm(discardPrompt(applyUncertain)))) return false;
@@ -132,7 +148,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     return true;
   }
 
-  function toggle(issue: Issue) {
+  function toggle(issue: IssueBulkEditTarget) {
     setSession(current => {
       if (!current || pending.current || current.applyUncertain) return current;
       const ids = new Set(current.ids);
@@ -146,6 +162,25 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     if (visible.length > ISSUE_BULK_EDIT_LIMIT || pending.current || applyUncertain) return;
     const ids = selected.length === visible.length ? new Set<string>() : new Set(visible.map(issue => issue.id));
     setSession(current => current && { ...current, ids, preview: null });
+  }
+
+  function togglePage() {
+    if (!canTogglePage) return;
+    setSession(current => {
+      if (!current || pending.current || current.applyUncertain) return current;
+      const ids = new Set(current.ids);
+      if (pageTargets.every(target => ids.has(target.id))) {
+        for (const target of pageTargets) ids.delete(target.id);
+      } else {
+        for (const target of pageTargets) ids.add(target.id);
+        if (ids.size > ISSUE_BULK_EDIT_LIMIT) return current;
+      }
+      return { ...current, ids, preview: null };
+    });
+  }
+
+  function clearSelection() {
+    setSession(current => current && !current.applyUncertain ? { ...current, ids: new Set(), preview: null } : current);
   }
 
   function updateFields(update: (current: EditSession) => Partial<EditFields>) {
@@ -188,7 +223,8 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     return api<T>(`${path}/${action}`, { method: 'POST', body, signal, headers: { 'X-Actor-Id': actorId } });
   }
 
-  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && !labelsError && !session.refreshRequired && !applyUncertain;
+  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && !labelsError &&
+    !session.refreshRequired && !applyUncertain && (!report || Boolean(report.fieldBreakdown));
   async function review() {
     if (!canPreview) return;
     await request(async signal => {
@@ -249,7 +285,8 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
   return {
     active, busy, locked: busy || applyUncertain, selectedIds: active ? session.ids : new Set<string>(), changes,
     preview, stalePreview, canPreview, applyUncertain, error: active ? session.error : '', refreshRequired: active && session.refreshRequired,
-    selectedCount: selected.length, visibleCount: visible.length,
+    selectedCount: selected.length, visibleCount: visible.length, reportScoped,
+    pageCount: pageTargets.length, pageSelectedCount, canTogglePage, togglePage, clearSelection,
     dueDateMode, dueDate, addLabelsText, removalOptions, removeLabels, labelsError, toggleLabelRemoval,
     setDueDateMode: (value: DueDateMode) => updateFields(() => ({ dueDateMode: value })),
     setDueDate: (value: string) => updateFields(() => ({ dueDate: value })),
@@ -350,8 +387,8 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
         </details>
       </fieldset>
       {editor.labelsError && <p className="issue-bulk-error" role="alert">{editor.labelsError}</p>}
-      <p className="issue-bulk-note">현재 목록의 업무만 선택할 수 있습니다. 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
-      {editor.visibleCount > ISSUE_BULK_EDIT_LIMIT && <p className="issue-bulk-note">전체 선택은 검색 결과가 {ISSUE_BULK_EDIT_LIMIT}개 이하일 때 가능합니다.</p>}
+      <p className="issue-bulk-note">{editor.reportScoped ? '같은 집계 그룹의 여러 페이지에서 업무를 선택할 수 있습니다.' : '현재 목록의 업무만 선택할 수 있습니다.'} 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
+      {!editor.reportScoped && editor.visibleCount > ISSUE_BULK_EDIT_LIMIT && <p className="issue-bulk-note">전체 선택은 검색 결과가 {ISSUE_BULK_EDIT_LIMIT}개 이하일 때 가능합니다.</p>}
       <button type="submit" className="btn" disabled={editor.busy || !editor.canPreview}>변경 미리보기</button>
     </form>
     {editor.error && <p className="issue-bulk-error" role="alert">{editor.error}</p>}

@@ -841,7 +841,7 @@ export function createApp(options: {
   });
   worklogs.registerRoutes(app,{actor,activity});
   timeReservations.registerRoutes(app,{actor,activity});
-  registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId));
+  const fieldBreakdownMatches = registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId));
   function createReportDocument(
     req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>,
     content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' = '주간 보고서',
@@ -1119,6 +1119,7 @@ export function createApp(options: {
   issueBulkEdit.registerRoutes(app,{
     actor,
     configurationToken:issueEditConfiguration,
+    fieldBreakdownMatches,
     prepare:(before,changes)=>prepareIssueUpdate(before,changes,{assigneeExplicit:Object.hasOwn(changes,'assigneeId')}),
     commit:commitIssueUpdate,
   });

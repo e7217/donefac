@@ -634,9 +634,11 @@ export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | '
   addLabels?: string[];
   removeLabels?: string[];
 };
+export type IssueBulkEditTarget = Pick<Issue, 'id' | 'version' | 'labels'>;
 export interface IssueBulkEditPreviewInput {
   issues: { id: string; expectedVersion: number }[];
   changes: IssueBulkEditChanges;
+  fieldBreakdown?: IssueFieldBreakdownSelection;
 }
 export interface IssueBulkEditRow extends Pick<Issue, 'id' | 'key' | 'title'> {
   outcome: 'changed' | 'unchanged' | 'blocked';
@@ -1240,6 +1242,13 @@ export interface SavedViewState {
 }
 export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type'] as const;
 export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIONS[number];
+export type IssueFieldBreakdownSelection = {
+  savedViewId?: string | null;
+  comparisonBy?: IssueFieldBreakdownDimension | null;
+  revision: string;
+  bucketId: string;
+  comparisonBucketId?: string | null;
+} & ({ fieldId: string; groupBy?: never } | { groupBy: IssueFieldBreakdownDimension; fieldId?: never });
 export interface IssueFieldBreakdownColumn {
   id: string;
   label: string;
@@ -1279,6 +1288,7 @@ export interface IssueFieldBreakdownPage {
   total: number;
   offset: number;
   issues: IssueFieldBreakdownIssue[];
+  editTargets?: IssueBulkEditTarget[];
 }
 export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
 export interface ProjectIssueOrder { projectId: string; issueIds: string[]; version: string }

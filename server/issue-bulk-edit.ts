@@ -5,9 +5,10 @@ import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT,
   type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditValues,
-  type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
+  type IssueFieldBreakdownSelection, type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
 } from '../shared/types.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
+import { parseFieldBreakdownSelection } from './field-breakdown-routes.js';
 import type { Store } from './store.js';
 
 export class IssueBulkEditError extends Error {
@@ -16,9 +17,11 @@ export class IssueBulkEditError extends Error {
 
 type IssueSelection = IssueBulkEditPreviewInput['issues'][number];
 type IssueUpdate = Partial<IssueBulkEditValues>;
+type FieldBreakdownMatches = (projectId: string, selection: IssueFieldBreakdownSelection, issueIds: readonly string[]) => boolean;
 interface BulkEditHooks<T extends { issue: Issue }> {
   actor(request: Request): string;
   configurationToken(projectId: string): string;
+  fieldBreakdownMatches?: FieldBreakdownMatches;
   prepare(before: Issue, update: IssueUpdate): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
@@ -74,7 +77,7 @@ function parseLabels(value: unknown, operation: 'add' | 'remove'): string[] {
 
 function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
   const input = object(raw);
-  if (Object.keys(input).some(field => field !== 'issues' && field !== 'changes')) fail(400, '업무 일괄 편집 요청 항목을 확인해 주세요.');
+  if (Object.keys(input).some(field => field !== 'issues' && field !== 'changes' && field !== 'fieldBreakdown')) fail(400, '업무 일괄 편집 요청 항목을 확인해 주세요.');
   if (!Array.isArray(input.issues) || input.issues.length < 1 || input.issues.length > ISSUE_BULK_EDIT_LIMIT) {
     fail(400, `업무를 1~${ISSUE_BULK_EDIT_LIMIT}개 선택해 주세요.`);
   }
@@ -113,7 +116,14 @@ function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
   if (Object.hasOwn(change, 'addLabels')) changes.addLabels = parseLabels(change.addLabels, 'add');
   if (Object.hasOwn(change, 'removeLabels')) changes.removeLabels = parseLabels(change.removeLabels, 'remove');
   if (changes.addLabels?.some(label => changes.removeLabels?.includes(label))) fail(400, '같은 라벨을 함께 추가하고 제거할 수 없습니다.');
-  return { issues, changes };
+  const fieldBreakdown = Object.hasOwn(input, 'fieldBreakdown') ? parseFieldBreakdownSelection(input.fieldBreakdown) : undefined;
+  return { issues, changes, ...(fieldBreakdown ? { fieldBreakdown } : {}) };
+}
+
+function verifyFieldBreakdown(projectId: string, { issues, fieldBreakdown }: IssueBulkEditPreviewInput, matches?: FieldBreakdownMatches) {
+  if (fieldBreakdown && !matches?.(projectId, fieldBreakdown, issues.map(issue => issue.id))) {
+    fail(409, '집계 이후 업무·보기·속성이 변경되었습니다. 필드 집계를 다시 조회해 주세요.', { reason: 'field_breakdown_stale' });
+  }
 }
 
 function parseApply(raw: unknown): string {
@@ -243,6 +253,7 @@ export class IssueBulkEditService {
     return this.store.transaction(() => {
       this.prune();
       if (!this.store.get('projects', projectId)) fail(404, '프로젝트를 찾을 수 없습니다.');
+      verifyFieldBreakdown(projectId, input, hooks.fieldBreakdownMatches);
       const issues = this.loadIssues(projectId, input.issues, 404);
       return this.review({ ...input, projectId, actorId }, issues, hooks);
     });
@@ -280,6 +291,7 @@ export class IssueBulkEditService {
       }
       if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
+      verifyFieldBreakdown(projectId, proposal, hooks.fieldBreakdownMatches);
       if (!this.store.get('projects', projectId) || proposal.configurationToken !== hooks.configurationToken(projectId)) fail(409, STALE_MESSAGE);
 
       // The migration preview represents the whole active source status, so an issue newly entering or leaving it also invalidates the review.

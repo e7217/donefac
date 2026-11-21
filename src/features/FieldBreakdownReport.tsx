@@ -1,23 +1,27 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUpRight, BarChart3, Link2, RefreshCw } from 'lucide-react';
-import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS } from '../../shared/types';
+import { ArrowUpRight, BarChart3, Link2, ListChecks, RefreshCw } from 'lucide-react';
+import { ISSUE_BULK_EDIT_LIMIT, ISSUE_FIELD_BREAKDOWN_DIMENSIONS } from '../../shared/types';
 import type {
   CustomFieldKind,
   FeatureProps,
+  IssueBulkEditTarget,
   IssueFieldBreakdown,
   IssueFieldBreakdownBucket,
   IssueFieldBreakdownComparison,
   IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
   IssueFieldBreakdownPage,
+  IssueFieldBreakdownSelection,
   SavedView,
 } from '../../shared/types';
 import { projectIssueSchema } from '../../shared/issue-schema';
+import { projectStatuses } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import { fieldBreakdownHash, sameFieldBreakdownScope, type FieldBreakdownScope } from '../lib/field-breakdown-route';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
+import { IssueBulkEdit, useIssueBulkEdit } from './IssueBulkEdit';
 import './field-breakdown.css';
 
 type Query = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
@@ -30,6 +34,11 @@ type Props = FeatureProps & {
   onPublishScope: (scope: FieldBreakdownScope) => boolean;
   onOpenSavedIssueView?: (id: string) => void;
 };
+type CohortPosition = { bucketId: string; comparisonBucketId?: string; offset: number };
+type CohortRefresh = { page: IssueFieldBreakdownPage; revision: string; selectedIds: ReadonlySet<string> };
+const pagePosition = (page: IssueFieldBreakdownPage): CohortPosition => ({
+  bucketId: page.bucket.id, comparisonBucketId: page.comparisonBucket?.id, offset: page.offset,
+});
 const GROUP_PAGE_SIZE = 25;
 const ISSUE_PAGE_SIZE = 50;
 const COMPARISON_PAGE_SIZE = 10;
@@ -60,6 +69,17 @@ function linkedSelection(scope: FieldBreakdownScope | null, firstFieldId: string
 function scopeOf(query: Query): FieldBreakdownScope {
   return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined, comparisonBy: query.comparisonBy };
 }
+
+function reportQuery(report: IssueFieldBreakdown): Query {
+  const filters = { savedViewId: report.savedView?.id ?? null, comparisonBy: report.comparison?.by };
+  return report.groupBy ? { groupBy: report.groupBy, ...filters } : { fieldId: report.field.id, ...filters };
+}
+
+function collectTargets(previous: readonly IssueBulkEditTarget[], current: readonly IssueBulkEditTarget[], selectedIds: ReadonlySet<string>) {
+  const targets = new Map(previous.filter(target => selectedIds.has(target.id)).map(target => [target.id, target]));
+  for (const target of current) targets.set(target.id, target);
+  return [...targets.values()];
+}
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '필드 집계를 불러오지 못했습니다.';
 const numberLabel = (value: number | null) =>
@@ -86,6 +106,8 @@ function ProjectFieldBreakdown(props: Props) {
   const [page, setPage] = useState<IssueFieldBreakdownPage | null>(null);
   const [pageLoading, setPageLoading] = useState(false);
   const [pageError, setPageError] = useState('');
+  const [cohortNotice, setCohortNotice] = useState('');
+  const [verifiedTargets, setVerifiedTargets] = useState<IssueBulkEditTarget[]>([]);
   const [groupsOffset, setGroupsOffset] = useState(0);
   const [reloadedViews, setReloadedViews] = useState<SavedView[] | null>(null);
   const [viewsLoading, setViewsLoading] = useState(false);
@@ -103,9 +125,17 @@ function ProjectFieldBreakdown(props: Props) {
   const activeSelection = useRef(origin.selection);
   const publishScope = useRef(onPublishScope);
   const drillHeading = useRef<HTMLHeadingElement>(null);
+  const bulkToggle = useRef<HTMLButtonElement>(null);
+  const bulkPanel = useRef<HTMLDivElement>(null);
   const dirty = !sameQuery(query, baseline);
   const validProject = data.projects.some((project) => project.id === projectId);
   const views = (reloadedViews ?? data.savedViews ?? []).filter((view) => view.projectId === projectId);
+  const fieldBreakdown: IssueFieldBreakdownSelection | undefined = report && page?.editTargets ? {
+    ...(report.groupBy ? { groupBy: report.groupBy } : { fieldId: report.field.id }),
+    savedViewId: report.savedView?.id ?? null, comparisonBy: report.comparison?.by, revision: report.revision,
+    bucketId: page.bucket.id, comparisonBucketId: page.comparisonBucket?.id,
+  } : undefined;
+  const bulk = useIssueBulkEdit({ ...props, refresh: refreshBulkCohort }, verifiedTargets, { fieldBreakdown, pageTargets: page?.editTargets ?? [] });
 
   if (!sameFieldBreakdownScope(origin.scope, linkedScope)) {
     if (echoScope && sameFieldBreakdownScope(echoScope, linkedScope)) setOrigin({ ...origin, scope: linkedScope });
@@ -121,6 +151,8 @@ function ProjectFieldBreakdown(props: Props) {
       setPage(null);
       setPageLoading(false);
       setPageError('');
+      setCohortNotice('');
+      setVerifiedTargets([]);
       setGroupsOffset(0);
       setOpeningIssue(null);
       setCopyFallback(null);
@@ -210,7 +242,13 @@ function ProjectFieldBreakdown(props: Props) {
     else if (value === 'custom' && firstFieldId) update({ fieldId: firstFieldId, savedViewId, comparisonBy });
   }
 
-  const loadReport = useCallback(async (submitted: Query, publish: boolean) => {
+  const readBucket = useCallback((submitted: Query, revision: string, position: CohortPosition, signal: AbortSignal) =>
+    api<IssueFieldBreakdownPage>(`/projects/${encodeURIComponent(projectId)}/field-breakdown/issues`, {
+      method: 'POST', headers: { 'X-Actor-Id': actorId }, signal,
+      body: JSON.stringify({ ...submitted, revision, ...position, ...(actorId ? { includeEditTargets: true } : {}) }),
+    }), [actorId, projectId]);
+
+  const loadReport = useCallback(async (submitted: Query, publish: boolean, cohort?: CohortRefresh) => {
     if ((!submitted.fieldId && !submitted.groupBy) || !validProject) return;
     queryRequest.current?.abort();
     pageRequest.current?.abort();
@@ -230,32 +268,51 @@ function ProjectFieldBreakdown(props: Props) {
         },
       );
       if (!active.current || controller.signal.aborted) return;
-      const appliedOptions = { savedViewId: result.savedView?.id ?? null, comparisonBy: result.comparison?.by };
-      const confirmed: Query = result.groupBy ? { groupBy: result.groupBy, ...appliedOptions } : { fieldId: result.field.id, ...appliedOptions };
+      const confirmed = reportQuery(result);
       if (!sameQuery(confirmed, submitted)) throw new Error('조회한 결과의 조건이 요청한 필드 집계 조건과 일치하지 않습니다.');
+
+      let nextPage: IssueFieldBreakdownPage | null = null;
+      if (cohort) {
+        const position = pagePosition(cohort.page);
+        const bucket = result.groups.find(item => item.id === position.bucketId);
+        const count = position.comparisonBucketId
+          ? result.comparison?.counts[position.bucketId]?.[position.comparisonBucketId] ?? 0
+          : bucket?.count ?? 0;
+        if (bucket && count > 0) {
+          const offset = Math.min(position.offset, Math.floor((count - 1) / ISSUE_PAGE_SIZE) * ISSUE_PAGE_SIZE);
+          nextPage = await readBucket(confirmed, result.revision, { ...position, offset }, controller.signal);
+          if (!active.current || controller.signal.aborted) return;
+        }
+      }
+
       setReport(result);
       setBaseline(confirmed);
-      dirtyRef.current = false;
+      if (!cohort) dirtyRef.current = false;
       copyAttempt.current = null;
       setCopyFallback(null);
-      setPage(null);
+      setPage(nextPage);
+      setVerifiedTargets(previous => cohort?.revision === result.revision && nextPage
+        ? collectTargets(previous, nextPage.editTargets ?? [], cohort.selectedIds)
+        : nextPage?.editTargets ?? []);
+      setCohortNotice(cohort && !nextPage ? '이 그룹에 남은 업무가 없습니다. 최신 집계를 표시합니다.' : '');
       setPageError('');
-      setGroupsOffset(0);
+      if (!cohort) setGroupsOffset(0);
       setStale(false);
       if (publish) {
         const scope = scopeOf(confirmed);
         setEchoScope(scope);
         if (!publishScope.current(scope)) setEchoScope(null);
       }
+      return { revision: result.revision, page: nextPage };
     } catch (cause) {
       if (active.current && !controller.signal.aborted) {
-        if (cause instanceof ApiError && cause.status === 409) setStale(true);
+        if (cohort || cause instanceof ApiError && cause.status === 409) setStale(true);
         setQueryError(publish ? `${errorMessage(cause)} 입력과 이전 집계는 유지됩니다.` : errorMessage(cause));
       }
     } finally {
       if (active.current && !controller.signal.aborted) setReportLoading(false);
     }
-  }, [actorId, projectId, validProject]);
+  }, [actorId, projectId, readBucket, validProject]);
 
   useEffect(() => {
     const { automatic, query: selected } = origin.selection;
@@ -266,34 +323,34 @@ function ProjectFieldBreakdown(props: Props) {
 
   function requestReport(event: FormEvent) {
     event.preventDefault();
+    if (bulk.active && !bulk.close()) return;
     void loadReport(query, true);
   }
 
+  async function refreshBulkCohort(): Promise<void> {
+    if (!report || !page) throw new Error('현재 집계에서 편집 대상을 찾을 수 없습니다.');
+    await props.refresh();
+    if (!active.current) return;
+    const restored = await loadReport(baseline, false, { page, revision: report.revision, selectedIds: bulk.selectedIds });
+    if (!restored) throw new Error('최신 업무 목록을 불러오지 못했습니다.');
+    if (restored.revision !== report.revision || !restored.page) bulk.clearSelection();
+  }
+
   async function loadBucket(bucket: IssueFieldBreakdownBucket, offset: number, comparisonBucketId?: string, focusResult = false) {
-    if (!report || stale || reportLoading || !bucket.count) return;
+    if (!report || stale || reportLoading || bulk.locked || !bucket.count) return;
+    const sameCohort = page?.bucket.id === bucket.id && page.comparisonBucket?.id === comparisonBucketId;
+    if (!sameCohort && bulk.active && !bulk.close()) return;
     pageRequest.current?.abort();
     const controller = new AbortController();
     pageRequest.current = controller;
     setPageLoading(true);
     setPageError('');
     try {
-      const result = await api<IssueFieldBreakdownPage>(
-        `/projects/${encodeURIComponent(projectId)}/field-breakdown/issues`,
-        {
-          method: 'POST',
-          headers: { 'X-Actor-Id': actorId },
-          signal: controller.signal,
-          body: JSON.stringify({
-            ...baseline,
-            revision: report.revision,
-            bucketId: bucket.id,
-            offset,
-            comparisonBucketId,
-          }),
-        },
-      );
+      const result = await readBucket(baseline, report.revision, { bucketId: bucket.id, offset, comparisonBucketId }, controller.signal);
       if (active.current && !controller.signal.aborted) {
         setPage(result);
+        setCohortNotice('');
+        setVerifiedTargets(previous => sameCohort ? collectTargets(previous, result.editTargets ?? [], bulk.selectedIds) : result.editTargets ?? []);
         if (focusResult) requestAnimationFrame(() => drillHeading.current?.focus());
       }
     } catch (cause) {
@@ -304,6 +361,16 @@ function ProjectFieldBreakdown(props: Props) {
     } finally {
       if (active.current && !controller.signal.aborted) setPageLoading(false);
     }
+  }
+
+  function openBulk() {
+    if (!fieldBreakdown || stale || pageLoading || reportLoading || !bulk.pageCount) return;
+    bulk.open();
+    requestAnimationFrame(() => bulkPanel.current?.querySelector('select')?.focus());
+  }
+
+  function closeBulk() {
+    if (bulk.close()) requestAnimationFrame(() => bulkToggle.current?.focus({ preventScroll: true }));
   }
 
   async function openRow(row: IssueFieldBreakdownIssue) {
@@ -349,6 +416,17 @@ function ProjectFieldBreakdown(props: Props) {
   const groups = report?.comparison ? report.groups.filter(bucket => bucket.count > 0) : report?.groups ?? [];
   const start = Math.min(groupsOffset, Math.max(0, Math.floor((groups.length - 1) / GROUP_PAGE_SIZE) * GROUP_PAGE_SIZE));
   const selectedField = schema.fields.find((field) => field.id === query.fieldId);
+  const drillBusy = pageLoading || reportLoading;
+  const bulkEditor = {
+    ...bulk,
+    locked: bulk.locked || drillBusy,
+    busy: bulk.busy || drillBusy,
+    canPreview: bulk.canPreview && !stale,
+    preview: stale && !bulk.applyUncertain ? undefined : bulk.preview,
+    refreshRequired: bulk.refreshRequired || stale && !bulk.applyUncertain,
+  };
+  const editTargets = new Map(page?.editTargets?.map(target => [target.id, target]));
+  const pageFullySelected = bulk.pageCount > 0 && bulk.pageSelectedCount === bulk.pageCount;
   return (
     <section className="field-breakdown-feature" aria-label="업무 필드 집계">
       <form
@@ -363,7 +441,7 @@ function ProjectFieldBreakdown(props: Props) {
           </h2>
           <p>프로젝트 전체 업무나 저장된 보기의 업무를 한두 가지 기준으로 집계합니다.</p>
         </header>
-        <fieldset disabled={reportLoading}>
+        <fieldset disabled={drillBusy || bulk.locked}>
           <div className="field-breakdown-query-grid">
             <label>
               집계 기준
@@ -501,8 +579,9 @@ function ProjectFieldBreakdown(props: Props) {
           </label>}
           {stale && (
             <p className="field-breakdown-stale" role="status">
-              집계 이후 업무·보기·필드 설정이 변경되었습니다. 이전 결과를 표시하고 있습니다. 위의 ‘필드
-              집계 조회’로 다시 조회해야 업무 목록을 열 수 있습니다.
+              집계 이후 업무·보기·필드 설정이 변경되었습니다. 이전 결과를 표시하고 있습니다. {bulk.active
+                ? '일괄 편집의 ‘최신 업무 불러오기’로 현재 그룹을 갱신할 수 있습니다.'
+                : '위의 ‘필드 집계 조회’로 다시 조회해야 업무 목록을 열 수 있습니다.'}
             </p>
           )}
           <div className="field-breakdown-summary">
@@ -549,7 +628,7 @@ function ProjectFieldBreakdown(props: Props) {
             </p>}
             {report.comparison ? <FieldBreakdownMatrix key={`${report.revision}:${report.generatedAt}`}
               rowLabel={report.field.name} rows={groups.slice(start, start + GROUP_PAGE_SIZE)} comparison={report.comparison} total={report.totalIssues}
-              page={page} disabled={stale || reportLoading || pageLoading}
+              page={page} disabled={stale || drillBusy || bulk.locked}
               onOpen={(bucket, comparisonBucketId) => void loadBucket(bucket, 0, comparisonBucketId, true)} /> : <div className="field-breakdown-table-scroll">
               <table aria-label="필드 값별 집계 표">
                 <thead>
@@ -569,7 +648,7 @@ function ProjectFieldBreakdown(props: Props) {
                             type="button"
                             className="field-breakdown-bucket"
                             aria-label={`그룹 ${bucket.label} 업무 보기`}
-                            disabled={!bucket.count || stale || reportLoading || pageLoading}
+                            disabled={!bucket.count || stale || drillBusy || bulk.locked}
                             onClick={() => void loadBucket(bucket, 0)}
                           >
                             <strong>{bucket.label}</strong>
@@ -628,27 +707,49 @@ function ProjectFieldBreakdown(props: Props) {
               선택한 그룹의 업무를 불러오는 중…
             </p>
           )}
+          {cohortNotice && <p className="field-breakdown-info" role="status">{cohortNotice}</p>}
           {page ? (
             <section className="card field-breakdown-issues" aria-label="필드 집계 그룹 업무">
               <header>
                 <h3 ref={drillHeading} tabIndex={-1}>{page.bucket.label}{page.comparisonBucket && ` × ${page.comparisonBucket.label}`}</h3>
                 <span>업무 {page.total.toLocaleString()}개</span>
               </header>
+              {fieldBreakdown && !bulk.active && <button type="button" ref={bulkToggle} className="btn field-breakdown-bulk-open"
+                disabled={stale || drillBusy || !bulk.pageCount} onClick={openBulk}>
+                <ListChecks size={16} aria-hidden="true" />집계 업무 일괄 편집
+              </button>}
+              {bulk.active && <>
+                <div className="field-breakdown-bulk" ref={bulkPanel}>
+                  <IssueBulkEdit editor={bulkEditor} statuses={projectStatuses(data, projectId)} users={data.users} onClose={closeBulk} />
+                </div>
+                <label className="field-breakdown-page-selection">
+                  <input type="checkbox" checked={pageFullySelected} disabled={!bulk.canTogglePage || drillBusy || stale}
+                    ref={element => { if (element) element.indeterminate = bulk.pageSelectedCount > 0 && !pageFullySelected; }}
+                    onChange={bulk.togglePage} />
+                  <span>이 페이지의 업무 전체 선택</span>
+                </label>
+              </>}
               <ul>
-                {page.issues.map((issue) => (
-                  <li key={issue.id}>
+                {page.issues.map((issue) => {
+                  const target = editTargets.get(issue.id);
+                  const selected = bulk.selectedIds.has(issue.id);
+                  return <li key={issue.id} className={bulk.active ? 'field-breakdown-selectable-issue' : undefined}>
+                    {bulk.active && <label className="field-breakdown-issue-selection"><input type="checkbox"
+                      aria-label={`${issue.key} 선택`} checked={selected}
+                      disabled={!target || stale || drillBusy || bulk.locked || !selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT}
+                      onChange={() => { if (target) bulk.toggle(target); }} /></label>}
                     <button
                       type="button"
                       className="field-breakdown-issue"
-                      disabled={Boolean(openingIssue) || stale}
+                      disabled={Boolean(openingIssue) || stale || bulk.busy}
                       onClick={() => void openRow(issue)}
                     >
                       <strong>{issue.key}</strong>
                       <span>{issue.title}</span>
                       {openingIssue === issue.id && <small>업무를 여는 중…</small>}
                     </button>
-                  </li>
-                ))}
+                  </li>;
+                })}
               </ul>
               {!page.issues.length && <p>이 페이지에 업무가 없습니다.</p>}
               <div className="field-breakdown-pagination">
@@ -660,7 +761,7 @@ function ProjectFieldBreakdown(props: Props) {
                   className="btn btn-ghost"
                   type="button"
                   aria-label="필드 집계 업무 이전 페이지"
-                  disabled={stale || pageLoading || reportLoading || page.offset === 0}
+                  disabled={stale || drillBusy || bulk.locked || page.offset === 0}
                   onClick={() =>
                     void loadBucket(page.bucket, Math.max(0, page.offset - ISSUE_PAGE_SIZE), page.comparisonBucket?.id)
                   }
@@ -672,7 +773,7 @@ function ProjectFieldBreakdown(props: Props) {
                   type="button"
                   aria-label="필드 집계 업무 다음 페이지"
                   disabled={
-                    stale || pageLoading || reportLoading || page.offset + ISSUE_PAGE_SIZE >= page.total
+                    stale || drillBusy || bulk.locked || page.offset + ISSUE_PAGE_SIZE >= page.total
                   }
                   onClick={() => void loadBucket(page.bucket, page.offset + ISSUE_PAGE_SIZE, page.comparisonBucket?.id)}
                 >

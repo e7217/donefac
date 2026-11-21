@@ -223,6 +223,8 @@ curl --fail-with-body \
 
 `addLabels`와 `removeLabels`는 각각 중복 없는 1~100개 문자열 배열이며, 라벨 하나는 최대 60자다. 양쪽에 같은 이름을 넣으면 요청을 거절한다. 대소문자와 공백을 포함한 이름을 그대로 비교한다. 해당 티켓에 있는 제거 대상만 지우고, 없는 추가 대상을 기존 목록 뒤에 붙인다.
 
+집계에서 선택한 업무의 미리보기에는 `fieldBreakdown`을 함께 보낸다. 집계에 사용한 `fieldId` 또는 `groupBy`, 선택 속성 `savedViewId`와 `comparisonBy`, 조회한 `revision`과 `bucketId`, 셀을 선택했으면 `comparisonBucketId`를 담는다. 미리보기와 적용의 같은 트랜잭션에서 현재 집계 버전과 각 대상의 소속을 확인한다. 범위나 선택이 달라지면 `409`와 `details.reason`의 `field_breakdown_stale`을 반환한다. 적용이 이미 완료된 요청의 재시도는 저장한 결과를 반환한다.
+
 응답의 `rows`는 업무별 `before`, `after`, `outcome`, `reason`을 반환하며 `changed`, `unchanged`, `blocked`에 건수를 담는다. 마감일이나 라벨 편집을 요청하면 해당 필드의 전후 값도 반환한다. 변경할 업무가 있고 모든 업무가 검증을 통과하면 30분간 유효한 `previewId`를 반환한다. 적용 전까지 업무와 변경 이력은 유지된다.
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
@@ -928,6 +930,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 교차 집계에는 위 네 값 중 `comparisonBy`를 추가한다. 기본 필드로 집계할 때는 `groupBy`와 서로 다른 값을 지정한다. `comparison.columns`는 각 열의 ID·현재 이름·조건에 해당하는 업무 수를 반환한다. `comparison.counts[행 ID][열 ID]`는 교차 업무 수이며, 생략된 셀은 0건이다. 다중 선택의 한 업무는 그 선택지에 해당하는 여러 행에 들어갈 수 있다. 열 합계에는 조회 범위의 해당 업무를 한 번씩 센다.
 
 `POST /api/v1/projects/:id/field-breakdown/issues`에 집계 때 사용한 조건과 응답의 `revision`, 행의 `id`를 `bucketId`로 보낸다. `comparisonBucketId`에 열의 `id`를 추가하면 `comparisonBucket`에 열 정보를, `total`에 두 조건을 모두 충족하는 업무 수를 반환한다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 뒤 업무·보기·필드 또는 비교 기준의 설정이 바뀌면 이전 `revision`의 조회는 `409`를 반환한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 행이나 열은 `404`를 반환한다.
+
+같은 업무 조회에서 `includeEditTargets: true`를 보내면 현재 페이지의 `id`, `version`, `labels`를 `editTargets`에 함께 반환한다. 일괄 편집에서 페이지를 넘겨 선택한 업무의 버전과 라벨을 확인할 때 사용한다. [업무 일괄 편집](#업무-일괄-편집)
 
 ## 문서 검토·발행
 
