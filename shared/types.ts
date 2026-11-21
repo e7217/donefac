@@ -557,6 +557,7 @@ export interface Issue {
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
+export interface IssueCloneResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
 export interface IssuePasteDiagnostic { line: number | null; message: string }
 export interface IssuePastePreviewRow extends Pick<Issue,
   'title' | 'description' | 'type' | 'status' | 'priority' | 'assigneeId' | 'startDate' | 'endDate' | 'dueDate' | 'labels'

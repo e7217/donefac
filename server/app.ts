@@ -48,7 +48,7 @@ import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
-import { issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
+import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError } from './reporting-ledger.js';
@@ -80,7 +80,8 @@ import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '.
 import { createCalendarMath } from '../shared/calendar.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
-import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationScheduleMode } from '../shared/issue-relations.js';
+import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
+import type { IssueCloneResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { isTerminalStatus } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
@@ -1171,7 +1172,7 @@ export function createApp(options: {
       saveNewDependency(req, { id: uid(), predecessorId, successorId: successor.id, type, lagDays, version: 1 });
       activity(req, 'issue', predecessor.id, '후행 업무 생성', `${successor.key} ${successor.title}`);
       return successor;
-    }, { predecessorId });
+    }, { kind: 'schedule-successor', predecessorId });
     res.status(result.duplicate ? 200 : 201).json(result.issue);
   });
   app.post('/api/issues/:id/children', (req, res) => {
@@ -1582,6 +1583,39 @@ export function createApp(options: {
   };
   const relationNotification = (req: Request) => (before: IssueRelation | undefined, after: IssueRelation | undefined) =>
     blockerNotifications.relationChanged(before,after,actor(req),now());
+  app.post('/api/issues/:id/clone', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (Object.keys(input).some(key => !['requestId', 'expectedSourceVersion', 'issue', 'actorId'].includes(key))) {
+      return fail('업무 복제 요청을 확인해 주세요.');
+    }
+    const { expectedSourceVersion, issue } = input;
+    if (typeof expectedSourceVersion !== 'number' || !Number.isSafeInteger(expectedSourceVersion) || expectedSourceVersion < 1) {
+      return fail('원본 업무의 버전을 확인해 주세요.');
+    }
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail('복제할 업무 정보를 확인해 주세요.');
+    const issueInput = issue as Record<string, unknown>;
+    const sourceIssueId = String(req.params.id);
+    let createdRelation: IssueRelation | undefined;
+    const result = issueCreation.create(() => actor(req), input, () => {
+      const source = store.get<Issue>('issues', sourceIssueId);
+      if (!source) return fail('원본 업무를 찾을 수 없습니다.', 404, { reason: 'source_missing' });
+      if (source.version !== expectedSourceVersion) {
+        return fail('원본 업무가 변경되었습니다. 최신 업무를 확인해 주세요.', 409,
+          { reason: 'source_version_changed', currentVersion: source.version });
+      }
+      if (Object.hasOwn(issueInput, 'projectId') && issueInput.projectId !== source.projectId) {
+        return fail('복제 업무는 원본 업무와 같은 프로젝트에 만들어 주세요.');
+      }
+      const created = createIssueInTransaction(req, { ...issueInput, projectId: source.projectId });
+      createdRelation = issueRelations.createInTransaction(source.id,
+        { otherIssueId: created.id, type: 'related', direction: 'outgoing' }, relationAudit(req), relationNotification(req)).relation;
+      return created;
+    }, { kind: 'issue-clone', sourceIssueId });
+    const endpoints = issueRelationEndpoints(sourceIssueId, result.issue.id, 'related', 'outgoing');
+    const relation = createdRelation ?? findTeamspaceIssueRelation(store, { ...endpoints, type: 'related' }) ?? null;
+    const response: IssueCloneResult = { ...result, relation };
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
+  });
   app.get('/api/issues/:id/relations',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));
   });

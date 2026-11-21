@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentSectionHash, markdownImportSectionId } from '../../shared/document-sections.js';
-import type { ApiKeyCreated, DependencyType, DocPage, DocRevision, Issue, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DependencyType, DocPage, DocRevision, Issue, IssueCloneResult, IssueRelation, PlanningItem, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actorId = 'user-seo';
@@ -171,6 +171,144 @@ test('public API creation retries retain the fixed actor and enforce write and p
   const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(workspace.issues.filter(value => value.title === input.title), [issue]);
   assert.equal(workspace.activities.find(value => value.resourceId === issue.id && value.action === '티켓 생성')?.actorId, actorId);
+});
+
+const clonePath = (id: string) => `/issues/${id}/clone`;
+
+test('cloning saves a fresh issue and one symmetric relation, with idempotent retries after source and relation changes', async t => {
+  const { call, enableOutbox, sideEffects, restart } = await fixture(t);
+  const { data: parent } = await call<Issue>('/issues', 'POST', { projectId, title: '원본 상위 업무' }, 201);
+  const { data: cycle } = await call<PlanningItem>('/planning-items', 'POST', { projectId, kind: 'cycle', name: '원본 계획' }, 201);
+  const { data: source } = await call<Issue>('/issues', 'POST', {
+    projectId, title: '원본 업무', description: '원본 설명', labels: ['원본'], parentId: parent.id, cycleId: cycle.id,
+  }, 201);
+  await call('/comments', 'POST', { resourceType: 'issue', resourceId: source.id, body: '원본 의견' }, 201);
+  await call(`/issues/${source.id}/relations`, 'POST', { otherIssueId: parent.id, direction: 'outgoing', type: 'blocks' }, 201);
+  await enableOutbox();
+  const before = sideEffects();
+  const issueFields = { title: '편집한 복제 업무', description: '복제 설명', type: source.type, labels: ['검토,복제'],
+    assigneeId, startDate: '2026-11-23', endDate: '2026-11-27', plannedEffortMinutes: 0 };
+  const input = { requestId: randomUUID(), expectedSourceVersion: source.version, issue: issueFields };
+  const path = clonePath(source.id);
+  const results = await Promise.all([input, { ...input, requestId: input.requestId.toUpperCase() }]
+    .map(body => call<IssueCloneResult>(path, 'POST', body, [200, 201])));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  const created = results.find(result => result.status === 201)!.data;
+  const replay = results.find(result => result.status === 200)!.data;
+  assert.equal(created.duplicate, false);
+  assert.deepEqual(replay, { ...created, duplicate: true });
+  const { issue, relation } = created;
+  assert.deepEqual(Object.fromEntries(Object.keys(issueFields).map(key => [key, issue[key as keyof Issue]])), issueFields);
+  assert.equal(issue.key, `NEO-${before[0]}`);
+  assert.notEqual(issue.id, source.id);
+  assert.equal(issue.projectId, projectId);
+  assert.equal(issue.version, 1);
+  assert.equal(issue.parentId, null);
+  assert.equal(issue.cycleId, null);
+  assert.equal(issue.moduleId, null);
+  assert.equal(issue.releaseId, null);
+  assert.deepEqual((await call(`/comments?resourceType=issue&resourceId=${issue.id}`)).data, []);
+  assert.ok(relation);
+  assert.equal(relation.type, 'related');
+  assert.equal(relation.origin, 'teamspace');
+  assert.deepEqual([relation.sourceIssueId, relation.targetIssueId], [source.id, issue.id].sort());
+  assert.deepEqual((await call<IssueRelation[]>(`/issues/${issue.id}/relations`)).data, [relation]);
+  assert.deepEqual(sideEffects(), before.map((value, index) => value + (index === 2 ? 3 : 1)));
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(workspace.issues.find(item => item.id === source.id), source);
+  assert.equal(workspace.activities.filter(item => item.resourceId === issue.id && item.actorId === actorId).length, 2);
+  assert.ok(workspace.activities.some(item => item.resourceId === source.id && item.detail === `관련 업무 · ${issue.key}`));
+
+  for (const [route, body, actor] of [
+    [path, { ...input, issue: { ...input.issue, title: '다른 입력' } }, actorId],
+    [clonePath(parent.id), input, actorId],
+    [path, input, assigneeId],
+    ['/issues', { ...input, ...issueFields, projectId, sourceIssueId: source.id }, actorId],
+  ] as const) {
+    assert.equal((await call<Failure>(route, 'POST', body, 409, actor)).data.details.reason, 'request_conflict');
+  }
+  await call(`/issues/${source.id}`, 'PATCH', { title: '변경한 원본', expectedVersion: source.version });
+  await call(`/issues/${issue.id}/relations/${relation.id}?expectedVersion=${relation.version}`, 'DELETE');
+  await restart();
+  assert.deepEqual((await call<IssueCloneResult>(path, 'POST', input)).data, { issue, relation: null, duplicate: true });
+  assert.deepEqual((await call<IssueRelation[]>(`/issues/${issue.id}/relations`)).data, []);
+});
+
+test('clone failures roll back links, keys and effects, and receipts survive trash and workspace replacement', async t => {
+  const { call, enableOutbox, observer, sideEffects } = await fixture(t);
+  const { data: source } = await call<Issue>('/issues', 'POST', { projectId, title: '버전으로 보호한 원본' }, 201);
+  const { data: edited } = await call<Issue>(`/issues/${source.id}`, 'PATCH', { expectedVersion: source.version, description: '원본 변경' });
+  await enableOutbox();
+  const before = sideEffects();
+  const input = { requestId: randomUUID(), expectedSourceVersion: edited.version, issue: { title: '다시 복제할 업무', assigneeId } };
+  const path = clonePath(source.id);
+  const { data: changed } = await call<Failure>(path, 'POST', { ...input, expectedSourceVersion: source.version }, 409);
+  assert.deepEqual(changed.details, { reason: 'source_version_changed', currentVersion: edited.version });
+  const { data: missing } = await call<Failure>(clonePath('missing-issue'), 'POST', input, 404);
+  assert.equal(missing.details.reason, 'source_missing');
+  await call(path, 'POST', { ...input, issue: { ...input.issue, projectId: 'project-team' } }, 400);
+  await call(path, 'POST', { ...input, issue: { ...input.issue, title: '' } }, 400);
+  assert.deepEqual(sideEffects(), before);
+
+  for (const table of ['issue_relations', 'issue_creation_requests']) {
+    observer.exec(`CREATE TRIGGER fail_clone BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT,'synthetic clone failure'); END`);
+    try {
+      await call(path, 'POST', input, 500);
+      assert.deepEqual(sideEffects(), before);
+      assert.deepEqual((await call<IssueRelation[]>(`/issues/${source.id}/relations`)).data, []);
+    } finally { observer.exec('DROP TRIGGER fail_clone'); }
+  }
+
+  const { data: { issue, relation } } = await call<IssueCloneResult>(path, 'POST', input, 201);
+  assert.equal(issue.key, `NEO-${before[0]}`);
+  const { data: { trashEntryId } } = await call<{ trashEntryId: string }>(`/issues/${issue.id}?expectedVersion=${issue.version}`, 'DELETE');
+  assert.equal((await call<Failure>(path, 'POST', input, 409)).data.details.reason, 'result_unavailable');
+  await call(`/trash/${trashEntryId}/restore`, 'POST', {});
+  const { data: restored } = await call<IssueCloneResult>(path, 'POST', input);
+  assert.equal(restored.issue.id, issue.id);
+  assert.ok(restored.issue.version > issue.version);
+  assert.equal(restored.relation?.id, relation?.id);
+
+  const { data: backup } = await call<WorkspaceSnapshot>('/export');
+  assert.ok(!JSON.stringify(backup).includes(input.requestId));
+  await call('/import', 'POST', { data: backup });
+  assert.equal((await call<Failure>(path, 'POST', input, 409)).data.details.reason, 'result_unavailable');
+  const { data: current } = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(current.issues.filter(value => value.title === input.issue.title).map(value => value.id), [issue.id]);
+});
+
+test('public clone uses the key owner and validates the source, target and explicit parent and planning references', async t => {
+  const { call } = await fixture(t);
+  async function key(project: string | null, access: 'read' | 'write') {
+    return (await call<ApiKeyCreated>('/api-keys', 'POST', { name: '합성 복제 키', projectIds: project ? [project] : null, access }, 201)).data.token;
+  }
+  const read = await key(projectId, 'read');
+  const write = await key(projectId, 'write');
+  const wide = await key(null, 'write');
+  const otherProject = 'project-team';
+  const { data: source } = await call<Issue>('/issues', 'POST', { projectId, title: '복제 API 원본' }, 201);
+  const { data: outside } = await call<Issue>('/issues', 'POST', { projectId: otherProject, title: '범위 밖 업무' }, 201);
+  const { data: cycle } = await call<PlanningItem>('/planning-items', 'POST', { projectId, kind: 'cycle', name: '복제 계획' }, 201);
+  const { data: outsideCycle } = await call<PlanningItem>('/planning-items', 'POST', { projectId: otherProject, kind: 'cycle', name: '범위 밖 계획' }, 201);
+  const path = `/v1${clonePath(source.id)}`;
+  const input = { requestId: randomUUID(), expectedSourceVersion: source.version, actorId: assigneeId,
+    issue: { title: 'API 복제 업무', parentId: source.id, cycleId: cycle.id } };
+  await call(path, 'POST', input, 401);
+  await call(path, 'POST', input, 403, actorId, read);
+  await call(`/v1${clonePath(outside.id)}`, 'POST', input, 403, actorId, write);
+  const { data: missing } = await call<Failure>(`/v1${clonePath('missing-issue')}`, 'POST', input, 404, actorId, write);
+  assert.equal(missing.details.reason, 'source_missing');
+  await call(path, 'POST', { ...input, issue: { ...input.issue, parentId: outside.id } }, 403, actorId, write);
+  await call(path, 'POST', { ...input, issue: { ...input.issue, cycleId: outsideCycle.id } }, 403, actorId, write);
+  await call(path, 'POST', { ...input, issue: { ...input.issue, projectId: otherProject } }, 400, actorId, wide);
+  const { data: result } = await call<IssueCloneResult>(path, 'POST', input, 201, assigneeId, write);
+  assert.equal(result.issue.parentId, source.id);
+  assert.equal(result.issue.cycleId, cycle.id);
+  assert.deepEqual((await call<IssueCloneResult>(path, 'POST', input, 200, assigneeId, write)).data, { ...result, duplicate: true });
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  const activities = workspace.activities.filter(value => value.resourceId === result.issue.id);
+  assert.equal(activities.length, 2);
+  assert.ok(activities.every(item => item.actorId === actorId));
 });
 
 const successorPath = (id: string) => `/issues/${id}/schedule-successors`;

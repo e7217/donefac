@@ -192,6 +192,7 @@ function ProjectGantt(props: GanttProps) {
   const handledFocusRequest = useRef<string | null>(null);
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const createTrigger = useRef<HTMLButtonElement>(null);
+  const restoreCreateFocus = useRef(false);
   const successorTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
@@ -205,6 +206,11 @@ function ProjectGantt(props: GanttProps) {
   useLayoutEffect(() => {
     if (preview && datePreviewFocusTarget) previewDialog.current?.focus();
   }, [preview, datePreviewFocusTarget]);
+  useLayoutEffect(() => {
+    if (createOpen || !restoreCreateFocus.current) return;
+    restoreCreateFocus.current = false;
+    createTrigger.current?.focus({ preventScroll: true });
+  }, [createOpen]);
   useEffect(() => {
     if (busy || linkEditor || !linkEditorFocusTarget.current) return;
     const opener = linkEditorFocusTarget.current;
@@ -252,8 +258,8 @@ function ProjectGantt(props: GanttProps) {
   }, [notify, refresh]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function finishCreating() {
+    restoreCreateFocus.current = true;
     setCreateOpen(false);
-    requestAnimationFrame(() => createTrigger.current?.focus({ preventScroll: true }));
   }
   function closeCreateForm() {
     if (canLeave()) finishCreating();

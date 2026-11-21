@@ -130,6 +130,16 @@
 .issue-children-heading > h3 { margin: 0; }
 .issue-children-heading > .btn { margin-inline-start: auto; }
 .issue-children-completed { color: #546a5d; font-size: 11px; }
+
+.issue-panel-header-actions > .issue-clone-trigger {
+  min-height: 32px;
+  padding: 5px 8px;
+}
+
+@media (max-width: 440px) {
+  .issue-clone-trigger > span { display: none; }
+}
+
 .issue-panel-document-layer {
   position: fixed;
   inset: 0;

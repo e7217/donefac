@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, Check, ChevronRight, Clock3, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
+import { ArrowRight, Check, ChevronRight, Clock3, Copy, Eye, FileText, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type ResourceLink, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -110,6 +110,30 @@ function IssuePanelContent(props: IssuePanelProps) {
     setChildCreation(null);
     requestAnimationFrame(() => childCreationTrigger.current?.focus({ preventScroll: true }));
   }, []);
+  const [cloneCreation, setCloneCreation] = useState<Issue | null>(null);
+  const [createdClone, setCreatedClone] = useState<Pick<Issue, 'id' | 'key'> | null>(null);
+  const [relationsRefreshKey, setRelationsRefreshKey] = useState(0);
+  const cloneCreationTrigger = useRef<HTMLButtonElement>(null);
+  const createdCloneLink = useRef<HTMLButtonElement>(null);
+  const cloneReturnFocus = useRef<'trigger' | 'receipt' | null>(null);
+  const closeCloneCreation = useCallback(() => {
+    cloneReturnFocus.current ??= 'trigger';
+    setCloneCreation(null);
+  }, []);
+  const showCreatedClone = useCallback(({ id, key }: Issue) => {
+    cloneReturnFocus.current = 'receipt';
+    setCreatedClone({ id, key });
+  }, []);
+  useLayoutEffect(() => {
+    if (cloneCreation || !cloneReturnFocus.current) return;
+    const target = cloneReturnFocus.current === 'receipt' ? createdCloneLink.current : cloneCreationTrigger.current;
+    cloneReturnFocus.current = null;
+    (target ?? cloneCreationTrigger.current)?.focus({ preventScroll: true });
+  }, [cloneCreation, createdClone]);
+  const refreshAfterClone = useCallback(async () => {
+    await refresh();
+    setRelationsRefreshKey(key => key + 1);
+  }, [refresh]);
   const [schedulePredecessor, setSchedulePredecessor] = useState<SchedulePredecessor | null>(null);
   const successorCreationTrigger = useRef<HTMLButtonElement>(null);
   function closeSuccessorCreation() {
@@ -123,6 +147,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     });
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
@@ -275,7 +300,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [manageFocus]);
   useEffect(() => {
     if (!commentFocus || loadedCommentActivation !== commentFocus.activation || handledCommentActivation.current === commentFocus.activation
-      || previewDocumentId || childCreation || schedulePredecessor || dependencyEditor) return;
+      || previewDocumentId || nestedModalOpen) return;
     if (tab !== 'details') {
       if (!switchTab('details')) handledCommentActivation.current = commentFocus.activation;
       return;
@@ -285,10 +310,10 @@ function IssuePanelContent(props: IssuePanelProps) {
     handledCommentActivation.current = commentFocus.activation;
     target.scrollIntoView({ block: 'nearest' });
     target.focus({ preventScroll: true });
-  }, [commentFocus, loadedCommentActivation, previewDocumentId, childCreation, schedulePredecessor, dependencyEditor, tab, switchTab]);
+  }, [commentFocus, loadedCommentActivation, previewDocumentId, nestedModalOpen, tab, switchTab]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || schedulePredecessor || dependencyEditor || previewDocumentId) return;
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || nestedModalOpen || previewDocumentId) return;
       if (manageFocus) {
         event.preventDefault();
         event.stopPropagation();
@@ -297,7 +322,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [closePanel, saving, childCreation, schedulePredecessor, dependencyEditor, manageFocus, previewDocumentId]);
+  }, [closePanel, saving, nestedModalOpen, manageFocus, previewDocumentId]);
 
   function keepIssuePanelFocus(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key !== 'Tab' || event.defaultPrevented) return;
@@ -502,18 +527,39 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
   return <>
-    <div className="issue-panel-backdrop" inert={Boolean(childCreation || schedulePredecessor || dependencyEditor || previewDocument)} onMouseDown={event => {
-      if (event.target === event.currentTarget && !saving && !childCreation && !schedulePredecessor && !dependencyEditor && !dependencyBusyRef.current) closePanel();
+    <div className="issue-panel-backdrop" inert={nestedModalOpen || Boolean(previewDocument)} onMouseDown={event => {
+      if (event.target === event.currentTarget && !saving && !nestedModalOpen && !dependencyBusyRef.current) closePanel();
     }}><aside ref={issuePanel} className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
       tabIndex={manageFocus ? -1 : undefined} onKeyDown={manageFocus ? keepIssuePanelFocus : undefined}>
     <header className="issue-panel-header">
       <div className="issue-panel-breadcrumb"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span>{data.projects.find(p => p.id === issue.projectId)?.name}</span><ChevronRight size={13} /><strong>{issue.key}</strong></div>
       <div className="issue-panel-header-actions">
+        <button ref={cloneCreationTrigger} className="btn btn-ghost issue-clone-trigger" type="button" aria-haspopup="dialog"
+          aria-label="업무 복제" title="업무 복제" disabled={saving || dependencyBusy} onClick={() => setCloneCreation(issue)}>
+          <Copy size={14} aria-hidden="true" /><span>업무 복제</span>
+        </button>
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
         <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
-    <div className="issue-panel-title"><span className="issue-type-label"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}</span><h2 id="issue-panel-heading">{issue.title}</h2>{parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} /></button>}<div className="issue-panel-tabs"><button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button><button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력</button><button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button><button className={tab === 'reservations' ? 'active' : ''} onClick={() => switchTab('reservations')}>시간 배정</button><button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button></div></div>
+    <div className="issue-panel-title">
+      <span className="issue-type-label">
+        <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}
+      </span>
+      <h2 id="issue-panel-heading">{issue.title}</h2>
+      {parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>
+        상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} />
+      </button>}
+      {createdClone && data.issues.some(value => value.id === createdClone.id) && <button ref={createdCloneLink} className="btn" type="button"
+        onClick={() => navigateIssue(createdClone.id)}>{createdClone.key} 복제 업무 열기<ArrowRight size={14} aria-hidden="true" /></button>}
+      <div className="issue-panel-tabs">
+        <button className={tab === 'details' ? 'active' : ''} onClick={() => switchTab('details')}>상세 정보</button>
+        <button className={tab === 'activity' ? 'active' : ''} onClick={() => switchTab('activity')}><Clock3 size={14} /> 변경 이력</button>
+        <button className={tab === 'worklogs' ? 'active' : ''} onClick={() => switchTab('worklogs')}>작업 시간</button>
+        <button className={tab === 'reservations' ? 'active' : ''} onClick={() => switchTab('reservations')}>시간 배정</button>
+        <button className={tab === 'source' ? 'active' : ''} onClick={() => switchTab('source')}>원본 기록</button>
+      </div>
+    </div>
     <div className="issue-panel-content">{tab === 'details' ? <>
       {(conflict || issue.version > draft.version) && <div className="issue-conflict-banner" role="alert"><div><strong>다른 변경사항이 있습니다</strong><p>작성 중인 내용은 유지됩니다. 편집 시작 버전은 {draft.version}, 현재 버전은 {issue.version}입니다. 최신 내용을 확인한 뒤 다시 편집하세요.</p></div><button className="btn" onClick={reloadLatest} disabled={saving}>최신 버전 불러오기</button></div>}
       <form className="issue-detail-form" onSubmit={save} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -590,7 +636,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         </button>)}
       </section>
       <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
-        disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
+        refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <h3><FileText size={16} /> 연결된 문서 <span>{linkedDocuments.length}</span></h3>
         {linkedDocuments.map(link => {
@@ -667,6 +713,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
+    {cloneCreation && <NewIssueModal {...props} cloneIssue={cloneCreation} onClose={closeCloneCreation}
+      onCloneCreated={showCreatedClone} refresh={refreshAfterClone} />}
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
       onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}

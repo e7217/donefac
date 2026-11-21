@@ -45,6 +45,7 @@ curl --fail-with-body \
 | `GET /attachments?resourceType=issue&resourceId=...` · `GET /attachments/:id/versions` | 업무·문서의 첨부 목록, 각 첨부의 버전 이력 |
 | `GET /attachments/:id/content` · `GET /attachment-versions/:id/download` | 지정된 파일 버전의 바이너리 |
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·휴지통 이동 |
+| `POST /issues/:id/clone` | 같은 프로젝트에 업무 복제와 원본 관련 관계 저장 |
 | `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·휴지통 이동 |
 | `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
@@ -172,6 +173,12 @@ curl --fail-with-body \
 `documentExcerptInclude`는 `attrs: { "documentId": "원본 문서 ID", "label": "저장 이름", "noPanel": false }`를 받는 블록이다. `noPanel: true`면 포함한 본문 위의 원본 안내를 숨긴다. 문서가 활성 상태이며 발췌 구역을 찾을 수 있으면 현재 원본의 해당 구역을 표시한다. 검토·발행·이력 화면의 포함 블록은 저장된 참조 이름을 사용한다. 자체 포함과 순환은 일반 문서 포함과 같은 기준으로 검사한다. 프로젝트 범위 API 키는 조회하거나 추가하는 포함 블록의 원본 프로젝트에도 접근할 수 있어야 한다.
 
 두 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 11`을 보낸다. 공동 편집 프로토콜 11, 문서 JSON 형식 11, 자체 백업 형식 69가 두 노드를 보존한다.
+
+## 업무 복제
+
+`POST /api/issues/:id/clone`과 쓰기 키의 `POST /api/v1/issues/:id/clone`은 `{requestId,expectedSourceVersion,issue}`를 받는다. `requestId`는 UUID v4다. `issue`에는 검토한 업무 생성 값을 보낸다. 새 업무의 프로젝트는 원본에서 결정되며, 명시한 프로젝트가 다르면 요청을 거절한다. 현재 워크플로, 업무 유형·필수 입력, 날짜와 같은 프로젝트의 상위 업무·계획 항목 검증을 적용한다.
+
+생성된 업무와 두 업무의 관련 관계를 함께 저장하고 `{issue,relation,duplicate}`를 반환한다. 최초 생성은 `201`, 같은 요청의 재확인은 `200`과 현재 저장 업무를 반환한다. 재확인 전에 관계를 해제하면 `relation`은 `null`이다. 원본 버전이 다르면 첫 저장에서 `409`와 `details.reason: 'source_version_changed'`, `currentVersion`을 반환한다. 백업 복원은 일반 업무와 관련 관계의 기존 규칙을 사용한다.
 
 ## 상위 업무에서 하위 업무 만들기
 

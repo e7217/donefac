@@ -3,6 +3,7 @@ import { creationRequestFingerprint, creationRequestId } from './creation-reques
 import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
+type CreationScope = { kind: 'schedule-successor'; predecessorId: string } | { kind: 'issue-clone'; sourceIssueId: string };
 type Receipt = { actorId: string; projectId: string; fingerprint: string; issueId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
 
@@ -29,8 +30,8 @@ export class IssueCreationService {
     )`);
   }
 
-  create(actorId: () => string, input: IssueInput, create: () => Issue, scheduleScope?: { predecessorId: string }): { issue: Issue; duplicate: boolean } {
-    if (!scheduleScope && !Object.hasOwn(input, 'requestId')) {
+  create(actorId: () => string, input: IssueInput, create: () => Issue, scope?: CreationScope): { issue: Issue; duplicate: boolean } {
+    if (!scope && !Object.hasOwn(input, 'requestId')) {
       return { issue: this.store.transaction(create), duplicate: false };
     }
     const requestId = input.requestId;
@@ -38,10 +39,10 @@ export class IssueCreationService {
       throw new IssueCreationError(400, '업무 생성 요청 ID를 확인해 주세요.', { reason: 'invalid_request_id' });
     }
     const id = requestId.toLowerCase();
-    // Ordinary receipts are bare hashes. The route-owned prefix prevents a generic request body from matching a scheduled create.
-    const digest = scheduleScope
-      ? `schedule-successor:${fingerprint({ ...input, predecessorId: scheduleScope.predecessorId })}`
-      : fingerprint(input);
+    // Keep the ordinary and schedule-successor digests stable for previously saved requests.
+    const digest = !scope ? fingerprint(input) : scope.kind === 'schedule-successor'
+      ? `schedule-successor:${fingerprint({ ...input, predecessorId: scope.predecessorId })}`
+      : `issue-clone:${fingerprint({ ...input, sourceIssueId: scope.sourceIssueId })}`;
     return this.store.transaction(() => {
       const author = actorId();
       const receipt = this.store.db.prepare(`SELECT actor_id AS actorId, project_id AS projectId,

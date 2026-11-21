@@ -161,9 +161,8 @@ export class ApiKeyService {
     if (!id || /[\/\\\u0000-\u001f]/.test(id) || id === '.' || id === '..') fail(400, '대상 ID 형식이 올바르지 않습니다.');
     return id;
   }
-  private references(key: ApiKeyRecord, request: Request, projectId: unknown, type: 'issue' | 'document', previous?: Issue | DocPage) {
+  private references(key: ApiKeyRecord, body: Record<string, unknown>, projectId: unknown, type: 'issue' | 'document', previous?: Issue | DocPage) {
     this.allowedProject(key, projectId);
-    const body = request.body as Record<string, unknown>;
     if (body.parentId !== undefined && body.parentId !== null && body.parentId !== '') this.resource(key, type === 'issue' ? 'issues' : 'documents', body.parentId);
     if (type === 'issue') for (const field of ['cycleId', 'moduleId', 'releaseId']) {
       if (body[field] !== undefined && body[field] !== null && body[field] !== '') this.resource(key, 'planning_items', body[field]);
@@ -393,6 +392,7 @@ export class ApiKeyService {
     }
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
+    const issueClone = /^\/api\/issues\/([^/]+)\/clone$/.exec(path);
     const cycleCompletion = /^\/api\/planning-items\/([^/]+)\/complete(\/preview)?$/.exec(path);
     const resourceLink = /^\/api\/resource-links\/([^/]+)$/.exec(path);
     const dependency = /^\/api\/dependencies\/([^/]+)$/.exec(path);
@@ -400,7 +400,15 @@ export class ApiKeyService {
     if (request.method === 'POST' && ['/api/issues', '/api/documents'].includes(path)) {
       this.query(request, []);
       const type = path === '/api/issues' ? 'issue' : 'document';
-      this.references(key, request, request.body.projectId ?? null, type);
+      this.references(key, request.body, request.body.projectId ?? null, type);
+    } else if (request.method === 'POST' && issueClone) {
+      this.query(request, []);
+      const source = this.store.get<Issue>('issues', this.decode(issueClone[1]));
+      if (!source) throw new ApiKeyError(404, '원본 업무를 찾을 수 없습니다.', { reason: 'source_missing' });
+      this.allowedProject(key, source.projectId);
+      const issue = request.body.issue;
+      if (!issue || typeof issue !== 'object' || Array.isArray(issue)) fail(400, '복제할 업무 정보를 확인해 주세요.');
+      this.references(key, issue, Object.hasOwn(issue, 'projectId') ? issue.projectId : source.projectId, 'issue');
     } else if ((request.method === 'PATCH' || request.method === 'DELETE') && detail) {
       const id = this.decode(detail[2]);
       const source = this.resource(key, detail[1] as 'issues' | 'documents', id);
@@ -411,7 +419,7 @@ export class ApiKeyService {
         const version = request.body.expectedVersion ?? fromQuery;
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
-      } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+      } else this.references(key, request.body, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
     } else if (request.method === 'POST' && cycleCompletion) {
       this.query(request, []);
       this.resource(key, 'planning_items', this.decode(cycleCompletion[1]));

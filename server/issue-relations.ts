@@ -55,27 +55,30 @@ export class IssueRelationsService {
   }
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
+    return this.store.transaction(() => this.createInTransaction(issueId, input, audit, notifyChange));
+  }
+
+  createInTransaction(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
+    if (!this.store.db.isTransaction) throw new Error('Creating an issue relation requires a transaction.');
     const { type, direction, value: otherId } = relationInput(input, 'otherIssueId');
     if (!isRelationId(issueId) || !isRelationId(otherId)) {
       throw new IssueRelationError(400, '연결할 업무를 선택해 주세요.');
     }
     if (issueId === otherId) throw new IssueRelationError(400, '업무를 자기 자신에게 연결할 수 없습니다.');
 
-    return this.store.transaction(() => {
-      const issue = this.requireIssue(issueId);
-      const other = this.requireIssue(otherId);
-      const endpoints = issueRelationEndpoints(issue.id, other.id, type, direction);
-      const existing = findTeamspaceIssueRelation(this.store, { ...endpoints, type });
-      if (existing) return { relation: existing, created: false };
+    const issue = this.requireIssue(issueId);
+    const other = this.requireIssue(otherId);
+    const endpoints = issueRelationEndpoints(issue.id, other.id, type, direction);
+    const existing = findTeamspaceIssueRelation(this.store, { ...endpoints, type });
+    if (existing) return { relation: existing, created: false };
 
-      const relation: TeamspaceIssueRelation = { id: randomUUID(), ...endpoints, origin: 'teamspace', type, version: 1, createdAt: new Date().toISOString() };
-      this.store.db.prepare('INSERT INTO issue_relations(id,source_issue_id,target_issue_id,json) VALUES(?,?,?,?)')
-        .run(relation.id, relation.sourceIssueId, relation.targetIssueId, JSON.stringify(relation));
-      recordIssueRelationVersion(this.store, relation.version);
-      this.recordActivity(issue, other, relation, '업무 관계 추가', audit);
-      notifyChange(undefined, relation);
-      return { relation, created: true };
-    });
+    const relation: TeamspaceIssueRelation = { id: randomUUID(), ...endpoints, origin: 'teamspace', type, version: 1, createdAt: new Date().toISOString() };
+    this.store.db.prepare('INSERT INTO issue_relations(id,source_issue_id,target_issue_id,json) VALUES(?,?,?,?)')
+      .run(relation.id, relation.sourceIssueId, relation.targetIssueId, JSON.stringify(relation));
+    recordIssueRelationVersion(this.store, relation.version);
+    this.recordActivity(issue, other, relation, '업무 관계 추가', audit);
+    notifyChange(undefined, relation);
+    return { relation, created: true };
   }
 
   update(issueId: string, relationId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): IssueRelation {

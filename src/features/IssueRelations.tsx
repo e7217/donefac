@@ -22,6 +22,7 @@ type Choice = keyof typeof CHOICES;
 type Draft = { original?: IssueRelation; otherIssueId: string; choice: Choice; query: string };
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   issueId: string;
+  refreshKey: number;
   disabled: boolean;
   onReviewSchedule: (opener: HTMLButtonElement, relation: IssueRelation, mode: IssueRelationScheduleMode, reload: () => Promise<void>) => void;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
@@ -50,7 +51,7 @@ export function IssueRelations(props: Props) {
   return <RelationList key={props.issueId} {...props} />;
 }
 
-function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onReviewSchedule, onDraftChange }: Props) {
+function RelationList({ issueId, refreshKey, data, openIssue, refresh, notify, disabled, onReviewSchedule, onDraftChange }: Props) {
   const editHeading = useId(), removeHeading = useId();
   const [relations, setRelations] = useState<IssueRelation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -126,6 +127,17 @@ function RelationList({ issueId, data, openIssue, refresh, notify, disabled, onR
       window.removeEventListener('teamspace:workspace-imported', reload);
     };
   }, [load]);
+
+  const lastRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (lastRefreshKey.current === refreshKey || busy) return;
+    const timer = setTimeout(() => {
+      if (pendingRef.current) return;
+      lastRefreshKey.current = refreshKey;
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [refreshKey, busy, load]);
 
   const discard = useCallback(() => {
     setDraft(null);
