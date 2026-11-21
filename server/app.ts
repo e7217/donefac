@@ -36,6 +36,7 @@ import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersion
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
 import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
 import { IssuePasteError, IssuePasteService } from './issue-paste.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
@@ -246,6 +247,9 @@ export function createApp(options: {
   const issueOrders = new IssueOrderService(store);
   const documentOrders = new DocumentOrderService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
+  const issueChangeHistory = new IssueChangeHistory(store, {
+    schema: projectId => issueSchemas.get(projectId), workflow: projectId => workflows.get(projectId),
+  });
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
   reportLedger.start();
   const reports=new ReportingService(store,reportLedger);
@@ -285,11 +289,15 @@ export function createApp(options: {
   apiKeys.installAuthorization(app);
   app.use((req,res,next)=>{const explicit=req.header('X-Actor-Id');if(req.method!=='GET'&&explicit&&!store.get('users',explicit))return res.status(400).json({error:'작업자를 찾을 수 없습니다.'});next();});
   const get = <T = any>(table: string, id: any): T => typeof id === 'string' && store.get<T>(table,id) || fail('대상을 찾을 수 없습니다.',404);
-  const actor = (req: Request) => {
+  const resolveActor = (req: Request): string | null => {
     const explicit = req.header('X-Actor-Id') || req.body?.actorId;
-    if (explicit) { if (!store.get('users',explicit)) fail('작업자를 찾을 수 없습니다.'); return explicit as string; }
-    return store.all<any>('users')[0]?.id || fail('먼저 팀원을 등록해 주세요.');
+    if (explicit) {
+      if (typeof explicit !== 'string' || !store.get('users', explicit)) return fail('작업자를 찾을 수 없습니다.');
+      return explicit;
+    }
+    return store.all<User>('users')[0]?.id ?? null;
   };
+  const actor = (req: Request) => resolveActor(req) ?? fail('먼저 팀원을 등록해 주세요.');
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
   const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string | null | undefined)[], createdAt: string, detail?: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt,...(detail===undefined?{}:{detail})});
@@ -339,7 +347,11 @@ export function createApp(options: {
     const label=(date:NonNullable<ReturnType<typeof issueDeadline>>)=>`${date.source==='dueDate'?'목표 마감일':'계획 종료일'} ${date.value}`;
     notifyIssueRisk(issue,context.actorId,'issue-deadline-postponed',issue.updatedAt,`${label(previousDeadline)} → ${label(deadline)}`);
   },['issues']);
-  app.use((req,_res,next)=>{const webhook=req.path==='/api/integrations/gitlab/webhook';const requested=req.header('X-Actor-Id')||req.body?.actorId;const actorId=webhook?null:(typeof requested==='string'?requested:store.all<any>('users')[0]?.id||null);store.withMutationContext({actorId,origin:webhook?'gitlab':'user'},next);});
+  app.use((req, _res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    const webhook = req.path === '/api/integrations/gitlab/webhook';
+    return store.withMutationContext({ actorId: webhook ? null : resolveActor(req), origin: webhook ? 'gitlab' : 'user' }, next);
+  });
   const attachmentRows=(type:string,id:string)=>{
     const rows=store.db.prepare('SELECT json FROM attachments WHERE resource_type=? AND resource_id=? ORDER BY rowid').all(type,id) as {json:string}[];
     return rows.map(row=>JSON.parse(row.json) as Attachment);
@@ -1233,6 +1245,17 @@ export function createApp(options: {
     });
     res.json(result);
   });
+  app.get('/api/issues/:id/change-history', (req, res) => {
+    const cursor = req.query.beforeVersion;
+    if (Object.keys(req.query).some(key => key !== 'beforeVersion') ||
+        (cursor !== undefined && (typeof cursor !== 'string' || !/^[1-9]\d*$/.test(cursor) || !Number.isSafeInteger(Number(cursor))))) {
+      return fail('변경 기록의 조회 위치를 확인해 주세요.');
+    }
+    const issue = get<Issue>('issues', req.params.id);
+    const scope = apiKeys.projectScope(req);
+    if (scope && !scope.includes(issue.projectId)) return fail('API 키에서 허용하지 않는 프로젝트입니다.', 403);
+    res.set('Cache-Control', 'no-store').json(issueChangeHistory.page(issue.id, cursor === undefined ? undefined : Number(cursor), scope ?? undefined));
+  });
   app.get('/api/issues/:id/gitlab-links', (req, res) => {
     if (Object.keys(req.query).some(key => key !== 'kind' && key !== 'offset')) return fail('GitLab 활동 조회 조건을 확인해 주세요.');
     const kind = req.query.kind ?? '';
@@ -1739,7 +1762,10 @@ export function createApp(options: {
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
       subscriptions.removeTarget(entry.resourceType,entry.resourceId);
       atlassianLinks.removeTarget(entry.resourceType,entry.resourceId);
-      if(entry.resourceType==='issue')timeReservations.purgeIssue(entry.resourceId);
+      if(entry.resourceType==='issue') {
+        timeReservations.purgeIssue(entry.resourceId);
+        issueChangeHistory.purgeIssue(entry.resourceId);
+      }
       trashItems.purgeOwner(entry.resourceType,entry.resourceId);
       trashItems.queueCleanup(archivedFiles(entry));
       trash.remove(entry.id);
@@ -2160,7 +2186,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2364,6 +2390,11 @@ export function createApp(options: {
       issues:data.issues,archivedIssues,users:data.users,
     },data.exportedAt):[];
     const allImportedIssues=[...(data.issues as Issue[]),...archivedIssues];
+    if (data.schemaVersion < 88 && data.issueChangeHistory !== undefined && (!Array.isArray(data.issueChangeHistory) || data.issueChangeHistory.length)) {
+      fail('티켓 필드 변경 기록을 포함한 백업은 schemaVersion 88이 필요합니다.');
+    }
+    const importedIssueChangeHistory = data.schemaVersion >= 88
+      ? issueChangeHistory.validateRestore(data.issueChangeHistory, allImportedIssues, data.projects, data.users, data.exportedAt) : [];
     const importedCycleCompletionRecords = cycleCompletionRecords.validateRestore(data.cycleCompletionRecords, {
       schemaVersion: data.schemaVersion, exportedAt: data.exportedAt, projects: data.projects,
       planningItems: importedPlanning.items, issues: allImportedIssues,
@@ -2648,6 +2679,7 @@ export function createApp(options: {
       reportLedger.replaceRestored(importedReportLedger,restoreAt);
       reports.replaceRestored(importedReportSnapshots);
       worklogs.replaceRestored(importedWorklogs,previousWorklogs);
+      issueChangeHistory.replace(importedIssueChangeHistory);
       const generation=uid();store.setSetting('attachmentImportGeneration',generation);swapped=files.swapImport(staged!,generation);
     }));}catch(error){swapped?.rollback();files.cleanupStage(staged!);throw error;}
     collaboration.invalidateAll('백업 가져오기로 문서가 교체되었습니다.');
@@ -2667,6 +2699,7 @@ export function createApp(options: {
     if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
@@ -2695,7 +2728,7 @@ export function createApp(options: {
     attachWebSocket: (server: import('node:http').Server, authorize?: CollaborationUpgradeGuard) => collaboration.attachWebSocket(server, authorize),
     close: () => {
       if (deadlineReminderTimer) clearInterval(deadlineReminderTimer);
-      migrations.close(); legacyImport.close(); outbound.close(); collaboration.close(); reportLedger.close(); stopIssueWatch(); store.db.close();
+      migrations.close(); legacyImport.close(); outbound.close(); collaboration.close(); reportLedger.close(); issueChangeHistory.close(); stopIssueWatch(); store.db.close();
     },
   };
 }

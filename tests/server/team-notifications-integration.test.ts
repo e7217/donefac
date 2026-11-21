@@ -188,7 +188,7 @@ test('native notification backups preserve transition details, exact archived co
   const wrongAnchor = structuredClone(data);
   wrongAnchor.teamNotifications.find(item => item.id === delivered.id)!.commentId = wrong.id;
   await expectStatus(f.call('/import', 'POST', { data: wrongAnchor }), 400);
-  const earlierHeader = { ...structuredClone(data), schemaVersion: 85 };
+  const earlierHeader = { ...structuredClone(data), schemaVersion: 85, issueChangeHistory: undefined };
   const rejected = await f.call<{ error: string }>('/import', 'POST', { data: earlierHeader });
   assert.equal(rejected.status, 400);
   assert.match(rejected.data.error, /schemaVersion 86/);
@@ -730,7 +730,7 @@ test('deadline postponement uses the effective date and native backup preserves 
     [...saved].reverse(),
   );
   await f.restart();
-  const old = { ...backup, schemaVersion: 61, teamNotifications: backup.teamNotifications.map(item =>
+  const old = { ...backup, schemaVersion: 61, issueChangeHistory: undefined, teamNotifications: backup.teamNotifications.map(item =>
     item.kind === 'issue-status-changed' ? { ...item, detail: undefined } : item) };
   const rejection = await expectStatus(f.call<{ error: string }>('/import', 'POST', { data: old }), 400);
   assert.match(rejection.error, /schemaVersion 62/);

@@ -166,7 +166,7 @@ test('native automation backup restores execution history and disabled rules wit
     const [run]=history.data;
     assert.deepEqual(backup.automationRuns,history.data);
     assert.equal(run.context?.gitlabBaseUrl,'http://gitlab.synthetic.test');
-    const oldFormat=await f.call<{error:string}>('/import','POST',{data:{...backup,schemaVersion:63}});
+    const oldFormat=await f.call<{error:string}>('/import','POST',{data:{...backup,schemaVersion:63,issueChangeHistory:undefined}});
     assert.equal(oldFormat.status,400);
     assert.match(oldFormat.data.error,/schemaVersion 64/);
     for(const automationRuns of [
@@ -186,7 +186,7 @@ test('native automation backup restores execution history and disabled rules wit
     const olderRun={...run};delete olderRun.context;
     assert.equal((await f.call('/import','POST',{data:{...backup,automationRuns:[olderRun]}})).status,200);
     assert.deepEqual((await f.call('/automation-runs')).data,[olderRun]);
-    const legacy={...backup,schemaVersion:7};delete legacy.automationRules;delete legacy.automationRuns;
+    const legacy={...backup,schemaVersion:7,issueChangeHistory:undefined};delete legacy.automationRules;delete legacy.automationRuns;
     assert.equal((await f.call('/import','POST',{data:legacy})).status,200);
     assert.equal((await f.call('/automation-rules')).data.length,0);
     assert.deepEqual((await f.call('/automation-runs')).data,[]);

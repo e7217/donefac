@@ -231,7 +231,8 @@ test('format 55 validates and restores state dwell while signed-in teams retain 
     await change(f, ticket, { title: '보고를 작성한 뒤 변경한 제목', status: 'todo' });
     assert.equal((await report(f, q)).statusDuration?.openIssues[0].statusId, 'todo');
     assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(value => value.id === document.id), document);
-    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 54 } });
+    const previousFormat = { ...backup, schemaVersion: 54, issueChangeHistory: undefined };
+    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: previousFormat });
     assert.equal(downgraded.status, 400);
     assert.match(downgraded.data.error, /schemaVersion 55/u);
     const missing = structuredClone(backup);
@@ -257,8 +258,7 @@ test('format 55 validates and restores state dwell while signed-in teams retain 
     assert.equal(restored.status, 200, JSON.stringify(restored.data));
     assert.deepEqual((await f.call<ReportSnapshot>(path)).data, snapshot);
 
-    const earlier = structuredClone(backup), legacy = earlier.reportSnapshots[0];
-    earlier.schemaVersion = 54;
+    const earlier = structuredClone(previousFormat), legacy = earlier.reportSnapshots[0];
     legacy.report.definitionVersion = 1;
     delete legacy.report.statusDuration;
     const older = await f.call('/import', 'POST', { data: earlier });

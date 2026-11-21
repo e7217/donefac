@@ -33,6 +33,7 @@ curl --fail-with-body \
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `POST /planning-items/:id/complete/preview` · `POST /planning-items/:id/complete` | 진행 중 사이클 완료와 미완료 업무 이월 검토·적용 |
 | `GET /issues?projectId=...&reporterId=...` · `GET /issues/:id` | 업무 조회, 선택적인 프로젝트·요청자 조건 |
+| `GET /issues/:id/change-history` | 티켓의 필드 변경 전후 값과 당시 표시 이름 조회 |
 | `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
 | `GET /issues/:id/resource-links` · `GET /documents/:id/resource-links` | 업무와 문서의 직접 연결 조회 |
 | `POST /resource-links` · `DELETE /resource-links/:id` | 업무와 문서의 직접 연결 추가·일반 연결 해제 |
@@ -192,6 +193,12 @@ curl --fail-with-body \
 본문 형식 12의 `documentColumnLayout`에는 `attrs: { "weights": [3, 7], "border": false }`와 1~3개의 `documentColumn`을 넣는다. `weights`의 길이는 단의 수와 같으며 각 값은 1~1,000 사이의 정수 비율이다. `border`의 기본값은 `false`다. `documentColumn`에는 속성 없이 하나 이상의 본문 블록을 넣는다.
 
 다단 구역을 편집하거나 교체하는 `PATCH`에는 `contentSchemaVersion: 12`를 보낸다. 공동 편집 프로토콜 12, 문서 JSON 형식 12, 자체 백업 형식 79에 다단 설정과 각 단의 내용을 보존한다. Markdown은 왼쪽 단의 첫 블록부터 저장 순서대로 내보내며, 배치가 바뀐 경우 ZIP의 `manifest.json`에 `layout_linearized`를 기록한다.
+
+## 티켓의 필드 변경 기록
+
+`GET /api/v1/issues/:id/change-history`와 브라우저용 `/api/issues/:id/change-history`는 최대 20건을 티켓 저장 버전의 내림차순으로 반환한다. 다음 페이지에는 응답의 `nextBeforeVersion`을 `?beforeVersion=...`으로 보낸다. 마지막 페이지의 값은 `null`이다. 각 `entries` 항목에는 `issueId`, `issueVersion`, `actorId`, `actorName`, `origin`, `occurredAt`, 당시 양쪽 프로젝트 ID와 `changes`가 있다. `origin`은 `user` 또는 `automation`이다.
+
+`changes`의 각 항목은 `field`, 당시 `label`, 변경 전후의 `before`와 `after`를 포함한다. 사용자 정의 필드는 `custom:<필드 ID>`로 표시한다. 전후 값에는 `value`, 당시 표시 이름인 `display`, 긴 값의 일부만 보존했을 때의 `truncated`가 있다. 자체 백업 형식 88은 이 기록을 보존한다. 프로젝트가 지정된 키는 티켓의 현재 프로젝트와 각 기록의 양쪽 프로젝트에 접근할 수 있어야 해당 기록을 읽을 수 있다.
 
 ## 티켓 설명의 서식
 

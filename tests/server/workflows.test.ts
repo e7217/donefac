@@ -263,11 +263,12 @@ test('board limits preserve old workflow clients, allow transitions above the li
     const exported = (await f.request<Backup>('/export')).data;
     assert.equal(exported.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.equal((await target.request('/import', 'POST', { data: exported })).status, 200);
-    assert.equal((await target.request('/import', 'POST', { data: { ...exported, schemaVersion: 56 } })).status, 200);
+    const previousFormat = { ...exported, issueChangeHistory: undefined };
+    assert.equal((await target.request('/import', 'POST', { data: { ...previousFormat, schemaVersion: 56 } })).status, 200);
     const restored = (await target.request<ProjectWorkflow>(path)).data;
     assert.equal(statusIn(restored).wipLimit, 1);
     assert.equal(statusIn(restored, 'done').wipLimit, 10_000);
-    const mislabeled = await target.request<{ error: string }>('/import', 'POST', { data: { ...exported, schemaVersion: 55 } });
+    const mislabeled = await target.request<{ error: string }>('/import', 'POST', { data: { ...previousFormat, schemaVersion: 55 } });
     assert.equal(mislabeled.status, 400);
     assert.match(mislabeled.data.error, /schemaVersion 56/);
     assert.equal(statusIn((await target.request<ProjectWorkflow>(path)).data).wipLimit, 1);

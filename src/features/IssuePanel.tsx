@@ -23,6 +23,7 @@ import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
+import { IssueChangeHistory } from './IssueChangeHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
 import { IssueProjectMove } from './IssueProjectMove';
@@ -759,6 +760,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
     : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <>
+      <IssueChangeHistory issueId={issue.id} issueVersion={issue.version} />
       <section className="issue-activity-list" aria-label="Teamspace 변경 이력">
         <h3 className="issue-history-heading">Teamspace 변경 이력</h3>
         {activities.length ? activities.map(activity => {

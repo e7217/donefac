@@ -213,7 +213,7 @@ test('calendar CAS guards manual workday previews; native backup preserves custo
     const current=(await f.request(path)).data;assert.equal((await f.request(path,'PATCH',{expectedVersion:current.version,workingWeekdays:[0,1,2,3,4],exceptions:[{date:'2026-11-20',isWorking:false,label:'배포 휴무'}]})).status,200);
     const exported=(await f.request('/export')).data;assert.equal(exported.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);assert.equal((await target.request('/import','POST',{data:exported})).status,200);assert.deepEqual((await target.request(path)).data.workingWeekdays,[0,1,2,3,4]);assert.equal((await target.request(path)).data.exceptions[0].label,'배포 휴무');
     const missing=structuredClone(exported);missing.calendars=missing.calendars.filter((c:any)=>c.projectId!==f.projectId);assert.equal((await target.request('/import','POST',{data:missing})).status,400);assert.deepEqual((await target.request(path)).data.workingWeekdays,[0,1,2,3,4]);
-    for(const schemaVersion of[1,2,3,4]){const legacy={...exported,schemaVersion};assert.equal((await target.request('/import','POST',{data:legacy})).status,200);const calendar=(await target.request(path)).data;assert.deepEqual(calendar.workingWeekdays,[1,2,3,4,5]);assert.deepEqual(calendar.exceptions,[]);}
+    for(const schemaVersion of[1,2,3,4]){const legacy={...exported,schemaVersion,issueChangeHistory:[]};assert.equal((await target.request('/import','POST',{data:legacy})).status,200);const calendar=(await target.request(path)).data;assert.deepEqual(calendar.workingWeekdays,[1,2,3,4,5]);assert.deepEqual(calendar.exceptions,[]);}
   }finally{for(const x of[f,target]){await x.close();x.remove();}}
 });
 

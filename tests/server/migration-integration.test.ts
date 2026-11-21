@@ -1055,7 +1055,7 @@ test('explicit repository routes match imported Jira keys only for their selecte
   assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
   assert.equal(Object.hasOwn(backup.data, 'jiraRoutes'), false, 'The mapping is local GitLab connection configuration.');
-  const legacy = structuredClone(backup.data);
+  const legacy = { ...structuredClone(backup.data), issueChangeHistory: undefined };
   legacy.schemaVersion = 34;
   delete legacy.automationRuns;
   assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 400);

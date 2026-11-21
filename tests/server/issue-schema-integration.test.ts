@@ -295,7 +295,7 @@ test('schema and workflow preserve referenced selectors, reject new bad conditio
     // Keep the issue valid to isolate the condition's unavailable status.
     invalid.issues.find(issue => issue.id === hidden.data.id)!.status = 'todo';
     assert.equal((await f.call('/import', 'POST', { data: invalid })).status, 400);
-    assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 33 } })).status, 400);
+    assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 33, issueChangeHistory: undefined } })).status, 400);
     assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before);
     assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
     const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data;
@@ -303,7 +303,7 @@ test('schema and workflow preserve referenced selectors, reject new bad conditio
     assert.deepEqual(restored.issues.find(issue => issue.id === hidden.data.id)?.customFields, hidden.data.customFields);
     assert.ok(restored.workflows!.find(value => value.projectId === conditionalProject)!.statuses.some(status => status.id === gate.id));
 
-    const legacy = structuredClone(backup.data);
+    const legacy = { ...structuredClone(backup.data), issueChangeHistory: undefined };
     legacy.schemaVersion = 33;
     for (const issueSchema of legacy.issueSchemas!) for (const field of issueSchema.fields) delete field.visibleWhen;
     assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);

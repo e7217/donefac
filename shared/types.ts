@@ -604,6 +604,32 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export type IssueChangeHistoryField = keyof Pick<Issue,
+  'projectId' | 'key' | 'title' | 'description' | 'descriptionFormat' | 'type' | 'status' | 'priority' |
+  'assigneeId' | 'reporterId' | 'collaboratorIds' | 'parentId' | 'labels' | 'startDate' | 'endDate' | 'dueDate' |
+  'estimate' | 'plannedEffortMinutes' | 'cycleId' | 'moduleId' | 'releaseId'
+> | `custom:${string}`;
+export interface IssueChangeHistoryValue {
+  value: CustomFieldValue;
+  display: string | null;
+  truncated?: true;
+}
+export interface IssueChangeHistoryEntry {
+  id: string;
+  issueId: string;
+  projectId: string;
+  previousProjectId: string;
+  issueVersion: number;
+  actorId: string;
+  actorName: string;
+  origin: 'user' | 'automation';
+  occurredAt: string;
+  changes: { field: IssueChangeHistoryField; label: string; before: IssueChangeHistoryValue; after: IssueChangeHistoryValue }[];
+}
+export interface IssueChangeHistoryPage {
+  entries: IssueChangeHistoryEntry[];
+  nextBeforeVersion: number | null;
+}
 export interface IssueTemplateDefaults {
   title: string;
   description: string;

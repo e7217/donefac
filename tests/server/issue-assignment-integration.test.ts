@@ -10,6 +10,7 @@ import { Store } from '../../server/store.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   ApiKeyCreated, AutomationRule, Issue, IssueAssignmentPreview, IssueAssignmentRule, IssueAssignmentRuleInput, IssueAssignmentRunPage,
+  IssueChangeHistoryEntry, IssueChangeHistoryPage,
   ProjectIssueOrder, ProjectWorkflow, TeamNotification, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated,
   WebhookEnvelope, WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -21,7 +22,9 @@ const runsPath = `${projectPath}/assignment-runs`;
 const target = 'user-seo';
 const editor = 'user-min';
 const headersFor = (actorId: string) => ({ 'X-Actor-Id': actorId });
-type Backup = WorkspaceSnapshot & { schemaVersion: number; issueAssignmentRules: IssueAssignmentRule[]; teamNotifications: TeamNotification[] };
+type Backup = WorkspaceSnapshot & {
+  schemaVersion: number; issueAssignmentRules: IssueAssignmentRule[]; teamNotifications: TeamNotification[]; issueChangeHistory: IssueChangeHistoryEntry[];
+};
 
 async function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-issue-assignment-'));
@@ -209,6 +212,11 @@ test('board and scoped API status changes share assignment while native import r
   }, headersFor(editor));
   assert.equal(moved.issue.assigneeId, target);
   assert.equal(moved.issue.version, board.version + 1);
+  const boardHistory = await f.expectStatus<IssueChangeHistoryPage>(200, `/issues/${board.id}/change-history`);
+  assert.equal(boardHistory.entries.length, 1);
+  assert.equal(boardHistory.entries[0].actorId, editor);
+  assert.deepEqual(new Map(boardHistory.entries[0].changes.map(change => [change.field, change.after.value])),
+    new Map([['assigneeId', target], ['status', 'review']]));
 
   const key = await f.expectStatus<ApiKeyCreated>(201, '/api-keys', 'POST', {
     name: '합성 업무 쓰기', access: 'write', projectIds: [projectId], expiresAt: null,
@@ -248,6 +256,7 @@ test('board and scoped API status changes share assignment while native import r
   const previousSchema: Partial<Backup> = { ...backup, schemaVersion: 31, teamNotifications: backup.teamNotifications.map(item =>
     item.kind === 'issue-status-changed' ? { ...item, detail: undefined } : item) };
   delete previousSchema.issueAssignmentRules;
+  delete previousSchema.issueChangeHistory;
   await f.expectStatus(200, '/import', 'POST', { data: previousSchema });
   assert.deepEqual(await f.expectStatus(200, rulesPath), []);
 });
@@ -278,6 +287,8 @@ test('an authenticated GitLab transition applies a required assignee once and ca
   assert.deepEqual(await f.snapshot(), before);
   assert.deepEqual(await f.expectStatus(200, '/automation-runs'), []);
   assert.deepEqual(await f.expectStatus(200, '/webhook-deliveries'), []);
+  const historyPath = `/issues/${issue.id}/change-history`;
+  assert.deepEqual(await f.expectStatus<IssueChangeHistoryPage>(200, historyPath), { entries: [], nextBeforeVersion: null });
   assert.equal((await f.runs()).total, 0);
   assert.deepEqual((await f.inbox(target)).items, []);
 
@@ -309,4 +320,9 @@ test('an authenticated GitLab transition applies a required assignee once and ca
   assert.equal((await hook()).data.duplicate, true);
   assert.equal((await f.runs()).total, 1);
   assert.equal((await f.envelope()).id, event.id);
+  const { entries } = await f.expectStatus<IssueChangeHistoryPage>(200, historyPath);
+  assert.equal(entries.length, 1);
+  assert.deepEqual([entries[0].origin, entries[0].actorId, entries[0].issueVersion], ['automation', 'user-jun', saved.version]);
+  assert.deepEqual(new Map(entries[0].changes.map(change => [change.field, change.after.value])),
+    new Map([['assigneeId', target], ['status', 'done']]));
 });

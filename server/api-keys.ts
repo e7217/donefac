@@ -293,6 +293,12 @@ export class ApiKeyService {
       this.used(key); return next();
     }
     if (request.method === 'GET') {
+      const issueHistory = /^\/api\/issues\/([^/]+)\/change-history$/.exec(path);
+      if (issueHistory) {
+        this.query(request, ['beforeVersion']);
+        this.resource(key, 'issues', this.decode(issueHistory[1]));
+        this.used(key); return next();
+      }
       const resourceLinks = /^\/api\/(issues|documents)\/([^/]+)\/resource-links$/.exec(path);
       if (resourceLinks) {
         this.query(request, []);
