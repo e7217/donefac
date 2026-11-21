@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isCalendarDate } from '../shared/calendar.js';
-import { ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
-import type { TeamNotification, TeamNotificationFilter, TeamNotificationPage } from '../shared/types.js';
+import { COMMENT_MENTION_NOTIFICATION_KINDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
+import type { Comment, TeamNotification, TeamNotificationFilter, TeamNotificationPage } from '../shared/types.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 50;
@@ -9,11 +9,12 @@ const LABEL_LIMIT = 500;
 export const MAX_NOTIFICATION_DETAIL_LENGTH = 500;
 const KINDS: ReadonlySet<string> = new Set(TEAM_NOTIFICATION_KINDS);
 const DEADLINE_KINDS: ReadonlySet<string> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
+const COMMENT_MENTION_KINDS: ReadonlySet<string> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
 const DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
 const COLUMNS = `id,recipient_id AS recipientId,actor_id AS actorId,kind,project_id AS projectId,
-  target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail`;
+  target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail,comment_id AS commentId`;
 const INSERT = `INSERT INTO team_notifications
-  (id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail) VALUES(?,?,?,?,?,?,?,?,?,?)`;
+  (id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`;
 const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS team_notifications (
   seq INTEGER PRIMARY KEY,
   id TEXT NOT NULL UNIQUE,
@@ -25,9 +26,10 @@ const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS team_notifications (
   target_label TEXT NOT NULL,
   created_at TEXT NOT NULL,
   read_at TEXT,
-  detail TEXT
+  detail TEXT,
+  comment_id TEXT
 )`;
-const RESTORE_FIELDS = new Set(['id', 'recipientId', 'actorId', 'kind', 'projectId', 'targetId', 'targetLabel', 'createdAt', 'readAt', 'detail']);
+const RESTORE_FIELDS = new Set(['id', 'recipientId', 'actorId', 'kind', 'projectId', 'targetId', 'targetLabel', 'createdAt', 'readAt', 'detail', 'commentId']);
 
 export class TeamNotificationError extends Error {
   readonly status = 400;
@@ -43,9 +45,10 @@ type NewDeadlineReminder = Pick<TeamNotification, 'recipientId' | 'targetId' | '
   projectId: string;
   deadline: { value: string; source: 'dueDate' | 'endDate' };
 };
-type StoredNotification = Omit<TeamNotification, 'detail'> & { detail: string | null };
+type StoredNotification = Omit<TeamNotification, 'detail' | 'commentId'> & { detail: string | null; commentId: string | null };
 
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const validId = (value: unknown): value is string => nonempty(value) && value.length <= 200 && value.trim() === value;
 const timestamp = (value: unknown): value is string => typeof value === 'string' && value.length === 24 &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 
@@ -62,18 +65,27 @@ function validateDetail(kind: string, detail: unknown, present: boolean): string
   throw new TeamNotificationError('알림 종류에 맞는 상세 내용을 입력해 주세요.');
 }
 
-function publicNotification({ detail, ...row }: StoredNotification): TeamNotification {
-  return detail === null ? row : { ...row, detail };
+function validateCommentId(kind: string, commentId: unknown, present: boolean): string | null {
+  if (COMMENT_MENTION_KINDS.has(kind)) {
+    if (present && validId(commentId)) return commentId;
+  } else if (!present) {
+    return null;
+  }
+  throw new TeamNotificationError('댓글 멘션 알림의 댓글 ID를 확인해 주세요.');
 }
 
-function restoreRow(value: unknown, users: Set<string>): TeamNotification {
+function publicNotification({ detail, commentId, ...row }: StoredNotification): TeamNotification {
+  return { ...row, ...(detail === null ? {} : { detail }), ...(commentId === null ? {} : { commentId }) };
+}
+
+function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>): TeamNotification {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TeamNotificationError('알림 데이터 형식을 확인해 주세요.');
   const row = value as Record<string, unknown>;
   const deadlineReminder = typeof row.kind === 'string' && DEADLINE_KINDS.has(row.kind);
   const validActor = deadlineReminder ? row.actorId === null :
     nonempty(row.actorId) && users.has(row.actorId) && row.recipientId !== row.actorId;
   if (Object.keys(row).some(field => !RESTORE_FIELDS.has(field)) ||
-    !nonempty(row.id) || row.id.length > 200 || row.id.trim() !== row.id || !nonempty(row.recipientId) || !users.has(row.recipientId) ||
+    !validId(row.id) || !nonempty(row.recipientId) || !users.has(row.recipientId) ||
     !validActor ||
     typeof row.kind !== 'string' || !KINDS.has(row.kind) ||
     (row.projectId !== null && !nonempty(row.projectId)) || (row.kind.startsWith('issue-') && row.projectId === null) ||
@@ -82,6 +94,16 @@ function restoreRow(value: unknown, users: Set<string>): TeamNotification {
     throw new TeamNotificationError('알림 종류·팀원·대상·시간을 확인해 주세요.');
   }
   const detail = validateDetail(row.kind, row.detail, Object.hasOwn(row, 'detail'));
+  const commentId = validateCommentId(row.kind, row.commentId, Object.hasOwn(row, 'commentId'));
+  if (commentId !== null) {
+    const comment = comments?.get(commentId);
+    // A receipt remains available after permanent deletion of its target comment.
+    if (comment && (comment.resourceType !== (row.kind === 'issue-comment-mentioned' ? 'issue' : 'document') ||
+        comment.resourceId !== row.targetId || comment.authorId !== row.actorId ||
+        !comment.mentions?.some(mention => mention.userId === row.recipientId))) {
+      throw new TeamNotificationError('댓글 멘션 알림의 대상과 수신자를 확인해 주세요.');
+    }
+  }
   if (deadlineReminder) {
     const date = /^(?:목표 마감일|계획 종료일) (\d{4}-\d{2}-\d{2})$/u.exec(detail ?? '')?.[1];
     if (!isCalendarDate(date) || row.id !== reminderId(row.kind, row.recipientId, row.targetId, date)) {
@@ -99,8 +121,11 @@ export class NotificationsService {
       if (!columns.some(column => column.name === 'detail')) {
         store.db.exec('ALTER TABLE team_notifications ADD COLUMN detail TEXT');
       }
+      if (!columns.some(column => column.name === 'comment_id')) {
+        store.db.exec('ALTER TABLE team_notifications ADD COLUMN comment_id TEXT');
+      }
       if (columns.find(column => column.name === 'actor_id')?.notnull === 1) {
-        const fields = 'seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail';
+        const fields = 'seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id';
         store.db.exec(`
           ALTER TABLE team_notifications RENAME TO previous_team_notifications;
           ${CREATE_TABLE};
@@ -126,8 +151,9 @@ export class NotificationsService {
     const insert = this.store.db.prepare(INSERT);
     const targetLabel = input.targetLabel.slice(0, LABEL_LIMIT);
     const detail = validateDetail(input.kind, input.detail, input.detail !== undefined);
+    const commentId = validateCommentId(input.kind, input.commentId, input.commentId !== undefined);
     for (const id of recipients) {
-      insert.run(randomUUID(), id, input.actorId, input.kind, input.projectId, input.targetId, targetLabel, input.createdAt, null, detail);
+      insert.run(randomUUID(), id, input.actorId, input.kind, input.projectId, input.targetId, targetLabel, input.createdAt, null, detail, commentId);
     }
   }
 
@@ -140,7 +166,7 @@ export class NotificationsService {
     const detail = `${deadline.source === 'dueDate' ? '목표 마감일' : '계획 종료일'} ${deadline.value}`;
     this.store.db.prepare(`${INSERT} ON CONFLICT(id) DO NOTHING`).run(
       reminderId(kind, recipientId, targetId, deadline.value), recipientId, null, kind, projectId, targetId,
-      targetLabel.slice(0, LABEL_LIMIT), createdAt, null, detail,
+      targetLabel.slice(0, LABEL_LIMIT), createdAt, null, detail, null,
     );
   }
 
@@ -186,17 +212,18 @@ export class NotificationsService {
   }
 
   /** Restoring oldest-first preserves insertion order and all read state. */
-  restore(raw: unknown, users: Set<string>): void {
+  restore(raw: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>): void {
     if (!Array.isArray(raw)) throw new TeamNotificationError('백업의 알림 목록을 확인해 주세요.');
     const seen = new Set<string>();
     const rows = Array.from(raw, value => {
-      const row = restoreRow(value, users);
+      const row = restoreRow(value, users, comments);
       if (seen.has(row.id)) throw new TeamNotificationError('백업에 중복된 알림 ID가 있습니다.');
       seen.add(row.id);
       return row;
     });
     this.store.db.exec('DELETE FROM team_notifications');
     const insert = this.store.db.prepare(INSERT);
-    for (const row of rows) insert.run(row.id, row.recipientId, row.actorId, row.kind, row.projectId, row.targetId, row.targetLabel, row.createdAt, row.readAt, row.detail ?? null);
+    for (const row of rows) insert.run(row.id, row.recipientId, row.actorId, row.kind, row.projectId, row.targetId,
+      row.targetLabel, row.createdAt, row.readAt, row.detail ?? null, row.commentId ?? null);
   }
 }

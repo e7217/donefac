@@ -44,6 +44,7 @@ import { newRequestId } from '../lib/request-id';
 import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel, downloadDocument, templateContent } from './document-utils';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
+import { CommentMentionInput, CommentMentionText, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
@@ -59,9 +60,10 @@ type Props = FeatureProps & {
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
   issueDrawerOpen?: boolean;
+  commentFocus?: { commentId: string; activation: number };
 };
 type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
-  | { kind: 'comment'; source: SelectionCommentSource; initialBody: string };
+  | { kind: 'comment'; source: SelectionCommentSource; initialDraft: CommentDraft };
 type DocumentMetadata = Pick<DocPage, 'title' | 'status' | 'parentId'> & { labels: string[] };
 type Draft = DocumentMetadata & {
   id: string; content: RichContent; plainText: string;
@@ -94,7 +96,7 @@ const draftFromPage = (page: DocPage): Draft => {
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false, commentFocus }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const listDrafts = useRef(new Set<string>());
@@ -125,11 +127,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sideTab, setSideTab] = useState<SideTab>('comments');
   const [comments, setComments] = useState<Comment[]>([]);
-  const [commentBody, setCommentBody] = useState('');
-  const commentBodyRef = useRef('');
+  const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
+  const commentDraftRef = useRef(commentDraft);
   const commentContextRef = useRef<CommentContext | null>(null);
-  const reselectedCommentDraft = useRef<(CommentContext & { body: string }) | null>(null);
+  const reselectedCommentDraft = useRef<(CommentContext & { draft: CommentDraft }) | null>(null);
   const focusCommentId = useRef<string | null>(null);
+  const [loadedCommentActivation, setLoadedCommentActivation] = useState<number>();
+  const handledCommentActivation = useRef<number>(undefined);
+  const commentsHeading = useRef<HTMLHeadingElement>(null);
   const [commentBusy, setCommentBusy] = useState(false);
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [commentError, setCommentError] = useState('');
@@ -276,18 +281,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     } catch { setStorageProblem(true); }
   }, []);
 
-  const rememberComment = useCallback((body = commentBodyRef.current, context = commentContextRef.current) => {
+  const rememberComment = useCallback((value = commentDraftRef.current, context = commentContextRef.current) => {
     if (!context || typeof window === 'undefined') return;
     try {
       const key = commentCacheKey(context.actorId, context.documentId);
-      if (body) localStorage.setItem(key, body);
+      if (value.body) localStorage.setItem(key, encodeCommentDraft(value));
       else localStorage.removeItem(key);
     } catch { setStorageProblem(true); }
   }, []);
 
-  const updateCommentBody = useCallback((value: string) => {
-    commentBodyRef.current = value;
-    setCommentBody(value);
+  const updateCommentDraft = useCallback((value: CommentDraft) => {
+    commentDraftRef.current = value;
+    setCommentDraft(value);
     rememberComment(value);
   }, [rememberComment]);
 
@@ -479,7 +484,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (creatingRequest.current || templateCreateAttempt.current || templateDraftDirty.current || draftRef.current?.dirty
-        || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
+        || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) {
         rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = '';
       }
     };
@@ -506,7 +511,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         event.preventDefault();
         return;
       }
-      if (draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) {
+      if (draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) {
         if (!window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 이동할까요?')) event.preventDefault();
         else { rememberDraft(draftRef.current); rememberComment(); }
       }
@@ -612,15 +617,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   };
 
   const documentId = draft?.id;
+  const commentActivation = documentId === selectedDocumentId ? commentFocus?.activation : undefined;
   useEffect(() => {
     if (!documentId) return;
     rememberComment();
     const context = { actorId, documentId };
     commentContextRef.current = context;
-    let cached = '';
-    try { cached = localStorage.getItem(commentCacheKey(actorId, documentId)) || ''; } catch { setStorageProblem(true); }
-    commentBodyRef.current = cached;
-    setComments([]); setCommentBody(cached); setCommentsLoading(true); setCommentError('');
+    let cached = emptyCommentDraft();
+    try { cached = decodeCommentDraft(localStorage.getItem(commentCacheKey(actorId, documentId))); } catch { setStorageProblem(true); }
+    commentDraftRef.current = cached;
+    setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentError('');
+  }, [documentId, actorId, rememberComment]);
+
+  useEffect(() => {
+    if (!documentId) return;
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
       activeRequest?.abort();
@@ -630,7 +640,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         signal: request.signal, headers: { 'X-Actor-Id': actorId },
       }).then(result => { if (!request.signal.aborted) { setComments(result); setCommentError(''); } })
         .catch(error => { if (!request.signal.aborted) setCommentError(error instanceof Error ? error.message : '댓글을 불러오지 못했습니다.'); })
-        .finally(() => { if (!request.signal.aborted) setCommentsLoading(false); });
+        .finally(() => {
+          if (!request.signal.aborted) {
+            setCommentsLoading(false);
+            setLoadedCommentActivation(commentActivation);
+          }
+        });
     };
     loadComments();
     window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
@@ -642,7 +657,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       window.removeEventListener('teamspace:trash-changed', loadComments);
       window.removeEventListener('teamspace:workspace-imported', loadComments);
     };
-  }, [documentId, actorId, rememberComment]);
+  }, [documentId, actorId, commentActivation]);
 
   useEffect(() => {
     if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments') return;
@@ -652,6 +667,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     article.scrollIntoView({ block: 'nearest' });
     article.focus({ preventScroll: true });
   }, [comments, sidebarOpen, sideTab]);
+
+  useEffect(() => {
+    if (!commentFocus || commentActivation !== commentFocus.activation || loadedCommentActivation !== commentFocus.activation
+      || handledCommentActivation.current === commentFocus.activation || issueDrawerOpen || publicationOpen || documentAction || newOpen || templateManager) return;
+    if (!sidebarOpen || sideTab !== 'comments') {
+      setSidebarOpen(true);
+      setSideTab('comments');
+      return;
+    }
+    const target = document.getElementById(`document-comment-${commentFocus.commentId}`) ?? commentsHeading.current;
+    if (!target || target.closest('[inert]')) return;
+    handledCommentActivation.current = commentFocus.activation;
+    target.scrollIntoView({ block: 'nearest' });
+    target.focus({ preventScroll: true });
+  }, [commentFocus, commentActivation, loadedCommentActivation, issueDrawerOpen, publicationOpen, documentAction,
+    newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
   useEffect(() => {
     if (!documentId || sideTab !== 'history' || publicationOpen) return;
@@ -671,7 +702,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       return;
     }
     if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return; }
-    if ((draftRef.current?.dirty || listDrafts.current.size || commentBodyRef.current.trim() || liveStateRef.current?.pending) &&
+    if ((draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) &&
       !window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return;
     rememberDraft(draftRef.current);
     rememberComment();
@@ -850,19 +881,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   async function submitComment(event: React.FormEvent) {
     event.preventDefault();
     const context = commentContextRef.current;
-    const body = commentBodyRef.current.trim();
-    if (!context || !body || commentBusy) return;
+    const payload = commentDraftPayload(commentDraftRef.current);
+    if (!context || !payload.body || commentBusy) return;
     setCommentBusy(true);
     try {
-      const result = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': context.actorId }, body: JSON.stringify({ resourceType: 'document', resourceId: context.documentId, body }) });
+      const result = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': context.actorId },
+        body: JSON.stringify({ resourceType: 'document', resourceId: context.documentId, ...payload }) });
       const current = commentContextRef.current;
       if (current?.documentId === context.documentId && current.actorId === context.actorId && activeActorRef.current === context.actorId) {
         setComments(items => items.some(item => item.id === result.id) ? items : [...items, result]);
-        if (commentBodyRef.current.trim() === body) updateCommentBody('');
+        if (sameCommentDraft(commentDraftPayload(commentDraftRef.current), payload)) updateCommentDraft(emptyCommentDraft());
       } else {
         try {
           const key = commentCacheKey(context.actorId, context.documentId);
-          if (localStorage.getItem(key)?.trim() === body) localStorage.removeItem(key);
+          const cached = decodeCommentDraft(localStorage.getItem(key));
+          if (sameCommentDraft(commentDraftPayload(cached), payload)) localStorage.removeItem(key);
         } catch { setStorageProblem(true); }
       }
       window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
@@ -937,18 +970,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const capturedActor = actorRef.current;
     if (data.documents.some(page => page.parentId === captured.id)) { notify('하위 문서를 먼저 다른 위치나 휴지통으로 옮겨 주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || commentBusy) { notify('공동 편집과 댓글 전송이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
-    const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentBodyRef.current.trim());
+    const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentDraftRef.current.body.trim());
     if (!window.confirm(`“${captured.title}” 문서를 휴지통으로 옮길까요?${hasDraft ? ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.' : ''}`)) return;
     savingRef.current = true; setSaving(true);
     try {
       await remove(`/documents/${captured.id}?expectedVersion=${captured.expectedVersion}`);
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
-      rememberComment('', { actorId: capturedActor, documentId: captured.id });
+      rememberComment(emptyCommentDraft(), { actorId: capturedActor, documentId: captured.id });
       if (reselectedCommentDraft.current?.actorId === capturedActor && reselectedCommentDraft.current.documentId === captured.id) reselectedCommentDraft.current = null;
       try { localStorage.removeItem(selectionCommentCacheKey(capturedActor, captured.id)); } catch { setStorageProblem(true); }
       const sameContext = draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
-      if (sameContext) { draftRef.current = null; setDraft(null); commentBodyRef.current = ''; setCommentBody(''); }
+      if (sameContext) {
+        draftRef.current = null;
+        setDraft(null);
+        updateCommentDraft(emptyCommentDraft());
+      }
       try { await refresh(); }
       catch { notify('문서를 휴지통으로 옮겼습니다. 문서 목록을 불러오지 못했습니다.', 'error'); return; }
       const next = scoped.find(page => page.id !== captured.id);
@@ -1173,26 +1210,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   function openSelectionComment(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
     documentActionOpener.current = opener;
     const preserved = reselectedCommentDraft.current;
-    let initialBody = '';
+    let initialDraft = emptyCommentDraft();
     if (preserved?.documentId === page.id && preserved.actorId === actorId) {
-      initialBody = preserved.body;
+      initialDraft = preserved.draft;
       reselectedCommentDraft.current = null;
     }
     try {
       const key = selectionCommentCacheKey(actorId, page.id);
       const cached = localStorage.getItem(key);
       if (cached !== null) {
-        initialBody ||= cached;
+        if (!initialDraft.body) initialDraft = decodeCommentDraft(cached);
         localStorage.removeItem(key);
       }
     } catch { setStorageProblem(true); }
-    setDocumentAction({ kind: 'comment', initialBody, source: { id: page.id, title: page.title, version: page.version, sourceSelection } });
+    setDocumentAction({ kind: 'comment', initialDraft, source: { id: page.id, title: page.title, version: page.version, sourceSelection } });
   }
-  function reselectCommentSource(body: string) {
+  function reselectCommentSource(value: CommentDraft) {
     if (documentAction?.kind !== 'comment') return;
     const documentId = documentAction.source.id;
-    reselectedCommentDraft.current = { actorId, documentId, body };
-    try { localStorage.setItem(selectionCommentCacheKey(actorId, documentId), body); } catch { setStorageProblem(true); }
+    reselectedCommentDraft.current = { actorId, documentId, draft: value };
+    try { localStorage.setItem(selectionCommentCacheKey(actorId, documentId), encodeCommentDraft(value)); } catch { setStorageProblem(true); }
 
     const current = draftRef.current;
     if (!liveMode && !manualRecovery && current?.id === documentId && selectedPage?.id === documentId
@@ -1372,7 +1409,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
             {sideTab === 'comments' && <>
-              <div className="docs-panel-heading"><h3>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
+              <div className="docs-panel-heading"><h3 tabIndex={-1} ref={commentsHeading}>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
               {commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}
               {commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}
               {!commentsLoading && !commentError && !comments.length && <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>}
@@ -1397,10 +1434,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                     <DocumentDecisionRevision data={data} documentId={comment.resourceId} revisionId={comment.documentSource.revisionId}
                       label={selectedPage.title} sourceLabel="댓글 원문 저장본" selection={comment.documentSource} />
                   </section>}
-                  <p>{comment.body}</p>
+                  <p><CommentMentionText comment={comment} /></p>
                 </article>;
               })}
-              <form className="docs-comment-form" onSubmit={submitComment}><textarea className="field" value={commentBody} onChange={event => updateCommentBody(event.target.value)} placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} /><button type="submit" className="btn btn-primary" disabled={!commentBody.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button></form>
+              <form className="docs-comment-form" onSubmit={submitComment}>
+                <CommentMentionInput className="field" draft={commentDraft} onChange={updateCommentDraft} users={data.users}
+                  placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} />
+                <button type="submit" className="btn btn-primary" disabled={!commentDraft.body.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button>
+              </form>
             </>}
             {sideTab === 'links' && <>
               <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue}
@@ -1422,8 +1463,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       sourceDocument={documentAction.source} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
       refresh={refresh} notify={notify} onClose={closeDocumentAction} />}
-    {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialBody={documentAction.initialBody}
-      actorId={actorId} refresh={refresh} notify={notify} onClose={closeDocumentAction} onSaved={showSavedSelectionComment} onReselect={reselectCommentSource} />}
+    {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialDraft={documentAction.initialDraft}
+      actorId={actorId} users={data.users} refresh={refresh} notify={notify} onClose={closeDocumentAction} onSaved={showSavedSelectionComment} onReselect={reselectCommentSource} />}
     {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} projectId={selectedPage.projectId ?? projectId} sectionId={publicationLink ? sectionId : null} covered={issueDrawerOpen}

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Comment, DocPage, DocRevision, DocumentSelectionCommentResult } from '../shared/types.js';
 import { parseDocumentSourceSelection, resolveDocumentDecisionSource } from './document-follow-up.js';
+import { parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import type { Store } from './store.js';
 
 type RequestInput = { documentId: string; actorId: string; body: unknown };
@@ -21,10 +22,10 @@ export class DocumentSelectionCommentError extends Error {
 
 function parse(input: unknown) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
-      Object.keys(input).some(key => !['requestId', 'expectedDocumentVersion', 'sourceSelection', 'body', 'actorId'].includes(key))) {
+      Object.keys(input).some(key => !['requestId', 'expectedDocumentVersion', 'sourceSelection', 'body', 'mentions', 'actorId'].includes(key))) {
     throw new DocumentSelectionCommentError(400, '선택한 문장에 남길 댓글 요청을 확인해 주세요.');
   }
-  const { requestId, expectedDocumentVersion, sourceSelection, body } = input as Record<string, unknown>;
+  const { requestId, expectedDocumentVersion, sourceSelection, body, mentions } = input as Record<string, unknown>;
   if (typeof requestId !== 'string' || !requestUuid.test(requestId)) {
     throw new DocumentSelectionCommentError(400, '댓글 요청 ID를 확인해 주세요.');
   }
@@ -33,7 +34,7 @@ function parse(input: unknown) {
   }
   const selection = parseDocumentSourceSelection(sourceSelection);
   if (!selection) throw new DocumentSelectionCommentError(400, '댓글을 남길 문서의 선택 범위를 확인해 주세요.');
-  return { requestId: requestId.toLowerCase(), expectedDocumentVersion, selection, body };
+  return { requestId: requestId.toLowerCase(), expectedDocumentVersion, selection, body, mentions };
 }
 
 function commentIdForRequest(documentId: string, actorId: string, requestId: string): string {
@@ -58,9 +59,11 @@ export class DocumentSelectionCommentService {
   }
 
   create({ documentId, actorId, body: input }: RequestInput, hooks: Hooks): DocumentSelectionCommentResult {
-    const { requestId, expectedDocumentVersion, selection, body: unvalidatedBody } = parse(input);
+    const { requestId, expectedDocumentVersion, selection, body: unvalidatedBody, mentions: unvalidatedMentions } = parse(input);
     const body = hooks.validateBody(unvalidatedBody);
-    const fingerprint = createHash('sha256').update(JSON.stringify([expectedDocumentVersion, selection, body])).digest('hex');
+    const mentions = parseCommentMentions(body, unvalidatedMentions);
+    const fingerprintFields = [expectedDocumentVersion, selection, body, ...(mentions.length ? [mentions] : [])];
+    const fingerprint = createHash('sha256').update(JSON.stringify(fingerprintFields)).digest('hex');
     return this.store.transaction(() => {
       const receipt = this.store.db.prepare(`SELECT document_id AS documentId, actor_id AS actorId, fingerprint,
         comment_id AS commentId FROM document_selection_comment_requests WHERE id=?`).get(requestId) as Receipt | undefined;
@@ -73,7 +76,8 @@ export class DocumentSelectionCommentService {
         const source = comment?.documentSource;
         const revision = source && this.store.get<DocRevision>('revisions', source.revisionId);
         if (!document || comment?.resourceType !== 'document' || comment.resourceId !== documentId || comment.authorId !== actorId ||
-            comment.body !== body || source?.from !== selection.from || source.to !== selection.to || source.text !== selection.text ||
+            comment.body !== body || JSON.stringify(comment.mentions ?? []) !== JSON.stringify(mentions) ||
+            source?.from !== selection.from || source.to !== selection.to || source.text !== selection.text ||
             revision?.documentId !== documentId || revision.version !== expectedDocumentVersion) {
           throw new DocumentSelectionCommentError(409, '이전에 저장한 댓글이나 원문 저장본을 확인할 수 없습니다.', { reason: 'receipt_unavailable' });
         }
@@ -91,12 +95,13 @@ export class DocumentSelectionCommentService {
       if (archived || this.store.get<Comment>('comments', id)) {
         throw new DocumentSelectionCommentError(409, '이 요청의 기존 댓글을 확인해 주세요.', { reason: 'receipt_unavailable' });
       }
+      validateCurrentMentionNames(this.store, body, mentions);
       const importedRevision = this.store.db.prepare(`SELECT 1 FROM source_records
         WHERE target_type='revision' AND target_id=? AND product='confluence' LIMIT 1`);
       const documentSource = resolveDocumentDecisionSource(this.store, document, actorId, selection, '문장 댓글 원문 저장',
         revision => !importedRevision.get(revision.id));
       const comment: Comment = { id, resourceId: documentId, resourceType: 'document', authorId: actorId,
-        body, createdAt: new Date().toISOString(), documentSource };
+        body, createdAt: new Date().toISOString(), documentSource, ...(mentions.length ? { mentions } : {}) };
       this.store.put('comments', comment);
       hooks.onCreated(document, comment);
       this.store.db.prepare(`INSERT INTO document_selection_comment_requests (id, document_id, actor_id, fingerprint, comment_id)

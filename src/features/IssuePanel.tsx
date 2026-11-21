@@ -17,6 +17,7 @@ import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
+import { CommentMentionInput, CommentMentionText, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
@@ -43,6 +44,7 @@ type IssuePanelProps = FeatureProps & {
   documentOverlay?: boolean;
   modalFocus?: boolean;
   previewDocumentId: string | null;
+  commentFocus?: { commentId: string; activation: number };
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
   onPreviewDocument: (id: string) => boolean;
@@ -59,7 +61,7 @@ export function IssuePanel(props: IssuePanelProps) {
 }
 
 function IssuePanelContent(props: IssuePanelProps) {
-  const { data, issueId, documentOverlay, modalFocus, previewDocumentId, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
+  const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
     refresh, notify, openIssue, openDocument } = props;
   const manageFocus = Boolean(documentOverlay || modalFocus);
   const issue = data.issues.find(i => i.id === issueId);
@@ -89,8 +91,12 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
   const [comments, setComments] = useState<Comment[]>([]);
-  const [commentBody, setCommentBody] = useState('');
+  const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
   const [loadingComments, setLoadingComments] = useState(true);
+  const [loadedCommentActivation, setLoadedCommentActivation] = useState<number>();
+  const handledCommentActivation = useRef<number>(undefined);
+  const commentsHeading = useRef<HTMLHeadingElement>(null);
+  const commentActivation = commentFocus?.activation;
   const [commentError, setCommentError] = useState('');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
@@ -148,22 +154,31 @@ function IssuePanelContent(props: IssuePanelProps) {
   const trackGitlabDraft = useCallback((dirty: boolean, pending: boolean, discard: () => void) => {
     gitlabDraft.current = dirty || pending ? { dirty, pending, discard, label: 'GitLab 연결 입력' } : null;
   }, []);
-  function switchTab(next: typeof tab) {
-    if (next === tab) return;
+  const switchTab = useCallback((next: typeof tab) => {
+    if (next === tab) return true;
     const editingReservations = tab === 'reservations';
     const drafts = [childDraft.current, gitlabDraft.current];
     const pending = drafts.find(value => value?.pending);
     if (pending) {
       const name = pending === gitlabDraft.current ? 'GitLab 연결' : pending.label ? '업무 관계' : editingReservations ? '시간 배정' : '작업 시간';
       notify(`${name} 저장이 끝난 뒤 이동해 주세요.`, 'error');
-      return;
+      return false;
     }
     const changed = drafts.flatMap(value => value?.dirty ? [value.label ?? (editingReservations ? '시간 배정 입력' : '작업 시간 기록')] : []);
-    if (changed.length && !window.confirm(`작성 중인 ${changed.join('·')}을 버리고 이동할까요?`)) return;
+    if (changed.length && !window.confirm(`작성 중인 ${changed.join('·')}을 버리고 이동할까요?`)) return false;
     for (const value of drafts) value?.discard();
     setTab(next);
-  }
-  useEffect(() => { dirtyRef.current = dirty || Boolean(commentBody.trim()); }, [dirty, commentBody]);
+    return true;
+  }, [notify, tab]);
+  useEffect(() => {
+    const focusCommentTab = (event: Event) => {
+      const target = (event as CustomEvent<{ issueId: string }>).detail;
+      if (!event.defaultPrevented && target?.issueId === issueId && !switchTab('details')) event.preventDefault();
+    };
+    window.addEventListener('teamspace:focus-issue-comment', focusCommentTab);
+    return () => window.removeEventListener('teamspace:focus-issue-comment', focusCommentTab);
+  }, [issueId, switchTab]);
+  useEffect(() => { dirtyRef.current = dirty || Boolean(commentDraft.body.trim()); }, [dirty, commentDraft.body]);
   if (loadedVersion !== issue?.version) {
     setLoadedVersion(issue?.version);
     if (!dirty) { setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setError(''); setConflict(false); setDeleteConfirm(false); }
@@ -198,7 +213,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           setDependencyEditor(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
-          setCommentBody(''); setError(''); setConflict(false);
+          setCommentDraft(emptyCommentDraft()); setError(''); setConflict(false);
         });
       }
     };
@@ -219,7 +234,12 @@ function IssuePanelContent(props: IssuePanelProps) {
         signal: request.signal, headers: { 'X-Actor-Id': props.actorId },
       }).then(value => { if (!request.signal.aborted) { setComments(value); setCommentError(''); } })
         .catch(err => { if (!request.signal.aborted) setCommentError(errorMessage(err)); })
-        .finally(() => { if (!request.signal.aborted) setLoadingComments(false); });
+        .finally(() => {
+          if (!request.signal.aborted) {
+            setLoadingComments(false);
+            setLoadedCommentActivation(commentActivation);
+          }
+        });
     };
     loadComments();
     window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
@@ -231,7 +251,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       window.removeEventListener('teamspace:trash-changed', loadComments);
       window.removeEventListener('teamspace:workspace-imported', loadComments);
     };
-  }, [issueId, props.actorId]);
+  }, [issueId, props.actorId, commentActivation]);
   const closeButton = useRef<HTMLButtonElement>(null);
   const issuePanel = useRef<HTMLElement>(null);
   const previewOpener = useRef<HTMLButtonElement | null>(null);
@@ -253,6 +273,19 @@ function IssuePanelContent(props: IssuePanelProps) {
   useEffect(() => {
     if (manageFocus) closeButton.current?.focus({ preventScroll: true });
   }, [manageFocus]);
+  useEffect(() => {
+    if (!commentFocus || loadedCommentActivation !== commentFocus.activation || handledCommentActivation.current === commentFocus.activation
+      || previewDocumentId || childCreation || schedulePredecessor || dependencyEditor) return;
+    if (tab !== 'details') {
+      if (!switchTab('details')) handledCommentActivation.current = commentFocus.activation;
+      return;
+    }
+    const target = document.getElementById(`issue-comment-${commentFocus.commentId}`) ?? commentsHeading.current;
+    if (!target) return;
+    handledCommentActivation.current = commentFocus.activation;
+    target.scrollIntoView({ block: 'nearest' });
+    target.focus({ preventScroll: true });
+  }, [commentFocus, loadedCommentActivation, previewDocumentId, childCreation, schedulePredecessor, dependencyEditor, tab, switchTab]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || childCreation || schedulePredecessor || dependencyEditor || previewDocumentId) return;
@@ -329,7 +362,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     const hadUnsaved = dirtyRef.current;
     if (!confirmDiscard()) return;
     savingRef.current = true; setSaving(true);
-    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setLabels(latest.labels.join(', ')); setCommentBody(''); setConflict(false); setError(''); dirtyRef.current = false; await refresh(); }
+    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(''); dirtyRef.current = false; await refresh(); }
     catch (err) { dirtyRef.current = hadUnsaved; setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
@@ -352,11 +385,15 @@ function IssuePanelContent(props: IssuePanelProps) {
     finally { savingRef.current = false; setSaving(false); }
   }
   async function addComment(event: FormEvent) {
-    event.preventDefault(); if (!commentBody.trim()) return; setCommenting(true); setCommentError('');
+    event.preventDefault();
+    const payload = commentDraftPayload(commentDraft);
+    if (!payload.body || commenting) return;
+    setCommenting(true); setCommentError('');
     try {
-      const value = await post<Comment>('/comments', { resourceType: 'issue', resourceId: issueId, body: commentBody.trim() });
+      const value = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': props.actorId },
+        body: JSON.stringify({ resourceType: 'issue', resourceId: issueId, ...payload }) });
       setComments(previous => previous.some(item => item.id === value.id) ? previous : [...previous, value]);
-      setCommentBody('');
+      setCommentDraft(emptyCommentDraft());
       window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
       await refresh();
     }
@@ -585,24 +622,28 @@ function IssuePanelContent(props: IssuePanelProps) {
         canPrepareStatus={canPrepareAutomationStatus} onPrepareStatus={prepareAutomationStatus} />
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments">
-        <h3><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>
+        <h3 ref={commentsHeading} tabIndex={-1}><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>
         {loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => {
           const user = data.users.find(value => value.id === comment.authorId);
-          return <article key={comment.id} className="issue-comment">
+          return <article id={`issue-comment-${comment.id}`} key={comment.id} className="issue-comment" tabIndex={-1}>
             <span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span>
             <div>
               <header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time>
                 <CommentTrashButton comment={comment} actorId={props.actorId} notify={notify} refresh={refresh} disabled={commenting || saving}
                   onArchived={removed => setComments(previous => previous.filter(value => value.id !== removed.id))} />
               </header>
-              <p>{comment.body}</p>
+              <p><CommentMentionText comment={comment} /></p>
             </div>
           </article>;
         })}
         {commentError && <div className="issue-form-error" role="alert">{commentError}</div>}
-        <form onSubmit={addComment}><textarea className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" value={commentBody} onChange={e => setCommentBody(e.target.value)} rows={3} required maxLength={10000} /><div className="issue-comment-submit"><button className="btn" disabled={!commentBody.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div></form>
+        <form onSubmit={addComment}>
+          <CommentMentionInput className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" draft={commentDraft}
+            onChange={setCommentDraft} users={data.users} rows={3} required maxLength={10000} readOnly={commenting} />
+          <div className="issue-comment-submit"><button className="btn" disabled={!commentDraft.body.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div>
+        </form>
       </section>
-      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentBody.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
+      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentDraft.body.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />

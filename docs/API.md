@@ -236,6 +236,12 @@ curl --fail-with-body \
 
 일반 댓글 조회는 문장 댓글의 `documentSource: {revisionId,from,to,text}`를 포함한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`로 읽는다. 범위 제한 `/api/v1/comments` 조회에서는 키로 읽을 수 있는 원문 저장본의 발췌를 반환한다. 자체 백업 형식 50은 활성 댓글과 휴지통 댓글의 발췌를 보존한다.
 
+### 댓글 멘션
+
+일반 댓글 `POST /api/comments`와 문장 댓글 등록 요청에 `mentions` 배열을 추가할 수 있다. 각 항목은 `userId`, `from`, `to`를 사용한다. 양 끝의 공백을 정리한 `body`에서 `from`을 포함하고 `to`는 제외하는 UTF-16 위치다. 범위는 시작 위치순으로 최대 50개를 보내며, 각 범위가 겹치지 않고 `@`와 현재 팀원 이름을 정확히 담아야 한다. 같은 이름의 팀원은 ID로 구분한다. 배열을 생략하거나 비우면 일반 댓글과 같은 방식으로 처리한다.
+
+저장 응답과 조회 목록에 멘션 범위를 포함한다. 문장 댓글을 재시도할 때 기존 요청 ID와 멘션을 함께 보낸다. `issue-comment-mentioned`와 `document-comment-mentioned`는 알림 대상 업무나 문서의 ID와 함께 `commentId`를 반환한다. 자체 백업 형식 71은 댓글의 멘션, 멘션 알림과 읽음 시각을 보존한다.
+
 ## 문서 참조·포함·접기
 
 문서 본문에는 다음 블록을 넣을 수 있다. `issueReference`는 `issueId`, `documentReference`와 `documentInclude`는 `documentId`를 사용하며, `label`은 대상이 없어졌을 때 표시할 이름이다. 모든 대상은 키의 프로젝트 범위 안에 있어야 한다. 포함 원문의 내용을 현재 문서에 복사하지 않으며, 조회 응답도 참조 ID를 유지한다.

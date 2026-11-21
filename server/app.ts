@@ -24,6 +24,7 @@ import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent }
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
+import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssuePasteError, IssuePasteService } from './issue-paste.js';
@@ -85,7 +86,7 @@ import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlann
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
+import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -245,8 +246,18 @@ export function createApp(options: {
     notifyDocument(document,document.authorId,'document-created',spaceSubscribers(document),document.createdAt);
   const notifyDocumentUpdate = (document: DocPage, actorId: string, createdAt: string) =>
     notifyDocument(document,actorId,'document-updated',documentSubscribers(document),createdAt);
+  const notifyComment = (comment: Comment, projectId: string | null, targetLabel: string, usualRecipients: (string | null)[]) => {
+    const { resourceType, resourceId: targetId, authorId: actorId, createdAt } = comment;
+    const fields = { projectId, targetId, targetLabel, actorId, createdAt };
+    const mentioned = new Set(comment.mentions?.map(mention => mention.userId));
+    if (mentioned.size) {
+      notifications.notify({ ...fields, kind: `${resourceType}-comment-mentioned`, recipientIds: [...mentioned], commentId: comment.id });
+    }
+    notifications.notify({ ...fields, kind: `${resourceType}-comment`,
+      recipientIds: usualRecipients.filter(userId => userId === null || !mentioned.has(userId)) });
+  };
   const notifyDocumentComment = (document: DocPage, comment: Comment) =>
-    notifyDocument(document,comment.authorId,'document-comment',[document.authorId,...documentSubscribers(document)],comment.createdAt);
+    notifyComment(comment, document.projectId, document.title, [document.authorId, ...documentSubscribers(document)]);
   const stopIssueWatch = store.onChange(({before,after,context})=>{
     const old=before as Issue | undefined, issue=after as Issue | undefined;
     if(!old || !issue)return;
@@ -1469,12 +1480,16 @@ export function createApp(options: {
   });
   app.post('/api/comments',(req,res)=>{
     const {resourceType,resourceId}=req.body;
-    if(!['issue','document'].includes(resourceType))return fail('댓글 대상을 확인해 주세요.');
-    const c={id:uid(),resourceType,resourceId,authorId:actor(req),body:text(req.body.body,'댓글',20000),createdAt:now()};
+    if(resourceType!=='issue'&&resourceType!=='document')return fail('댓글 대상을 확인해 주세요.');
+    const body = text(req.body.body, '댓글', 20000);
+    const mentions = parseCommentMentions(body, req.body.mentions);
+    const c: Comment = { id: uid(), resourceType, resourceId, authorId: actor(req), body, createdAt: now(),
+      ...(mentions.length ? { mentions } : {}) };
     store.transaction(()=>{
+      validateCurrentMentionNames(store, body, mentions);
       if(resourceType==='issue'){
         const issue=get<Issue>('issues',resourceId);
-        notifyIssue(issue,c.authorId,'issue-comment',[issue.assigneeId,...issue.collaboratorIds,...issueSubscribers(issue)],c.createdAt);
+        notifyComment(c, issue.projectId, `${issue.key} ${issue.title}`, [issue.assigneeId, ...issue.collaboratorIds, ...issueSubscribers(issue)]);
       }else{
         const doc=get<DocPage>('documents',resourceId);
         notifyDocumentComment(doc,c);
@@ -1942,6 +1957,15 @@ export function createApp(options: {
     const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
     const allImportedComments=[...(data.comments as Comment[]),...archiveComments];
+    const importedUserIds = new Set((data.users as User[]).map(user => user.id));
+    for (const { body, mentions } of allImportedComments) {
+      if (data.schemaVersion < 71 && mentions !== undefined && (!Array.isArray(mentions) || mentions.length)) {
+        fail('댓글 멘션을 포함한 백업은 schemaVersion 71이 필요합니다.');
+      }
+      if (parseCommentMentions(body, mentions).some(mention => !importedUserIds.has(mention.userId))) {
+        fail('백업의 댓글에서 지정한 팀원을 찾을 수 없습니다.');
+      }
+    }
     const allImportedRevisions=[...importedRevisions,...importedTrash.flatMap(entry=>entry.revisions)];
     if(data.schemaVersion<42&&allImportedRevisions.some(revision=>revision.confluenceSourceVersion!==undefined))fail('Confluence 원본 버전을 구분하는 문서 이력에는 schemaVersion 42 백업이 필요합니다.');
     if(data.schemaVersion<33&&(
@@ -2026,6 +2050,10 @@ export function createApp(options: {
       fail('업무·문서 생성 알림을 포함한 백업은 schemaVersion 29가 필요합니다.');
     }
     const issueRiskKinds:ReadonlySet<unknown>=new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+    const commentMentionKinds: ReadonlySet<unknown> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
+    if (data.schemaVersion < 71 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: { kind?: unknown; commentId?: unknown } | null) => commentMentionKinds.has(row?.kind) || row?.commentId !== undefined,
+    )) fail('댓글 멘션 알림을 포함한 백업은 schemaVersion 71이 필요합니다.');
     const deadlineReminderKinds: ReadonlySet<unknown> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
     if (data.schemaVersion < 70 && (
       (data.deadlineReminderPreferences !== undefined && (!Array.isArray(data.deadlineReminderPreferences) || data.deadlineReminderPreferences.length > 0)) ||
@@ -2037,7 +2065,7 @@ export function createApp(options: {
       fail('업무 차단·마감 연기 알림을 포함한 백업은 schemaVersion 62가 필요합니다.');
     }
     const subscriptionRefs={
-      users:new Set((data.users as User[]).map(user=>user.id)),
+      users:importedUserIds,
       issueIds:new Set((data.issues as Issue[]).map(issue=>issue.id)),
       documentIds:new Set(importedDocuments.map(document=>document.id)),
       projectIds:new Set((data.projects as Project[]).map(project=>project.id)),
@@ -2093,7 +2121,8 @@ export function createApp(options: {
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       documentTemplates.restore(importedTemplates);
       documentTemplateAssets.restore(importedTemplateAssets);
-      notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
+      notifications.restore(data.schemaVersion>=15?data.teamNotifications:[], subscriptionRefs.users,
+        data.schemaVersion>=71 ? new Map(allImportedComments.map(comment => [comment.id, comment])) : undefined);
       deadlineReminders.restore(data.schemaVersion >= 70 ? data.deadlineReminderPreferences : [], subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
@@ -2176,6 +2205,7 @@ export function createApp(options: {
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});

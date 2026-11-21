@@ -803,6 +803,8 @@ export interface DocumentDecisionSource extends DocumentSourceSelection { revisi
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
 export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; duplicate: boolean }
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
+export const MAX_COMMENT_MENTIONS = 50;
+export interface CommentMention { userId: string; from: number; to: number }
 export interface Comment {
   id: string;
   resourceType: 'issue' | 'document';
@@ -811,6 +813,7 @@ export interface Comment {
   body: string;
   createdAt: string;
   documentSource?: DocumentDecisionSource;
+  mentions?: CommentMention[];
 }
 export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
@@ -855,9 +858,10 @@ export interface TrashItemPage { items: TrashItemSummary[]; total: number; offse
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const ISSUE_RISK_NOTIFICATION_KINDS = ['issue-block-added', 'issue-block-resolved', 'issue-deadline-postponed'] as const;
 export const ISSUE_DEADLINE_REMINDER_KINDS = ['issue-deadline-upcoming', 'issue-deadline-today', 'issue-deadline-overdue'] as const;
+export const COMMENT_MENTION_NOTIFICATION_KINDS = ['issue-comment-mentioned', 'document-comment-mentioned'] as const;
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', ...ISSUE_RISK_NOTIFICATION_KINDS,
-  ...ISSUE_DEADLINE_REMINDER_KINDS,
+  ...ISSUE_DEADLINE_REMINDER_KINDS, ...COMMENT_MENTION_NOTIFICATION_KINDS,
   'document-created', 'document-comment', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn',
 ] as const;
@@ -871,6 +875,7 @@ export interface TeamNotification {
   projectId: string | null;
   targetId: string;
   targetLabel: string;
+  commentId?: string;
   detail?: string;
   createdAt: string;
   readAt: string | null;

@@ -2,38 +2,41 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { MessageSquarePlus, X } from 'lucide-react';
-import type { Comment, DocPage, DocumentSelectionCommentResult, DocumentSourceSelection, FeatureProps } from '../../shared/types';
+import type { Comment, DocPage, DocumentSelectionCommentResult, DocumentSourceSelection, FeatureProps, User } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { COMMENT_LIST_CHANGED } from './CommentTrashButton';
+import { CommentMentionInput, commentDraftPayload, emptyCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
 import './document-decision-link.css';
 import './document-selection-comment.css';
 
 export type SelectionCommentSource = Pick<DocPage, 'id' | 'title' | 'version'> & { sourceSelection: DocumentSourceSelection };
 type Props = Pick<FeatureProps, 'actorId' | 'refresh' | 'notify'> & {
   source: SelectionCommentSource;
-  initialBody: string;
+  initialDraft: CommentDraft;
+  users: User[];
   onClose: () => void;
   onSaved: (comment: Comment) => void;
-  onReselect: (body: string) => void;
+  onReselect: (draft: CommentDraft) => void;
 };
-type Attempt = { actorId: string; body: string; payload: string };
+type Attempt = { actorId: string; submitted: ReturnType<typeof commentDraftPayload>; payload: string };
 
 const COMMENT_LIMIT = 20_000;
 const UNKNOWN_RESULT = '댓글 등록 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.';
 const STALE_SOURCE = '문서의 저장본이 변경됐습니다. 댓글 입력을 유지한 채 본문을 다시 선택할 수 있습니다.';
 
-export function DocumentSelectionCommentDialog({ source, initialBody, actorId, refresh, notify, onClose, onSaved, onReselect }: Props) {
+export function DocumentSelectionCommentDialog({ source, initialDraft, users, actorId, refresh, notify, onClose, onSaved, onReselect }: Props) {
   const titleId = useId();
+  const inputId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const submitButton = useRef<HTMLButtonElement>(null);
   const reselectButton = useRef<HTMLButtonElement>(null);
   const pending = useRef(false);
   const attempt = useRef<Attempt | null>(null);
-  const bodyRef = useRef(initialBody);
-  const [body, setBody] = useState(initialBody);
+  const draftRef = useRef(initialDraft);
+  const [draft, setDraft] = useState(initialDraft);
   const [busy, setBusy] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [sourceConflict, setSourceConflict] = useState(false);
@@ -50,7 +53,7 @@ export function DocumentSelectionCommentDialog({ source, initialBody, actorId, r
 
   const confirmDiscard = useCallback(() => {
     if (attempt.current) return window.confirm('댓글이 등록됐을 수 있습니다. 문서의 댓글 목록에서 확인할 수 있습니다. 계속할까요?');
-    return !bodyRef.current.trim() || window.confirm('작성 중인 발췌 댓글을 버릴까요?');
+    return !draftRef.current.body.trim() || window.confirm('작성 중인 발췌 댓글을 버릴까요?');
   }, []);
 
   useEffect(() => {
@@ -66,7 +69,7 @@ export function DocumentSelectionCommentDialog({ source, initialBody, actorId, r
       }
     }
     function unload(event: BeforeUnloadEvent) {
-      if (!pending.current && !attempt.current && !bodyRef.current.trim()) return;
+      if (!pending.current && !attempt.current && !draftRef.current.body.trim()) return;
       event.preventDefault();
       event.returnValue = '';
     }
@@ -86,11 +89,11 @@ export function DocumentSelectionCommentDialog({ source, initialBody, actorId, r
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmed = bodyRef.current.trim();
-    if (pending.current || sourceConflict || replayRejected || !trimmed) return;
+    const submitted = commentDraftPayload(draftRef.current);
+    if (pending.current || sourceConflict || replayRejected || !submitted.body) return;
     const replay = Boolean(attempt.current);
-    const request = attempt.current ?? { actorId, body: trimmed, payload: JSON.stringify({
-      requestId: newRequestId(), expectedDocumentVersion: source.version, sourceSelection: source.sourceSelection, body: trimmed,
+    const request = attempt.current ?? { actorId, submitted, payload: JSON.stringify({
+      requestId: newRequestId(), expectedDocumentVersion: source.version, sourceSelection: source.sourceSelection, ...submitted,
     }) };
     attempt.current = request;
     pending.current = true;
@@ -104,10 +107,10 @@ export function DocumentSelectionCommentDialog({ source, initialBody, actorId, r
       const pinned = saved?.documentSource;
       const { from, to, text } = source.sourceSelection;
       if (typeof result?.duplicate !== 'boolean' || !saved?.id || saved.resourceType !== 'document' || saved.resourceId !== source.id
-        || saved.authorId !== request.actorId || saved.body !== request.body || !pinned?.revisionId
+        || saved.authorId !== request.actorId || !sameCommentDraft(saved, request.submitted) || !pinned?.revisionId
         || pinned.from !== from || pinned.to !== to || pinned.text !== text) throw new Error(UNKNOWN_RESULT);
       attempt.current = null;
-      bodyRef.current = '';
+      draftRef.current = emptyCommentDraft();
       onSaved(saved);
     } catch (cause) {
       const knownFailure = cause instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(cause.status);
@@ -149,16 +152,18 @@ export function DocumentSelectionCommentDialog({ source, initialBody, actorId, r
       <section className="document-decision-link-excerpt" aria-label="선택한 본문">
         <blockquote tabIndex={0}>{source.sourceSelection.text}</blockquote>
       </section>
-      <label className="document-selection-comment-input">발췌 댓글
-        <textarea ref={textarea} className="field" rows={4} maxLength={COMMENT_LIMIT} value={body} disabled={busy}
-          readOnly={recovering} onChange={event => { bodyRef.current = event.target.value; setBody(event.target.value); }} />
-      </label>
+      <div className="document-selection-comment-input">
+        <label htmlFor={inputId}>발췌 댓글</label>
+        <CommentMentionInput id={inputId} textareaRef={textarea} className="field" rows={4} maxLength={COMMENT_LIMIT}
+          draft={draft} users={users} disabled={busy} readOnly={recovering}
+          onChange={value => { draftRef.current = value; setDraft(value); }} />
+      </div>
       {error && <p className="document-decision-link-error" role="alert">{error}</p>}
       <footer>
         <button type="button" className="btn btn-ghost" disabled={busy} onClick={close}>취소</button>
         {sourceConflict ? <button ref={reselectButton} className="btn btn-primary" type="button" disabled={busy}
-          onClick={() => onReselect(bodyRef.current)}>본문 다시 선택</button>
-          : <button ref={submitButton} type="submit" className="btn btn-primary" disabled={busy || replayRejected || !body.trim()}>
+          onClick={() => onReselect(draftRef.current)}>본문 다시 선택</button>
+          : <button ref={submitButton} type="submit" className="btn btn-primary" disabled={busy || replayRejected || !draft.body.trim()}>
             <MessageSquarePlus size={16} aria-hidden="true" />{busy ? '등록 중…' : recovering ? '댓글 결과 다시 확인' : '발췌 댓글 등록'}
           </button>}
       </footer>

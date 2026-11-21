@@ -59,6 +59,13 @@ type WorkspaceRoute = {
   documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
 };
+type NotificationCommentFocus = {
+  targetType: 'issue' | 'document';
+  targetId: string;
+  actorId: string;
+  commentId: string;
+  activation: number;
+};
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 function routeHash(route: WorkspaceRoute) {
@@ -211,6 +218,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
   const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
+  const [notificationCommentFocus, setNotificationCommentFocus] = useState<NotificationCommentFocus | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
   const [sectionId, setSectionId] = useState<string | null>(null);
@@ -304,6 +312,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     routeIndexRef.current = index;
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setNotificationCommentFocus(focus => {
+      if (!focus) return null;
+      if (focus.targetType === 'issue') return route.issueId === focus.targetId ? focus : null;
+      return route.view === 'documents' && route.documentId === focus.targetId && !route.issueId && !route.publication ? focus : null;
+    });
     setBlockerScope(previousScope => sameBlockerScope(previousScope, route.blockerScope) ? previousScope : route.blockerScope ?? null);
     setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
@@ -441,13 +454,22 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     if (!active()) return false;
     const snapshot = dataRef.current;
+    const openTarget = (targetType: NotificationCommentFocus['targetType'], route: WorkspaceRoute) => {
+      const { targetId, commentId } = notification;
+      const previous = acceptedRouteRef.current;
+      if (commentId && targetType === 'issue' && previous && routeHash(previous) === routeHash(route) &&
+          !window.dispatchEvent(new CustomEvent('teamspace:focus-issue-comment', { cancelable: true, detail: { issueId: targetId } }))) return false;
+      if (!requestRoute(route)) return false;
+      setNotificationCommentFocus(commentId ? { targetType, targetId, actorId, commentId, activation: request } : null);
+      return true;
+    };
     if (notification.kind.startsWith('issue-')) {
       const issue = snapshot?.issues.find(value => value.id === notification.targetId);
-      if (issue) return requestRoute({ projectId:issue.projectId, view:'issues', documentId:null, issueId:issue.id,
+      if (issue) return openTarget('issue', { projectId:issue.projectId, view:'issues', documentId:null, issueId:issue.id,
         savedViewId:view === 'issues' && projectId === issue.projectId ? savedViewId : null });
     } else {
       const doc = snapshot?.documents.find(value => value.id === notification.targetId);
-      if (doc) return requestRoute({ projectId:doc.projectId || projectId, view:'documents', documentId:doc.id, issueId:null });
+      if (doc) return openTarget('document', { projectId:doc.projectId || projectId, view:'documents', documentId:doc.id, issueId:null });
     }
     notify('알림의 대상이 삭제되었거나 현재 워크스페이스에 없습니다.', 'error');
     return false;
@@ -498,6 +520,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
+  const activeCommentFocus = notificationCommentFocus?.actorId === actorId ? notificationCommentFocus : undefined;
   const boardIssueFocus = Boolean(openedIssue && openedIssue.id === boardDialogIssueId);
   const workspaceObscured = documentIssueOpen || reportIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
 
@@ -529,6 +552,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         <div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {
           if(!dispatchWorkspaceNavigation())return;
           publicationOpenRequest.current++;notificationOpenRequest.current++;
+          setNotificationCommentFocus(null);
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
@@ -553,6 +577,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope}/></Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
+          commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {
             const current = acceptedRouteRef.current;
             if (current?.view === 'documents') requestRoute({...current, documentLabel:label});
@@ -567,6 +592,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     </div>
     {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || reportIssueOpen}
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onClose={() => closeIssuePanel(openedIssue.id)}
+      commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
@@ -670,6 +696,6 @@ function WorkspaceSettings(props:FeatureProps) {
     <Suspense fallback={null}><MigrationApplySettings {...props}/></Suspense>
     <section className="card settings-card"><div className="card-heading"><h2>데이터 내보내기 · 가져오기</h2><ArrowDownToLine size={19}/></div><p className="muted">티켓·문서·관계, 문서 검토·발행 기록, 휴지통, 팀 알림과 개인 마감 알림 설정, 작업 시간과 보고서 보관본, 변경 이력을 자체 JSON 형식으로 보관합니다. API 키, GitLab 토큰과 외부 웹훅 설정·비밀값·전송 기록은 포함되지 않습니다.</p><div className="data-actions"><button className="btn btn-secondary" onClick={async()=>{try{const payload=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(payload)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`teamspace-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);props.notify('데이터를 내보냈습니다.');}catch(e){props.notify((e as Error).message,'error');}}}><ArrowDownToLine size={16}/>전체 데이터 내보내기</button><label className="btn btn-ghost"><ArrowUpFromLine size={16}/>백업 가져오기<input className="sr-only" type="file" accept="application/json,.json" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>64*1024*1024-1024){props.notify('가져오기 파일은 64MB 미만이어야 합니다.','error');e.target.value='';return;}try{const parsed=JSON.parse(await file.text());if(!parsed || typeof parsed!=='object' || !supportsNativeBackupVersion(parsed.schemaVersion))throw new Error(`Teamspace 내보내기 파일(schemaVersion 1~${NATIVE_BACKUP_SCHEMA_VERSION})을 선택해주세요.`);setImportData(parsed);setImportName(file.name);}catch(error){props.notify(error instanceof SyntaxError ? '올바른 JSON 파일이 아닙니다.' : (error as Error).message,'error');}e.target.value='';}}/></label></div></section>
     <section className="card settings-card"><div className="card-heading"><h2>이 개발 버전의 범위</h2><span className="badge">개발 중</span></div><p>팀원 선택은 작업자 기록을 위한 기능입니다. 프로젝트별 워크플로와 공유 보기, 문서별 공동 편집, 팀 보고서와 주간 문서를 사용할 수 있습니다.</p><p className="muted">실제 Jira·Confluence 파일 이관 리허설, 운영 GitLab 연결과 팀 사용 검증이 남아 있습니다.</p></section>
-    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부·작업 시간·보고서·팀 알림·개인 마감 알림 설정과 휴지통 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 및 마감 알림 설정 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
+    {importData !== null && <div className="modal-backdrop"><div className="modal-card" role="dialog" aria-modal="true" aria-label="백업 가져오기 확인"><h2>백업을 가져올까요?</h2><p><strong>{importName}</strong></p><p>현재 워크스페이스의 티켓·문서·계획·관계·첨부·작업 시간·보고서·팀 알림·개인 마감 알림 설정과 휴지통 데이터를 이 백업으로 교체하고 이 브라우저의 임시 문서·댓글 및 마감 알림 설정 초안도 초기화합니다. 업무 유형·사용자 정의 필드·기준 계획·마일스톤·업무 달력도 교체하며 백업에 없는 항목은 초기화됩니다. 자동화 규칙은 비활성으로 복원됩니다. 외부 웹훅 설정과 대기 전송은 초기화되고 기존 API 키는 모두 회수되며 필요한 키는 다시 발급해야 합니다. 먼저 현재 데이터를 내보내어 보관해주세요.</p><div className="modal-actions"><button className="btn" onClick={()=>setImportData(null)}>취소</button><button className="btn btn-danger" disabled={busy} onClick={async()=>{setBusy(true);try{await post('/import',{data:importData});for(const key of Object.keys(localStorage)){if(key.startsWith('teamspace:document-draft:') || key.startsWith('teamspace:document-comment-draft:') || key.startsWith('teamspace:document-selection-comment-draft:'))localStorage.removeItem(key);}await props.refresh();window.dispatchEvent(new Event('teamspace:workspace-imported'));setImportData(null);props.notify('백업 데이터를 가져왔습니다. 기존 API 키는 회수되었습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}>확인하고 가져오기</button></div></div></div>}
   </div>;
 }
