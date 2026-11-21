@@ -3,6 +3,7 @@ import type { Issue, IssueOrderMove, IssueOrderMoveResult, Project, ProjectIssue
 import type { Store, StoreChange } from './store.js';
 
 type IssuePosition = Pick<Issue, 'id' | 'status'>;
+type IssueMoveChanges = Partial<Pick<Issue, 'status' | 'assigneeId'>>;
 type StoredOrder = { project_id: string; issue_ids: string | null; revision: string };
 type RestoredOrder = Pick<ProjectIssueOrder, 'projectId' | 'issueIds'>;
 
@@ -14,14 +15,17 @@ const fail = (message: string, status = 400, details?: unknown): never => { thro
 const isId = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 
 function parseMove(value: Record<string, unknown>): IssueOrderMove {
-  const { issueId, expectedVersion, expectedIssueVersion, anchorId, position, status } = value;
+  const { issueId, expectedVersion, expectedIssueVersion, anchorId, position, status, targetAssigneeId, assigneeId } = value;
   if (!isId(issueId) || (anchorId !== null && !isId(anchorId)) || issueId === anchorId) return fail('이동할 업무와 기준 업무를 확인해 주세요.');
   if (position !== 'before' && position !== 'after') return fail('기준 업무의 앞이나 뒤를 선택해 주세요.');
   if (!isId(expectedVersion) || expectedVersion.length > 200 || typeof expectedIssueVersion !== 'number' || !Number.isSafeInteger(expectedIssueVersion) || expectedIssueVersion < 1) {
     return fail('업무 순서와 이동할 업무의 버전이 필요합니다.');
   }
   if (status !== undefined && !isId(status)) return fail('이동할 상태를 확인해 주세요.');
-  return { issueId, expectedVersion, expectedIssueVersion, anchorId, position, status };
+  if ((targetAssigneeId !== undefined && targetAssigneeId !== null && !isId(targetAssigneeId)) ||
+      (assigneeId !== undefined && assigneeId !== null && !isId(assigneeId))) return fail('이동할 담당자를 확인해 주세요.');
+  if (targetAssigneeId !== undefined && assigneeId !== undefined && assigneeId !== targetAssigneeId) return fail('지정한 담당자와 이동할 담당자 묶음이 일치해야 합니다.');
+  return { issueId, expectedVersion, expectedIssueVersion, anchorId, position, status, targetAssigneeId, assigneeId };
 }
 
 export class IssueOrderService {
@@ -49,8 +53,8 @@ export class IssueOrderService {
     const before = change.before as Issue | undefined;
     const after = change.after as Issue | undefined;
     if (before && after && before.projectId === after.projectId) {
-      if (before.status !== after.status) {
-        // Preserve the rank while giving board clients a new version for this column change.
+      if (before.status !== after.status || before.assigneeId !== after.assigneeId) {
+        // Preserve the rank while invalidating stale board destinations.
         this.store.db.prepare(`INSERT INTO project_issue_orders (project_id, revision) VALUES (?, ?)
           ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision`).run(after.projectId, randomUUID());
       }
@@ -107,7 +111,7 @@ export class IssueOrderService {
   }
 
   move(projectId: string, body: Record<string, unknown>, hooks: {
-    changeStatus: (issue: Issue, status: string) => Issue;
+    changeIssue: (issue: Issue, changes: IssueMoveChanges) => Issue;
     recordMove: (issue: Issue, anchor: Issue | undefined, position: IssueOrderMove['position']) => void;
   }): IssueOrderMoveResult {
     const move = parseMove(body);
@@ -120,13 +124,24 @@ export class IssueOrderService {
         return fail('이동 업무와 기준 업무는 현재 프로젝트에 있어야 합니다.', 409);
       }
       if (source.version !== move.expectedIssueVersion) return fail('이동할 업무가 변경되었습니다. 새로고침 후 다시 시도해 주세요.', 409, { currentIssueVersion: source.version });
-      if (move.status !== undefined && anchor && anchor.status !== move.status) return fail('기준 업무의 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요.', 409);
+      const targetAssignee = move.targetAssigneeId !== undefined ? move.targetAssigneeId : move.assigneeId;
+      if (targetAssignee != null && !this.store.get('users', targetAssignee)) return fail('이동할 담당자를 찾을 수 없습니다.');
+      const targetStatus = move.status ?? (move.targetAssigneeId !== undefined ? source.status : undefined);
+      if (targetStatus !== undefined && anchor && anchor.status !== targetStatus) return fail('기준 업무의 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요.', 409);
+      if (move.targetAssigneeId !== undefined) {
+        const anchorMoved = anchor && anchor.assigneeId !== move.targetAssigneeId;
+        const sourceMoved = move.assigneeId === undefined && source.assigneeId !== move.targetAssigneeId;
+        if (anchorMoved || sourceMoved) return fail('업무의 담당자 묶음이 변경되었습니다. 새로고침 후 다시 시도해 주세요.', 409);
+      }
 
       const nextIds = order.issueIds.filter(id => id !== source.id);
       const insertionIndex = anchor ? nextIds.indexOf(anchor.id) + Number(move.position === 'after') : move.position === 'before' ? 0 : nextIds.length;
       nextIds.splice(insertionIndex, 0, source.id);
       const orderChanged = nextIds.some((id, index) => order.issueIds[index] !== id);
-      const issue = move.status !== undefined && move.status !== source.status ? hooks.changeStatus(source, move.status) : source;
+      const changes: IssueMoveChanges = {};
+      if (move.status !== undefined && move.status !== source.status) changes.status = move.status;
+      if (move.assigneeId !== undefined && (move.assigneeId !== source.assigneeId || changes.status !== undefined)) changes.assigneeId = move.assigneeId;
+      const issue = changes.status !== undefined || changes.assigneeId !== undefined ? hooks.changeIssue(source, changes) : source;
       if (orderChanged) {
         this.put(projectId, nextIds);
         hooks.recordMove(issue, anchor, move.position);

@@ -1145,6 +1145,7 @@ export interface IssueViewLabelFilter {
 
 export interface SavedViewState {
   layout: 'list' | 'board';
+  boardGrouping?: 'assignee';
   filters: {
     query: string;
     status: string;
@@ -1193,6 +1194,8 @@ export interface IssueOrderMove {
   anchorId: string | null;
   position: 'before' | 'after';
   status?: IssueStatus;
+  targetAssigneeId?: string | null;
+  assigneeId?: string | null;
 }
 export interface IssueOrderMoveResult { order: ProjectIssueOrder; issue: Issue }
 export interface WorkspaceSnapshot {

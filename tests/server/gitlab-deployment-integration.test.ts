@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 
 const integrationPath = '/api/integrations/gitlab';
@@ -230,7 +231,7 @@ test('live deployment rules require exact environment and established SHA proof,
   assert.equal((await getIssue(unverified)).status, unverified.status);
 
   const archived = await f.json<{ schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[] }>('/api/export');
-  assert.equal(archived.schemaVersion, 75);
+  assert.equal(archived.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   await f.json('/api/import', 'POST', { data: { ...archived, schemaVersion: 74 } }, headers, 400);
   await f.json('/api/import', 'POST', { data: archived }, headers);
   const restored = (await f.json<AutomationRule[]>(`${rulePath}?projectId=${project.id}`)).find(row => row.id === rule.id);

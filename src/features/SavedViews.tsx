@@ -25,6 +25,10 @@ type Props = {
 };
 type ViewEditor = { mode: 'create'; state: SavedViewState } | { mode: 'update'; state: SavedViewState; target: SavedView };
 
+function viewState({ layout, boardGrouping, filters }: SavedViewState): SavedViewState {
+  return { layout, ...(layout === 'board' && boardGrouping ? { boardGrouping } : {}), filters };
+}
+
 export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
@@ -162,7 +166,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
     try {
       const value = editing.mode === 'update'
         ? await patch<SavedView>(`/views/${encodeURIComponent(editing.target.id)}`, {
-          name, ...editing.state, filters: {
+          name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
             priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
           }, expectedVersion: editing.target.version,
@@ -237,7 +241,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
       if (origin !== window.location.hash || navigation !== navigationEpoch.current) {setEditing(null);return;}
       const latest = list.find(view => view.id === editing.target.id);
       if (!latest) {savedEditor.current = editing;onSelect?.(null);setEditing(null);notify('이 보기는 삭제되었습니다.','error');return;}
-      setEditing({ mode: 'update', state: { layout: latest.layout, filters: latest.filters }, target: latest });
+      setEditing({ mode: 'update', state: viewState(latest), target: latest });
       setName(latest.name);onApply(latest);setConflicted(false);setDialogError('');
     } catch (cause) {
       if (mounted.current) setDialogError((cause as Error).message);
@@ -245,7 +249,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
       if (mounted.current) setBusy(false);
     }
   };
-  const changed = selected && JSON.stringify({layout:selected.layout,filters:selected.filters}) !== JSON.stringify(current);
+  const changed = selected && JSON.stringify(viewState(selected)) !== JSON.stringify(viewState(current));
   const editorState = editing?.state;
   if (!projectId || projectId === 'all') return null;
   return <div className="saved-views">
@@ -280,7 +284,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
       <div className="card-heading"><h2 id="saved-view-title">{editing.mode === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
       <p className="muted">적용된 검색어와 필터를 {editorState.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
-      <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span><span>{editorState.filters.status === 'all' ? '모든 상태' : `상태: ${editorState.filters.status}`}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
+      <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{editorState.filters.status === 'all' ? '모든 상태' : `상태: ${editorState.filters.status}`}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
         {issuePriorityLabelFilterLabels(editorState.filters).map(label => <span key={label}>{label}</span>)}

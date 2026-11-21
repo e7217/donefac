@@ -1055,7 +1055,8 @@ export function createApp(options: {
   });
   app.patch('/api/projects/:id/issue-order',(req,res)=>{
     const result = issueOrders.move(req.params.id, req.body, {
-      changeStatus: (issue,status) => updateIssue(req, issue, {status}),
+      changeIssue: (issue, changes) => commitIssueUpdate(req, issue,
+        prepareIssueUpdate(issue, changes, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId') })),
       recordMove: (issue,anchor,position) => {
         const location = anchor ? `${anchor.key} ${position === 'before' ? '앞으로' : '뒤로'}` : position === 'before' ? '맨 처음으로' : '맨 끝으로';
         activity(req, 'issue', issue.id, '업무 순서 변경', `${issue.key} · ${location} 이동`);
@@ -1899,6 +1900,9 @@ export function createApp(options: {
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' &&
       (Object.hasOwn(view.filters, 'priorities') || Object.hasOwn(view.filters, 'labels'))
     )) fail('우선순위·라벨 조건을 포함한 보기는 schemaVersion 68이 필요합니다.');
+    if (data.schemaVersion < 76 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && Object.hasOwn(view, 'boardGrouping')
+    )) fail('담당자별 보드 묶음을 포함한 보기는 schemaVersion 76이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));

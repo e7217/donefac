@@ -444,3 +444,65 @@ test('saved GitLab view drives field report membership and invalidates drilldown
     assert.equal((await f.request(`${path}/issues`, 'POST', drill)).status, 409);
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
+
+test('assignee board grouping is a presentation setting with explicit clearing and portable restore', async () => {
+  const f = await fixture();
+  try {
+    const created = await f.request('/views', 'POST', { ...definition, boardGrouping: 'assignee' });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.boardGrouping, 'assignee');
+    assert.deepEqual(created.data.filters, definition.filters);
+    const id = created.data.id;
+    const detail = `/views/${id}`;
+    const views = () => f.request(`/views?projectId=${definition.projectId}`);
+    const legacy = await f.request(detail, 'PATCH', {
+      expectedVersion: created.data.version, filters: { ...definition.filters, query: '연결한 일감' },
+    });
+    assert.equal(legacy.status, 200);
+    assert.equal(legacy.data.boardGrouping, 'assignee');
+    const expectedFilters = { ...definition.filters, query: '연결한 일감' };
+    assert.deepEqual(legacy.data.filters, expectedFilters);
+    assert.equal((await f.request(detail, 'PATCH', { expectedVersion: created.data.version, boardGrouping: null })).status, 409);
+    for (const invalid of ['', 'status', [], 1, false]) {
+      assert.equal((await f.request(detail, 'PATCH', { expectedVersion: legacy.data.version, boardGrouping: invalid })).status, 400);
+    }
+
+    const { data: archived } = await f.request('/export');
+    assert.equal(archived.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    assert.equal(archived.savedViews[0].boardGrouping, 'assignee');
+    const olderWithGrouping = { ...archived, schemaVersion: 75 };
+    const rejected = await f.request('/import', 'POST', { data: olderWithGrouping });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.data.error, /schemaVersion 76/);
+    const malformed = structuredClone(archived);
+    malformed.savedViews[0].boardGrouping = 'priority';
+    assert.equal((await f.request('/import', 'POST', { data: malformed })).status, 400);
+    assert.deepEqual((await views()).data, [legacy.data]);
+    assert.equal((await f.request('/import', 'POST', { data: archived })).status, 200);
+    const [restored] = (await views()).data as SavedView[];
+    assert.ok(restored.version > legacy.data.version);
+    assert.equal(restored.boardGrouping, 'assignee');
+    assert.deepEqual(restored.filters, expectedFilters);
+
+    const cleared = await f.request(detail, 'PATCH', { expectedVersion: restored.version, boardGrouping: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(Object.hasOwn(cleared.data, 'boardGrouping'), false);
+    const groupedAgain = await f.request(detail, 'PATCH', { expectedVersion: cleared.data.version, boardGrouping: 'assignee' });
+    assert.equal(groupedAgain.status, 200);
+    const list = await f.request(detail, 'PATCH', { expectedVersion: groupedAgain.data.version, layout: 'list' });
+    assert.equal(list.status, 200);
+    assert.equal(Object.hasOwn(list.data, 'boardGrouping'), false);
+    const flat = await f.request(detail, 'PATCH', { expectedVersion: list.data.version, layout: 'board' });
+    assert.equal(flat.status, 200);
+    assert.equal(Object.hasOwn(flat.data, 'boardGrouping'), false);
+
+    const oldBackup = structuredClone(archived);
+    oldBackup.schemaVersion = 75;
+    delete oldBackup.savedViews[0].boardGrouping;
+    assert.equal((await f.request('/import', 'POST', { data: oldBackup })).status, 200);
+    const [restoredOld] = (await views()).data as SavedView[];
+    assert.equal(Object.hasOwn(restoredOld, 'boardGrouping'), false);
+    assert.equal(restoredOld.layout, 'board');
+    assert.deepEqual(restoredOld.filters, expectedFilters);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});

@@ -22,7 +22,9 @@ const string = (value: unknown, name: string, max: number, empty = false) => {
 function state(value: unknown, schema: ProjectIssueSchema, users: User[], planningItems: readonly PlanningItem[], previous?: SavedViewState['filters']): SavedViewState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('보기 설정은 객체여야 합니다.');
   const v = value as Record<string, unknown>;
-  if (!['list', 'board'].includes(v.layout as string)) return fail('목록 또는 보드 보기만 저장할 수 있습니다.');
+  const { layout, boardGrouping } = v;
+  if (layout !== 'list' && layout !== 'board') return fail('목록 또는 보드 보기만 저장할 수 있습니다.');
+  if (boardGrouping != null && boardGrouping !== 'assignee') return fail('보드 묶는 기준을 확인해주세요.');
   if (!v.filters || typeof v.filters !== 'object' || Array.isArray(v.filters)) return fail('보기 필터가 올바르지 않습니다.');
   const filters = v.filters as Record<string, unknown>;
   const query = string(filters.query, '검색어', 800, true);
@@ -37,7 +39,7 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const gitlab = previous && gitlabInput === null ? undefined : parseIssueViewGitlabFilter(gitlabInput);
     const priorities = Object.hasOwn(filters, 'priorities') ? parseIssueViewPriorities(filters.priorities) : previous?.priorities;
     const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
-    return { layout: v.layout as SavedViewState['layout'], filters: {
+    return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), filters: {
       query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
       ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}),
     } };
@@ -146,6 +148,7 @@ export class SavedViewService {
         const selected = state({ ...old, ...req.body }, this.issueSchemas?.get(old.projectId) || defaultIssueSchema(old.projectId), users, hooks.planningItems(old.projectId), old.filters);
         this.validateAssignee(selected, users);
         const updated: SavedView = { ...old, ...selected, name: 'name' in req.body ? string(req.body.name, '보기 이름', 80) : old.name, version: old.version + 1, updatedAt: new Date().toISOString() };
+        if (!selected.boardGrouping) delete updated.boardGrouping;
         this.put(updated);
         hooks.activity(req, 'project', old.projectId, '업무 보기 변경', updated.name);
         return updated;

@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useRef, useState, type DragEvent } from 'react';
+import { useId, useMemo, useRef, useState, type DragEvent } from 'react';
 import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
-import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState, type User, type WorkflowStatus } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { downloadText } from '../lib/download';
@@ -26,15 +26,41 @@ import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-v
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-order.css';
+import './issue-board-groups.css';
 
 const isAll = (id: string) => !id || id === 'all';
 const issueDragType = 'text/issue-id';
 type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
-type BoardDrop = IssuePlacement & { status: IssueStatus };
+type BoardCell = { status: IssueStatus; targetAssigneeId?: string | null };
+type BoardDrop = IssuePlacement & BoardCell;
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
+type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
 type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
+const assigneeCollator = new Intl.Collator('ko', { numeric: true });
+
+function groupBoardIssues(issues: Issue[], users: readonly User[], showEmpty: boolean) {
+  const byAssignee = new Map<string | null, Issue[]>();
+  for (const issue of issues) {
+    const assigneeId = issue.assigneeId ?? null;
+    const group = byAssignee.get(assigneeId);
+    if (group) group.push(issue);
+    else byAssignee.set(assigneeId, [issue]);
+  }
+  const names = new Map<string, number>();
+  for (const user of users) names.set(user.name, (names.get(user.name) ?? 0) + 1);
+  const lanes = users.filter(user => showEmpty || byAssignee.has(user.id))
+    .sort((a, b) => assigneeCollator.compare(a.name, b.name) || assigneeCollator.compare(a.email, b.email) || (a.id < b.id ? -1 : Number(a.id > b.id)))
+    .map<BoardLane>(user => ({ id: user.id, name: user.name, email: (names.get(user.name) ?? 0) > 1 ? user.email : undefined,
+      color: user.color, issues: byAssignee.get(user.id) ?? [] }));
+  const known = new Set(users.map(user => user.id));
+  for (const id of [...byAssignee.keys()].filter((id): id is string => id !== null && !known.has(id)).sort()) {
+    lanes.push({ id, name: `담당자 확인 불가 (${id})`, issues: byAssignee.get(id) ?? [] });
+  }
+  lanes.push({ id: null, name: '담당자 미지정', issues: byAssignee.get(null) ?? [] });
+  return lanes;
+}
 
 function IssueOrderControls({ issue, previous, next, busy, move }: {
   issue: Issue; previous?: Issue; next?: Issue; busy: boolean;
@@ -92,6 +118,9 @@ export function Issues(props: FeatureProps & {
   const unavailableView = Boolean(savedViewId && !selectedView);
   const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; id: string | null; applied: boolean }>();
   const [view, setView] = useState<'list' | 'board'>('list');
+  const [boardGrouping, setBoardGrouping] = useState<SavedViewState['boardGrouping']>();
+  const [showEmptyAssignees, setShowEmptyAssignees] = useState(false);
+  const groupingInstructions = useId();
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
   const [assignee, setAssignee] = useState('all');
@@ -135,6 +164,7 @@ export function Issues(props: FeatureProps & {
   const bulk = useIssueBulkEdit(props, issues);
   const project = data.projects.find(value => value.id === projectId);
   const projectSelected = Boolean(project);
+  const groupedBoard = projectSelected && view === 'board' && boardGrouping === 'assignee';
   const currentPasteScope = JSON.stringify([projectId, props.actorId]);
   if (pasteScope !== null && pasteScope !== currentPasteScope) setPasteScope(null);
   const capacities = useMemo(() => {
@@ -170,6 +200,7 @@ export function Issues(props: FeatureProps & {
   }
   function applySavedView(value: SavedViewState) {
     setView(value.layout);
+    setBoardGrouping(value.layout === 'board' ? value.boardGrouping : undefined);
     setQuery(value.filters.query);
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
@@ -180,6 +211,10 @@ export function Issues(props: FeatureProps & {
   }
   if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
     setAppliedRouteView({ projectId, id: savedViewId, applied: Boolean(selectedView) });
+    if (appliedRouteView?.projectId !== projectId) {
+      setBoardGrouping(undefined);
+      setShowEmptyAssignees(false);
+    }
     if (selectedView || savedViewId || appliedRouteView?.id) applySavedView(selectedView ?? defaultView);
   }
   function clearFilters() {
@@ -226,7 +261,10 @@ export function Issues(props: FeatureProps & {
     catch (error) { notify(errorMessage(error), 'error'); } finally { pendingMutation.current = false; setBusy(null); }
   }
 
-  async function moveIssue(issue: Issue, placement: IssuePlacement, options: { status?: IssueStatus; version?: string; opener?: HTMLButtonElement } = {}) {
+  async function moveIssue(issue: Issue, placement: IssuePlacement, options: Pick<IssueOrderMove, 'status' | 'targetAssigneeId' | 'assigneeId'> & {
+    version?: string;
+    opener?: HTMLButtonElement;
+  } = {}) {
     if (!order || issue.projectId !== projectId || placement.anchorId === issue.id || notice?.needsRefresh || pendingMutation.current) return;
     const nextStatus = options.status !== issue.status ? options.status : undefined;
     if (nextStatus !== undefined && !allowedNextStatuses(data, issue).some(value => value.id === nextStatus)) {
@@ -238,13 +276,17 @@ export function Issues(props: FeatureProps & {
     pendingMutation.current = true;
     setBusy(issue.id);
     setOrderNotice({ projectId, text: `${issue.key} 업무 순서를 저장 중입니다.` });
-    let text = nextStatus === undefined ? `${issue.key} 업무 순서를 변경했습니다.` : `${issue.key} 업무 순서와 상태를 변경했습니다.`;
+    const movement = options.assigneeId === undefined ? (nextStatus === undefined ? '순서' : '순서와 상태')
+      : nextStatus === undefined ? '순서와 담당자' : '순서·상태·담당자';
+    let text = `${issue.key} 업무 ${movement}를 변경했습니다.`;
     let error = false;
     try {
       try {
         const move: IssueOrderMove = {
           issueId: issue.id, expectedVersion: options.version ?? order.version, expectedIssueVersion: issue.version,
           ...placement, ...(nextStatus === undefined ? {} : { status: nextStatus }),
+          ...(options.targetAssigneeId === undefined ? {} : { targetAssigneeId: options.targetAssigneeId }),
+          ...(options.assigneeId === undefined ? {} : { assigneeId: options.assigneeId }),
         };
         await patch(`/projects/${encodeURIComponent(projectId)}/issue-order`, move);
       } catch (cause) {
@@ -265,7 +307,9 @@ export function Issues(props: FeatureProps & {
       pendingMutation.current = false;
       setBusy(null);
       if (opener) requestAnimationFrame(() => {
-        if (opener.isConnected && document.activeElement === document.body) opener.focus({ preventScroll: true });
+        if (document.activeElement !== document.body) return;
+        if (opener.isConnected) opener.focus({ preventScroll: true });
+        else boardCanvas.current?.querySelector<HTMLButtonElement>(`.issue-board-card[data-issue-id="${CSS.escape(issue.id)}"]`)?.focus();
       });
     }
   }
@@ -297,17 +341,18 @@ export function Issues(props: FeatureProps & {
     setDropTarget(null);
   }
 
-  function boardDragOver(event: DragEvent<HTMLElement>, status: IssueStatus, column: Issue[]) {
+  function boardDragOver(event: DragEvent<HTMLElement>, cell: BoardCell, column: Issue[]) {
     if (!event.dataTransfer.types.includes(issueDragType) || pendingMutation.current || notice?.needsRefresh) return;
     if (drag.current && drag.current.projectId !== projectId) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     const placement = order ? boardPlacement(event, column, drag.current?.issue.id) : { anchorId: null, position: 'after' } as const;
-    const target = { ...placement, status };
-    setDropTarget(current => current?.status === status && current.anchorId === target.anchorId && current.position === target.position ? current : target);
+    const target = { ...placement, ...cell };
+    setDropTarget(current => current?.status === cell.status && current.targetAssigneeId === cell.targetAssigneeId &&
+      current.anchorId === target.anchorId && current.position === target.position ? current : target);
   }
 
-  function dropOnBoard(event: DragEvent<HTMLElement>, status: IssueStatus, column: Issue[]) {
+  function dropOnBoard(event: DragEvent<HTMLElement>, { status, targetAssigneeId }: BoardCell, column: Issue[]) {
     const id = event.dataTransfer.getData(issueDragType);
     const source = drag.current;
     endBoardDrag();
@@ -315,15 +360,74 @@ export function Issues(props: FeatureProps & {
     event.preventDefault();
     const issue = source?.issue ?? projectIssues.find(value => value.id === id);
     if (!issue) return;
-    if (!order) { void changeStatus(issue, status); return; }
+    const changesAssignee = targetAssigneeId !== undefined && (issue.assigneeId ?? null) !== targetAssigneeId;
+    if (!order) {
+      if (changesAssignee) notify('업무 순서를 불러온 뒤 다른 담당자에게 이동하세요.', 'error');
+      else void changeStatus(issue, status);
+      return;
+    }
     const placement = boardPlacement(event, column, issue.id);
-    if (issue.status === status && keepsVisiblePosition(issue, column, placement)) return;
-    void moveIssue(issue, placement, { status, version: source?.orderVersion });
+    if (!changesAssignee && issue.status === status && keepsVisiblePosition(issue, column, placement)) return;
+    void moveIssue(issue, placement, { status, version: source?.orderVersion, targetAssigneeId,
+      assigneeId: changesAssignee ? targetAssigneeId : undefined });
   }
 
-  const controls = (issue: Issue, visible: Issue[], index: number) => ordering && <IssueOrderControls issue={issue}
+  const controls = (issue: Issue, visible: Issue[], index: number, targetAssigneeId?: string | null) => ordering && <IssueOrderControls issue={issue}
     previous={visible[index - 1]} next={visible[index + 1]} busy={Boolean(busy || notice?.needsRefresh)}
-    move={(source, placement, opener) => void moveIssue(source, placement, { opener })} />;
+    move={(source, placement, opener) => void moveIssue(source, placement, { opener, targetAssigneeId })} />;
+
+  function boardHeading(state: WorkflowStatus, visible: number, capacity?: BoardStatusCapacity) {
+    return <>
+      <div className="issue-board-heading" tabIndex={capacity ? -1 : undefined}>
+        <StatusDot color={state.color} /><strong>{capacity?.status.label ?? state.label}</strong>
+        {capacity ? <span className="board-capacity-count" title="프로젝트 전체 업무 수 / 한도" role="status"
+          aria-label={`프로젝트 전체 업무 ${capacity.issues.length}개, 한도 ${capacity.limit}개`}>{capacity.issues.length.toLocaleString()} / {capacity.limit.toLocaleString()}</span> : <span>{visible}</span>}
+        <button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} onClick={() => beginCreate(state.id)}><Plus size={15} /></button>
+      </div>
+      {capacity && <BoardCapacityNote value={capacity} visible={visible} open={openCapacity} />}
+    </>;
+  }
+
+  function capacityState(capacity?: BoardStatusCapacity) {
+    if (!capacity) return undefined;
+    const excess = capacity.issues.length - capacity.limit;
+    return excess > 0 ? 'over' : excess === 0 ? 'at' : 'under';
+  }
+
+  function boardColumn(state: WorkflowStatus, laneIssues: Issue[], targetAssigneeId?: string | null) {
+    const column = laneIssues.filter(issue => issue.status === state.id);
+    const cell: BoardCell = { status: state.id, targetAssigneeId };
+    const isCellTarget = (target: BoardDrop | null) => target?.status === state.id && target.targetAssigneeId === targetAssigneeId;
+    const target = isCellTarget(dropTarget) ? dropTarget : null;
+    const grouped = targetAssigneeId !== undefined;
+    const capacity = grouped ? undefined : capacities.get(state.id);
+    return <section key={state.id} className={`issue-board-column ${target ? 'is-drag-over' : ''}`} data-status-id={state.id}
+      aria-label={grouped ? (capacities.get(state.id)?.status.label ?? state.label) : undefined} data-capacity={capacityState(capacity)}
+      onDragOver={event => boardDragOver(event, cell, column)}
+      onDragLeave={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDropTarget(current => isCellTarget(current) ? null : current); }}
+      onDrop={event => dropOnBoard(event, cell, column)}>
+      {grouped ? <div className="issue-board-cell-heading">
+        <StatusDot color={state.color} /><span>{capacities.get(state.id)?.status.label ?? state.label}</span><span>{column.length}</span>
+      </div> : boardHeading(state, column.length, capacity)}
+      {column.map((issue, index) => {
+        const user = data.users.find(user => user.id === issue.assigneeId);
+        return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
+          <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
+            draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={() => openIssue(issue.id)}>
+            <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
+            <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(label => <span className="issue-label" key={label}>{label}</span>)}</span>
+            <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
+            <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
+          </button>
+          <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
+          {controls(issue, column, index, targetAssigneeId)}
+        </div>;
+      })}
+      {column.length === 0 && <div className="issue-column-empty">{grouped ? '업무 없음' : capacity?.issues.length ? '필터에 맞는 업무가 없습니다' : '이 상태의 업무가 없습니다'}</div>}
+    </section>;
+  }
+
+  const lanes = groupedBoard ? groupBoardIssues(issues, data.users, showEmptyAssignees) : [];
   const csvDisabled = Boolean(busy || bulk.locked || unavailableView || !issues.length);
 
   function downloadIssuesCsv(selectionOnly: boolean) {
@@ -345,6 +449,12 @@ export function Issues(props: FeatureProps & {
     </div>
     <div className="issue-toolbar">
       <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} disabled={bulk.busy} onClick={() => { if (!bulk.active || bulk.close()) setView('board'); }}><Columns3 size={16} /> 보드</button></div>
+      {projectSelected && view === 'board' && <label className="issue-board-group-picker">보드 그룹
+        <select className="issue-filter" aria-label="보드 그룹" value={boardGrouping ?? ''} disabled={Boolean(busy)} onChange={event => {
+          endBoardDrag();
+          setBoardGrouping(event.currentTarget.value === 'assignee' ? 'assignee' : undefined);
+        }}><option value="">그룹 없음</option><option value="assignee">담당자별</option></select>
+      </label>}
       <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} disabled={bulk.locked} onChange={e => setQuery(e.target.value)} /></div>
       <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} disabled={bulk.locked} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
       <select className="issue-filter" aria-label="담당자 필터" value={assignee} disabled={bulk.locked} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
@@ -370,7 +480,7 @@ export function Issues(props: FeatureProps & {
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
     <SavedViews projectId={projectId} planningItems={planningItems} views={projectViews} selectedId={savedViewId}
-      current={{layout:view,filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
+      current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results">
       <span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span>
@@ -381,7 +491,7 @@ export function Issues(props: FeatureProps & {
         {bulk.active && <button className="btn btn-ghost" type="button" disabled={csvDisabled || !bulk.selectedCount} onClick={() => downloadIssuesCsv(true)}>
           <ArrowDownToLine size={14} aria-hidden="true" />선택 업무 CSV
         </button>}
-      </div> : <span className="muted">{order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
+      </div> : <span className="muted" id={groupedBoard ? groupingInstructions : undefined}>{groupedBoard ? '다른 담당자 행으로 끌면 담당자가 바뀝니다.' : order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
     </div>
     {order && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
@@ -409,37 +519,35 @@ export function Issues(props: FeatureProps & {
       {selectedCapacity && <BoardCapacityDetails key={selectedCapacity.status.id} value={selectedCapacity}
         visibleIds={new Set(issues.map(issue => issue.id))} users={data.users} heading={capacityHeading}
         openIssue={onOpenBoardCapacityIssue ?? openIssue} close={closeCapacity} />}
-      <div className="issue-board" ref={boardCanvas}>{statuses.map(state => {
-      const key = state.id;
-      const column = issues.filter(i => i.status === key);
-      const capacity = capacities.get(key);
-      const target = dropTarget?.status === key ? dropTarget : null;
-      return <section key={key} className={`issue-board-column ${target ? 'is-drag-over' : ''}`} data-status-id={key}
-        data-capacity={capacity && (capacity.issues.length > capacity.limit ? 'over' : capacity.issues.length === capacity.limit ? 'at' : 'under')}
-        onDragOver={event => boardDragOver(event, key, column)}
-        onDragLeave={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDropTarget(current => current?.status === key ? null : current); }}
-        onDrop={event => dropOnBoard(event, key, column)}>
-        <div className="issue-board-heading" tabIndex={capacity ? -1 : undefined}><StatusDot color={state.color} /><strong>{capacity?.status.label ?? state.label}</strong>
-          {capacity ? <span className="board-capacity-count" title="프로젝트 전체 업무 수 / 한도" role="status"
-            aria-label={`프로젝트 전체 업무 ${capacity.issues.length}개, 한도 ${capacity.limit}개`}>{capacity.issues.length.toLocaleString()} / {capacity.limit.toLocaleString()}</span> : <span>{column.length}</span>}
-          <button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} onClick={() => { beginCreate(key); }}><Plus size={15} /></button></div>
-        {capacity && <BoardCapacityNote value={capacity} visible={column.length} open={openCapacity} />}
-        {column.map((issue, index) => {
-          const user = data.users.find(u => u.id === issue.assigneeId);
-          return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
-            <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
-              draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={() => openIssue(issue.id)}>
-              <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
-              <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}</span>
-              <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
-              <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
-            </button>
-            <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
-            {controls(issue, column, index)}
-          </div>;
-        })}{column.length === 0 && <div className="issue-column-empty">{capacity?.issues.length ? '필터에 맞는 업무가 없습니다' : '이 상태의 업무가 없습니다'}</div>}
-      </section>;
-    })}</div></>)}
+      {groupedBoard ? <>
+        <label className="issue-board-empty-toggle">
+          <input type="checkbox" checked={showEmptyAssignees} onChange={event => setShowEmptyAssignees(event.currentTarget.checked)} />
+          빈 담당자 그룹 표시
+        </label>
+        <div className="issue-board issue-board-grouped" ref={boardCanvas} role="region" aria-label="담당자별 보드"
+          aria-describedby={groupingInstructions} tabIndex={0}>
+          <div className="issue-board-lane-columns issue-board-project-columns" role="group" aria-label="프로젝트 상태별 업무 수">
+            {statuses.map(state => {
+              const capacity = capacities.get(state.id);
+              return <div key={state.id} className="issue-board-column" data-status-id={state.id} data-capacity={capacityState(capacity)}>
+                {boardHeading(state, issues.filter(issue => issue.status === state.id).length, capacity)}
+              </div>;
+            })}
+          </div>
+          {lanes.map(lane => <section className="issue-board-lane" key={lane.id === null ? 'unassigned' : `assignee:${lane.id}`}
+            aria-label={lane.email ? `${lane.name} · ${lane.email}` : lane.name} data-board-assignee-id={lane.id ?? ''}>
+            <h3 className="issue-board-lane-heading">
+              {lane.color && <span className="issue-avatar" aria-hidden="true" style={{ background: lane.color }}>{lane.name.slice(0, 1)}</span>}
+              <span className="issue-board-lane-person"><strong>{lane.name}</strong>{lane.email && <small>{lane.email}</small>}</span>
+              <span className="issue-board-lane-count">{lane.issues.length.toLocaleString()}개</span>
+            </h3>
+            <div className="issue-board-lane-columns">
+              {statuses.map(state => boardColumn(state, lane.issues, lane.id))}
+            </div>
+          </section>)}
+        </div>
+      </> : <div className="issue-board" ref={boardCanvas}>{statuses.map(state => boardColumn(state, issues))}</div>}
+    </>)}
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}

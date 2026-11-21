@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Issue, Project, ProjectIssueOrder, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Issue, IssueAssignmentRunPage, IssueOrderMove, Project, ProjectIssueOrder, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; issueOrders: ProjectIssueOrder[]; reportingLedger: ReportingLedgerData };
 type MoveResult = { order: ProjectIssueOrder; issue: Issue };
@@ -155,6 +155,87 @@ test('board movement atomically checks the current column, required fields and i
     assert.ok(success.data.issue.completedAt);
     const backup = await f.api.read<Backup>('/export');
     assert.ok(backup.reportingLedger.events.some(event => event.issueId === moving.id && event.before?.statusId === 'todo' && event.after?.statusId === 'done'));
+  } finally { await f.close(); }
+});
+
+test('grouped moves guard the destination and apply status, assignment and canonical rank atomically', async () => {
+  const f = await fixture();
+  try {
+    const created = await f.api.request<Project>('/projects', 'POST', { key: 'LANE', name: '담당자별 보드' });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const projectId = created.data.id;
+    const [firstUser, secondUser] = (await f.api.snapshot()).users;
+    assert.ok(firstUser && secondUser);
+    const create = async (title: string, status: string, assigneeId: string, description = '') => {
+      const response = await f.api.request<Issue>('/issues', 'POST', { projectId, title, status, assigneeId, description });
+      assert.equal(response.status, 201, JSON.stringify(response.data));
+      return response.data;
+    };
+    const moving = await create('다른 담당자에게 넘길 업무', 'todo', firstUser.id);
+    const hidden = await create('필터에서 가려진 업무', 'done', secondUser.id);
+    const anchor = await create('도착 지점', 'done', secondUser.id);
+    const automatic = await create('같은 묶음에서 상태만 바꿀 업무', 'todo', secondUser.id, '이동 준비');
+    const workflowPath = `/projects/${projectId}/workflow`;
+    const workflow = await f.api.read<ProjectWorkflow>(workflowPath);
+    const updated = await f.api.request(workflowPath, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'done' ? { ...edge, requiredFields: ['description'] } : edge),
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.data));
+    const rule = await f.api.request(`/projects/${projectId}/assignment-rules`, 'POST', {
+      name: '완료하면 첫 번째 팀원에게 배정', enabled: true, fromStatuses: ['todo'], toStatusId: 'done',
+      issueTypes: [], assigneeId: firstUser.id, mode: 'replace', priority: 1,
+    });
+    assert.equal(rule.status, 201, JSON.stringify(rule.data));
+
+    const initial = await f.api.order(projectId);
+    const laneBody = { ...moveBody(initial, moving, anchor, 'after', 'done'), targetAssigneeId: secondUser.id, assigneeId: secondUser.id };
+    const send = (body: IssueOrderMove) => f.api.request<MoveResult>(projectPath(projectId), 'PATCH', body);
+    const before = await f.api.snapshot();
+    assert.equal((await send({ ...laneBody, assigneeId: null })).status, 400);
+    assert.equal((await send({ ...laneBody, targetAssigneeId: 'missing-user', assigneeId: 'missing-user' })).status, 400);
+    assert.equal((await send({ ...laneBody, assigneeId: undefined })).status, 409);
+    assert.equal((await send(laneBody)).status, 422);
+    assert.deepEqual(await f.api.snapshot(), before);
+
+    const reassign = (issue: Issue, assigneeId: string) => f.api.request<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, assigneeId });
+    const shifted = await reassign(anchor, firstUser.id);
+    assert.equal(shifted.status, 200, JSON.stringify(shifted.data));
+    const shiftedOrder = await f.api.order(projectId);
+    assert.deepEqual(shiftedOrder.issueIds, initial.issueIds);
+    assert.notEqual(shiftedOrder.version, initial.version);
+    assert.equal((await send(laneBody)).status, 409);
+    assert.equal((await send({ ...laneBody, expectedVersion: shiftedOrder.version })).status, 409);
+    assert.equal((await reassign(shifted.data, secondUser.id)).status, 200);
+
+    const prepared = await f.api.request<Issue>(`/issues/${moving.id}`, 'PATCH', { expectedVersion: moving.version, description: '이동 준비' });
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.data));
+    const ready = await f.api.order(projectId);
+    const moved = await send({ ...laneBody, expectedVersion: ready.version, expectedIssueVersion: prepared.data.version });
+    assert.equal(moved.status, 200, JSON.stringify(moved.data));
+    assert.deepEqual(moved.data.order.issueIds, [hidden.id, anchor.id, moving.id, automatic.id]);
+    assert.equal(moved.data.issue.assigneeId, secondUser.id);
+    assert.equal(moved.data.issue.status, 'done');
+    assert.equal(moved.data.issue.version, prepared.data.version + 1);
+    assert.ok(moved.data.issue.completedAt);
+    const beforeNoOp = await f.api.snapshot();
+    const noop = await send({ ...moveBody(moved.data.order, moved.data.issue, anchor, 'after'), targetAssigneeId: secondUser.id });
+    assert.equal(noop.status, 200, JSON.stringify(noop.data));
+    assert.deepEqual(noop.data, moved.data);
+    assert.deepEqual(await f.api.snapshot(), beforeNoOp);
+
+    const viaRule = await send({ ...moveBody(moved.data.order, automatic, anchor, 'before', 'done'), targetAssigneeId: secondUser.id });
+    assert.equal(viaRule.status, 200, JSON.stringify(viaRule.data));
+    assert.equal(viaRule.data.issue.assigneeId, firstUser.id);
+    const runs = await f.api.read<IssueAssignmentRunPage>(`/projects/${projectId}/assignment-runs`);
+    assert.equal(runs.items.find(run => run.issueId === moving.id)?.outcome, 'skipped');
+    assert.equal(runs.items.find(run => run.issueId === automatic.id)?.outcome, 'assigned');
+
+    const unassigned = await send({ ...moveBody(viaRule.data.order, moved.data.issue, null, 'after'), targetAssigneeId: null, assigneeId: null });
+    assert.equal(unassigned.status, 200, JSON.stringify(unassigned.data));
+    assert.equal(unassigned.data.issue.assigneeId, null);
+    assert.equal(unassigned.data.issue.status, 'done');
+    assert.equal(unassigned.data.order.issueIds.at(-1), moving.id);
   } finally { await f.close(); }
 });
 

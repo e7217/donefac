@@ -1,0 +1,117 @@
+.issue-board-group-picker,
+.issue-board-empty-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #4e6458;
+  font-size: 12px;
+}
+
+.issue-board-group-picker {
+  min-width: 0;
+}
+
+.issue-board-group-picker select:focus-visible,
+.issue-board-grouped:focus-visible {
+  outline: 2px solid #2c7d65;
+  outline-offset: 2px;
+}
+
+.issue-board-empty-toggle {
+  min-height: 36px;
+  cursor: pointer;
+}
+
+.issue-board-empty-toggle input {
+  accent-color: #2c7d65;
+}
+
+.issue-board.issue-board-grouped {
+  display: block;
+  max-width: 100%;
+  min-height: 0;
+  padding-top: 6px;
+}
+
+.issue-board-lane-columns {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  width: max-content;
+}
+
+.issue-board-lane-columns .issue-board-column {
+  flex: none;
+}
+
+.issue-board-project-columns .issue-board-column {
+  padding-bottom: 4px;
+}
+
+.issue-board-lane {
+  width: max-content;
+  min-width: 100%;
+  margin-top: 14px;
+}
+
+.issue-board-lane-heading {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 244px;
+  margin: 0 0 7px;
+  padding: 7px 10px;
+  border: 1px solid #e1ece5;
+  border-radius: 7px;
+  background: #f7faf8;
+  color: #3d594b;
+  font-size: 13px;
+}
+
+.issue-board-lane-person {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.issue-board-lane-person small,
+.issue-board-lane-count {
+  color: #596e63;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.issue-board-lane-count {
+  flex-shrink: 0;
+  margin-inline-start: 5px;
+}
+
+.issue-board-cell-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 2px;
+  color: #536c5a;
+  font-size: 11px;
+}
+
+.issue-board-cell-heading > :last-child {
+  margin-inline-start: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-board-grouped .issue-column-empty {
+  padding: 12px 0;
+  color: #63786a;
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  .issue-board-group-picker select,
+  .issue-board-empty-toggle {
+    min-height: 44px;
+  }
+}
