@@ -24,6 +24,7 @@ interface GanttDependencyFindingsProps {
   onLocateDate: (issueId: string, endpoint: ScheduleDependencyEndpoint) => void;
   onEditLink: (dependency: Dependency, opener: HTMLButtonElement) => void;
   disabled: boolean;
+  focused?: boolean;
 }
 
 const PAGE_SIZE = 8;
@@ -31,7 +32,7 @@ const FINDING_LABELS = { conflict: '충돌', missing: '날짜 미정', invalid: 
 const FINDING_KINDS = ['conflict', 'missing', 'invalid'] as const;
 
 export function GanttDependencyFindings({
-  id, findings, onClose, onLocateDate, onEditLink, disabled,
+  id, findings, onClose, onLocateDate, onEditLink, disabled, focused,
 }: GanttDependencyFindingsProps) {
   const heading = useId();
   const [page, setPage] = useState(0);
@@ -53,7 +54,7 @@ export function GanttDependencyFindings({
     <header className="gantt-findings-header">
       <div>
         <h2 id={heading}><TriangleAlert size={17} aria-hidden="true" />일정 충돌</h2>
-        <p>프로젝트 전체 업무의 저장된 날짜와 연결을 점검합니다.</p>
+        <p>{focused ? '현재 선후행 흐름의 저장된 날짜와 연결을 점검합니다.' : '프로젝트 전체 업무의 저장된 날짜와 연결을 점검합니다.'}</p>
       </div>
       <button className="issue-icon-button" type="button" aria-label="일정 충돌 닫기" onClick={onClose}>
         <X size={17} aria-hidden="true" />

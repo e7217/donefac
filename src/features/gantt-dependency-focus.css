@@ -1,0 +1,93 @@
+.gantt-dependency-focus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  min-width: 0;
+  margin-block: 10px;
+  padding: 10px 12px;
+  border: 1px solid #b9d7cb;
+  border-radius: 8px;
+  background: #f1f8f5;
+  color: #225348;
+}
+
+.gantt-dependency-focus-summary {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.gantt-dependency-focus-summary h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.gantt-dependency-focus-work {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.gantt-dependency-focus-counts,
+.gantt-dependency-focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 7px;
+}
+
+.gantt-dependency-focus-counts {
+  margin: 5px 0 0;
+  color: #425a52;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-dependency-focus-counts > span {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e7efeb;
+}
+
+.gantt-dependency-focus-counts > .gantt-dependency-focus-extra {
+  background: #fff0d6;
+  color: #754710;
+}
+
+.gantt-dependency-focus-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  color: #46565e;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.gantt-dependency-focus-labels > span {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #e9eef2;
+  white-space: nowrap;
+}
+
+.gantt-dependency-focus-labels > span[data-direction='successor'] {
+  background: #e3f0ec;
+  color: #265c4e;
+}
+
+.gantt-dependency-focus-labels > span[data-direction='anchor'] {
+  background: #d0eadf;
+  color: #184f40;
+}
+
+.gantt-feature .gantt-row[data-dependency-focus-row='anchor'] > .gantt-left {
+  box-shadow: inset 3px 0 #347f67;
+  background: #ebf7f0;
+}
