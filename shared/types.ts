@@ -802,6 +802,33 @@ export interface Dependency { id: string; predecessorId: string; successorId: st
 export interface DocumentSourceSelection { from: number; to: number; text: string }
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
+
+export interface DecisionFollowUpItem {
+  linkId: string;
+  issue: Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'status' | 'assigneeId'> & {
+    statusLabel: string;
+    statusColor: string;
+    statusCategory: StatusCategory;
+    deadline: string | null;
+    deadlineSource: 'dueDate' | 'endDate' | null;
+  };
+  document: Pick<DocPage, 'id' | 'projectId' | 'title'>;
+  source: Omit<DocumentDecisionSource, 'text'> & { version: number; title: string; createdAt: string };
+}
+
+export interface DecisionFollowUpPage {
+  projectId: string;
+  total: number;
+  offset: number;
+  limit: number;
+  items: DecisionFollowUpItem[];
+}
+
+export interface DecisionFollowUpSource {
+  linkId: string;
+  documentId: string;
+  source: DocumentDecisionSource;
+}
 export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; duplicate: boolean }
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
 export const MAX_COMMENT_MENTIONS = 50;

@@ -91,21 +91,24 @@ function subscribeToRevision(documentId: string, revisionId: string) {
   } };
 }
 
-type RevisionLoad = { revision: DocRevision; excerpt?: DocumentSelectionHighlight | null } | { error: string; missing: boolean };
-function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel, selection }: {
+type RevisionLoad = { revision: DocRevision; excerpt?: DocumentSelectionHighlight | null; quote?: string } | { error: string; missing: boolean };
+function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel, selection, loadSelection, expectedVersion, actionLabel }: {
   documentId: string;
   revisionId: string;
   label: string;
   nodeBudget: number;
   sourceLabel?: string;
   selection?: DocumentSourceSelection;
+  loadSelection?: (signal: AbortSignal) => Promise<DocumentSourceSelection>;
+  expectedVersion?: number;
+  actionLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState<RevisionLoad | null>(null);
   const toggleButton = useRef<HTMLButtonElement>(null);
   const openingFocus = useRef<Element | null>(null);
-  const excerptRequested = selection !== undefined;
+  const excerptRequested = selection !== undefined || loadSelection !== undefined;
   const { from, to, text: excerptText } = selection ?? {};
   const canRevealExcerpt = useCallback(() => {
     const active = document.activeElement;
@@ -114,32 +117,37 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
 
   useEffect(() => {
     if (!open) return;
-    const subscription = subscribeToRevision(documentId, revisionId);
-    let active = true;
-    subscription.result.then(async revision => {
-      if (!active) return;
-      if (revision.id !== revisionId || revision.documentId !== documentId) {
+    const controller = new AbortController();
+    let releaseRevision: (() => void) | undefined;
+    async function load() {
+      const retrieved = loadSelection ? await loadSelection(controller.signal) : undefined;
+      if (controller.signal.aborted) return;
+      const subscription = subscribeToRevision(documentId, revisionId);
+      releaseRevision = subscription.release;
+      const revision = await subscription.result;
+      if (controller.signal.aborted) return;
+      if (revision.id !== revisionId || revision.documentId !== documentId ||
+          (expectedVersion !== undefined && revision.version !== expectedVersion)) {
         setLoaded({ error: '고정 버전 정보를 확인할 수 없습니다.', missing: false });
         return;
       }
+      const selected = retrieved ?? (from !== undefined && to !== undefined && excerptText !== undefined ? { from, to, text: excerptText } : undefined);
       let excerpt: DocumentSelectionHighlight | null | undefined;
       if (excerptRequested) {
-        excerpt = null;
-        if (from !== undefined && to !== undefined && excerptText !== undefined) {
-          excerpt = await import('../../shared/document-selection-highlight').then(
-            ({ locateDocumentSelection }) => locateDocumentSelection(revision.content, { from, to, text: excerptText }),
-            () => null,
-          );
-        }
+        excerpt = selected ? await import('../../shared/document-selection-highlight').then(
+          ({ locateDocumentSelection }) => locateDocumentSelection(revision.content, selected),
+          () => null,
+        ) : null;
       }
-      if (active) setLoaded({ revision, excerpt });
-    }, error => {
-      if (!active) return;
+      if (!controller.signal.aborted) setLoaded({ revision, excerpt, quote: retrieved?.text });
+    }
+    void load().catch(error => {
+      if (controller.signal.aborted) return;
       const missing = error instanceof ApiError && error.status === 404;
       setLoaded({ error: missing ? '고정 버전을 찾을 수 없습니다.' : '고정 버전을 불러오지 못했습니다.', missing });
     });
-    return () => { active = false; subscription.release(); };
-  }, [documentId, revisionId, open, attempt, excerptRequested, from, to, excerptText]);
+    return () => { controller.abort(); releaseRevision?.(); };
+  }, [documentId, revisionId, open, attempt, excerptRequested, from, to, excerptText, loadSelection, expectedVersion]);
 
   useEffect(() => {
     const imported = () => { setOpen(false); setLoaded(null); };
@@ -151,10 +159,11 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
   const revision = saved?.revision;
   const revisionLabel = revision?.confluenceSourceVersion != null ? documentRevisionLabel(revision) : revision ? `고정 버전 ${revision.version}` : '고정 버전';
   const title = revision?.title || label || '제목 없는 문서';
-  const toggleLabel = sourceLabel ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
+  const toggleLabel = actionLabel ? `${actionLabel} ${open ? '접기' : '열기'}`
+    : sourceLabel ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
   return <section className="doc-included-content doc-pinned-include" aria-label={`${sourceLabel ?? '고정 포함 문서'} ${title}`}
     onKeyDown={event => {
-      if (!open || !selection || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+      if (!open || !excerptRequested || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       setOpen(false);
@@ -172,6 +181,7 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
     {open && loaded && 'error' in loaded && <div className="doc-pinned-message"><p role="alert">{loaded.error}</p>
       {!loaded.missing && <button className="btn btn-ghost" type="button" onClick={() => { setLoaded(null); setAttempt(previous => previous + 1); }}>고정 버전 다시 불러오기</button>}
     </div>}
+    {open && saved?.quote && <blockquote aria-label="결정 근거 발췌">{saved.quote}</blockquote>}
     {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned"
       pinnedSource={{ documentId, revisionId }} showOutline={Boolean(sourceLabel)} selectionHighlight={saved?.excerpt} canRevealExcerpt={canRevealExcerpt} />}
   </section>;
@@ -179,16 +189,20 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
 
 const keepReading = () => {};
 
-export function DocumentDecisionRevision({ data, documentId, revisionId, label, sourceLabel = '결정 근거 원문', selection }: {
+export function DocumentDecisionRevision({ data, documentId, revisionId, label, sourceLabel = '결정 근거 원문', selection, loadSelection, expectedVersion, actionLabel }: {
   data: WorkspaceSnapshot;
   documentId: string;
   revisionId: string;
   label: string;
   sourceLabel?: string;
   selection?: DocumentSourceSelection;
+  loadSelection?: (signal: AbortSignal) => Promise<DocumentSourceSelection>;
+  expectedVersion?: number;
+  actionLabel?: string;
 }) {
   return <DocumentBlocksProvider data={data} documentId={documentId} openIssue={keepReading} openDocument={keepReading}>
-    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} sourceLabel={sourceLabel} selection={selection} />
+    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} sourceLabel={sourceLabel} selection={selection}
+      loadSelection={loadSelection} expectedVersion={expectedVersion} actionLabel={actionLabel} />
   </DocumentBlocksProvider>;
 }
 

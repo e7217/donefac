@@ -577,3 +577,122 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
     }
   }
 });
+
+test('360px에서 프로젝트의 결정 후속 업무를 찾아 고정 원문을 열고 티켓 변경 뒤 보고서로 돌아온다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [targetProject, documentProject], users: [firstAssignee, nextAssignee] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const sourceTitle = `결정 검증 ${suffix}`;
+  const currentTitle = `개정 회의록 ${suffix}`;
+  const originalText = '실험실에서 먼저 검증한다.';
+  const revisedText = '개정 회의록은 별도 배포 절차를 기록한다.';
+  const source = await createDecision(request, documentProject.id, sourceTitle, {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: originalText }] }],
+  });
+  const title = `프로젝트 결정 후속 검증 ${suffix}`;
+  const ticketResponse = await request.post('/api/issues', { data: {
+    projectId: targetProject.id, title, assigneeId: firstAssignee.id, dueDate: '2027-08-14', endDate: '2027-08-24',
+  } });
+  expect(ticketResponse.status(), await ticketResponse.text()).toBe(201);
+  const issue = await ticketResponse.json() as Issue;
+
+  try {
+    const linked = await request.post(`/api/documents/${source.id}/decision-links`, { data: {
+      requestId: randomUUID(), expectedDocumentVersion: source.version, issueId: issue.id,
+      sourceSelection: { from: 1, to: originalText.length + 1, text: originalText },
+    } });
+    expect(linked.status(), await linked.text()).toBe(201);
+    const { link } = await linked.json() as DocumentIssueLinkResult;
+    const revised = await request.patch(`/api/documents/${source.id}`, { data: {
+      expectedVersion: source.version, title: currentTitle,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: revisedText }] }] },
+    } });
+    expect(revised.ok(), await revised.text()).toBeTruthy();
+
+    const sourcePath = `/api/projects/${targetProject.id}/decision-follow-ups/${link.id}/source`;
+    const revisionPath = `/api/documents/${source.id}/include-revisions/${link.documentSource?.revisionId}`;
+    const reads: string[] = [];
+    page.on('request', event => {
+      const path = new URL(event.url()).pathname;
+      if (path === sourcePath || path === revisionPath) reads.push(path);
+    });
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${targetProject.id}/reports`);
+    await page.getByRole('tab', { name: '결정 후속 업무', exact: true }).click();
+    const report = page.getByRole('tabpanel', { name: '결정 후속 업무', exact: true });
+    const search = report.getByRole('searchbox', { name: '결정 후속 업무 검색', exact: true });
+    const status = report.getByRole('combobox', { name: '결정 후속 업무 상태', exact: true });
+    await expect(status).toHaveValue('open');
+    await search.fill(sourceTitle);
+    await status.selectOption('all');
+    await report.getByRole('button', { name: '조건 적용', exact: true }).click();
+    const row = report.getByRole('article', { name: `${issue.key} 결정 후속 업무`, exact: true });
+    await expect(row).toContainText(currentTitle);
+    expect(new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('q')).toBe(sourceTitle);
+    expect(new URL(page.url()).hash).toContain('/reports/decision-follow-ups');
+    expect(reads).toEqual([]);
+    await expect(report.locator('time[datetime="2027-08-14"]')).toBeVisible();
+
+    const evidence = report.getByRole('button', { name: `${issue.key} 결정 근거 열기`, exact: true });
+    const frozenRequest = page.waitForResponse(response => new URL(response.url()).pathname === revisionPath);
+    await evidence.click();
+    expect((await frozenRequest).ok()).toBeTruthy();
+    await expect(report.locator('[data-document-excerpt-start]')).toHaveText(originalText);
+    await expect(report.getByText(revisedText, { exact: true })).toHaveCount(0);
+    expect([...reads].sort()).toEqual([sourcePath, revisionPath].sort());
+    await report.getByRole('button', { name: `${issue.key} 결정 근거 접기`, exact: true }).click();
+
+    const applied = new URL(page.url()).hash;
+    await page.reload();
+    await expect(search).toHaveValue(sourceTitle);
+    await expect(status).toHaveValue('all');
+    const openIssue = report.getByRole('button', { name: `${issue.key} 업무 열기`, exact: true });
+    await openIssue.click();
+    const ticket = page.getByRole('dialog', { name: title, exact: true });
+    await expect(ticket).toBeVisible();
+    expect(new URL(page.url()).hash).toContain('/reports/decision-follow-ups?');
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(openIssue).toBeFocused();
+    expect(new URL(page.url()).hash).toBe(applied);
+
+    await openIssue.click();
+    await ticket.getByRole('combobox', { name: '상태', exact: true }).selectOption('done');
+    await ticket.getByRole('combobox', { name: '담당자', exact: true }).selectOption(nextAssignee.id);
+    await ticket.getByLabel('목표 마감일', { exact: true }).fill('2027-08-18');
+    const updated = page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${issue.id}` && response.request().method() === 'PATCH');
+    await ticket.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    expect((await updated).ok()).toBeTruthy();
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(row.getByText(nextAssignee.name, { exact: true })).toBeVisible();
+    await expect(report.locator('time[datetime="2027-08-18"]')).toBeVisible();
+    await status.selectOption('closed');
+    await report.getByRole('button', { name: '조건 적용', exact: true }).click();
+    await expect(openIssue).toBeVisible();
+    await expect(report.getByText('완료', { exact: true })).toBeVisible();
+    const bounds = await report.boundingBox();
+    expect(bounds?.x).toBeGreaterThanOrEqual(0);
+    expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(360);
+
+    const deleted = await request.delete(`/api/documents/${source.id}`);
+    expect(deleted.ok(), await deleted.text()).toBeTruthy();
+    const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+    try {
+      const previousReads = reads.length;
+      const missing = page.waitForResponse(response => new URL(response.url()).pathname === sourcePath);
+      await evidence.click();
+      expect((await missing).status()).toBe(404);
+      await expect(report.getByRole('alert')).toContainText('고정 버전을 찾을 수 없습니다.');
+      expect(reads.slice(previousReads)).toEqual([sourcePath]);
+    } finally {
+      await request.delete(`/api/trash/${trashEntryId}`);
+    }
+  } finally {
+    for (const resource of [`issues/${issue.id}`, `documents/${source.id}`]) {
+      const deleted = await request.delete(`/api/${resource}`);
+      if (deleted.ok()) {
+        const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+  }
+});

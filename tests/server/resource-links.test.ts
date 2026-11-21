@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, DocPage, DocumentIssueLinkResult, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocumentIssueLinkResult, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const project = 'project-neo';
 const outsideProject = 'project-team';
@@ -17,6 +17,7 @@ const publicLinks = '/v1/resource-links';
 const issueLinks = (issue: Issue) => `/v1/issues/${issue.id}/resource-links`;
 const documentLinks = (document: DocPage) => `/v1/documents/${document.id}/resource-links`;
 const pair = (issue: Issue, document: DocPage) => ({ issueId: issue.id, documentId: document.id });
+const paragraph = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
 
 async function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-resource-links-'));
@@ -48,11 +49,18 @@ async function fixture(t: TestContext) {
     assert.equal(response.status, 201);
     return (await response.json() as ApiKeyCreated).token;
   }
-  const issue = (title: string, projectId = project) => call<Issue>('/issues', 201, 'POST', { title, projectId });
+  const issue = (title: string, projectId = project, values?: Partial<Issue>) => call<Issue>('/issues', 201, 'POST', { ...values, title, projectId });
   const document = (title: string, projectId: string | null = project, content?: RichContent) =>
     call<DocPage>('/documents', 201, 'POST', { title, projectId, content });
   const connect = (source: Issue, target: DocPage) => call<ResourceLink>('/resource-links', 201, 'POST', pair(source, target));
-  return { call, key, issue, document, connect };
+  async function cite(issue: Issue, document: DocPage, text: string) {
+    const { link } = await call<DocumentIssueLinkResult>(`/documents/${document.id}/decision-links`, 201, 'POST', {
+      requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id,
+      sourceSelection: { from: 1, to: text.length + 1, text },
+    });
+    return link;
+  }
+  return { call, key, issue, document, connect, cite };
 }
 
 test('resource-link reads expose only active pairs whose endpoints are both allowed', async t => {
@@ -162,4 +170,110 @@ test('public reads and replay hide pinned decision text, and public deletion pre
 
   await f.call(`/resource-links/${link.id}`, 200, 'DELETE');
   assert.deepEqual(await f.call(documentLinks(document), 200, 'GET', undefined, reader), []);
+});
+
+test('project decision follow-ups read the frozen source with current ticket metadata and scope both endpoints', async t => {
+  const f = await fixture(t);
+  const sourceText = '정확한 승인 근거만 보존한다.';
+  const own = await f.document('Frozen Source %_ Original', project, paragraph(sourceText));
+  const cross = await f.document('Other Project Decision', outsideProject, paragraph(sourceText));
+  const common = await f.document('Common Decision', null, paragraph(sourceText));
+  const ordinary = await f.document('Ordinary Document', project, paragraph(sourceText));
+  const ticket = await f.issue('Verification ticket Title', project, { assigneeId: owner, dueDate: '2027-03-04', endDate: '2027-03-10' });
+  const otherTicket = await f.issue('Outside verification ticket', outsideProject);
+  const oldRelation = await f.connect(ticket, own);
+  const ownLink = await f.cite(ticket, own, sourceText);
+  const crossLink = await f.cite(ticket, cross, sourceText);
+  const commonLink = await f.cite(ticket, common, sourceText);
+  const otherLink = await f.cite(otherTicket, own, sourceText);
+  await f.connect(ticket, ordinary);
+  assert.equal(ownLink.id, oldRelation.id);
+  assert.equal(ownLink.kind, oldRelation.kind);
+
+  const path = `/projects/${project}/decision-follow-ups`;
+  const sourcePath = (link: ResourceLink) => `${path}/${link.id}/source`;
+  const page = (query: Record<string, string> = {}, token?: string) =>
+    f.call<DecisionFollowUpPage>(`${token ? '/v1' : ''}${path}?${new URLSearchParams(query)}`, 200, 'GET', undefined, token);
+  const ids = (result: DecisionFollowUpPage) => new Set(result.items.map(row => row.linkId));
+  const exact = await page({ q: 'fRoZeN SoUrCe %_' });
+  assert.equal(exact.total, 1);
+  assert.deepEqual(ids(exact), new Set([ownLink.id]));
+  assert.equal((await page({ q: sourceText })).total, 0);
+  assert.equal((await page({ q: ticket.key.toLowerCase(), assigneeId: owner })).total, 3);
+  assert.equal((await page({ assigneeId: 'unassigned' })).total, 0);
+  assert.equal((await page({ status: 'closed' })).total, 0);
+
+  const revised = await f.call<DocPage>(`/documents/${own.id}`, 200, 'PATCH', {
+    expectedVersion: own.version, title: 'Renamed current document', content: paragraph('나중에 다시 작성한 현재 본문.'),
+  });
+  const expectedSource = ownLink.documentSource!;
+  const current = (await page({ q: revised.title })).items[0];
+  assert.deepEqual(current.document, { id: own.id, projectId: project, title: revised.title });
+  assert.deepEqual({ ...current.source, createdAt: undefined }, {
+    revisionId: expectedSource.revisionId, version: own.version, title: own.title, from: 1, to: sourceText.length + 1, createdAt: undefined,
+  });
+  assert.ok(Number.isFinite(Date.parse(current.source.createdAt)));
+  assert.ok(!JSON.stringify(current).includes(sourceText));
+  assert.deepEqual(await f.call<DecisionFollowUpSource>(sourcePath(ownLink)), { linkId: ownLink.id, documentId: own.id, source: expectedSource });
+  assert.deepEqual(ids(await page()), new Set([ownLink.id, crossLink.id, commonLink.id]));
+  await f.call(sourcePath(otherLink), 404);
+  await f.call(`${path}?q=x&q=y`, 400);
+  await f.call(`${path}?offset=-1`, 400);
+  await f.call(`${path}?status=done`, 400);
+
+  const scoped = await f.key('read');
+  const both = await f.key('read', [project, outsideProject]);
+  const workspace = await f.key('read', null);
+  const outside = await f.key('read', [outsideProject]);
+  await f.call(`/v1${path}`, 401);
+  await f.call(`/v1${path}`, 403, 'GET', undefined, outside);
+  assert.deepEqual(ids(await page({}, scoped)), new Set([ownLink.id]));
+  assert.equal((await page({ q: cross.title }, scoped)).total, 0);
+  assert.deepEqual(ids(await page({}, both)), new Set([ownLink.id, crossLink.id]));
+  assert.deepEqual(ids(await page({}, workspace)), new Set([ownLink.id, crossLink.id, commonLink.id]));
+  await f.call(`/v1${sourcePath(crossLink)}`, 403, 'GET', undefined, scoped);
+  await f.call(`/v1${sourcePath(commonLink)}`, 403, 'GET', undefined, both);
+  assert.deepEqual(await f.call<DecisionFollowUpSource>(`/v1${sourcePath(crossLink)}`, 200, 'GET', undefined, both), {
+    linkId: crossLink.id, documentId: cross.id, source: crossLink.documentSource,
+  });
+
+  const changed = await f.call<Issue>(`/issues/${ticket.id}`, 200, 'PATCH', {
+    expectedVersion: ticket.version, status: 'done', assigneeId: null, dueDate: null,
+  });
+  assert.equal((await page()).total, 0);
+  const closed = await page({ status: 'closed', assigneeId: 'unassigned' });
+  assert.equal(closed.total, 3);
+  assert.ok(closed.items.every(row => row.issue.statusCategory === 'done' && row.issue.deadline === '2027-03-10' && row.issue.deadlineSource === 'endDate'));
+  const deletedDoc = await f.call<{ trashEntryId: string }>(`/documents/${own.id}`, 200, 'DELETE', { expectedVersion: revised.version });
+  await f.call(sourcePath(ownLink), 404);
+  assert.equal((await page({ status: 'all' })).total, 2);
+  await f.call(`/trash/${deletedDoc.trashEntryId}/restore`, 200, 'POST');
+  assert.equal((await page({ status: 'all' })).total, 3);
+  const deletedIssue = await f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 200, 'DELETE', { expectedVersion: changed.version });
+  await f.call(sourcePath(ownLink), 404);
+  assert.equal((await page({ status: 'all' })).total, 0);
+  await f.call(`/trash/${deletedIssue.trashEntryId}/restore`, 200, 'POST');
+  assert.deepEqual(await f.call<DecisionFollowUpSource>(sourcePath(ownLink)), { linkId: ownLink.id, documentId: own.id, source: expectedSource });
+  assert.equal((await page({ status: 'all' })).total, 3);
+});
+
+test('decision follow-up pages use deadline priority and stable link ordering at the page boundary', async t => {
+  const f = await fixture(t);
+  const sourceText = '페이지 순서 검증에 쓰는 문장';
+  const source = await f.document('Paging Decision', project, paragraph(sourceText));
+  const first = await f.issue('Decision paging first', project, { dueDate: '2027-01-01', endDate: '2027-02-05' });
+  const last = await f.issue('Decision paging undated', project);
+  const firstId = (await f.cite(first, source, sourceText)).id;
+  const lastId = (await f.cite(last, source, sourceText)).id;
+  const ids: string[] = [];
+  for (let index = 0; index < 20; index++) {
+    const issue = await f.issue(`Decision paging tie ${index}`, project, { endDate: '2027-01-03' });
+    ids.push((await f.cite(issue, source, sourceText)).id);
+  }
+  const route = `/projects/${project}/decision-follow-ups?q=Decision+paging`;
+  const page = await f.call<DecisionFollowUpPage>(route);
+  const next = await f.call<DecisionFollowUpPage>(`${route}&offset=20`);
+  assert.deepEqual([page.limit, page.offset, page.total, next.offset, next.total], [20, 0, 22, 20, 22]);
+  assert.deepEqual([...page.items, ...next.items].map(row => row.linkId), [firstId, ...ids.sort(), lastId]);
+  assert.deepEqual((await f.call<DecisionFollowUpPage>(route)).items, page.items);
 });

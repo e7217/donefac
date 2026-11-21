@@ -57,6 +57,7 @@ import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
 import { TimeReservationError, TimeReservationService } from './time-reservations.js';
 import { registerTeamOverviewRoutes } from './team-overview.js';
+import { DecisionFollowUpError, registerDecisionFollowUpRoutes } from './decision-follow-ups.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { registerDeliveryBlockerRoutes } from './delivery-blocker-routes.js';
@@ -897,6 +898,12 @@ export function createApp(options: {
   registerTeamOverviewRoutes(app,{
     store,timeReservations,
     snapshot:()=>({projects:store.all('projects'),issues:store.all('issues'),workflows:workflows.snapshot(),gitlabLinks:store.all('gitlab_links')}),
+  });
+  registerDecisionFollowUpRoutes(app, {
+    store,
+    workflow: projectId => workflows.get(projectId),
+    projectScope: req => apiKeys.projectScope(req),
+    authorizeDocumentBody: (req, content) => apiKeys.authorizeDocumentBody(req, content),
   });
   app.get('/api/atlassian-links',(req,res)=>{
     if(Object.keys(req.query).some(key=>key!=='targetType'&&key!=='targetId'))return fail('기존 도구 링크 조회 조건을 확인해 주세요.');
@@ -2265,6 +2272,7 @@ export function createApp(options: {
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
+    if(error instanceof DecisionFollowUpError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentTreeMoveError)return res.status(error.status).json({error:error.message});
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});

@@ -24,6 +24,7 @@ curl --fail-with-body \
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
 | `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
+| `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
@@ -235,6 +236,14 @@ curl --fail-with-body \
 브라우저의 `POST /api/documents/:id/decision-links`에 `{requestId, expectedDocumentVersion, issueId, sourceSelection}`을 보낸다. `requestId`는 UUID v4다. `sourceSelection`은 후속 업무와 같은 `{from,to,text}` 형식이며, 서버는 현재 저장 버전의 선택 범위를 읽어 발췌를 확인한다. 기존 문서 연결이 있으면 ID와 관계 유형을 유지하면서 근거를 추가한다. 연결이 없으면 `결정 근거` 관계를 만들고, 원문 저장본이 필요하면 같은 트랜잭션에 기록한다.
 
 발췌를 처음 저장하면 `201`과 `{issue,link,duplicate:false}`를 반환한다. 작업자와 요청 내용이 같은 재시도, 또는 같은 저장본의 동일한 발췌는 `200`과 `duplicate:true`를 반환한다. 저장된 버전이나 선택한 텍스트가 다른 경우, 또는 문서와 티켓 사이에 다른 결정 근거가 이미 있는 경우 `409`를 반환한다. 연결을 해제한 뒤 이전 요청을 보내면 `409`를 반환한다. 자체 백업 형식 48은 기존 업무에 저장된 발췌와 원문 저장본을 보존하고, 복원할 때 재시도 기록을 초기화한다.
+
+## 프로젝트 결정 후속 업무
+
+`GET /api/projects/:id/decision-follow-ups`와 `/api/v1`의 같은 경로는 결정 근거가 연결된 현재 티켓을 프로젝트 기준으로 읽는다. `status`는 `open`(기본값), `closed`, `all` 중 하나다. `assigneeId`에는 팀원 ID 또는 `unassigned`를 쓴다. `q`는 최대 160 UTF-16 코드 단위의 검색어로 현재 업무 키·제목과 현재·고정 문서 제목을 대소문자 없이 비교한다. `offset`은 기본 0이며 정수 0~1,000,000을 받는다.
+
+`{projectId,total,offset,limit,items}`에 조건을 통과한 연결을 20건씩 반환한다. 목표 마감일 또는 계획 종료일이 이른 업무를 먼저 보여준다. 날짜가 없는 업무는 뒤에 두고 같은 날짜에서는 원문 저장 시각 내림차순, 연결 ID 오름차순으로 정렬한다. 각 행에는 `linkId`, 현재 `issue`와 `document`, 고정 `source`의 버전 ID·버전·당시 제목·시각·선택 위치를 제공한다. 휴지통에서 업무나 문서를 복원하면 현재 활성 연결을 다시 조회할 수 있다.
+
+`GET /api/projects/:id/decision-follow-ups/:linkId/source`와 `/api/v1`의 같은 경로는 현재 연결과 고정 저장본의 발췌를 다시 대조해 `{linkId,documentId,source}`를 반환한다. `source`의 `{revisionId,from,to,text}`를 기존 고정 원문 뷰어에 전달할 수 있다. 범위 제한 키는 업무와 원본 문서 양쪽 프로젝트를 포함해야 한다. 공통 문서는 전체 프로젝트 키로 읽는다. 목록과 합계에는 허용된 행만 포함되며, 발췌 조회에는 원문 저장본의 본문 접근 범위도 적용한다.
 
 ## 문장 댓글
 

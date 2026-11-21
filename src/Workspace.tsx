@@ -15,6 +15,7 @@ import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from 
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, patch, post, relativeTime, setActor } from './lib/api';
+import { decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
@@ -54,6 +55,7 @@ type WorkspaceRoute = {
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   blockerScope?: DeliveryBlockerDraftScope | null;
+  decisionFollowUpScope?: DecisionFollowUpScope | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
   documentCommentId?: string | null;
@@ -70,7 +72,7 @@ type WorkspaceCommentFocus = {
 const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 function routeHash(route: WorkspaceRoute) {
-  const reportDetail = route.blockerScope ? 'blockers' : route.reportId;
+  const reportDetail = route.decisionFollowUpScope ? 'decision-follow-ups' : route.blockerScope ? 'blockers' : route.reportId;
   const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? reportDetail :
     (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
   const query = new URLSearchParams();
@@ -79,6 +81,9 @@ function routeHash(route: WorkspaceRoute) {
   if (route.view === 'reports' && route.blockerScope) {
     if (route.blockerScope.savedViewId) query.set('savedView', route.blockerScope.savedViewId);
     if (route.blockerScope.reason) query.set('reason', route.blockerScope.reason);
+  }
+  if (route.view === 'reports' && route.decisionFollowUpScope) {
+    for (const [name, value] of decisionFollowUpParameters(route.decisionFollowUpScope)) query.set(name, value);
   }
   if (route.view === 'gantt' && route.ganttFocusIssueId) {
     query.set('focusIssue', route.ganttFocusIssueId);
@@ -119,7 +124,8 @@ function sameBlockerScope(a?: DeliveryBlockerDraftScope | null, b?: DeliveryBloc
 }
 function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'reports' && next.view === 'reports' && previous.projectId === next.projectId &&
-    (previous.reportId ?? null) === (next.reportId ?? null) && sameBlockerScope(previous.blockerScope, next.blockerScope);
+    (previous.reportId ?? null) === (next.reportId ?? null) && sameBlockerScope(previous.blockerScope, next.blockerScope) &&
+    sameDecisionFollowUpScope(previous.decisionFollowUpScope, next.decisionFollowUpScope);
 }
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next);
@@ -175,6 +181,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     ...(isRelationId(blockerView) ? { savedViewId: blockerView } : {}),
     ...(blockerReason ? { reason: blockerReason } : {}),
   } : null;
+  const decisionFollowUpScope = view === 'reports' && projectId === parts[0] && parts[2] === 'decision-follow-ups'
+    ? readDecisionFollowUpScope(parameters, id => snapshot.users.some(user => user.id === id)) : null;
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
@@ -203,7 +211,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
     issueMetric, issueOffset,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -219,6 +227,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [documentLabel, setDocumentLabel] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [blockerScope, setBlockerScope] = useState<DeliveryBlockerDraftScope | null>(null);
+  const [decisionFollowUpScope, setDecisionFollowUpScope] = useState<DecisionFollowUpScope | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
@@ -332,6 +341,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       return route.view === 'documents' && route.documentId === focus.targetId && !route.issueId && !route.publication ? focus : null;
     });
     setBlockerScope(previousScope => sameBlockerScope(previousScope, route.blockerScope) ? previousScope : route.blockerScope ?? null);
+    setDecisionFollowUpScope(scope => sameDecisionFollowUpScope(scope, route.decisionFollowUpScope) ? scope : route.decisionFollowUpScope ?? null);
     setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
@@ -406,6 +416,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
       blockerScope:view === 'reports' ? current?.blockerScope : null,
+      decisionFollowUpScope:view === 'reports' ? current?.decisionFollowUpScope : null,
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
       ganttFocusDate:sameProject ? ganttFocusDate : null,
       publicationTab, issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
@@ -420,6 +431,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const closeIssuePanel = (id: string) => {
     const current = acceptedRouteRef.current;
     if (current?.issueId === id) requestRoute({ ...current, issueId: null, documentPreviewId: null });
+  };
+  const changeDecisionFollowUpScope = (scope: DecisionFollowUpScope | null) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null, decisionFollowUpScope: scope });
   };
   const previewIssueDocument = (id: string) => {
     const current = acceptedRouteRef.current;
@@ -601,7 +616,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
-        {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}><Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope}/></Suspense>}
+        {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>
+          <Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope} decisionFollowUpScope={decisionFollowUpScope}
+            onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} issueOverlayOpen={reportIssueOpen}/>
+        </Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
           onCopyCommentLink={copyDocumentCommentLink}

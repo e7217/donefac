@@ -16,14 +16,22 @@ import type {
 import { projectIssueTypes } from '../../shared/issue-schema';
 import { isCalendarDate } from '../../shared/calendar';
 import { api } from '../lib/api';
+import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, type DecisionFollowUpScope } from '../lib/decision-follow-up-route';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { WorklogReport } from './WorklogReport';
 import { FieldBreakdownReport } from './FieldBreakdownReport';
 import { DeliveryBlockersReport } from './DeliveryBlockersReport';
+import { DecisionFollowUpsReport } from './DecisionFollowUpsReport';
 import { reportDuration, StatusDurationReport } from './ReportStatusDuration';
 import './reports.css';
 
-type Props = FeatureProps & { snapshotId?: string | null; initialBlockerScope?: DeliveryBlockerDraftScope | null };
+type Props = FeatureProps & {
+  snapshotId?: string | null;
+  initialBlockerScope?: DeliveryBlockerDraftScope | null;
+  decisionFollowUpScope: DecisionFollowUpScope | null;
+  onChangeDecisionFollowUpScope: (scope: DecisionFollowUpScope | null) => boolean;
+  issueOverlayOpen: boolean;
+};
 const CATEGORIES: StatusCategory[] = ['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'];
 const META: Record<StatusCategory, { label: string; color: string }> = {
   backlog: { label: '백로그', color: '#8a98a7' },
@@ -106,9 +114,10 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [view, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
+  const [standardView, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
+  const view = props.decisionFollowUpScope ? 'decisions' : standardView;
   const [creating, setCreating] = useState(false),
     [createError, setCreateError] = useState('');
   const active = useRef(true),
@@ -325,7 +334,13 @@ function ProjectReports(props: Props) {
     );
   function showView(next: typeof view) {
     if (next === view) return;
-    if ([view, next].some(item => item === 'worklogs' || item === 'fields') &&
+    if (next === 'decisions') {
+      props.onChangeDecisionFollowUpScope(DEFAULT_DECISION_FOLLOW_UP_SCOPE);
+      return;
+    }
+    if (view === 'decisions') {
+      if (!props.onChangeDecisionFollowUpScope(null)) return;
+    } else if ([view, next].some(item => item === 'worklogs' || item === 'fields') &&
         !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setView(next);
   }
@@ -390,6 +405,16 @@ function ProjectReports(props: Props) {
           onClick={() => showView('blockers')}
         >
           진행 차단
+        </button>
+        <button
+          role="tab"
+          id="report-decisions-tab"
+          aria-controls="report-decisions-panel"
+          aria-selected={view === 'decisions'}
+          disabled={creating}
+          onClick={() => showView('decisions')}
+        >
+          결정 후속 업무
         </button>
       </div>
       {view === 'live' ? (
@@ -553,6 +578,10 @@ function ProjectReports(props: Props) {
       ) : view === 'blockers' ? (
         <section role="tabpanel" id="report-blockers-panel" aria-labelledby="report-blockers-tab">
           <DeliveryBlockersReport {...props} initialScope={props.initialBlockerScope ?? undefined} />
+        </section>
+      ) : props.decisionFollowUpScope ? (
+        <section role="tabpanel" id="report-decisions-panel" aria-labelledby="report-decisions-tab">
+          <DecisionFollowUpsReport {...props} scope={props.decisionFollowUpScope} onScopeChange={props.onChangeDecisionFollowUpScope} />
         </section>
       ) : (
         <section role="tabpanel" id="report-saved-panel" aria-labelledby="report-saved-tab">
