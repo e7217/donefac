@@ -100,6 +100,7 @@ test('issue paste reviews ordinary fields without side effects and applies the s
   assert.deepEqual(repeated.result, { issues: applied.result.issues, duplicate: true });
   const [first, second] = applied.result.issues;
   assert.deepEqual([first.key, second.key], [`NEO-${before[0]}`, `NEO-${before[0] + 1}`]);
+  assert.deepEqual([first.reporterId, second.reporterId], [actorId, actorId]);
   assert.equal(first.endDate, '2026-12-04');
   assert.equal(second.endDate, null);
   assert.equal(second.assigneeId, assigneeId);

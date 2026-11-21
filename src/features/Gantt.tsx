@@ -47,6 +47,7 @@ import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
+import { IssueReporterSelect } from './IssueReporterSelect';
 import './issues.css';
 import './gantt.css';
 
@@ -1772,6 +1773,7 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   const [type, setType] = useState(() => initialIssueType(data, projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || ''));
   const [valuesByProject, setValuesByProject] = useState<Record<string, Record<string, CustomFieldValue>>>({});
   const [assigneeId, setAssigneeId] = useState('');
+  const [reporterId, setReporterId] = useState<Issue['reporterId']>();
   const [selectedProject, setSelectedProject] = useState(projects.some(project => project.id === projectId) ? projectId : projects[0]?.id || '');
   const [plansByProject, setPlansByProject] = useState<Record<string, Partial<Record<PlanningKind, string | null>>>>(() =>
     initialPlan ? { [initialPlan.projectId]: { [initialPlan.kind]:initialPlan.id } } : {});
@@ -1807,6 +1809,7 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   function creationInput(form: FormData) {
     return {
       projectId: selectedProject, title: title.trim(), type, status: initialStatus, assigneeId: assigneeId || null,
+      ...(reporterId !== undefined ? { reporterId } : {}),
       startDate: startDate || null, endDate: endDate || null, description: form.get('description') || '',
       collaboratorIds: form.getAll('collaboratorIds'), dueDate: form.get('dueDate') || null,
       estimate: form.get('estimate') ? Number(form.get('estimate')) : null,
@@ -1871,6 +1874,8 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
         <label className="issue-form-label">시작일<input aria-label="추가할 업무 시작일" className="field" type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></label>
         <label className="issue-form-label">종료일<input aria-label="추가할 업무 종료일" className="field" type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></label>
         {chooseProject && <label className="issue-form-label">프로젝트<select aria-label="추가할 업무 프로젝트" className="field" value={selectedProject} onChange={event => { setSelectedProject(event.target.value); setType(initialIssueType(data, event.target.value)); }} required>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
+        <label className="issue-form-label">요청자<IssueReporterSelect value={reporterId === undefined ? actorId || undefined : reporterId}
+          users={users} ariaLabel="추가할 업무 요청자" onChange={value => setReporterId(value === actorId ? undefined : value)} /></label>
         {calendarMath && <div className="issue-grid-wide"><WorkingDayRangePicker calendarMath={calendarMath} startDate={startDate || null} endDate={endDate || null}
           onApply={applyCalculatedDates} disabled={fieldsLocked} /></div>}
       </div>

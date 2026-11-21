@@ -15,6 +15,7 @@ import { newRequestId } from '../lib/request-id';
 import { CustomFields, initialIssueType, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect } from './PlanningSelectors';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
+import { IssueReporterSelect } from './IssueReporterSelect';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
@@ -106,6 +107,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [description, setDescription] = useState(cloneIssue?.description ?? '');
+  const [reporterId, setReporterId] = useState<Issue['reporterId']>();
   const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
     if (parentIssue) return parentIssue.projectId;
@@ -257,6 +259,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       projectId: selectedProject, title: String(form.get('title') || '').trim(), description,
       ...(descriptionFormat === 'markdown' || cloneIssue?.descriptionFormat === 'markdown' ? { descriptionFormat } : {}),
       type: selectedType, status: selectedStatus, priority: form.get('priority'), assigneeId: form.get('assigneeId') || null,
+      ...(reporterId !== undefined ? { reporterId } : {}),
       startDate: form.get('startDate') || null, endDate: form.get('endDate') || null, dueDate: form.get('dueDate') || null,
       estimate: form.get('estimate') ? Number(form.get('estimate')) : null,
       plannedEffortMinutes: form.get('plannedEffortMinutes') ? Number(form.get('plannedEffortMinutes')) : null,
@@ -622,6 +625,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               <label className="issue-form-label">우선순위<select name="priority" className="field" defaultValue={cloneIssue?.priority ?? 'medium'}>{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
               <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
               {!successorMode && dateFields}
+              <label className="issue-form-label">요청자<IssueReporterSelect value={reporterId === undefined ? actorId || undefined : reporterId}
+                users={data.users} onChange={value => setReporterId(value === actorId ? undefined : value)} /></label>
             </div>
             {!successorMode && dateRangePicker}
             {reviewedClone && <div><button type="button" className="btn" disabled={needsCloneReview || !(reviewedClone.startDate || reviewedClone.endDate || reviewedClone.dueDate)}

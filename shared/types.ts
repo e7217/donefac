@@ -233,7 +233,7 @@ export interface MigrationAppendConfiguration {
   refreshAttachments?: true;
   refreshRelations?: true;
 }
-export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
+export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'reporterId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
 export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>> & {
   descriptionFormat?: IssueDescriptionFormat;
@@ -595,6 +595,7 @@ export interface Issue {
   id: string; key: string; projectId: string; title: string; description: string;
   descriptionFormat?: IssueDescriptionFormat;
   type: string; status: IssueStatus; priority: Priority; assigneeId: string | null;
+  reporterId?: string | null;
   collaboratorIds: string[]; parentId: string | null; labels: string[];
   startDate: string | null; endDate: string | null; dueDate: string | null;
   estimate: number | null; cycle: string | null; module: string | null; release: string | null;

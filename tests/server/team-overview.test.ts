@@ -165,6 +165,7 @@ test('team overview aggregates custom active workflows and effective deadlines; 
 test('team overview independently pages the chosen issue metric by deadline, priority and numeric issue key', async t => {
   const f = await fixture(t);
   const first = await f.issue('날짜를 먼저 표시', { priority: 'low', endDate: reference });
+  assert.equal(first.reporterId, f.member.id);
   const urgent = await f.issue('날짜 없는 긴급 업무', { priority: 'urgent' });
   const undated = [];
   for (let index = 0; index < 10; index++) undated.push(await f.issue(`날짜 없는 업무 ${index}`));

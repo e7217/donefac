@@ -345,6 +345,8 @@ export function createApp(options: {
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
     if(typeof i.status!=='string'||!Object.hasOwn(PRIORITY,i.priority))fail('상태 또는 우선순위가 올바르지 않습니다.');
     if(i.assigneeId!==null)get('users',i.assigneeId);
+    if (i.reporterId !== undefined && i.reporterId !== null &&
+        (typeof i.reporterId !== 'string' || !store.get<User>('users', i.reporterId))) fail('등록된 요청자를 선택해 주세요.');
     if(!Array.isArray(i.collaboratorIds)||!i.collaboratorIds.every(x=>typeof x==='string'))fail('협력자를 확인해 주세요.');
     i.collaboratorIds=[...new Set(i.collaboratorIds)];i.collaboratorIds.forEach(id=>get('users',id));
     if(!Array.isArray(i.labels)||!i.labels.every(x=>typeof x==='string'&&x.length<=60))fail('라벨을 확인해 주세요.');i.labels=[...new Set(i.labels)];
@@ -1064,13 +1066,18 @@ export function createApp(options: {
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
   const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('다른 프로젝트로 옮기려면 업무 상세에서 프로젝트 이동 미리보기를 사용해 주세요.');
-    const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
+    const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
     const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
     return {...prepareIssueChange(old,proposed,options),fields};
   };
   const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,fields}:ReturnType<typeof prepareIssueUpdate>, history?: { action: string; detail: string }) => {
     const actorId=actor(req);
-    store.put('issues',issue);activity(req,'issue',issue.id,history?.action ?? '티켓 변경',history?.detail ?? `${issue.key}: ${fields.join(', ')}`);
+    let detail = history?.detail ?? `${issue.key}: ${fields.join(', ')}`;
+    if (old.reporterId !== issue.reporterId) {
+      const reporterName = (id: Issue['reporterId']) => id ? get<User>('users', id).name : id === null ? '미지정' : '확인되지 않음';
+      detail += ` · 요청자 ${reporterName(old.reporterId)} → ${reporterName(issue.reporterId)}`;
+    }
+    store.put('issues',issue);activity(req,'issue',issue.id,history?.action ?? '티켓 변경',detail);
     if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actorId,'issue-assigned',[issue.assigneeId],issue.updatedAt);
     commitIssueAssignment(decision,old,issue,actorId,'user');
     return issue;
@@ -1226,7 +1233,7 @@ export function createApp(options: {
     res.json(result);
   });
   const prepareIssueCreation=(input:Record<string,unknown>):Issue=>{
-    const timestamp=now();const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
+    const timestamp=now();const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
     const projectId=text(input.projectId,'프로젝트',200);
     const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
     const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
@@ -1235,13 +1242,13 @@ export function createApp(options: {
   };
   // The caller owns the transaction, including any links created with the issue.
   const commitIssueCreation=(req:Request,i:Issue):Issue=>{
-    const timestamp=i.createdAt;
+    const timestamp=i.createdAt, actorId=actor(req);
+    if (i.reporterId === undefined) i.reporterId = actorId;
     const p=get<Project>('projects',i.projectId), row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as {next_number:number}|undefined;
     const num=row?.next_number||1;i.key=`${p.key}-${num}`;
     store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);
     if(done(i))i.completedAt=timestamp;
     store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);
-    const actorId=actor(req);
     if(i.assigneeId)notifyIssue(i,actorId,'issue-assigned',[i.assigneeId],timestamp);
     notifyIssue(i,actorId,'issue-created',projectSubscribers(i).filter(id=>id!==i.assigneeId),timestamp);
     return i;
@@ -2263,6 +2270,12 @@ export function createApp(options: {
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(trashItemComments)];
     const allImportedComments=[...(data.comments as Comment[]),...archiveComments];
     const importedUserIds = new Set((data.users as User[]).map(user => user.id));
+    for (const issue of allImportedIssues) {
+      if (Object.hasOwn(issue, 'reporterId') && issue.reporterId !== null &&
+          (typeof issue.reporterId !== 'string' || !importedUserIds.has(issue.reporterId))) {
+        fail('백업의 업무에서 지정한 요청자를 찾을 수 없습니다.');
+      }
+    }
     for (const { body, mentions } of allImportedComments) {
       if (data.schemaVersion < 71 && mentions !== undefined && (!Array.isArray(mentions) || mentions.length)) {
         fail('댓글 멘션을 포함한 백업은 schemaVersion 71이 필요합니다.');

@@ -14,7 +14,7 @@ test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한�
   expect(otherActor).toBeDefined();
 
   async function create(label: string, data: Partial<Issue>) {
-    const created = await request.post('/api/issues', { data: { title: `${prefix} ${label}`, ...data } });
+    const created = await request.post('/api/issues', { data: { title: `${prefix} ${label}`, reporterId: null, ...data } });
     expect(created.status()).toBe(201);
     return created.json() as Promise<Issue>;
   }
@@ -114,7 +114,7 @@ test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한�
 
     await actorPicker.selectOption(otherActor.id);
     await expect(project).toHaveValue(allProjects);
-    await expect(scope.locator('option:checked')).toHaveText('담당·협력 업무');
+    await expect(scope.locator('option:checked')).toHaveText('담당·협력·요청 업무');
     await expect(row(other)).toBeVisible();
     await expect(row(today)).toBeVisible();
     await expect(row(priorityDate)).toHaveCount(0);

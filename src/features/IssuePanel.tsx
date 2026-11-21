@@ -26,6 +26,7 @@ import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
 import { IssueProjectMove } from './IssueProjectMove';
+import { IssueReporterSelect } from './IssueReporterSelect';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
@@ -55,7 +56,7 @@ type IssuePanelProps = FeatureProps & {
 };
 
 function editableIssue(issue: Issue, labels: string) {
-  return { title: issue.title.trim(), description: issue.description, descriptionFormat: issue.descriptionFormat ?? 'plain', type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
+  return { title: issue.title.trim(), description: issue.description, descriptionFormat: issue.descriptionFormat ?? 'plain', type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, reporterId: issue.reporterId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
 function isOpenBlockerError(cause: unknown) {
@@ -418,9 +419,10 @@ function IssuePanelContent(props: IssuePanelProps) {
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError(null);
     try {
-      const { descriptionFormat, ...fields } = editableIssue(draft, labels);
+      const { descriptionFormat, reporterId, ...fields } = editableIssue(draft, labels);
       const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
+        ...(reporterId !== undefined && reporterId !== baseDraft?.reporterId ? { reporterId } : {}),
         ...(changedFormat ? { descriptionFormat } : {}) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
@@ -629,6 +631,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           <label className="issue-form-label">담당자<select aria-label="담당자" className="field" value={draft.assigneeId || ''} onChange={e => update('assigneeId', e.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
           <label className="issue-form-label">시작일<input aria-label="시작일" type="date" className="field" value={draft.startDate || ''} onChange={e => update('startDate', e.target.value || null)} /></label>
           <label className="issue-form-label">종료일<input aria-label="종료일" type="date" className="field" value={draft.endDate || ''} onChange={e => update('endDate', e.target.value || null)} /></label>
+          <label className="issue-form-label">요청자<IssueReporterSelect value={draft.reporterId} users={data.users} onChange={value => update('reporterId', value)} /></label>
           <div className="issue-grid-wide"><button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
             onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button></div>
           <label className="issue-form-label">목표 마감일<input aria-label="목표 마감일" type="date" className="field" value={draft.dueDate || ''} onChange={e => update('dueDate', e.target.value || null)} /></label>

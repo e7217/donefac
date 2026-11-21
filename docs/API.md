@@ -27,11 +27,11 @@ curl --fail-with-body \
 | `GET /decision-follow-ups` · `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 팀·프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 기본·사용자 정의 필드의 현재 값별 집계, 두 기준의 교차 집계와 해당 업무 조회 |
-| `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
+| `GET /users` | 요청자·담당자 지정에 필요한 팀원 ID·이름·색상 |
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `POST /planning-items/:id/complete/preview` · `POST /planning-items/:id/complete` | 진행 중 사이클 완료와 미완료 업무 이월 검토·적용 |
-| `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
+| `GET /issues?projectId=...&reporterId=...` · `GET /issues/:id` | 업무 조회, 선택적인 프로젝트·요청자 조건 |
 | `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
 | `GET /issues/:id/resource-links` · `GET /documents/:id/resource-links` | 업무와 문서의 직접 연결 조회 |
 | `POST /resource-links` · `DELETE /resource-links/:id` | 업무와 문서의 직접 연결 추가·일반 연결 해제 |
@@ -129,6 +129,8 @@ curl --fail-with-body \
 
 프로젝트 ID와 상태·유형·팀원·계획 ID는 조회 응답으로 확인한다. 유형·필드·선택지는 표시 이름 대신 `issue-schema`의 고유 ID를 전달한다. 기본 상태는 프로젝트 워크플로에 따르며, 같은 필수 입력·상태 전이 규칙을 적용한다.
 
+업무 생성에 `reporterId`를 생략하면 작업자를 요청자로 기록한다. 쓰기 키에서는 키의 작업자가 기본값이다. 등록된 팀원 ID로 요청자를 지정하고, `null`로 미지정을 저장할 수 있다. `PATCH`에서 필드를 생략하면 현재 값을 유지한다. 예전 업무의 응답에 필드가 없으면 요청자 기록이 확인되지 않은 상태다. `GET /api/v1/issues`의 `reporterId` 조건에 팀원 ID를 넣으면 키의 프로젝트 범위에서 해당 요청자의 업무를 반환한다.
+
 ```json
 {
   "requestId": "34ca1269-3ac2-4d0e-becb-fd6a1eba6274",
@@ -136,6 +138,7 @@ curl --fail-with-body \
   "title": "파이프라인 실패 원인 확인",
   "type": "버그",
   "assigneeId": "담당자 ID",
+  "reporterId": "요청자 ID",
   "cycleId": "사이클 ID",
   "moduleId": null,
   "releaseId": null

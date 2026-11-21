@@ -101,6 +101,83 @@ test('Jira rich descriptions survive initial HTTP apply and an accepted plain so
     [JSON.stringify(rich), plain].sort());
 });
 
+test('Jira HTTP migration projects only an explicit mapped reporter and updates it without overwriting local edits', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-jira-reporter';
+  const actorMappings: Record<string, string> = { creator: 'user-min', first: 'user-yun', second: 'user-jun' };
+  const rawActor = (accountId: string) => ({ accountId, displayName: `합성 ${accountId}` });
+  function row(id: number, updated: string, reporter: string | null | undefined) {
+    return { id: String(id), key: `OLD-${id}`, fields: {
+      project: { id: '101', key: 'OLD', name: '가상 Jira 프로젝트' }, summary: `원래 업무 ${id}`,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      created: '2020-01-01T00:00:00Z', updated, creator: rawActor('creator'),
+      ...(reporter !== undefined ? { reporter: reporter === null ? null : rawActor(reporter) } : {}),
+    } };
+  }
+  const upload = (name: string, updated: string, reporters: (string | null | undefined)[]) => f.upload(
+    Buffer.from(JSON.stringify({ issues: reporters.map((reporter, index) => row(index + 1, updated, reporter)) })), `${name}.json`, 'jira', instance);
+  const readOptions = async (pkg: LegacyPackageSummary) => (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+  function mapUsers(config: MigrationConfiguration, options: MigrationOptions) {
+    config.users = Object.fromEntries(options.identities.map(identity => [identity.id, actorMappings[identity.sourceValue] ?? null]));
+    return config;
+  }
+  const initial = await upload('original-reporters', '2020-01-02T00:00:00Z', ['first', undefined, 'first', undefined, 'first', 'first', null]);
+  const config = mapUsers(await f.configuration(initial, 'REQ'), await readOptions(initial));
+  const first = await f.apply(await f.preview(config));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  const read = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.filter(issue => issue.projectId === projectId);
+  const records = await read();
+  const issue = (items: Issue[], id: number) => items.find(value => value.title === `원래 업무 ${id}`)!;
+  assert.deepEqual(Array.from({ length: 7 }, (_, index) => issue(records, index + 1).reporterId),
+    ['user-yun', undefined, 'user-yun', undefined, 'user-yun', 'user-yun', null]);
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[] };
+  const initialBackup = (await f.call<Backup>('/export')).data;
+  const mappedArchive = initialBackup.sourceRecords.find(record => record.targetId === issue(records, 1).id);
+  const creatorOnlyArchive = initialBackup.sourceRecords.find(record => record.targetId === issue(records, 2).id);
+  const blankReporterArchive = initialBackup.sourceRecords.find(record => record.targetId === issue(records, 7).id);
+  assert.equal(mappedArchive?.record.authorId, 'creator');
+  assert.equal(mappedArchive?.record.metadata.jiraReporter, 'first');
+  assert.ok(mappedArchive?.jiraIssueFieldHashes?.reporterId);
+  assert.equal(creatorOnlyArchive?.jiraIssueFieldHashes?.reporterId, undefined);
+  assert.ok(blankReporterArchive?.jiraIssueFieldHashes?.reporterId);
+  assert.notEqual(blankReporterArchive.jiraIssueFieldHashes.reporterId, mappedArchive.jiraIssueFieldHashes.reporterId);
+
+  for (const [index, reporterId] of [[3, 'user-min'], [4, null]] as const) {
+    const current = issue(records, index);
+    const edited = await f.call<Issue>(`/issues/${current.id}`, 'PATCH', { expectedVersion: current.version, reporterId });
+    assert.equal(edited.status, 200, JSON.stringify(edited.data));
+    assert.equal(edited.data.reporterId, reporterId);
+  }
+  const delta = await upload('new-reporters', '2020-01-03T00:00:00Z', ['second', 'second', 'second', 'second', null, 'unmapped', undefined]);
+  const options = await readOptions(delta);
+  const target = options.appendTarget;
+  assert.ok(target);
+  const appendConfig = mapUsers({ ...options.defaultConfiguration, appendTo: {
+    projectId, refreshExisting: true,
+    statuses: Object.fromEntries(options.statuses.map(item => [item.id, target.statuses.find(status => status.label === item.label)!.id])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(item => [item.id, target.issueTypes.find(type => type.name === item.label)!.id])),
+    fields: {},
+  } }, options);
+  const review = await f.preview(appendConfig);
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  const decisions = Object.fromEntries(review.issueRefresh?.map(item => [item.sourceKey, item.fields.find(field => field.field === 'reporterId')?.decision]) ?? []);
+  assert.deepEqual(decisions, { 'OLD-1': 'apply', 'OLD-2': 'apply', 'OLD-3': 'conflict', 'OLD-4': 'conflict', 'OLD-5': 'apply' });
+  assert.ok(review.notices.some(item => item.code === 'JIRA_REFRESH_FIELD_UNAVAILABLE' && item.message.includes('요청자')));
+  const applied = await f.apply(review);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const expected = ['user-jun', 'user-jun', 'user-min', null, null, 'user-yun', null];
+  const after = await read();
+  assert.deepEqual(Array.from({ length: 7 }, (_, index) => issue(after, index + 1).reporterId), expected);
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  const afterRestore = await read();
+  assert.deepEqual(Array.from({ length: 7 }, (_, index) => issue(afterRestore, index + 1).reporterId), expected);
+});
+
 test('incremental Jira imports append only new issues to the bound project and reuse active source parents', async t => {
   const f = await fixture();
   t.after(() => f.close());

@@ -80,6 +80,7 @@ test('ordinary ticket retries allocate one issue, key, audit, notification and o
   const issue = requests[0].data;
   assert.deepEqual(requests[1].data, issue);
   assert.equal(issue.key, `NEO-${before[0]}`);
+  assert.equal(issue.reporterId, actorId);
   assert.equal(issue.startDate, first.startDate);
   assert.equal(issue.endDate, first.endDate);
   assert.deepEqual(sideEffects(), before.map(value => value + 1));
@@ -120,6 +121,55 @@ test('a failed create or receipt insert rolls back the issue and all side effect
   const legacyFirst = await call<Issue>('/issues', 'POST', legacy, 201);
   const legacySecond = await call<Issue>('/issues', 'POST', legacy, 201);
   assert.notEqual(legacyFirst.data.id, legacySecond.data.id);
+});
+
+test('issue reporters preserve unknown history, declared team members, explicit clearing and scoped queries', async t => {
+  const { call, sideEffects, restart } = await fixture(t);
+  const { data: initial } = await call<WorkspaceSnapshot>('/workspace');
+  const legacy = initial.issues.find(issue => issue.projectId === projectId)!;
+  const namedReporter = initial.users.find(user => user.id === assigneeId)!;
+  assert.equal(Object.hasOwn(legacy, 'reporterId'), false);
+  const { data: legacyEdited } = await call<Issue>(`/issues/${legacy.id}`, 'PATCH', {
+    expectedVersion: legacy.version, title: `${legacy.title} 수정`,
+  });
+  assert.equal(Object.hasOwn(legacyEdited, 'reporterId'), false);
+
+  const input = { projectId, title: '별도 요청자 업무', assigneeId: actorId };
+  const beforeInvalid = sideEffects();
+  for (const reporterId of ['', 42, [], { id: assigneeId }, 'missing-team-member']) {
+    await call('/issues', 'POST', { ...input, reporterId }, 400);
+  }
+  assert.deepEqual(sideEffects(), beforeInvalid);
+  const { data: named } = await call<Issue>('/issues', 'POST', { ...input, reporterId: assigneeId }, 201);
+  assert.equal(named.reporterId, assigneeId);
+  assert.equal(named.assigneeId, actorId);
+  const { data: unassigned } = await call<Issue>('/issues', 'POST', { ...input, title: '요청자 미지정 업무', reporterId: null }, 201);
+  assert.equal(unassigned.reporterId, null);
+  await call<Issue>('/issues', 'POST', { ...input, projectId: 'project-team', reporterId: assigneeId }, 201);
+
+  const { data: { token } } = await call<ApiKeyCreated>('/api-keys', 'POST', {
+    name: '요청 업무 조회', access: 'read', projectIds: [projectId], expiresAt: null,
+  }, 201);
+  const findReported = async () => (await call<Issue[]>(`/v1/issues?projectId=${projectId}&reporterId=${assigneeId}`,
+    'GET', undefined, 200, actorId, token)).data.map(issue => issue.id);
+  assert.deepEqual(await findReported(), [named.id]);
+  await call('/v1/issues?projectId=project-team&reporterId=user-min', 'GET', undefined, 403, actorId, token);
+  for (const path of ['/v1/issues?reporterId=missing-team-member', '/v1/issues?reporterId=user-min&reporterId=user-seo', '/v1/issues?reporterId=']) {
+    await call(path, 'GET', undefined, 400, actorId, token);
+  }
+
+  await call(`/issues/${named.id}`, 'PATCH', { expectedVersion: named.version + 1, reporterId: null }, 409);
+  await call(`/issues/${named.id}`, 'PATCH', { expectedVersion: named.version, reporterId: 'missing-team-member' }, 400);
+  assert.deepEqual(await findReported(), [named.id]);
+  const { data: changed } = await call<Issue>(`/issues/${named.id}`, 'PATCH', { expectedVersion: named.version, reporterId: null });
+  assert.equal(changed.reporterId, null);
+  assert.equal(changed.version, named.version + 1);
+  assert.deepEqual(await findReported(), []);
+  await restart();
+  const { data: current } = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(current.issues.find(issue => issue.id === named.id), changed);
+  assert.ok(current.activities.some(activity => activity.resourceId === named.id && activity.actorId === actorId &&
+    activity.detail.includes(`요청자 ${namedReporter.name} → 미지정`)));
 });
 
 test('used issue request IDs survive deletion, trash restoration and workspace replacement', async t => {
@@ -163,6 +213,7 @@ test('public API creation retries retain the fixed actor and enforce write and p
   const read = await key(projectId, 'read');
   const input = { requestId: randomUUID(), projectId, title: 'API 생성 재시도', actorId: assigneeId };
   const { data: issue } = await call<Issue>('/v1/issues', 'POST', input, 201, assigneeId, write);
+  assert.equal(issue.reporterId, actorId);
   assert.deepEqual((await call<Issue>('/v1/issues', 'POST', input, 200, assigneeId, write)).data, issue);
   await call('/v1/issues', 'POST', input, 403, actorId, otherScope);
   await call('/v1/issues', 'POST', input, 403, actorId, read);
@@ -180,7 +231,7 @@ test('cloning saves a fresh issue and one symmetric relation, with idempotent re
   const { data: parent } = await call<Issue>('/issues', 'POST', { projectId, title: '원본 상위 업무' }, 201);
   const { data: cycle } = await call<PlanningItem>('/planning-items', 'POST', { projectId, kind: 'cycle', name: '원본 계획' }, 201);
   const { data: source } = await call<Issue>('/issues', 'POST', {
-    projectId, title: '원본 업무', description: '원본 설명', labels: ['원본'], parentId: parent.id, cycleId: cycle.id,
+    projectId, title: '원본 업무', description: '원본 설명', labels: ['원본'], parentId: parent.id, cycleId: cycle.id, reporterId: assigneeId,
   }, 201);
   await call('/comments', 'POST', { resourceType: 'issue', resourceId: source.id, body: '원본 의견' }, 201);
   await call(`/issues/${source.id}/relations`, 'POST', { otherIssueId: parent.id, direction: 'outgoing', type: 'blocks' }, 201);
@@ -202,6 +253,7 @@ test('cloning saves a fresh issue and one symmetric relation, with idempotent re
   assert.equal(issue.key, `NEO-${before[0]}`);
   assert.notEqual(issue.id, source.id);
   assert.equal(issue.projectId, projectId);
+  assert.equal(issue.reporterId, actorId);
   assert.equal(issue.version, 1);
   assert.equal(issue.parentId, null);
   assert.equal(issue.cycleId, null);
@@ -334,6 +386,7 @@ test('a new successor uses normal issue fields and one scheduled edge for every 
     assert.equal(successor.startDate, issueFields.startDate);
     assert.equal(successor.endDate, issueFields.endDate);
     assert.equal(successor.assigneeId, assigneeId);
+    assert.equal(successor.reporterId, actorId);
     const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
     assert.deepEqual(workspace.dependencies.filter(link => link.successorId === successor.id)
       .map(({ predecessorId, type, lagDays, version }) => ({ predecessorId, type, lagDays, version })),

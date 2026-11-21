@@ -93,6 +93,58 @@ test('Jira JSON registers custom user identities without inferring users from or
   assert.equal(values['named:비움'], null);
 });
 
+test('Jira reporter evidence distinguishes the creator, explicit blanks and incomplete source identities', () => {
+  const creator = { accountId: 'creator-a', displayName: '원본 작성자' };
+  const rest = parse('issues.json', JSON.stringify({ issues: [
+    { id: '1', key: 'OLD-1', fields: { creator, reporter: { accountId: 'reporter-b', displayName: '원본 보고자', credential: 'never-store-this' } } },
+    { id: '2', key: 'OLD-2', fields: { creator } },
+    { id: '3', key: 'OLD-3', fields: { creator, reporter: null } },
+    { id: '4', key: 'OLD-4', fields: { creator, reporter: { displayName: '계정 ID 없음' } } },
+  ] }));
+  const restIssue = find(rest, 'issue:1');
+  assert.equal(restIssue.authorId, 'creator-a');
+  assert.equal(restIssue.metadata.jiraReporter, 'reporter-b');
+  assert.ok(restIssue.references.some(reference => reference.relation === 'creatorOrReporter' && reference.sourceId === 'creator-a'));
+  assert.ok(restIssue.references.some(reference => reference.relation === 'reporter' && reference.sourceId === 'reporter-b'));
+  assert.equal(find(rest, 'identity:reporter-b').title, '원본 보고자');
+  assert.equal(find(rest, 'issue:2').metadata.jiraReporter, undefined);
+  assert.equal(find(rest, 'issue:3').metadata.jiraReporter, null);
+  assert.equal(find(rest, 'issue:4').metadata.jiraReporter, undefined);
+  assert.ok(!JSON.stringify(rest).includes('never-store-this'));
+
+  const csv = parse('issues.csv', [
+    'Issue id,Issue key,Creator,Reporter,Summary', '1,OLD-1,creator-a,reporter-b,보고자 있음',
+    '2,OLD-2,creator-a,,보고자 없음', '3,OLD-3,creator-a',
+  ].join('\r\n'));
+  assert.equal(find(csv, 'issue:1').authorId, 'creator-a');
+  assert.equal(find(csv, 'issue:1').metadata.jiraReporter, 'reporter-b');
+  assert.equal(find(csv, 'issue:2').metadata.jiraReporter, null);
+  assert.equal(find(csv, 'issue:3').metadata.jiraReporter, undefined);
+  const duplicate = parse('duplicate.csv', 'Issue id,Issue key,Reporter,Reporter\r\n1,OLD-1,first,second');
+  assert.equal(find(duplicate, 'issue:1').metadata.jiraReporter, undefined);
+
+  const backup = parse('entities.xml', `<entity-engine-xml>
+    <Project id="20" pkey="OLD"/><ApplicationUser lowerUserName="bob" userKey="reporter-b"/>
+    <Issue id="1" project="20" creator="creator-a" reporter="bob"/><Issue id="2" project="20" creator="creator-a"/>
+    <Issue id="3" project="20" creator="creator-a" reporter=""/>
+  </entity-engine-xml>`);
+  assert.equal(find(backup, 'issue:1').authorId, 'creator-a');
+  assert.equal(find(backup, 'issue:1').metadata.jiraReporter, 'reporter-b');
+  assert.equal(find(backup, 'issue:1').references.filter(reference => reference.relation === 'reporter').length, 1);
+  assert.equal(find(backup, 'issue:2').metadata.jiraReporter, undefined);
+  assert.equal(find(backup, 'issue:3').metadata.jiraReporter, null);
+
+  const search = parse('search.xml', `<rss><channel>
+    <item><key id="1">OLD-1</key><reporter username="reporter-b">원본 이름</reporter></item>
+    <item><key id="2">OLD-2</key><reporter>표시 이름만 있음</reporter></item>
+    <item><key id="3">OLD-3</key><reporter/></item>
+  </channel></rss>`);
+  assert.equal(find(search, 'issue:1').metadata.jiraReporter, 'reporter-b');
+  assert.equal(find(search, 'issue:2').authorId, '표시 이름만 있음');
+  assert.equal(find(search, 'issue:2').metadata.jiraReporter, undefined);
+  assert.equal(find(search, 'issue:3').metadata.jiraReporter, null);
+});
+
 test('Importers JSON is explicitly identified and preserves authored history, comments, custom data and top-level links',()=>{
   const data=parse('importers.json',JSON.stringify({users:[{name:'alice',fullname:'원본 Alice',email:'alice@example.test'}],projects:[{key:'OLD',name:'기존 프로젝트',issues:[{externalId:'10',key:'OLD-1',summary:'원본 부모',reporter:'alice',issueType:'Task',status:'Closed',created:'P-3D',customFieldValues:[{fieldName:'점수',fieldType:'float',value:0}],comments:[{author:'alice',body:'이전 댓글',created:'2020-01-01T00:00:00Z'}],history:[{author:'alice',created:'2020-01-02T00:00:00Z',items:[{fieldType:'jira',field:'status',fromString:'Open',toString:'Closed'}]}]},{externalId:'11',key:'OLD-2',summary:'자식'}]}],links:[{name:'sub-task-link',sourceId:'11',destinationId:'10'}]}));
   assert.equal(find(data,'identity:alice').title,'원본 Alice');assert.equal(find(data,'issue:10').createdAt,'P-3D');assert.equal(find(data,'field:named:점수').metadata.fieldType,'float');assert.equal(data.records.filter(item=>item.kind==='comment').length,1);assert.equal(data.records.filter(item=>item.kind==='history').length,1);assert.ok(data.records.some(item=>item.kind==='relation'&&item.title==='sub-task-link'));assert.ok(codes(data).has('JSON_IMPORTERS_DIALECT'));assert.ok(!codes(data).has('JSON_REST_DIALECT'));assert.ok(codes(data).has('DATE_TIMEZONE_UNRESOLVED'));

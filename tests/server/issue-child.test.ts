@@ -88,7 +88,7 @@ test('child creation binds the active parent and project and uses the project fi
   await call(pathFor(parent.id), 'POST', { ...request, issue: { ...inputs, customFields: { 'delivery-count': 0 } } }, 422);
 
   const valid = { ...request, issue: {
-    ...inputs, projectId, parentId: parent.id, description: '검수 기준', customFields: { 'delivery-count': 0 },
+    ...inputs, projectId, parentId: parent.id, description: '검수 기준', reporterId: 'user-min', customFields: { 'delivery-count': 0 },
   } };
   const calls = await Promise.all([
     call<IssueChildCreationResult>(pathFor(parent.id), 'POST', valid, [200, 201]),
@@ -100,6 +100,7 @@ test('child creation binds the active parent and project and uses the project fi
   assert.deepEqual(calls.find(value => value.status === 200)!.data, { ...created, duplicate: true });
   assert.equal(created.issue.parentId, parent.id);
   assert.equal(created.issue.projectId, projectId);
+  assert.equal(created.issue.reporterId, 'user-min');
   assert.equal(created.issue.status, workflow.initialStatusId);
   assert.equal(created.issue.customFields?.['delivery-count'], 0);
 

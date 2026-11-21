@@ -368,13 +368,16 @@ export class ApiKeyService {
       const workflow = /^\/api\/projects\/([^/]+)\/(workflow|issue-schema)$/.exec(path);
       if (workflow) { this.query(request, []); this.allowedProject(key, this.decode(workflow[1])); this.used(key); return next(); }
       if (['/api/issues', '/api/documents', '/api/planning-items'].includes(path)) {
-        const query = this.query(request, path === '/api/planning-items' ? ['projectId', 'kind'] : ['projectId']);
+        const query = this.query(request, path === '/api/planning-items' ? ['projectId', 'kind'] :
+          path === '/api/issues' ? ['projectId', 'reporterId'] : ['projectId']);
         if (query.projectId) { this.allowedProject(key, query.projectId); if (!this.store.get('projects', query.projectId)) fail(404, '프로젝트를 찾을 수 없습니다.'); }
         if (query.kind && !['cycle', 'module', 'release'].includes(query.kind)) fail(400, '계획 종류를 확인해 주세요.');
+        if (query.reporterId && !this.store.get<User>('users', query.reporterId)) fail(400, '등록된 요청자를 선택해 주세요.');
         const table = path === '/api/issues' ? 'issues' : path === '/api/documents' ? 'documents' : 'planning_items';
         const values = this.store.all<Issue | DocPage | PlanningItem>(table).filter(record =>
           (key.projectIds === null || (record.projectId !== null && key.projectIds.includes(record.projectId))) &&
           (!query.projectId || record.projectId === query.projectId) &&
+          (!query.reporterId || 'reporterId' in record && record.reporterId === query.reporterId) &&
           (!query.kind || ('kind' in record && record.kind === query.kind)) &&
           (!('content' in record) || this.canReadDocumentBody(key, record.content)));
         this.used(key); response.json(values); return;

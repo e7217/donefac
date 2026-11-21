@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
-import { buildMyWorkQueue, type MyWorkGrouping, type MyWorkGroupId, type MyWorkItem, type MyWorkRoleFilter } from '../../shared/my-work';
+import { buildMyWorkQueue, type MyWorkGrouping, type MyWorkGroupId, type MyWorkItem, type MyWorkRole, type MyWorkRoleFilter } from '../../shared/my-work';
 import type { FeatureProps } from '../../shared/types';
 import { STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { todayDate } from './schedule-utils';
@@ -18,6 +18,7 @@ const groupLabels: Record<MyWorkGroupId, string> = {
   closed: '완료·취소',
 };
 const pageSize = 20;
+const roleLabels: Record<MyWorkRole, string> = { assigned: '담당', collaborating: '협력', reported: '요청' };
 
 export function MyWork({ data, actorId, openIssue }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'>) {
   const [today, setToday] = useState(todayDate);
@@ -71,9 +72,10 @@ export function MyWork({ data, actorId, openIssue }: Pick<FeatureProps, 'data' |
         <label className="my-work-filter">
           참여 범위
           <select className="field" value={role} onChange={event => setRole(event.target.value as MyWorkRoleFilter)}>
-            <option value="all">담당·협력 업무</option>
+            <option value="all">담당·협력·요청 업무</option>
             <option value="assigned">담당 업무</option>
             <option value="collaborating">협력 업무</option>
+            <option value="reported">내가 요청한 업무</option>
           </select>
         </label>
         <label className="my-work-filter">
@@ -113,12 +115,14 @@ function WorkGroup({ id, items, openIssue }: { id: MyWorkGroupId; items: MyWorkI
         <span>{items.length.toLocaleString('ko-KR')}개</span>
       </header>
       <ul className="my-work-list">
-        {items.slice(start, end).map(({ issue, project, status, role, date }) => (
+        {items.slice(start, end).map(({ issue, project, status, role, reported, date }) => (
           <li key={issue.id}>
             <button className="my-work-row" type="button" onClick={() => openIssue(issue.id)}>
               <span className="my-work-identity">
                 <span className="my-work-item-title"><span className="issue-key">{issue.key}</span> <strong>{issue.title}</strong></span>
-                <span className="my-work-item-project">{project.name}<span aria-hidden="true">·</span>{role === 'assigned' ? '담당' : '협력'}</span>
+                <span className="my-work-item-project">{project.name}<span aria-hidden="true">·</span>{roleLabels[role]}
+                  {reported && role !== 'reported' && <><span aria-hidden="true">·</span>{roleLabels.reported}</>}
+                </span>
               </span>
               <span className="my-work-item-status">
                 <span className="status-dot" style={{ backgroundColor: status.color }} aria-hidden="true" />{status.label}

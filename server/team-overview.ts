@@ -115,7 +115,11 @@ function issueSummary(data: OverviewData, selection: Selection) {
   const referenceDay = calendarDay(selection.date);
   for (const issue of data.issues) {
     const project = countsByProject.get(issue.projectId);
-    if (!project || (selection.memberId !== null && !myWorkMembership(issue, selection.memberId))) continue;
+    if (!project) continue;
+    if (selection.memberId !== null) {
+      const participation = myWorkMembership(issue, selection.memberId);
+      if (!participation || participation === 'reported') continue;
+    }
     // Recent GitLab links are also useful on terminal tickets.
     matchingIssues.set(issue.id, issue);
     const status = statusMeta(activeStatus, issue.projectId, issue.status);

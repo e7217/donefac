@@ -73,6 +73,29 @@ test('finds assigned and collaborating work across projects without duplicate me
   assert.equal(queue(input, { projectId: 'application', role: 'collaborating' }).total, 0);
 });
 
+test('finds reported work independently of assignment and counts each active issue once', () => {
+  const assignedAndReported = issue('APP-1', { reporterId: actor, collaboratorIds: [actor] });
+  const collaboratingAndReported = issue('APP-2', { assigneeId: 'someone', collaboratorIds: [actor], reporterId: actor });
+  const reportedOnly = issue('PLAT-1', { assigneeId: null, reporterId: actor, status: 'verifying' });
+  const closed = issue('PLAT-2', { assigneeId: null, reporterId: actor, status: 'shipped' });
+  const assignedOnly = issue('APP-3', { reporterId: 'someone' });
+  const unknown = issue('APP-4', { assigneeId: null });
+  const cleared = issue('APP-5', { assigneeId: null, reporterId: null });
+  const input = [assignedAndReported, collaboratingAndReported, reportedOnly, closed, assignedOnly, unknown, cleared];
+
+  assert.equal(myWorkMembership(reportedOnly, actor), 'reported');
+  assert.equal(myWorkMembership(unknown, actor), null);
+  assert.equal(myWorkMembership(cleared, actor), null);
+  assert.equal(countActiveMyWork(snapshot(input), actor), 4);
+  assert.equal(queue(input).total, 4);
+  assert.deepEqual(keysByGroup(queue(input, { role: 'reported' })).undated, ['APP-1', 'APP-2', 'PLAT-1']);
+  assert.deepEqual(keysByGroup(queue(input, { role: 'reported', includeClosed: true })).closed, ['PLAT-2']);
+  assert.deepEqual(keysByGroup(queue(input, { role: 'assigned' })).undated, ['APP-1', 'APP-3']);
+  assert.deepEqual(keysByGroup(queue(input, { role: 'collaborating' })).undated, ['APP-2']);
+  assert.deepEqual(queue(input, { role: 'reported' }).groups.find(group => group.id === 'undated')?.items
+    .map(item => [item.role, item.reported]), [['assigned', true], ['collaborating', true], ['reported', true]]);
+});
+
 test('prefers the deadline, falls back to the schedule end, and uses a seven-day calendar boundary', () => {
   const result = queue([
     issue('APP-1', { dueDate: '2026-01-27', endDate: '2026-02-12' }),
