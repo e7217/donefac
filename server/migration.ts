@@ -2,12 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { AttachmentVersion, DocPage, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
+import type { AttachmentVersion, DocPage, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
+import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
+  remapMappingConfiguration, resolveMappingPackages, restoreMappedUsers } from './migration-mapping.js';
 import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
@@ -16,7 +18,7 @@ import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAli
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, type SourcePreservationService } from './source-preservation.js';
+import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -725,6 +727,93 @@ export class MigrationService {
     }
     return config;
   }
+
+  private optionsForPackages(packages: MigrationPackage[], options = buildMigrationOptions(packages)): MigrationOptions {
+    const destination = this.appendDestination(packages, options, { history: true, attachments: true, relations: true });
+    if (destination) {
+      const { project, workflow, schema, instanceKey, sourceProjectId } = destination;
+      options.appendTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceProjectId,
+        statuses: workflow.statuses, issueTypes: schema.issueTypes, fields: schema.fields };
+    }
+    const pageDestination = this.pageAppendDestination(packages, options, true);
+    if (pageDestination) {
+      const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = pageDestination;
+      options.appendPagesTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceSpaceId, sourceSpaceKey };
+    }
+    return options;
+  }
+
+  private validateMappingConfiguration(raw: unknown): MigrationConfiguration {
+    try { return this.validateConfiguration(mappingConfigurationInput(raw)); }
+    catch (error) {
+      if (error instanceof LegacyImportError || error instanceof SourcePreservationError) return invalidMigrationMapping();
+      throw error;
+    }
+  }
+
+  private validateMappingDestination(configuration: MigrationConfiguration, packages: MigrationPackage[], options: MigrationOptions): void {
+    const unavailable = () => mappingError(409, 'append_target_unavailable', '기존 추가 대상 또는 워크플로·필드 설정이 현재 원본 매핑과 맞지 않습니다. 이관 대상을 다시 선택해 주세요.');
+    const append = configuration.appendTo;
+    if (append) {
+      const destination = this.appendDestination(packages, options, {
+        history: append.refreshHistory, attachments: append.refreshAttachments, relations: append.refreshRelations,
+      });
+      if (!destination || destination.project.id !== append.projectId) return unavailable();
+      const statuses = new Set(destination.workflow.statuses.map(status => status.id));
+      const types = new Set(destination.schema.issueTypes.filter(type => !type.archived).map(type => type.id));
+      const fields = new Set(destination.schema.fields.filter(field => !field.archived).map(field => field.id));
+      if (Object.values(append.statuses).some(id => !statuses.has(id)) || Object.values(append.issueTypes).some(id => !types.has(id)) ||
+          Object.values(append.fields).some(id => id !== null && !fields.has(id))) return unavailable();
+    }
+    if (configuration.appendPagesTo) {
+      const destination = this.pageAppendDestination(packages, options, configuration.appendPagesTo.refreshHistory);
+      if (!destination || destination.project.id !== configuration.appendPagesTo.projectId) return unavailable();
+    }
+  }
+
+  private readMappingSnapshot<T>(read: () => T): T {
+    if (this.store.db.isTransaction) return read();
+    this.store.db.exec('BEGIN');
+    try {
+      const result = read();
+      this.store.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.store.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private exportMapping(raw: unknown): MigrationMappingFile {
+    const draft = this.validateMappingConfiguration(readMappingRequest(raw, 'configuration'));
+    return this.readMappingSnapshot(() => {
+      const knownIds = new Set(this.legacy.list().map(({ id }) => id));
+      if (draft.packageIds.some(id => !knownIds.has(id))) return mappingError(409, 'package_missing', '선택한 원본 패키지를 먼저 분석해 주세요.');
+      const packages = this.loadPackages(draft.packageIds, true);
+      const options = buildMigrationOptions(packages);
+      const configuration = remapMappingConfiguration(draft, packages, options);
+      this.validateMappingDestination(configuration, packages, options);
+      return makeMappingFile(configuration, packages, this.store.all<User>('users'));
+    });
+  }
+
+  private importMapping(raw: unknown): MigrationMappingRestore {
+    const mapping = readMappingFile(readMappingRequest(raw, 'mapping'));
+    const draft = this.validateMappingConfiguration(mapping.configuration);
+    if (draft.packageIds.length !== mapping.packages.length || draft.packageIds.some((id, index) => id !== mapping.packages[index].id)) {
+      return invalidMigrationMapping('매핑의 원본 패키지 순서를 확인해 주세요.');
+    }
+    return this.readMappingSnapshot(() => {
+      const packageIds = resolveMappingPackages(mapping.packages, this.legacy.list());
+      const packages = this.loadPackages(packageIds, true);
+      const options = buildMigrationOptions(packages);
+      const remapped = remapMappingConfiguration(draft, packages, options);
+      const configuration = restoreMappedUsers(remapped, mapping.mappedUsers, this.store.all<User>('users'));
+      this.validateMappingDestination(configuration, packages, options);
+      return { options: this.optionsForPackages(packages, options), configuration };
+    });
+  }
+
   private async preview(value: unknown, request: Request, hooks: Hooks): Promise<MigrationPreview> {
     const actorId = hooks.actor(request);
     const configuration = this.validateConfiguration(value);
@@ -914,19 +1003,17 @@ export class MigrationService {
     app.get('/api/migrations/options', (req, res) => {
       if (Object.keys(req.query).some(key => key !== 'packageId')) fail(400, '원본 패키지 조회 조건을 확인해 주세요.');
       const packages = this.loadPackages(this.packageIds(req.query.packageId), true);
-      const options = buildMigrationOptions(packages);
-      const destination = this.appendDestination(packages, options, { history: true, attachments: true, relations: true });
-      if (destination) {
-        const { project, workflow, schema, instanceKey, sourceProjectId } = destination;
-        options.appendTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceProjectId,
-          statuses: workflow.statuses, issueTypes: schema.issueTypes, fields: schema.fields };
-      }
-      const pageDestination = this.pageAppendDestination(packages, options, true);
-      if (pageDestination) {
-        const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = pageDestination;
-        options.appendPagesTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceSpaceId, sourceSpaceKey };
-      }
-      res.json(options);
+      res.json(this.optionsForPackages(packages));
+    });
+    app.post('/api/migrations/mapping/export', (req, res) => {
+      if (Object.keys(req.query).length) return invalidMigrationMapping();
+      hooks.actor(req);
+      res.set('Cache-Control', 'no-store').json(this.exportMapping(req.body));
+    });
+    app.post('/api/migrations/mapping/import', (req, res) => {
+      if (Object.keys(req.query).length) return invalidMigrationMapping();
+      hooks.actor(req);
+      res.set('Cache-Control', 'no-store').json(this.importMapping(req.body));
     });
     app.post('/api/migrations/preview', async (req, res) => res.status(201).json(await this.preview(req.body.configuration, req, hooks)));
     app.get('/api/migrations/previews/:id', (req, res) => res.json(this.getPreview(String(req.params.id), hooks.actor(req), true).prepared.preview));

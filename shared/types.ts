@@ -280,6 +280,24 @@ export interface MigrationConfiguration {
   appendTo?: MigrationAppendConfiguration;
   appendPagesTo?: MigrationPageAppendConfiguration;
 }
+export const MIGRATION_MAPPING_FILE_MAX_BYTES = 16 * 1024 * 1024;
+export interface MigrationMappingFile {
+  format: 'teamspace-migration-mapping';
+  version: 1;
+  packages: {
+    id: string;
+    sha256: string;
+    product: LegacySource['product'];
+    instanceKey: string;
+    format: LegacySource['format'];
+  }[];
+  configuration: MigrationConfiguration;
+  mappedUsers: Record<string, string>;
+}
+export interface MigrationMappingRestore {
+  options: MigrationOptions;
+  configuration: MigrationConfiguration;
+}
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
 export interface MigrationJiraPlanningChoice {
   recordId: string; sourceKey: string; title: string;

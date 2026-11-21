@@ -172,6 +172,37 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal((await launch(['stage', manifest, root], env).exited).code, 1);
   assert.equal(await readFile(stagePath, 'utf8'), initial);
 
+  const mappingSourceRoot = join(scratch, 'mapping-source');
+  const mappingStage = await launch(['stage', manifest, mappingSourceRoot], env).exited;
+  assert.equal(mappingStage.code, 0, mappingStage.stderr);
+  const mappingReview = launch(['review', mappingSourceRoot], env);
+  const mappingPath = join(scratch, 'mapping.json');
+  let previousActor;
+  try {
+    const base = await waitForReview(mappingReview);
+    const workspace = await json(base, '/workspace');
+    previousActor = workspace.users[0].id;
+    const mappingStageState = JSON.parse(await readFile(join(mappingSourceRoot, 'stage.json'), 'utf8'));
+    const query = new URLSearchParams(mappingStageState.packages.map(pkg => ['packageId', pkg.packageId]));
+    const { defaultConfiguration: configuration, identities } = await json(base, `/migrations/options?${query}`);
+    configuration.projects = configuration.projects.map(project => ({ ...project, key: 'REH', name: 'Rehearsal fixture' }));
+    configuration.sourceBaseUrls = Object.fromEntries(mappingStageState.packages.map(pkg => [pkg.packageId, `https://${pkg.product}.example.invalid`]));
+    for (const sourceValue of [jiraAuthor, confluenceAuthor]) {
+      const identity = identities.find(value => value.sourceValue === sourceValue);
+      assert.ok(identity, `Fixture author ${sourceValue} was not analyzed`);
+      configuration.users[identity.id] = previousActor;
+    }
+    const mapping = await json(base, '/migrations/mapping/export', { method: 'POST', actor: previousActor, body: { configuration } });
+    const raw = JSON.stringify(mapping);
+    for (const value of [workspace.users[0].email, privateTitle, privateBody, privateWorklog, jiraAuthor, confluenceAuthor]) {
+      assert.equal(raw.includes(value), false);
+    }
+    await writeFile(mappingPath, raw, { mode: 0o600 });
+  } finally {
+    mappingReview.child.kill('SIGTERM');
+    await mappingReview.exited;
+  }
+
   const pending = await launch(['verify', root], env).exited;
   assert.equal(pending.code, 2, pending.stderr);
   const pendingEvidence = (await readReport(root, pending)).report;
@@ -191,16 +222,18 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
     const workspace = await json(base, '/workspace');
     assert.equal(workspace.users.length, 1);
     const actor = workspace.users[0].id;
+    assert.notEqual(actor, previousActor);
     assert.equal(workspace.issues.length + workspace.documents.length, 0);
-    const query = new URLSearchParams(staged.packages.map(pkg => ['packageId', pkg.packageId]));
-    const { defaultConfiguration: configuration, identities } = await json(base, `/migrations/options?${query}`);
-    configuration.projects = configuration.projects.map(project => ({ ...project, key: 'REH', name: 'Rehearsal fixture' }));
-    configuration.sourceBaseUrls = Object.fromEntries(staged.packages.map(pkg => [pkg.packageId, `https://${pkg.product}.example.invalid`]));
+    const mapping = JSON.parse(await readFile(mappingPath, 'utf8'));
+    const { options, configuration } = await json(base, '/migrations/mapping/import', { method: 'POST', actor, body: { mapping } });
+    assert.deepEqual(configuration.packageIds, staged.packages.map(pkg => pkg.packageId));
+    assert.ok(configuration.packageIds.every(id => !mapping.configuration.packageIds.includes(id)));
+    assert.ok(configuration.projects.every(project => project.key === 'REH' && project.name === 'Rehearsal fixture'));
     for (const sourceValue of [jiraAuthor, confluenceAuthor]) {
-      const identity = identities.find(value => value.sourceValue === sourceValue);
-      assert.ok(identity, `Fixture author ${sourceValue} was not analyzed`);
-      configuration.users[identity.id] = actor;
+      const identity = options.identities.find(value => value.sourceValue === sourceValue);
+      assert.equal(configuration.users[identity.id], actor);
     }
+    assert.deepEqual(await json(base, '/source-imports'), []);
     const preview = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration } });
     assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
     assert.equal(preview.counts.issues, 2);

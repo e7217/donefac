@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
-import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationJiraPlanningChoice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
+import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -115,12 +115,14 @@ function ActorMigration(props: MigrationApplyProps) {
   const [preview, setPreview] = useState<MigrationPreview | null>(null), [acknowledgements, setAcknowledgements] = useState<string[]>([]), [selectedImport, setSelectedImport] = useState<string | null>(null);
   const [planningDraft, setPlanningDraft] = useState<{ key: string; selections: JiraPlanningSelections } | null>(null);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(''), [error, setError] = useState(''), [listError, setListError] = useState(''), [clock, setClock] = useState(() => Date.now());
+  const [mappingNotice, setMappingNotice] = useState('');
+  const mappingFileHelp = useId();
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
   const migrationHeading = useRef<HTMLHeadingElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
   const savedAppendDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
-  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); savedAppendDraft.current = {}; dirtyRef.current = false; }, []);
+  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); savedAppendDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     try { const [nextPackages, nextImports] = await Promise.all([api<LegacyPackageSummary[]>('/legacy-import/packages'), api<SourceImport[]>('/source-imports')]); if (active.current && sequence === loadSequence.current) { setPackages(nextPackages); setImports(nextImports); setListError(''); } }
@@ -155,8 +157,8 @@ function ActorMigration(props: MigrationApplyProps) {
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [notify, reset]);
-  async function execute(label: string, action: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setPending(label); setError(''); try { await action(); } catch (cause) { if (active.current) setError(`${errorText(cause)} 입력과 기존 미리보기는 유지됩니다.`); } finally { busyRef.current = false; if (active.current) setPending(''); } }
-  function change(next: MigrationConfiguration) { setConfiguration(next); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); }
+  async function execute(label: string, action: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setPending(label); setError(''); setMappingNotice(''); try { await action(); } catch (cause) { if (active.current) setError(`${errorText(cause)} 입력과 기존 미리보기는 유지됩니다.`); } finally { busyRef.current = false; if (active.current) setPending(''); } }
+  function change(next: MigrationConfiguration) { setConfiguration(next); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); }
   function mapValue<K extends 'users' | 'statuses' | 'issueTypes' | 'fields' | 'sourceBaseUrls'>(key: K, id: string, value: MigrationConfiguration[K][string]) { if (configuration) change({ ...configuration, [key]: { ...configuration[key], [id]: value } }); }
   function chooseDestination(mode: string) {
     if (!configuration || !options) return;
@@ -269,6 +271,54 @@ function ActorMigration(props: MigrationApplyProps) {
     const report = buildMigrationPreflightReport(preview, options?.packages ?? packages);
     downloadDocument(`migration-preflight-${preview.id}.json`, JSON.stringify(report, null, 2), 'application/json;charset=utf-8');
   }
+  async function exportMapping(opener: HTMLButtonElement) {
+    if (!configuration || !matching || hasPlanningChanges || busyRef.current) return;
+    await execute('이관 매핑 파일 준비 중…', async () => {
+      const file = await post<MigrationMappingFile>('/migrations/mapping/export', { configuration });
+      if (!active.current) return;
+      downloadDocument('teamspace-migration-mapping.json', JSON.stringify(file), 'application/json;charset=utf-8');
+      setMappingNotice('이관 매핑 JSON을 내려받았습니다.');
+    });
+    requestAnimationFrame(() => { if (opener.isConnected && document.activeElement === document.body) opener.focus({ preventScroll: true }); });
+  }
+  async function importMapping(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file || hasPlanningChanges || busyRef.current) return;
+    await execute('이관 매핑 파일 확인 중…', async () => {
+      if (file.size > MIGRATION_MAPPING_FILE_MAX_BYTES) {
+        throw new Error(`이관 매핑 파일은 ${MIGRATION_MAPPING_FILE_MAX_BYTES / (1024 * 1024)}MiB 이하로 선택해 주세요.`);
+      }
+      let mapping: unknown;
+      try { mapping = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())); }
+      catch { throw new Error('이관 매핑 JSON 파일을 읽을 수 없습니다.'); }
+      if (!active.current) return;
+      const result = await post<MigrationMappingRestore>('/migrations/mapping/import', { mapping });
+      if (!active.current) return;
+      const restored = result.configuration;
+      const defaults = result.options.defaultConfiguration;
+      const packageIds = [...restored.packageIds];
+      const verified = new Map(result.options.packages.map(item => [item.id, item]));
+      const next = destinationMode(restored) === 'new' ? restored : {
+        ...restored,
+        projects: restored.projects.length ? restored.projects : defaults.projects,
+        statuses: Object.keys(restored.statuses).length ? restored.statuses : defaults.statuses,
+        issueTypes: Object.keys(restored.issueTypes).length ? restored.issueTypes : defaults.issueTypes,
+        fields: Object.keys(restored.fields).length ? restored.fields : defaults.fields,
+      };
+      if ((selected.length || configuration || preview) &&
+        !window.confirm('현재 패키지 선택과 이관 매핑 및 미리보기를 파일의 매핑으로 바꿀까요?')) return;
+      setPackages(previous => [...verified.values(), ...previous.filter(item => !verified.has(item.id))]);
+      setSelected(packageIds);
+      setOptions(result.options);
+      savedAppendDraft.current = {};
+      change(next);
+      dirtyRef.current = true;
+      setMappingNotice('이관 매핑을 불러왔습니다. 적용 전 미리보기를 새로 만들어 주세요.');
+      void load();
+    });
+    requestAnimationFrame(() => { if (input.isConnected && document.activeElement === document.body) input.focus({ preventScroll: true }); });
+  }
   async function apply() {
     if (!preview || !canApply || busyRef.current) return;
     const confirmation = reviewProduct
@@ -297,8 +347,21 @@ function ActorMigration(props: MigrationApplyProps) {
     <header className="migration-heading"><div><h2 ref={migrationHeading} tabIndex={-1}><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>
     {listError && <p className="migration-error" role="alert">{listError} 현재 매핑과 미리보기는 유지됩니다.</p>}{error && <p className="migration-error" role="alert">{error}</p>}{pending && <p role="status" className="migration-pending"><Loader2 className="spin" size={17} />{pending}</p>}
+    <fieldset className="migration-fieldset migration-mapping-files" aria-label="이관 매핑 파일" disabled={Boolean(pending) || hasPlanningChanges}>
+      <div className="migration-mapping-file-actions">
+        <label>이관 매핑 파일 불러오기
+          <input type="file" className="field" accept=".json,application/json" aria-describedby={mappingFileHelp}
+            onChange={event => void importMapping(event.currentTarget)} />
+        </label>
+        <button type="button" className="btn" disabled={!configuration || !matching}
+          onClick={event => void exportMapping(event.currentTarget)}><Download size={16} aria-hidden="true" />이관 매핑 JSON 내보내기</button>
+      </div>
+      <small id={mappingFileHelp}>같은 원본 패키지를 분석한 뒤 매핑을 불러와 새 미리보기를 만드세요.</small>
+      {hasPlanningChanges && <small>계획 선택을 반영하거나 취소한 뒤 매핑 파일을 사용할 수 있습니다.</small>}
+    </fieldset>
+    {mappingNotice && <p role="status" className="migration-mapping-file-notice">{mappingNotice}</p>}
     <fieldset disabled={Boolean(pending) || hasPlanningChanges} className="migration-fieldset"><h3>가져올 원본</h3>
-      <Paged title="이관 패키지" items={packages} label={item => `${item.filename} ${item.source.instanceKey}`} render={item => <label className="migration-package"><input type="checkbox" aria-label={`이관 패키지 ${item.filename}`} checked={selected.includes(item.id)} onChange={event => { setSelected(previous => event.target.checked ? [...previous, item.id] : previous.filter(id => id !== item.id)); setPreview(null); setAcknowledgements([]); }} /><span><strong>{item.filename}</strong><small>{item.source.product} · {item.source.instanceKey} · 분석 오류 {item.errors}, 경고 {item.warnings}</small></span></label>} />
+      <Paged title="이관 패키지" items={packages} label={item => `${item.filename} ${item.source.instanceKey}`} render={item => <label className="migration-package"><input type="checkbox" aria-label={`이관 패키지 ${item.filename}`} checked={selected.includes(item.id)} onChange={event => { setSelected(previous => event.target.checked ? [...previous, item.id] : previous.filter(id => id !== item.id)); setPreview(null); setAcknowledgements([]); setMappingNotice(''); }} /><span><strong>{item.filename}</strong><small>{item.source.product} · {item.source.instanceKey} · 분석 오류 {item.errors}, 경고 {item.warnings}</small></span></label>} />
       {!loading && !packages.length && <p>먼저 위의 원본 분석에서 내보내기 파일을 등록하세요.</p>}
       {selected.some(id => !packages.some(item => item.id === id)) && <p className="migration-error" role="alert">선택한 패키지 일부가 최신 목록에 없습니다. 현재 입력을 유지했으므로 원본 목록을 다시 확인하세요.</p>}
       {selected.length > 0 && <p role="status">이관 패키지 {selected.length.toLocaleString()}개 선택</p>}

@@ -6,6 +6,18 @@
 .migration-origin-summary { margin: .75rem 0; }
 .migration-origin-summary small { margin-top: .35rem; }
 
+.migration-mapping-files { margin-top: .8rem; }
+.migration-mapping-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .55rem .75rem;
+}
+.migration-mapping-file-actions label { flex: 0 1 22rem; min-width: 0; }
+.migration-mapping-file-actions .field { box-sizing: border-box; }
+.migration-mapping-files > small { margin-top: .35rem; }
+.migration-mapping-file-notice { margin: .6rem 0 0; color: #176b63; font-size: .875rem; }
+
 .migration-destination-mode { display: block; max-width: 26rem; margin-top: 1rem; }
 .migration-append-project { margin-top: .75rem; padding: .8rem 1rem; border: 1px solid #d4e2de; border-radius: .5rem; }
 .migration-append-project h3 { margin: 0; }
@@ -33,6 +45,7 @@
 
 .migration-source-button { margin-top: .4rem; }
 .migration-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.migration-notice > strong { overflow-wrap: anywhere; }
 .migration-review > header .migration-review-actions { justify-content: flex-end; }
 .migration-review-diagnostics { margin: 1rem 0; }
 .migration-review-diagnostics legend { padding: 0; font-weight: 650; }

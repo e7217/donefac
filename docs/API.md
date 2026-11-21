@@ -605,6 +605,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | 요청 | 동작 |
 | --- | --- |
 | `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑과 확인한 Jira·Confluence 추가 대상 |
+| `POST /api/migrations/mapping/export` | `{configuration}`으로 다시 사용할 수 있는 이관 매핑 JSON 반환 |
+| `POST /api/migrations/mapping/import` | `{mapping}`의 원본과 현재 워크스페이스를 대조해 `{options, configuration}` 반환 |
 | `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 업무·문서 추가 계획과 보존·누락 진단 검토 |
 | `GET /api/migrations/previews/:id` | 선택한 작업자의 검사 결과 다시 읽기 |
 | `POST /api/migrations/previews/:id/apply` | `expectedVersion`·`acknowledgements`로 검토한 계획 적용 |
@@ -616,6 +618,10 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
+
+이관 매핑 파일의 형식은 `teamspace-migration-mapping`, 버전은 `1`, 최대 크기는 16MiB다. 파일의 `packages`에는 당시 분석 ID와 원본 제품·인스턴스 식별값·내보내기 형식·SHA-256을 저장한다. 복원 시 네 원본 속성이 일치하는 현재 분석 패키지를 찾는다. 당시 ID가 같은 원본을 가리키면 이를 사용하고, 새 ID로 다시 분석했으면 일치 항목이 하나여야 한다. 패키지·매핑·제외 항목의 ID는 현재 분석 결과로 바꾼다. `mappedUsers`에는 매핑된 팀원 ID와 공백 제거·소문자 변환한 이메일의 SHA-256을 기록한다. 현재 팀원과 유일하게 일치해야 매핑을 복원한다. 기존 프로젝트 추가 설정은 현재 확인한 대상과 연결이 일치해야 복원한다.
+
+두 브라우저 관리 경로는 파일 생성과 매핑 대조를 처리한다. 실제 이관은 복원 후 새 미리보기를 만들고 확인 항목을 검토한 뒤 적용한다. 원본 ID, 내부 주소, 대상 프로젝트명과 팀원 이메일 해시가 포함될 수 있으므로 파일은 팀 내부에서 보관한다.
 
 객체에 연결된 `notices[].recordId`는 패키지 ID와 레코드 ID를 첫 `/`로 연결한 값이다. 진단의 **원본 상세 보기**는 두 ID를 각각 인코딩해 분석 단계의 원본 조회 경로를 사용한다.
 

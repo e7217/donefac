@@ -29,6 +29,7 @@ const categories:StatusCategory[]=['backlog','todo','in_progress','review','done
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const optionId=(packageId:string,kind:string,value:string)=>`option_${hash(packageId,kind,value).slice(0,40)}`;
+export { optionId as migrationOptionId };
 const qualified=(packageId:string,row:LegacyRecord)=>`${packageId}/${row.id}`;
 const string=(value:unknown)=>typeof value==='string'?value:typeof value==='number'||typeof value==='boolean'?String(value):'';
 const object=(value:unknown):Record<string,unknown>=>value&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{};
