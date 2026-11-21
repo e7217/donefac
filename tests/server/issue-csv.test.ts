@@ -68,14 +68,14 @@ test('keeps formula-like values as text and escapes quotes and physical lines wi
   assert.equal(quoted, header + '"TEAM-1","팀 프로젝트","문장, ""인용""\r\n=2+2","기능 작업","검증 중","보통","담당 팀원","","","","\'=첫 라벨, 쉼표, 라벨","","","\'－단계"\r\n');
 });
 
-test('accepts exported start and end columns in the existing schedule paste parser', () => {
+test('accepts exported plan dates and goal deadlines in the schedule paste parser', () => {
   const csv = formatIssueCsv(data, [
     createIssue('TEAM-2', { title: '한글 "인용"\n다음 줄, 기호', startDate: '2026-12-01', endDate: '2026-12-02', dueDate: '2026-12-31' }),
     createIssue('TEAM-1', { title: '=1+1', endDate: '2026-12-03' }),
   ]);
   assert.deepEqual(parseSchedulePaste(csv), {
     rows: [
-      { line: 2, key: 'TEAM-2', startDate: '2026-12-01', endDate: '2026-12-02' },
+      { line: 2, key: 'TEAM-2', startDate: '2026-12-01', endDate: '2026-12-02', dueDate: '2026-12-31' },
       { line: 4, key: 'TEAM-1', startDate: undefined, endDate: '2026-12-03' },
     ],
     errors: [],

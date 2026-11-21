@@ -42,9 +42,9 @@ async function fixture(t: TestContext) {
   const project = await createProject('PASTELINK');
   return {
     call, createProject,
-    async issue(title: string, projectId = project.id) {
+    async issue(title: string, { projectId = project.id, dueDate = null }: { projectId?: string; dueDate?: string | null } = {}) {
       const result = await call<Issue>('/issues', 'POST', {
-        projectId, title, startDate: '2026-11-19', endDate: '2026-11-20',
+        projectId, title, startDate: '2026-11-19', endDate: '2026-11-20', dueDate,
       });
       assert.equal(result.status, 201, JSON.stringify(result.data));
       return result.data;
@@ -61,10 +61,11 @@ async function fixture(t: TestContext) {
       assert.equal(result.status, 200);
       return result.data;
     },
-    async preview(rows: string[][], korean = false) {
+    async preview(rows: string[][], { korean = false, includeDueDate = false }: { korean?: boolean; includeDueDate?: boolean } = {}) {
       const header = korean
         ? ['업무 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격']
         : ['key', 'startDate', 'endDate', 'predecessor', 'dependency type', 'lag days'];
+      if (includeDueDate) header.push(korean ? '목표 마감일' : 'dueDate');
       const text = [header, ...rows].map(row => row.join('\t')).join('\n');
       const result = await call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId: project.id, text });
       assert.equal(result.status, 200, JSON.stringify(result.data));
@@ -98,7 +99,7 @@ test('schedule paste previews and commits dates and a new link together, replays
   const before = await f.workspace();
   const preview = await f.preview([
     [successor.key, '2026-11-23', '2026-11-24', predecessor.key.toLowerCase(), '', ''],
-  ], true);
+  ], { korean: true });
   assert.deepEqual(preview.errors, []);
   assert.deepEqual(preview.warnings, []);
   assert.equal(preview.unchanged, 0);
@@ -151,7 +152,7 @@ test('repeated successor rows merge split dates once and add, edit and remove di
     [successor.key, '', '', removed.key, '-', ''],
     [successor.key, '', '', kept.key, '', ''],
     [successor.key, '2026-11-23', '', '', '', ''],
-  ], true);
+  ], { korean: true });
   assert.deepEqual(preview.errors, []);
   assert.deepEqual(preview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
     [successor.id, '2026-11-23', '2026-11-24'],
@@ -192,6 +193,65 @@ test('repeated successor rows merge split dates once and add, edit and remove di
   assert.deepEqual(byPair(reverted, kept, successor), keepLink);
 });
 
+test('spreadsheet goal dates merge across predecessor rows and replay and undo with planned dates and links', async t => {
+  const f = await fixture(t);
+  const newPredecessor = await f.issue('추가할 선행 업무');
+  const oldPredecessor = await f.issue('해제할 선행 업무');
+  const first = await f.issue('계획과 목표를 바꿀 업무', { dueDate: '2026-11-25' });
+  const second = await f.issue('목표를 새로 지정할 업무');
+  const cleared = await f.issue('목표를 해제할 업무', { dueDate: '2026-11-28' });
+  const kept = await f.issue('목표가 비어 있는 붙여넣기 셀', { dueDate: '2026-11-29' });
+  const removedLink = await f.link(oldPredecessor, first, 'SS', 1);
+  const before = await f.workspace();
+  const rows = [
+    [first.key, '2026-11-18', '', newPredecessor.key, 'SS', '0', ''],
+    [first.key.toLowerCase(), '', '2026-11-24', oldPredecessor.key, '-', '', '2026-11-27'],
+    [second.key, '', '', '', '', '', '2026-11-26'],
+    [cleared.key, '', '', '', '', '', '-'],
+    [kept.key, '2026-11-18', '', '', '', '', ''],
+  ];
+  const review = await f.preview(rows, { korean: true, includeDueDate: true });
+  assert.deepEqual(review.errors, []);
+  assert.equal(review.unchanged, 0);
+  assert.deepEqual(review.changes.map(({ id }) => id), [first.id, second.id, cleared.id, kept.id]);
+  assert.deepEqual(review.changes.slice(0, 3).map(({ fromDue, toDue }) => [fromDue, toDue]), [
+    ['2026-11-25', '2026-11-27'], [null, '2026-11-26'], ['2026-11-28', null],
+  ]);
+  assert.equal(Object.hasOwn(review.changes[3], 'fromDue'), false);
+  assert.equal(Object.hasOwn(review.changes[3], 'toDue'), false);
+  assert.deepEqual(review.dependencyChanges, [
+    expectedChange(2, newPredecessor, first, null, { type: 'SS', lagDays: 0 }),
+    expectedChange(3, oldPredecessor, first, { type: 'SS', lagDays: 1 }, null),
+  ]);
+  assert.deepEqual(await f.workspace(), before);
+
+  const applied = await f.apply(review);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.dependencyChanges, 2);
+  const dates = ({ id, version, startDate, endDate, dueDate }: Issue) => [id, version, startDate, endDate, dueDate];
+  assert.deepEqual(applied.data.updated.map(dates), [
+    dates({ ...first, version: first.version + 1, startDate: '2026-11-18', endDate: '2026-11-24', dueDate: '2026-11-27' }),
+    dates({ ...second, version: second.version + 1, dueDate: '2026-11-26' }),
+    dates({ ...cleared, version: cleared.version + 1, dueDate: null }),
+    dates({ ...kept, version: kept.version + 1, startDate: '2026-11-18' }),
+  ]);
+  const after = await f.workspace();
+  assert.ok(byPair(after, newPredecessor, first));
+  assert.equal(byPair(after, oldPredecessor, first), undefined);
+  assert.deepEqual(await f.apply(review), applied);
+  assert.deepEqual(await f.workspace(), after);
+
+  const undone = await f.undo(applied.data.undoId);
+  assert.equal(undone.status, 200, JSON.stringify(undone.data));
+  const restored = [first, second, cleared, kept].map(issue => dates({ ...issue, version: issue.version + 2 }));
+  assert.deepEqual(undone.data.updated.map(dates), restored);
+  const reverted = await f.workspace();
+  assert.deepEqual(restored.map(([id]) => dates(reverted.issues.find(issue => issue.id === id)!)), restored);
+  assert.equal(byPair(reverted, newPredecessor, first), undefined);
+  const original = byPair(reverted, oldPredecessor, first);
+  assert.deepEqual([original?.id, original?.type, original?.lagDays], [removedLink.id, removedLink.type, removedLink.lagDays]);
+});
+
 test('merged dates still reject an invalid final range, conflicting explicit dates and repeated links', async t => {
   const f = await fixture(t);
   const a = await f.issue('첫 선행 업무');
@@ -216,6 +276,14 @@ test('merged dates still reject an invalid final range, conflicting explicit dat
   assert.deepEqual(conflicting.errors.map(error => [error.line, error.key]), [[3, successor.key], [4, successor.key]]);
   assert.match(conflicting.errors[0].message, /시작일/u);
   assert.match(conflicting.errors[1].message, /중복/u);
+
+  const conflictingDueDate = await f.preview([
+    [successor.key, '', '', a.key, '', '', '2026-11-25'],
+    [successor.key, '', '', b.key, '', '', '-'],
+  ], { includeDueDate: true });
+  assert.equal(conflictingDueDate.previewId, null);
+  assert.deepEqual(conflictingDueDate.errors.map(error => [error.line, error.key]), [[3, successor.key]]);
+  assert.match(conflictingDueDate.errors[0].message, /목표 마감일/u);
   assert.deepEqual(await f.workspace(), before);
 });
 
@@ -330,7 +398,7 @@ test('paste rejects a combined cycle, a late indirect cycle, and a cross-project
   const c = await f.issue('C');
   const d = await f.issue('D');
   const outsideProject = await f.createProject('OTHERLINK');
-  const foreign = await f.issue('타 프로젝트 업무', outsideProject.id);
+  const foreign = await f.issue('타 프로젝트 업무', { projectId: outsideProject.id });
   const before = await f.workspace();
 
   const twoDirections = await f.preview([

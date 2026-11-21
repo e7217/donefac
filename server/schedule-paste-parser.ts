@@ -11,6 +11,7 @@ export interface SchedulePasteRow {
   key: string;
   startDate: string | null | undefined;
   endDate: string | null | undefined;
+  dueDate?: string | null;
   dependency?: { predecessorKey: string; type?: DependencyType | '-'; lagDays?: number };
 }
 
@@ -20,6 +21,7 @@ interface Header {
   keyIndex: number;
   startIndex: number | undefined;
   endIndex: number | undefined;
+  dueIndex: number | undefined;
   predecessorIndex: number | undefined;
   typeIndex: number | undefined;
   lagIndex: number | undefined;
@@ -34,7 +36,7 @@ interface Candidate {
 
 interface SeenIssueRows {
   predecessorLines: Map<string, number>;
-  dates: Partial<Record<'startDate' | 'endDate', { value: string | null; line: number }>>;
+  dates: Partial<Record<'startDate' | 'endDate' | 'dueDate', { value: string | null; line: number }>>;
 }
 
 type Column = keyof typeof columnLabels;
@@ -43,12 +45,12 @@ const normalizeColumn = (label: string) => label.toLowerCase().replace(/\s+/g, '
 const columnAliases = new Map<string, Column>([
   ...(Object.keys(columnLabels) as Column[]).map(column => [normalizeColumn(columnLabels[column]), column] as const),
   ['티켓', 'key'], ['issuekey', 'key'], ['key', 'key'],
-  ['startdate', 'start'], ['enddate', 'end'],
+  ['startdate', 'start'], ['enddate', 'end'], ['duedate', 'due'],
   ['predecessor', 'predecessor'], ['predecessorkey', 'predecessor'],
   ['dependencytype', 'dependencyType'], ['lagdays', 'lag'],
 ]);
 
-const requiredHeader = '업무 키와 시작일·종료일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
+const requiredHeader = '업무 키와 시작일·종료일·목표 마감일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
 
 function inspectHeader(parsed: DelimitedText): Candidate {
   const recordIndex = parsed.records.findIndex(record => !blankRecord(record));
@@ -78,13 +80,13 @@ function inspectHeader(parsed: DelimitedText): Candidate {
     }
   }
   if (!columns.has('key')) errors.push({ line: record.line, message: '업무 키 헤더(업무 키, 티켓, issue key, key)가 필요합니다.' });
-  if (!columns.has('start') && !columns.has('end') && !columns.has('predecessor')) {
+  if (!columns.has('start') && !columns.has('end') && !columns.has('due') && !columns.has('predecessor')) {
     errors.push({ line: record.line, message: requiredHeader });
   }
   if (!errors.length) {
     candidate.header = {
       recordIndex, record, keyIndex: columns.get('key')!,
-      startIndex: columns.get('start'), endIndex: columns.get('end'),
+      startIndex: columns.get('start'), endIndex: columns.get('end'), dueIndex: columns.get('due'),
       predecessorIndex: columns.get('predecessor'), typeIndex: columns.get('dependencyType'), lagIndex: columns.get('lag'),
     };
   }
@@ -140,7 +142,7 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
 
   const { parsed, header } = valid[0];
   if (parsed.error) return { rows: [], errors: [parsed.error] };
-  const { recordIndex, record, keyIndex, startIndex, endIndex, predecessorIndex } = header!;
+  const { recordIndex, record, keyIndex, startIndex, endIndex, dueIndex, predecessorIndex } = header!;
   const dataRecords = parsed.records.slice(recordIndex + 1).filter(row => !blankRecord(row));
   if (dataRecords.length > SCHEDULE_PASTE_MAX_ROWS) {
     return { rows: [], errors: [{ line: dataRecords[SCHEDULE_PASTE_MAX_ROWS].line, message: '일정은 한 번에 500행까지 붙여넣을 수 있습니다.' }] };
@@ -149,7 +151,9 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
   const rows: SchedulePasteRow[] = [];
   const errors: SchedulePasteDiagnostic[] = [];
   const seenKeys = new Map<string, SeenIssueRows>();
-  const dateColumns = [[startIndex, 'startDate', '시작일'], [endIndex, 'endDate', '종료일']] as const;
+  const dateColumns = [
+    [startIndex, 'startDate', columnLabels.start], [endIndex, 'endDate', columnLabels.end], [dueIndex, 'dueDate', columnLabels.due],
+  ] as const;
   for (const row of dataRecords) {
     if (row.cells.length !== record.cells.length) {
       errors.push({ line: row.line, message: `열 수가 헤더(${record.cells.length}개)와 다릅니다. 빈 날짜 셀도 구분자를 유지해 주세요.` });

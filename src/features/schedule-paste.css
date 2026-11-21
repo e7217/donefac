@@ -218,6 +218,11 @@
   overflow-x: auto;
 }
 
+.schedule-paste-table-scroll:focus-visible {
+  outline: 2px solid #177c72;
+  outline-offset: -2px;
+}
+
 .schedule-paste-change-table table {
   width: 100%;
   border-collapse: collapse;
@@ -427,16 +432,16 @@
   min-width: 0;
 }
 
-.schedule-bulk-date-cell .schedule-paste-date {
+.schedule-bulk-date-table .schedule-paste-date-change .schedule-paste-date {
   white-space: normal;
 }
 
-.schedule-bulk-date-cell .schedule-paste-date strong,
-.schedule-bulk-date-previous {
+.schedule-bulk-date-table .schedule-paste-date-change .schedule-paste-date strong,
+.schedule-bulk-date-table .schedule-paste-date-previous {
   overflow-wrap: anywhere;
 }
 
-.schedule-bulk-date-previous {
+.schedule-paste-date-previous {
   display: block;
   margin-bottom: 0.15rem;
   color: #526f62;

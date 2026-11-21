@@ -323,7 +323,8 @@ test('team bulk dates fence the other project calendar, linked endpoint and unch
 test('mixed spreadsheet date edits preview without source writes, apply once, and share atomic undo with manual scheduling', async () => {
   const f = await fixture();
   try {
-    const shifted = await issue(f, '이동할 합성 일정'), unscheduled = await issue(f, '새로 지정할 합성 일정', null, null), cleared = await issue(f, '지울 합성 일정'), unchanged = await issue(f, '빈 셀 유지');
+    const shifted = await issue(f, '이동할 합성 일정', '2026-11-19', '2026-11-20', '2026-11-26');
+    const unscheduled = await issue(f, '새로 지정할 합성 일정', null, null), cleared = await issue(f, '지울 합성 일정'), unchanged = await issue(f, '빈 셀 유지');
     const before = await workspace(f);
     const value = await preview(f, sheet([
       [shifted.key, '2026-11-23', '2026-11-25'], [unscheduled.key, '2026-11-26', '2026-11-27'],
@@ -334,9 +335,11 @@ test('mixed spreadsheet date edits preview without source writes, apply once, an
     assert.deepEqual(dates(value.changes.map(change => ({ id: change.id, startDate: change.toStart, endDate: change.toEnd }))), {
       [shifted.id]: ['2026-11-23', '2026-11-25'], [unscheduled.id]: ['2026-11-26', '2026-11-27'], [cleared.id]: [null, null],
     });
+    assert.ok(value.changes.every(change => !Object.hasOwn(change, 'fromDue') && !Object.hasOwn(change, 'toDue')));
     const applied = await apply(f, value); assert.equal(applied.status, 200, JSON.stringify(applied.data)); assert.ok(applied.data.undoId); assert.equal(applied.data.updated.length, 3);
     const after = await workspace(f);
     for (const updated of applied.data.updated) { assert.equal(updated.version, 2); assert.equal(after.issues.find(item => item.id === updated.id)?.version, 2); }
+    assert.equal(after.issues.find(item => item.id === shifted.id)?.dueDate, shifted.dueDate);
     assert.equal(after.issues.find(item => item.id === unchanged.id)?.version, unchanged.version);
     const retry = await apply(f, value); assert.equal(retry.status, 200); assert.deepEqual(retry.data, applied.data); assert.deepEqual(await workspace(f), after);
     const undo = await f.call<{ updated: Issue[]; warnings: string[] }>('/schedule/undo', 'POST', { undoId: applied.data.undoId });
@@ -371,6 +374,62 @@ test('bad dates, unknown or cross-project keys and duplicate rows cannot produce
     const partial = await preview(f, sheet([[target.key, '-', '']])); assert.deepEqual(partial.errors, []); assert.ok(partial.previewId);
     assert.equal(partial.changes[0].toStart, null); assert.equal(partial.changes[0].toEnd, target.endDate);
     assert.deepEqual(await workspace(f), initial);
+  } finally { await f.close(); }
+});
+
+test('dueDate-only paste rejects required clears and stale goal edits without applying any other row', async () => {
+  const f = await fixture();
+  try {
+    const first = await issue(f, '필수 목표 마감일', '2026-11-19', '2026-11-20', '2026-11-25');
+    const second = await issue(f, '함께 검토할 목표 마감일', '2026-11-19', '2026-11-20', '2026-11-26');
+    const workflowPath = `/projects/${f.project.id}/workflow`;
+    const workflow = (await f.call<ProjectWorkflow>(workflowPath)).data;
+    const saved = await f.call(workflowPath, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      fieldRules: [{ issueType: '*', statusId: first.status, requiredFields: ['dueDate'] }],
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.data));
+    const header = ['key', 'dueDate'];
+    const before = await workspace(f);
+    const blocked = await preview(f, sheet([[first.key, '-'], [second.key, '2026-11-28']], header));
+    assert.equal(blocked.previewId, null);
+    assert.deepEqual(blocked.errors.map(({ line, key }) => [line, key]), [[2, first.key]]);
+    assert.match(blocked.errors[0].message, /마감일/u);
+    assert.deepEqual(blocked.changes.map(({ id, toDue }) => [id, toDue]), [[second.id, '2026-11-28']]);
+    assert.deepEqual(await workspace(f), before);
+
+    const noop = await preview(f, sheet([[first.key, first.dueDate!], [second.key, '']], header));
+    assert.equal(noop.previewId, null);
+    assert.equal(noop.unchanged, 2);
+    assert.deepEqual(noop.errors, []);
+    assert.deepEqual(noop.changes, []);
+
+    const text = sheet([[first.key, '2026-11-27'], [second.key, '2026-11-28']], header);
+    const stale = await preview(f, text);
+    assert.ok(stale.previewId);
+    const incoming = await f.call<Issue>(`/issues/${second.id}`, 'PATCH', { expectedVersion: second.version, dueDate: '2026-11-29' });
+    assert.equal(incoming.status, 200, JSON.stringify(incoming.data));
+    const beforeApply = await workspace(f);
+    assert.equal((await apply(f, stale)).status, 409);
+    assert.deepEqual(await workspace(f), beforeApply);
+
+    const fresh = await preview(f, text);
+    assert.deepEqual(fresh.changes.map(({ fromDue, toDue }) => [fromDue, toDue]), [
+      ['2026-11-25', '2026-11-27'], ['2026-11-29', '2026-11-28'],
+    ]);
+    const applied = await apply(f, fresh);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.deepEqual(applied.data.updated.map(allDates), [
+      { ...allDates(first), dueDate: '2026-11-27' }, { ...allDates(second), dueDate: '2026-11-28' },
+    ]);
+
+    const changed = await f.call<Issue>(`/issues/${second.id}`, 'PATCH', {
+      expectedVersion: applied.data.updated[1].version, dueDate: '2026-11-30',
+    });
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    const beforeUndo = await workspace(f);
+    assert.equal((await f.call('/schedule/undo', 'POST', { undoId: applied.data.undoId })).status, 409);
+    assert.deepEqual(await workspace(f), beforeUndo);
   } finally { await f.close(); }
 });
 

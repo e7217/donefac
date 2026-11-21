@@ -30,23 +30,23 @@ function sheetError(result: ReturnType<typeof buildGanttScheduleSheet>) {
 test('schedule sheet roundtrips saved dates and sorted inbound dependencies for selected successors', () => {
   const hidden = makeIssue('TEAM-2');
   const quoted = makeIssue('TEAM-10"old');
-  const successor = makeIssue('TEAM-14', { startDate: '2026-11-23' });
+  const successor = makeIssue('TEAM-14', { startDate: '2026-11-23', dueDate: '2026-11-30' });
   const unscheduled = makeIssue('TEAM-1');
   const projects = [hidden, quoted, successor, unscheduled];
   const links = [dependency(quoted, successor, 'SF', 0), dependency(hidden, successor, 'FF', -2), dependency(unscheduled, hidden, 'SS', 3)];
   const selected = [successor, unscheduled];
   const exported = sheetText(buildGanttScheduleSheet(selected, projects, links));
   assert.equal(exported, [
-    '\uFEFF업무 키\t시작일\t종료일\t선행 업무\t연결 유형\t근무일 간격',
-    'TEAM-14\t2026-11-23\t\tTEAM-2\tFF\t-2',
-    'TEAM-14\t\t\t"TEAM-10""old"\tSF\t0',
-    'TEAM-1\t\t\t\t\t',
+    '\uFEFF업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형\t근무일 간격',
+    'TEAM-14\t2026-11-23\t\t2026-11-30\tTEAM-2\tFF\t-2',
+    'TEAM-14\t\t\t\t"TEAM-10""old"\tSF\t0',
+    'TEAM-1\t\t\t\t\t\t',
     '',
   ].join('\r\n'));
   assert.equal(sheetText(buildGanttScheduleSheet(selected, projects.toReversed(), links.toReversed())), exported);
   assert.deepEqual(parseSchedulePaste(exported), {
     rows: [
-      { line: 2, key: 'TEAM-14', startDate: '2026-11-23', endDate: undefined, dependency: { predecessorKey: 'TEAM-2', type: 'FF', lagDays: -2 } },
+      { line: 2, key: 'TEAM-14', startDate: '2026-11-23', endDate: undefined, dueDate: '2026-11-30', dependency: { predecessorKey: 'TEAM-2', type: 'FF', lagDays: -2 } },
       { line: 3, key: 'TEAM-14', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'TEAM-10"OLD', type: 'SF', lagDays: 0 } },
       { line: 4, key: 'TEAM-1', startDate: undefined, endDate: undefined },
     ],
@@ -54,7 +54,7 @@ test('schedule sheet roundtrips saved dates and sorted inbound dependencies for 
   });
 });
 
-test('schedule sheet fails explicitly for ambiguous keys, missing and invalid links, or mixed projects', () => {
+test('schedule sheet fails explicitly for ambiguous keys, invalid dates or links, and mixed projects', () => {
   const first = makeIssue('TEAM-1');
   const second = makeIssue('TEAM-2');
   const other = makeIssue('OPS-1', { projectId: 'ops' });
@@ -66,6 +66,8 @@ test('schedule sheet fails explicitly for ambiguous keys, missing and invalid li
   assert.match(sheetError(buildGanttScheduleSheet([unsafe], [unsafe], [])), /업무의 키/);
   const duplicateKey = makeIssue('team-1');
   assert.match(sheetError(buildGanttScheduleSheet([first], [...projects, duplicateKey], [])), /업무의 키/);
+  const invalidDeadline = makeIssue('TEAM-3', { dueDate: '2026-11-31' });
+  assert.match(sheetError(buildGanttScheduleSheet([invalidDeadline], [invalidDeadline], [])), /업무의 날짜/);
   for (const links of [
     [dependency(other, first, 'FS', 0)], [dependency(first, first, 'FS', 0)],
     [{ ...link, lagDays: 3651 }], [link, { ...link, id: 'duplicate' }],

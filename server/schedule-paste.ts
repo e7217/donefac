@@ -284,12 +284,12 @@ export class SchedulePasteService {
       const preview: SchedulePastePreview = {
         projectId, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
       };
-      const changes = new Map<string, AutomaticScheduleMutation>();
+      const changes = new Map<string, ScheduleDateMutation>();
       const linkChanges: ScheduleDependencyMutation[] = [];
       const byPair = new Map(dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
       const targetIds = new Set<string>();
       const resolvedRows: { row: SchedulePasteRow; issue: Issue; datesChanged: boolean }[] = [];
-      const requestedDates = new Map<string, { issue: Issue; line: number; change: AutomaticScheduleMutation }>();
+      const requestedDates = new Map<string, { issue: Issue; line: number; dates: ScheduleBulkDateChanges }>();
       for (const row of parsed.rows) {
         const issue = byKey.get(row.key);
         if (!issue) {
@@ -297,22 +297,27 @@ export class SchedulePasteService {
           preview.errors.push({line:row.line,key:row.key,message});
           continue;
         }
-        const datesChanged = (row.startDate !== undefined && row.startDate !== issue.startDate) ||
-          (row.endDate !== undefined && row.endDate !== issue.endDate);
+        const { startDate, endDate, dueDate } = row;
+        const datesChanged = (startDate !== undefined && startDate !== issue.startDate) ||
+          (endDate !== undefined && endDate !== issue.endDate) ||
+          (dueDate !== undefined && dueDate !== (issue.dueDate ?? null));
         resolvedRows.push({ row, issue, datesChanged });
         if (!datesChanged) continue;
         const previous = requestedDates.get(issue.id);
-        const dates = previous ? previous.change : issue;
+        const dates = previous?.dates ?? {};
+        if (startDate !== undefined) dates.startDate = startDate;
+        if (endDate !== undefined) dates.endDate = endDate;
+        if (dueDate !== undefined) dates.dueDate = dueDate;
         requestedDates.set(issue.id, {
-          issue, line:previous?.line ?? row.line,
-          change:{ id:issue.id,expectedVersion:issue.version,
-            startDate:row.startDate === undefined ? dates.startDate : row.startDate,
-            endDate:row.endDate === undefined ? dates.endDate : row.endDate },
+          issue, line: previous?.line ?? row.line, dates,
         });
       }
 
       const invalidDates = new Set<string>();
-      for (const { issue, line, change } of requestedDates.values()) {
+      for (const { issue, line, dates } of requestedDates.values()) {
+        const edit = proposeDateEdit(issue, dates);
+        if (!edit) continue;
+        const { change, summary } = edit;
         const { startDate, endDate } = change;
         let error: string | null;
         if (startDate && endDate && startDate > endDate) {
@@ -326,10 +331,8 @@ export class SchedulePasteService {
           continue;
         }
         changes.set(issue.id, change);
-        preview.changes.push({
-          id:issue.id,key:issue.key,title:issue.title,version:issue.version,
-          fromStart:issue.startDate,fromEnd:issue.endDate,toStart:startDate,toEnd:endDate,
-        });
+        const { fromDue, toDue, ...startAndEnd } = summary;
+        preview.changes.push(fromDue !== toDue ? summary : startAndEnd);
       }
 
       for (const { row, issue, datesChanged } of resolvedRows) {
@@ -372,7 +375,10 @@ export class SchedulePasteService {
       if (changes.size || linkChanges.length) {
         const projected = issues.map(issue => {
           const change = changes.get(issue.id);
-          return change ? {...issue,startDate:change.startDate,endDate:change.endDate} : issue;
+          return change ? {
+            ...issue, startDate: change.startDate, endDate: change.endDate,
+            dueDate: change.dueDate === undefined ? issue.dueDate : change.dueDate,
+          } : issue;
         });
         preview.warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
       }

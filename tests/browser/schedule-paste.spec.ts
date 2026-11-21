@@ -11,11 +11,11 @@ function dateAt(offset: number) {
   return date.toISOString().slice(0, 10);
 }
 
-async function createIssue(request: APIRequestContext, projectId: string, offset: number) {
+async function createIssue(request: APIRequestContext, projectId: string, offset: number, dueDate?: string) {
   const response = await request.post('/api/issues', {
     data: {
       projectId, title: `일정 붙여넣기 검사 ${Date.now()} ${offset}`,
-      startDate: dateAt(offset), endDate: dateAt(offset + 3),
+      startDate: dateAt(offset), endDate: dateAt(offset + 3), dueDate,
     },
   });
   expect(response.ok()).toBeTruthy();
@@ -25,7 +25,7 @@ async function createIssue(request: APIRequestContext, projectId: string, offset
 test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변경을 적용·되돌린다', async ({ page, request }) => {
   const project = (await workspace(request)).projects[0];
   const predecessor = await createIssue(request, project.id, 0);
-  const successor = await createIssue(request, project.id, 5);
+  const successor = await createIssue(request, project.id, 5, dateAt(11));
   try {
     const dependency = await request.post('/api/dependencies', {
       data: {predecessorId:predecessor.id,successorId:successor.id,lagDays:0},
@@ -38,10 +38,10 @@ test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변�
     const preview = dialog.getByRole('button', {name:'붙여넣기 미리보기',exact:true});
     const apply = dialog.getByRole('button', {name:'검토한 일정 적용',exact:true});
     const text = [
-      ['업무 키','시작일','종료일'],
-      [predecessor.key,dateAt(1),dateAt(9)],
-      [successor.key,'','-'],
-    ].map(row => row.join('\t')).join('\n');
+      ['key', 'startDate', 'endDate', 'dueDate'],
+      [predecessor.key, dateAt(1), dateAt(9), dateAt(10)],
+      [successor.key, '', '-', ''],
+    ].map(row => row.join(',')).join('\n');
 
     const invalid = text.replace(dateAt(1), '2026/11/19');
     await input.fill(invalid);
@@ -52,8 +52,12 @@ test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변�
     await input.fill(text);
     await preview.click();
     const table = dialog.getByRole('table', {name:'붙여넣기 일정 변경 목록'});
-    await expect(table.getByRole('row', {name:new RegExp(predecessor.key)})).toContainText(dateAt(9));
-    await expect(table.getByRole('row', {name:new RegExp(successor.key)})).toContainText('미정');
+    const predecessorRow = table.getByRole('row', { name: new RegExp(predecessor.key) });
+    const successorRow = table.getByRole('row', { name: new RegExp(successor.key) });
+    await expect(predecessorRow).toContainText(dateAt(9));
+    await expect(predecessorRow.getByRole('cell').last()).toContainText(dateAt(10));
+    await expect(successorRow).toContainText('미정');
+    await expect(successorRow.getByRole('cell').last()).toBeEmpty();
     await expect(dialog.getByText(/선행 업무 종료 후/)).toBeVisible();
     expect((await workspace(request)).issues.find(issue => issue.id === predecessor.id)?.endDate).toBe(predecessor.endDate);
 
@@ -61,12 +65,15 @@ test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변�
     await expect(dialog).toHaveCount(0);
     await expect(page.getByLabel(`${predecessor.key} 종료일`, {exact:true})).toHaveValue(dateAt(9));
     await expect(page.getByLabel(`${successor.key} 종료일`, {exact:true})).toHaveValue('');
-    const stored = (await workspace(request)).issues.find(issue => issue.id === successor.id);
-    expect(stored?.startDate).toBe(successor.startDate);
-    expect(stored?.endDate).toBeNull();
+    const stored = (await workspace(request)).issues;
+    expect(stored.find(issue => issue.id === successor.id)).toMatchObject({
+      startDate: successor.startDate, endDate: null, dueDate: successor.dueDate,
+    });
+    expect(stored.find(issue => issue.id === predecessor.id)?.dueDate).toBe(dateAt(10));
     await page.getByRole('button', {name:'되돌리기',exact:true}).click();
     await expect(page.getByLabel(`${predecessor.key} 종료일`, {exact:true})).toHaveValue(predecessor.endDate!);
     await expect(page.getByLabel(`${successor.key} 종료일`, {exact:true})).toHaveValue(successor.endDate!);
+    expect((await workspace(request)).issues.find(issue => issue.id === predecessor.id)?.dueDate).toBeNull();
 
     await page.setViewportSize({width:360,height:820});
     const opener = page.getByRole('button', {name:'일정 붙여넣기',exact:true});
@@ -98,6 +105,7 @@ test('일정 붙여넣기의 오래된 미리보기를 거절하고 붙여넣은
     await input.fill(text);
     await preview.click();
     await expect(apply).toBeEnabled();
+    await expect(dialog.getByRole('columnheader', { name: '목표 마감일', exact: true })).toHaveCount(0);
     const external = await request.patch(`/api/issues/${issue.id}`, {
       data:{expectedVersion:issue.version,endDate:dateAt(5)},
     });

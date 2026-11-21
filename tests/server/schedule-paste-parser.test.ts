@@ -43,6 +43,22 @@ test('header aliases allow either date column and explicitly headed unrelated co
   }
 });
 
+test('goal deadline alone supports explicit ISO dates, clear, keep and physical-line diagnostics', () => {
+  for (const header of ['목표 마감일', 'Due Date', 'dueDate']) {
+    const result = parseSchedulePaste([
+      ['업무 키', header], ['p-1', ' 2024-02-29 '], ['p-2', '-'], ['p-3', ''], ['p-4', '2023-02-29'],
+    ].map(row => row.join('\t')).join('\r\n'));
+    assert.deepEqual(result.rows, [
+      { line: 2, key: 'P-1', startDate: undefined, endDate: undefined, dueDate: '2024-02-29' },
+      { line: 3, key: 'P-2', startDate: undefined, endDate: undefined, dueDate: null },
+      { line: 4, key: 'P-3', startDate: undefined, endDate: undefined },
+    ]);
+    assert.deepEqual(result.errors.map(({ line, key }) => [line, key]), [[5, 'P-4']]);
+    assert.match(result.errors[0].message, /목표 마감일.*YYYY-MM-DD/);
+  }
+  assert.match(parseSchedulePaste('key,목표 마감일,Due Date\np-1,2026-11-28,2026-11-29').errors[0].message, /목표 마감일 헤더가 중복/);
+});
+
 test('dependency-only and mixed date sheets preserve blank fields and normalize relationship choices', () => {
   for (const header of ['선행 업무', 'predecessor', 'Predecessor Key']) {
     assert.deepEqual(parseSchedulePaste(`업무 키\t${header}\n p-2 \t p-1 `), {
@@ -126,18 +142,19 @@ test('CSV and TSV retain each predecessor and allow one date-only row per succes
 
 test('conflicting dates identify the first supplied value for each column at its physical line', () => {
   const result = parseSchedulePaste([
-    'key,startDate,endDate,predecessor,notes',
-    'p-3,2026-12-01,,p-1,"first\nsecond"',
-    'p-3,,-,p-2,notes',
-    'P-3,2026-12-02,2026-12-10,,conflict',
+    'key,startDate,endDate,dueDate,predecessor,notes',
+    'p-3,2026-12-01,,2026-12-12,p-1,"first\nsecond"',
+    'p-3,,-,2026-12-12,p-2,notes',
+    'P-3,2026-12-02,2026-12-10,-,,conflict',
   ].join('\n'));
   assert.deepEqual(result.rows, [
-    { line: 2, key: 'P-3', startDate: '2026-12-01', endDate: undefined, dependency: { predecessorKey: 'P-1' } },
-    { line: 4, key: 'P-3', startDate: undefined, endDate: null, dependency: { predecessorKey: 'P-2' } },
+    { line: 2, key: 'P-3', startDate: '2026-12-01', endDate: undefined, dueDate: '2026-12-12', dependency: { predecessorKey: 'P-1' } },
+    { line: 4, key: 'P-3', startDate: undefined, endDate: null, dueDate: '2026-12-12', dependency: { predecessorKey: 'P-2' } },
   ]);
-  assert.deepEqual(result.errors.map(({ line, key }) => [line, key]), [[5, 'P-3'], [5, 'P-3']]);
+  assert.deepEqual(result.errors.map(({ line, key }) => [line, key]), [[5, 'P-3'], [5, 'P-3'], [5, 'P-3']]);
   assert.match(result.errors[0].message, /시작일.*2번째 줄.*충돌/);
   assert.match(result.errors[1].message, /종료일.*4번째 줄.*충돌/);
+  assert.match(result.errors[2].message, /목표 마감일.*2번째 줄.*충돌/);
 });
 
 test('missing, empty, duplicate or ambiguous headers produce errors without guessing', () => {

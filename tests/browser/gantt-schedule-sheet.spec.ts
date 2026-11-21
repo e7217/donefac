@@ -21,9 +21,9 @@ async function downloadSheet(page: Page, projectKey: string) {
   const bytes = await readFile(await download.path());
   expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
   const [header, ...lines] = bytes.toString('utf8', 3).replace(/\r?\n$/, '').split(/\r?\n/);
-  expect(header).toBe('업무 키\t시작일\t종료일\t선행 업무\t연결 유형\t근무일 간격');
+  expect(header).toBe('업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형\t근무일 간격');
   const rows = lines.map(line => line.split('\t'));
-  for (const row of rows) expect(row).toHaveLength(6);
+  for (const row of rows) expect(row).toHaveLength(7);
   return { header, rows };
 }
 
@@ -41,11 +41,14 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
   const successorStart = day(7);
   const originalEnd = day(10);
   const editedEnd = day(15);
+  const originalDue = day(17);
+  const editedDue = day(21);
+  const originalPartialDue = day(20);
   const created: Issue[] = [];
 
-  async function createIssue(projectId: string, title: string, startDate: string | null, endDate: string | null) {
+  async function createIssue(projectId: string, title: string, startDate: string | null, endDate: string | null, dueDate: string | null = null) {
     const issue = await json<Issue>(await request.post('/api/issues', {
-      data: { projectId, title, startDate, endDate },
+      data: { projectId, title, startDate, endDate, dueDate },
     }), 201);
     created.push(issue);
     return issue;
@@ -54,8 +57,8 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
   try {
     const hidden = await createIssue(targetProject.id, `검색에 걸리지 않는 선행 ${randomUUID()}`, day(0), day(3));
     const visible = await createIssue(targetProject.id, `${prefix} 선행`, day(0), day(3));
-    const successor = await createIssue(targetProject.id, `${prefix} 후행`, successorStart, originalEnd);
-    const partial = await createIssue(targetProject.id, `${prefix} 시작일 미정`, null, originalEnd);
+    const successor = await createIssue(targetProject.id, `${prefix} 후행`, successorStart, originalEnd, originalDue);
+    const partial = await createIssue(targetProject.id, `${prefix} 시작일 미정`, null, originalEnd, originalPartialDue);
     const other = await createIssue(routeProject.id, `${prefix} 다른 프로젝트`, successorStart, originalEnd);
     const dependency = async (predecessor: Issue, type: Dependency['type'], lagDays: number) =>
       json<Dependency>(await request.post('/api/dependencies', {
@@ -79,19 +82,22 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     for (const issue of [other, hidden]) await expect(row(issue)).toHaveCount(0);
     const all = await downloadSheet(page, targetProject.key);
     expect([...new Set(all.rows.map(([key]) => key))].sort()).toEqual([visible.key, successor.key, partial.key].sort());
-    expect(all.rows.find(([key]) => key === partial.key)?.[2]).toBe(originalEnd);
+    expect(all.rows.find(([key]) => key === partial.key)?.slice(1, 4)).toEqual(['', originalEnd, originalPartialDue]);
 
     await row(successor).getByRole('checkbox', { name: `${successor.key} 선택`, exact: true }).check();
+    await row(partial).getByRole('checkbox', { name: `${partial.key} 선택`, exact: true }).check();
     const selected = await downloadSheet(page, targetProject.key);
-    expect(selected.rows.map(([key]) => key)).toEqual([successor.key, successor.key]);
-    expect(selected.rows.map(cells => cells.slice(1, 3))).toEqual([[successorStart, originalEnd], ['', '']]);
-    expect(selected.rows.map(cells => cells.slice(3))).toEqual(expect.arrayContaining([
+    expect(selected.rows.map(([key]) => key).sort()).toEqual([successor.key, successor.key, partial.key].sort());
+    const successorRows = selected.rows.filter(([key]) => key === successor.key);
+    expect(successorRows.map(cells => cells.slice(1, 4))).toEqual([[successorStart, originalEnd, originalDue], ['', '', '']]);
+    expect(successorRows.map(cells => cells.slice(4))).toEqual(expect.arrayContaining([
       [hidden.key, 'FF', '-1'],
       [visible.key, 'SS', '2'],
     ]));
 
-    const edited = selected.rows.map(([key, startDate, endDate, predecessor, type, lag]) => [
-      key, startDate, endDate ? editedEnd : '', predecessor, type, predecessor === hidden.key ? '3' : lag,
+    const edited = selected.rows.map(([key, startDate, endDate, dueDate, predecessor, type, lag]) => [
+      key, startDate, key === successor.key && endDate ? editedEnd : endDate,
+      dueDate ? (key === partial.key ? '-' : editedDue) : '', predecessor, type, predecessor === hidden.key ? '3' : lag,
     ].join('\t'));
     const text = `\uFEFF${[selected.header, ...edited].join('\n')}`;
     await page.getByRole('button', { name: '일정 붙여넣기', exact: true }).click();
@@ -99,7 +105,7 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     await expect(dialog).toContainText(`대상 프로젝트 ${targetProject.key} · ${targetProject.name}`);
     await expect(projectFilter).toBeDisabled();
     const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
-    const mixed = `${text}\n${[other.key, successorStart, editedEnd, '', '', ''].join('\t')}`;
+    const mixed = `${text}\n${[other.key, successorStart, editedEnd, '', '', '', ''].join('\t')}`;
     await input.fill(mixed);
     const discard = page.waitForEvent('dialog');
     await page.evaluate(() => history.back());
@@ -123,17 +129,29 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     expect(preview).toMatchObject({
       projectId: targetProject.id,
       errors: [],
-      changes: [{ id: successor.id, fromEnd: originalEnd, toEnd: editedEnd }],
+      changes: expect.arrayContaining([
+        expect.objectContaining({ id: successor.id, fromEnd: originalEnd, toEnd: editedEnd, fromDue: originalDue, toDue: editedDue }),
+        expect.objectContaining({ id: partial.id, fromEnd: originalEnd, toEnd: originalEnd, fromDue: originalPartialDue, toDue: null }),
+      ]),
       dependencyChanges: [{ predecessorKey: hidden.key, successorKey: successor.key,
         before: { type: 'FF', lagDays: -1 }, after: { type: 'FF', lagDays: 3 } }],
     });
-    await expect(dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' })).toContainText(editedEnd);
+    expect(preview.changes).toHaveLength(2);
+    const dateTable = dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
+    await expect(dateTable).toContainText(editedEnd);
+    await expect(dateTable.getByRole('columnheader', { name: '목표 마감일', exact: true })).toBeVisible();
+    const newDeadline = dateTable.getByRole('row', { name: new RegExp(successor.key) })
+      .getByRole('cell', { name: new RegExp(`${originalDue}.*${editedDue}`) });
+    await newDeadline.scrollIntoViewIfNeeded();
+    await expect(newDeadline).toBeInViewport();
+    await expect(dateTable.getByRole('row', { name: new RegExp(partial.key) })
+      .getByRole('cell', { name: new RegExp(`${originalPartialDue}.*미정.*삭제`) })).toBeVisible();
     await expect(dialog.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록' })).toContainText('+3근무일');
 
-    async function expectStored(endDate: string, lagDays: number) {
+    async function expectStored(endDate: string, lagDays: number, dueDate = originalDue, partialDue: string | null = originalPartialDue) {
       const snapshot = await workspace();
-      expect(snapshot.issues.find(issue => issue.id === successor.id)).toMatchObject({ startDate: successorStart, endDate });
-      expect(snapshot.issues.find(issue => issue.id === partial.id)).toEqual(partial);
+      expect(snapshot.issues.find(issue => issue.id === successor.id)).toMatchObject({ startDate: successorStart, endDate, dueDate });
+      expect(snapshot.issues.find(issue => issue.id === partial.id)).toMatchObject({ startDate: null, endDate: originalEnd, dueDate: partialDue });
       expect(snapshot.dependencies.find(link => link.id === hiddenLink.id)).toMatchObject({ type: 'FF', lagDays });
       expect(snapshot.dependencies.find(link => link.id === visibleLink.id)).toEqual(visibleLink);
     }
@@ -141,11 +159,11 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     await expectStored(originalEnd, -1);
     await dialog.getByRole('button', { name: '검토한 일정 적용', exact: true }).click();
     await expect(dialog).toHaveCount(0);
-    await expectStored(editedEnd, 3);
+    await expectStored(editedEnd, 3, editedDue, null);
     await projectFilter.selectOption(routeProject.id);
     await expect(row(successor)).toHaveCount(0);
     const otherSheet = await downloadSheet(page, routeProject.key);
-    expect(otherSheet.rows).toEqual([[other.key, successorStart, originalEnd, '', '', '']]);
+    expect(otherSheet.rows).toEqual([[other.key, successorStart, originalEnd, '', '', '', '']]);
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     await projectFilter.selectOption(targetProject.id);
     await expect(row(successor).getByLabel(`${successor.key} 종료일`, { exact: true })).toHaveValue(originalEnd);

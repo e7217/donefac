@@ -1569,7 +1569,7 @@ function ProjectGantt(props: GanttProps) {
       <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled} title="저장된 일정으로 내려받기"
         onPointerDown={keepInlineDateFocus} onClick={downloadGantt}><ArrowDownToLine size={15} aria-hidden="true" />간트 HTML 내려받기</button>
       {sheetProject && <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled || !sheetIssues.length}
-        title={selectedIssues.length ? '선택한 업무의 저장된 일정과 선행 연결' : '표시된 업무의 저장된 일정과 선행 연결'}
+        title={`${selectedIssues.length ? '선택한' : '표시된'} 업무의 저장된 일정, 목표 마감일, 선행 연결`}
         onPointerDown={keepInlineDateFocus} onClick={downloadScheduleSheet}>
         <ArrowDownToLine size={15} aria-hidden="true" />일정 편집용 TSV 내려받기
       </button>}

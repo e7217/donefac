@@ -8,6 +8,7 @@ export const SCHEDULE_PASTE_COLUMNS = {
   key: '업무 키',
   start: '시작일',
   end: '종료일',
+  due: '목표 마감일',
   predecessor: '선행 업무',
   dependencyType: '연결 유형',
   lag: '근무일 간격',
@@ -62,7 +63,8 @@ export function buildGanttScheduleSheet(
       return { ok: false, error: '내려받을 업무의 키를 확인해 주세요.' };
     }
     if ((issue.startDate !== null && !isCalendarDate(issue.startDate)) ||
-        (issue.endDate !== null && !isCalendarDate(issue.endDate))) {
+        (issue.endDate !== null && !isCalendarDate(issue.endDate)) ||
+        (issue.dueDate != null && !isCalendarDate(issue.dueDate))) {
       return { ok: false, error: '내려받을 업무의 날짜를 확인해 주세요.' };
     }
 
@@ -83,12 +85,12 @@ export function buildGanttScheduleSheet(
     if (rows.length + Math.max(predecessors.length, 1) > SCHEDULE_PASTE_MAX_ROWS) {
       return { ok: false, error: `일정표는 ${SCHEDULE_PASTE_MAX_ROWS}행까지 내려받을 수 있습니다. 업무를 줄여 다시 시도해 주세요.` };
     }
-    const dates = [quoteKey(issue.key), issue.startDate ?? '', issue.endDate ?? ''];
+    const dates = [quoteKey(issue.key), issue.startDate ?? '', issue.endDate ?? '', issue.dueDate ?? ''];
     if (!predecessors.length) rows.push([...dates, '', '', ''].join('\t'));
     predecessors.sort((a, b) => keyOrder.compare(a.key, b.key) || a.key.localeCompare(b.key, 'en'));
     for (const [index, predecessor] of predecessors.entries()) {
       rows.push([
-        ...(index === 0 ? dates : [dates[0], '', '']),
+        ...(index === 0 ? dates : [dates[0], '', '', '']),
         quoteKey(predecessor.key), predecessor.link.type, String(predecessor.link.lagDays),
       ].join('\t'));
     }

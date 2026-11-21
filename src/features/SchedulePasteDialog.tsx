@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { ArrowDown, CalendarRange, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
 import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
 import type {
-  FeatureProps, Issue, Project, ScheduleBulkDateChanges, ScheduleBulkDateInput, SchedulePasteApplyResult,
+  FeatureProps, Issue, Project, ScheduleBulkDateChanges, ScheduleBulkDateInput, ScheduleChange, SchedulePasteApplyResult,
   SchedulePasteDependencyChange, SchedulePastePreview,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
@@ -46,6 +46,7 @@ const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '일정 요청을 완료하지 못했습니다.';
 const hasChanges = (result: SchedulePastePreview) =>
   result.changes.length > 0 || Boolean(result.dependencyChanges?.length);
+const hasDueDateChange = (change: ScheduleChange) => change.fromDue !== undefined || change.toDue !== undefined;
 
 function isDefiniteApplyRejection(cause: unknown, bulk: boolean, recovering: boolean) {
   if (!(cause instanceof ApiError) || cause.status < 400 || cause.status >= 500) return false;
@@ -464,12 +465,12 @@ function ProjectScheduleEditDialog({
                   aria-describedby="schedule-paste-help"
                   value={text}
                   onChange={(event) => updateText(event.target.value)}
-                  placeholder={'key\tstartDate\tendDate\nPROJ-123\t2026-12-01\t2026-12-05'}
+                  placeholder={'key\tstartDate\tendDate\tdueDate\nPROJ-123\t2026-12-01\t2026-12-05\t2026-12-08'}
                   spellCheck={false}
                   rows={8}
                 />
                 <p id="schedule-paste-help">
-                  날짜는 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
+                  시작일, 종료일, 목표 마감일은 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
                   빈 칸은 기존 날짜를 유지합니다.
                   선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
                 </p>
@@ -477,14 +478,14 @@ function ProjectScheduleEditDialog({
                   <summary>입력 예시 보기</summary>
                   <p>스프레드시트에서 헤더를 포함해 복사한 표는 탭으로 구분됩니다.</p>
                   <pre aria-label="TSV 일정 예시">
-                    {'업무 키\t시작일\t종료일\t선행 업무\nPROJ-123\t2026-12-01\t2026-12-04\t\nPROJ-124\t2026-12-07\t2026-12-08\tPROJ-123'}
+                    {'업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\nPROJ-123\t2026-12-01\t2026-12-04\t2026-12-08\t\nPROJ-124\t2026-12-07\t2026-12-08\t-\tPROJ-123'}
                   </pre>
                   <p>쉼표로 구분한 CSV도 사용할 수 있습니다.</p>
                   <pre aria-label="CSV 일정 예시">
-                    {'key,startDate,endDate\nPROJ-123,2026-12-01,2026-12-05\nPROJ-124,,-'}
+                    {'key,startDate,endDate,dueDate\nPROJ-123,2026-12-01,2026-12-05,2026-12-08\nPROJ-124,,,-'}
                   </pre>
                   <p>
-                    업무 키는 후행 업무를 가리킵니다. 같은 업무의 시작일과 종료일은 서로 다른 행에 적을 수
+                    업무 키는 후행 업무를 가리킵니다. 같은 업무의 날짜는 서로 다른 행에 적을 수
                     있으며, 같은 날짜 열에 값을 여러 번 쓰면 값이 모두 같아야 합니다. 연결만 수정할 때는 날짜
                     열을 생략할 수 있습니다.
                   </p>
@@ -691,9 +692,11 @@ function BulkDateProject({ project }: { project?: ProjectName }) {
 function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePreview['changes']; bulk: boolean; projects?: IssueProjects }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
+  const showDueDate = !bulk && changes.some(hasDueDateChange);
   return (
     <div className={`schedule-paste-change-table${bulk ? ' schedule-bulk-date-table' : ''}`}>
-      <div className="schedule-paste-table-scroll">
+      <div className="schedule-paste-table-scroll" tabIndex={showDueDate ? 0 : undefined}
+        role={showDueDate ? 'region' : undefined} aria-label={showDueDate ? '일정 변경 표 스크롤' : undefined}>
         <table aria-label={bulk ? '선택 업무 날짜 변경 목록' : '붙여넣기 일정 변경 목록'}>
           <thead>
             <tr>
@@ -704,6 +707,7 @@ function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePrevie
                   <th scope="col">변경 시작일</th>
                   <th scope="col">현재 종료일</th>
                   <th scope="col">변경 종료일</th>
+                  {showDueDate && <th scope="col">목표 마감일</th>}
                 </>
               )}
             </tr>
@@ -718,9 +722,9 @@ function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePrevie
                 </th>
                 {bulk ? (
                   <>
-                    <BulkDateCell before={change.fromStart} after={change.toStart} />
-                    <BulkDateCell before={change.fromEnd} after={change.toEnd} />
-                    <BulkDateCell before={change.fromDue ?? null} after={change.toDue ?? null} />
+                    <DateChangeCell before={change.fromStart} after={change.toStart} />
+                    <DateChangeCell before={change.fromEnd} after={change.toEnd} />
+                    <DateChangeCell before={change.fromDue ?? null} after={change.toDue ?? null} />
                   </>
                 ) : (
                   <>
@@ -728,6 +732,8 @@ function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePrevie
                     <td><DateResult before={change.fromStart} after={change.toStart} /></td>
                     <td>{change.fromEnd || '미정'}</td>
                     <td><DateResult before={change.fromEnd} after={change.toEnd} /></td>
+                    {showDueDate && (hasDueDateChange(change)
+                      ? <DateChangeCell before={change.fromDue ?? null} after={change.toDue ?? null} /> : <td />)}
                   </>
                 )}
               </tr>
@@ -742,10 +748,10 @@ function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePrevie
   );
 }
 
-function BulkDateCell({ before, after }: { before: string | null; after: string | null }) {
+function DateChangeCell({ before, after }: { before: string | null; after: string | null }) {
   return (
-    <td className="schedule-bulk-date-cell">
-      {before !== after && <span className="schedule-bulk-date-previous">{before || '미정'} →</span>}
+    <td className="schedule-paste-date-change">
+      {before !== after && <span className="schedule-paste-date-previous">{before || '미정'} →</span>}
       <DateResult before={before} after={after} />
     </td>
   );
