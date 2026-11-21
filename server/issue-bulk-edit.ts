@@ -22,9 +22,9 @@ type IssueUpdate = Partial<IssueBulkEditValues>;
 type FieldBreakdownMatches = (projectId: string, selection: IssueFieldBreakdownSelection, issueIds: readonly string[]) => boolean;
 interface BulkEditHooks<T extends { issue: Issue }> {
   actor(request: Request): string;
-  configurationToken(projectId: string): string;
+  configurationToken(projectId: string, changes: IssueBulkEditChanges): string;
   fieldBreakdownMatches?: FieldBreakdownMatches;
-  prepare(before: Issue, update: IssueUpdate): T;
+  prepare(before: Issue, update: IssueUpdate, preparedAt: string): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
 interface StatusMigrationHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
@@ -188,10 +188,10 @@ function issueUpdate(before: Issue, { addLabels, removeLabels, customFields, ...
   return { ...update, labels };
 }
 
-function values({ status, priority, assigneeId, dueDate, labels, customFields }: Issue, update: IssueUpdate): IssueBulkEditValues {
-  // Include these fields when requested so reviews saved before their introduction still match on replay.
+function values({ status, priority, assigneeId, dueDate, labels, customFields }: Issue, update: IssueUpdate,
+  includeDueDate = Object.hasOwn(update, 'dueDate')): IssueBulkEditValues {
   return { status, priority, assigneeId,
-    ...(Object.hasOwn(update, 'dueDate') ? { dueDate } : {}),
+    ...(includeDueDate ? { dueDate: dueDate ?? null } : {}),
     ...(Object.hasOwn(update, 'labels') ? { labels } : {}),
     ...(update.customFields ? { customFields: Object.fromEntries(Object.keys(update.customFields).map(id => [id, customFieldValue(customFields, id)])) } : {}),
   };
@@ -214,7 +214,8 @@ function sameValues(left: IssueBulkEditValues | null, right: IssueBulkEditValues
       && left.dueDate === right.dueDate && sameLabels(left.labels, right.labels) && sameCustomFields(left.customFields, right.customFields);
 }
 
-function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare']): BulkEditCandidate<T> {
+function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare'],
+  preparedAt: string): BulkEditCandidate<T> {
   const { id, key, title } = before;
   const update = issueUpdate(before, changes);
   const row = { id, key, title, before: values(before, update) };
@@ -222,14 +223,15 @@ function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulk
     return { before, row: { ...row, after: row.before, outcome: 'unchanged', reason: null } };
   }
   try {
-    const prepared = prepare(before, update);
+    const prepared = prepare(before, update, preparedAt);
     const next = prepared.issue;
     if (next.id !== before.id || next.projectId !== before.projectId || next.version !== before.version + 1) {
       fail(500, '일괄 변경할 업무의 식별자 또는 버전이 일치하지 않습니다.');
     }
-    const nextValues = values(next, update);
-    if (sameValues(row.before, nextValues)) return { before, row: { ...row, after: nextValues, outcome: 'unchanged', reason: null } };
-    return { before, prepared, row: { ...row, after: nextValues, outcome: 'changed', reason: null } };
+    const includeDueDate = Object.hasOwn(update, 'dueDate') || (next.dueDate ?? null) !== (before.dueDate ?? null);
+    const reviewed = { ...row, before: values(before, update, includeDueDate), after: values(next, update, includeDueDate) };
+    if (sameValues(reviewed.before, reviewed.after)) return { before, row: { ...reviewed, outcome: 'unchanged', reason: null } };
+    return { before, prepared, row: { ...reviewed, outcome: 'changed', reason: null } };
   } catch (error) {
     const status = (error as { status?: unknown } | null)?.status;
     if (typeof status !== 'number' || !(status >= 400 && status < 500)) throw error;
@@ -277,9 +279,10 @@ export class IssueBulkEditService {
   private review<T extends { issue: Issue }>(scope: BulkEditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
     const rows: IssueBulkEditRow[] = [];
     const counts = { changed: 0, unchanged: 0, blocked: 0 };
+    const preparedAt = new Date().toISOString();
     let remainingBytes = scope.changes.customFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
     for (const issue of issues) {
-      const { row } = candidate(issue, scope.changes, hooks.prepare);
+      const { row } = candidate(issue, scope.changes, hooks.prepare, preparedAt);
       if (scope.changes.customFields) {
         remainingBytes -= Buffer.byteLength(JSON.stringify(row)) + 1;
         if (remainingBytes < 0) fail(413, '미리보기 데이터가 너무 큽니다. 업무 또는 변경할 필드 수를 줄여 주세요.');
@@ -292,7 +295,7 @@ export class IssueBulkEditService {
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
     const proposal: BulkEditProposal = {
-      ...scope, id, removeAfter: expiresAt, rows, configurationToken: hooks.configurationToken(scope.projectId),
+      ...scope, id, removeAfter: expiresAt, rows, configurationToken: hooks.configurationToken(scope.projectId, scope.changes),
     };
     this.store.put(TABLE, proposal);
     return { previewId: id, expiresAt, rows, ...counts };
@@ -343,7 +346,7 @@ export class IssueBulkEditService {
       if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
       verifyFieldBreakdown(projectId, proposal, hooks.fieldBreakdownMatches);
-      if (!this.store.get('projects', projectId) || proposal.configurationToken !== hooks.configurationToken(projectId)) fail(409, STALE_MESSAGE);
+      if (!this.store.get('projects', projectId) || proposal.configurationToken !== hooks.configurationToken(projectId, proposal.changes)) fail(409, STALE_MESSAGE);
 
       // The migration preview represents the whole active source status, so an issue newly entering or leaving it also invalidates the review.
       const issues = proposal.migrationFromStatusId
@@ -351,7 +354,8 @@ export class IssueBulkEditService {
         : this.loadIssues(projectId, proposal.issues, 409);
       if (proposal.migrationFromStatusId && (issues.length !== proposal.issues.length || issues.some(({ id, version }, index) =>
         id !== proposal.issues[index].id || version !== proposal.issues[index].expectedVersion))) fail(409, STALE_MESSAGE);
-      const prepared = issues.map(issue => candidate(issue, proposal.changes, hooks.prepare));
+      const preparedAt = new Date().toISOString();
+      const prepared = issues.map(issue => candidate(issue, proposal.changes, hooks.prepare, preparedAt));
       if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
 
       const result: IssueBulkEditResult = { previewId, updated: [], unchanged: 0 };

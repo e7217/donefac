@@ -534,10 +534,12 @@ function IssuePanelContent(props: IssuePanelProps) {
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError(null);
     try {
-      const { descriptionFormat, reporterId, ...fields } = editableIssue(draft, labels);
+      const { descriptionFormat, reporterId, dueDate, ...fields } = editableIssue(draft, labels);
       const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
+      const changedDueDate = (dueDate ?? null) !== (baseDraft?.dueDate ?? null);
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
         ...(reporterId !== undefined && reporterId !== baseDraft?.reporterId ? { reporterId } : {}),
+        ...(changedDueDate ? { dueDate: dueDate ?? null } : {}),
         ...(changedFormat ? { descriptionFormat } : {}) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);

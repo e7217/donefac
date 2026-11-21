@@ -1,5 +1,6 @@
 import type { Express, Request } from 'express';
 import { type Issue, type IssueRequiredField, type Project, type ProjectIssueSchema, type ProjectWorkflow, type WorkflowFieldRule, type WorkflowStatus, type WorkflowTransition } from '../shared/types.js';
+import { MAX_WORKING_DURATION_DAYS } from '../shared/calendar.js';
 import { defaultWorkflow, MAX_WORKFLOW_WIP_LIMIT, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
 import { BASE_REQUIRED_FIELD_LABELS, defaultIssueSchema, fieldApplies, hasCustomValue, requiredFieldLabels } from '../shared/issue-schema.js';
 import { visibilityFieldsWithMissingStatuses, type IssueSchemaService } from './issue-schema.js';
@@ -18,7 +19,7 @@ function nonempty(value: unknown, label: string, limit: number): string { if (ty
 function config(projectId: string, value: unknown, version: number, updatedAt: string, schema: ProjectIssueSchema, previous?: ProjectWorkflow): ProjectWorkflow {
   const source = object(value);
   const issueTypes = new Set(schema.issueTypes.map(type => type.id));
-  const previousLimits = new Map(previous?.statuses.map(status => [status.id, status.wipLimit]));
+  const previousStatuses = new Map(previous?.statuses.map(status => [status.id, status]));
   const previousBlockerGuards = new Set(previous?.transitions.filter(edge => edge.requireResolvedBlockers).map(edge => `${edge.from}:${edge.to}`));
   if (!Array.isArray(source.statuses) || source.statuses.length < 1 || source.statuses.length > 40) invalid('상태는 1~40개여야 합니다.');
   const statuses: WorkflowStatus[] = source.statuses.map(value => {
@@ -26,13 +27,24 @@ function config(projectId: string, value: unknown, version: number, updatedAt: s
     if (!/^[a-z][a-z0-9_-]*$/.test(id)) invalid('상태 ID는 영문 소문자로 시작하는 영문·숫자·밑줄·하이픈이어야 합니다.');
     if (typeof status.color !== 'string' || !/^#[a-f\d]{6}$/i.test(status.color)) invalid('상태 색상은 #RRGGBB 형식이어야 합니다.');
     if (typeof status.category !== 'string' || !Object.hasOwn(STATUS_CATEGORY_LABELS, status.category)) invalid('상태 분류를 확인해 주세요.');
-    const limit = status.wipLimit === undefined ? previousLimits.get(id) : status.wipLimit;
-    const normalized = { id, label, color: status.color, category: status.category as WorkflowStatus['category'] };
-    if (limit === undefined || limit === null) return normalized;
-    if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_WORKFLOW_WIP_LIMIT) {
-      invalid('상태별 보드 업무 한도는 1~10,000의 정수 또는 null이어야 합니다.');
+    const previousStatus = previousStatuses.get(id);
+    const limit = status.wipLimit === undefined ? previousStatus?.wipLimit : status.wipLimit;
+    const defaultDueWorkdays = status.defaultDueWorkdays === undefined ? previousStatus?.defaultDueWorkdays : status.defaultDueWorkdays;
+    const normalized: WorkflowStatus = { id, label, color: status.color, category: status.category as WorkflowStatus['category'] };
+    if (limit != null) {
+      if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_WORKFLOW_WIP_LIMIT) {
+        invalid('상태별 보드 업무 한도는 1~10,000의 정수 또는 null이어야 합니다.');
+      }
+      normalized.wipLimit = limit;
     }
-    return { ...normalized, wipLimit: limit };
+    if (defaultDueWorkdays != null) {
+      if (typeof defaultDueWorkdays !== 'number' || !Number.isSafeInteger(defaultDueWorkdays) ||
+        defaultDueWorkdays < 1 || defaultDueWorkdays > MAX_WORKING_DURATION_DAYS) {
+        invalid('상태별 기본 목표 마감일의 근무일 수는 1~3,650의 정수 또는 null이어야 합니다.');
+      }
+      normalized.defaultDueWorkdays = defaultDueWorkdays;
+    }
+    return normalized;
   });
   const ids = new Set(statuses.map(status => status.id));
   if (ids.size !== statuses.length) invalid('중복된 상태 ID가 있습니다.');

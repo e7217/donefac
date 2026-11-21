@@ -374,6 +374,7 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
   onClose: () => void;
 }) {
   const { changes, preview } = editor;
+  const hasAutomaticDueDate = statuses.find(status => status.id === changes.status)?.defaultDueWorkdays != null;
   function valueLabel(field: BulkBasicField, values: IssueBulkEditValues) {
     if (field === 'status') return statuses.find(status => status.id === values.status)?.label ?? values.status;
     if (field === 'priority') return PRIORITY[values.priority];
@@ -421,7 +422,8 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
         <div className="issue-bulk-date-fields">
           <label>마감일<select className="field" aria-label="일괄 변경 마감일" value={editor.dueDateMode}
             onChange={event => editor.setDueDateMode(event.currentTarget.value as DueDateMode)}>
-            <option value="keep">현재 마감일 유지</option><option value="set">날짜 지정</option><option value="clear">마감일 지우기</option>
+            <option value="keep">{hasAutomaticDueDate ? '기존 날짜 또는 자동 지정' : '현재 마감일 유지'}</option>
+            <option value="set">날짜 지정</option><option value="clear">마감일 지우기</option>
           </select></label>
           {editor.dueDateMode === 'set' && <label>지정할 마감일<input type="date" className="field" required
             value={editor.dueDate} onChange={event => editor.setDueDate(event.currentTarget.value)} /></label>}

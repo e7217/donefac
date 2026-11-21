@@ -255,7 +255,7 @@ curl --fail-with-body \
 
 ## 업무 일괄 편집
 
-브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?,customFields?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
+브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?,customFields?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 상태 전이에서 담당자나 목표 마감일을 생략하면 해당 워크플로의 자동 규칙을 적용할 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
 
 `addLabels`와 `removeLabels`는 각각 중복 없는 1~100개 문자열 배열이며, 라벨 하나는 최대 60자다. 양쪽에 같은 이름을 넣으면 요청을 거절한다. 대소문자와 공백을 포함한 이름을 그대로 비교한다. 해당 티켓에 있는 제거 대상만 지우고, 없는 추가 대상을 기존 목록 뒤에 붙인다.
 
@@ -263,7 +263,7 @@ curl --fail-with-body \
 
 집계에서 선택한 업무의 미리보기에는 `fieldBreakdown`을 함께 보낸다. 집계에 사용한 `fieldId` 또는 `groupBy`, 선택 속성 `savedViewId`와 `comparisonBy`, 조회한 `revision`과 `bucketId`, 셀을 선택했으면 `comparisonBucketId`를 담는다. 미리보기와 적용의 같은 트랜잭션에서 현재 집계 버전과 각 대상의 소속을 확인한다. 범위나 선택이 달라지면 `409`와 `details.reason`의 `field_breakdown_stale`을 반환한다. 적용이 이미 완료된 요청의 재시도는 저장한 결과를 반환한다.
 
-응답의 `rows`는 업무별 `before`, `after`, `outcome`, `reason`을 반환하며 `changed`, `unchanged`, `blocked`에 건수를 담는다. 마감일이나 라벨 편집을 요청하면 해당 필드의 전후 값도 반환한다. 변경할 업무가 있고 모든 업무가 검증을 통과하면 30분간 유효한 `previewId`를 반환한다. 적용 전까지 업무와 변경 이력은 유지된다.
+응답의 `rows`는 업무별 `before`, `after`, `outcome`, `reason`을 반환하며 `changed`, `unchanged`, `blocked`에 건수를 담는다. 마감일이나 라벨 편집을 요청하면 해당 필드의 전후 값도 반환한다. 전이로 자동 지정하는 마감일도 전후 값에 포함한다. 변경할 업무가 있고 모든 업무가 검증을 통과하면 30분간 유효한 `previewId`를 반환한다. 적용 전까지 업무와 변경 이력은 유지된다.
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
@@ -286,6 +286,14 @@ curl --fail-with-body \
 브라우저의 `PATCH /api/projects/:projectId/workflow`에서 전이 항목에 `requireResolvedBlockers: true`를 보내면 해당 경로와 업무 유형에 규칙을 적용한다. `false`는 규칙을 해제하고, 생략하면 같은 출발·도착 경로에 저장된 설정을 유지한다. 기본값은 꺼짐이다. 형식 81의 자체 백업에 저장한다.
 
 실제 상태 변경에서 대상 티켓으로 들어오는 Teamspace의 직접 차단 관계를 확인한다. 원인 티켓이 있는 프로젝트의 상태 분류가 완료 또는 취소일 때 해결된 것으로 본다. 열린 원인이 있으면 일반 업무 저장과 보드 이동은 `422` 및 `details.reason: "open_issue_blockers"`를 반환한다. 일괄 편집은 미리보기와 적용 시점에 다시 확인하며, 열린 원인은 먼저 별도로 해결해야 한다. GitLab은 미리보기와 실제 이벤트에 차단 사유를 기록하며 다음 새 이벤트부터 현재 상태를 평가한다. 워크플로의 상태 일괄 이관은 관리용 상태 매핑 규칙을 사용한다.
+
+## 상태별 자동 목표 마감일
+
+`PATCH /api/projects/:projectId/workflow`에서 상태 목록의 `defaultDueWorkdays`에 1~3,650의 정수를 지정한다. `null`은 설정을 해제하며, 속성을 생략하면 같은 상태 ID에 저장된 설정을 사용한다. `GET /api/projects/:projectId/workflow`는 설정된 상태에만 이 속성을 반환한다. 자체 백업 형식 93은 이 설정을 보존한다.
+
+날짜가 비어 있는 티켓이 해당 상태로 이동할 때 서울 기준 상태 변경일 다음부터 프로젝트 달력의 근무일을 센다. 날짜는 상태별 필수 입력 검사 전에 계산한다. 이미 날짜가 있거나 요청에 `dueDate`를 직접 지정하면 해당 날짜나 명시적인 `null`을 우선한다. 업무 상세·보드·업무 쓰기 API·일반 업무 일괄 편집·GitLab 자동화의 상태 전이에 적용한다. 생성·이관·프로젝트 이동은 각 작업의 입력과 원본 날짜를 사용한다.
+
+일괄 편집은 적용 전에 달력 버전과 계산된 날짜를 다시 대조한다. 달력이 바뀌거나 서울 기준일이 넘어 결과가 달라진 경우 `409`를 반환하고 새 미리보기를 요구한다. 저장된 날짜와 작업자는 티켓의 변경 이력에 기록된다.
 
 ## 워크플로 상태 일괄 이동
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowDown, ArrowRight, ArrowRightLeft, ArrowUp, ChevronDown, GitBranch, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { type FeatureProps, type IssueRequiredField, type ProjectWorkflow, type WorkflowStatus, type WorkflowTransition } from '../../shared/types';
+import { MAX_WORKING_DURATION_DAYS } from '../../shared/calendar';
 import { MAX_WORKFLOW_WIP_LIMIT, projectWorkflow, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { api, patch } from '../lib/api';
@@ -11,20 +12,22 @@ import { errorMessage } from './schedule-utils';
 import { WorkflowStatusMigration } from './WorkflowStatusMigration';
 import './workflow-settings.css';
 
-type StatusDraft = Omit<WorkflowStatus, 'wipLimit'> & { wipLimitText: string };
+type StatusDraft = Omit<WorkflowStatus, 'wipLimit' | 'defaultDueWorkdays'> & { wipLimitText: string; defaultDueWorkdaysText: string };
 type WorkflowDraft = Omit<ProjectWorkflow, 'statuses'> & { statuses: StatusDraft[] };
 
 function workflowDraft(value: ProjectWorkflow): WorkflowDraft {
   return {
     ...value,
-    statuses: value.statuses.map(({ wipLimit, ...status }) => ({ ...status, wipLimitText: String(wipLimit ?? '') })),
+    statuses: value.statuses.map(({ wipLimit, defaultDueWorkdays, ...status }) => ({
+      ...status, wipLimitText: String(wipLimit ?? ''), defaultDueWorkdaysText: String(defaultDueWorkdays ?? ''),
+    })),
     transitions: value.transitions.map(edge => ({ ...edge, requireResolvedBlockers: edge.requireResolvedBlockers === true })),
   };
 }
 
-function validLimit(value: string) {
-  const limit = Number(value);
-  return value === '' || (/^[0-9]+$/.test(value) && limit >= 1 && limit <= MAX_WORKFLOW_WIP_LIMIT);
+function validOptionalInteger(value: string, maximum: number) {
+  const number = Number(value);
+  return value === '' || (/^[0-9]+$/.test(value) && number >= 1 && number <= maximum);
 }
 
 export function WorkflowSettings(props: FeatureProps) {
@@ -42,6 +45,7 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
   const [transitionFilter, setTransitionFilter] = useState('all');
   const [migrationOpen, setMigrationOpen] = useState(false);
   const limitHint = useId();
+  const deadlineHint = useId();
   const closeMigration = useCallback(() => setMigrationOpen(false), []);
   const dirty = JSON.stringify(draft) !== JSON.stringify(workflowDraft(baseline));
   const issueTypes = projectIssueTypes(data, projectId, { includeArchived: true });
@@ -94,13 +98,23 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
   async function save(event: FormEvent) {
     event.preventDefault();
     if (savingRef.current) return;
-    const invalid = draft.statuses.find(status => !validLimit(status.wipLimitText));
+    const invalid = draft.statuses.find(status => !validOptionalInteger(status.wipLimitText, MAX_WORKFLOW_WIP_LIMIT));
     if (invalid) {
       setTab('states');
       setError(`${invalid.label || invalid.id}의 업무 한도를 1~${MAX_WORKFLOW_WIP_LIMIT.toLocaleString('ko-KR')} 사이의 정수로 입력해 주세요.`);
       return;
     }
-    const statuses = draft.statuses.map(({ wipLimitText, ...status }) => ({ ...status, wipLimit: wipLimitText === '' ? null : Number(wipLimitText) }));
+    const invalidDeadline = draft.statuses.find(status => !validOptionalInteger(status.defaultDueWorkdaysText, MAX_WORKING_DURATION_DAYS));
+    if (invalidDeadline) {
+      setTab('states');
+      setError(`${invalidDeadline.label || invalidDeadline.id}의 자동 목표 마감일을 1~${MAX_WORKING_DURATION_DAYS.toLocaleString('ko-KR')} 사이의 정수로 입력해 주세요.`);
+      return;
+    }
+    const statuses = draft.statuses.map(({ wipLimitText, defaultDueWorkdaysText, ...status }) => ({
+      ...status,
+      wipLimit: wipLimitText === '' ? null : Number(wipLimitText),
+      defaultDueWorkdays: defaultDueWorkdaysText === '' ? null : Number(defaultDueWorkdaysText),
+    }));
     savingRef.current = true; setSaving(true); setError('');
     try { const value = await patch<ProjectWorkflow>(`/projects/${projectId}/workflow`, { ...draft, statuses, expectedVersion: draft.version }); setDraft(workflowDraft(value)); setBaseline(value); dirtyRef.current = false; await refresh(); notify('프로젝트 워크플로를 저장했습니다.'); }
     catch (err) { setError(errorMessage(err)); } finally { savingRef.current = false; setSaving(false); }
@@ -123,14 +137,15 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
           </label>
           <p>상태 ID는 저장 후 고정됩니다. 완료 분류 변경은 집계와 사용 중인 업무의 완료 시각에도 반영됩니다.</p>
         </div>
-        <p id={limitHint} className="workflow-limit-hint">업무 한도는 해당 상태에 있는 프로젝트의 업무를 하위 업무까지 모두 셉니다. 한도를 넘으면 보드에 경고가 표시됩니다.</p>
+        <p id={limitHint} className="workflow-state-hint">업무 한도는 해당 상태에 있는 프로젝트의 업무를 하위 업무까지 모두 셉니다. 한도를 넘으면 보드에 경고가 표시됩니다.</p>
+        <p id={deadlineHint} className="workflow-state-hint">목표 마감일이 비어 있는 업무가 설정한 상태로 이동하면 프로젝트 작업 달력에서 변경일 이후의 근무일을 셉니다. 근무일 수를 비워 두면 자동 지정을 끕니다.</p>
         <div className="workflow-table-scroll">
           <table className="workflow-state-table">
-            <thead><tr><th>순서</th><th>상태 이름</th><th className="workflow-limit-column">업무 한도</th><th>고유 ID</th><th>색상</th><th>분류</th><th>사용 중</th><th /></tr></thead>
+            <thead><tr><th>순서</th><th>상태 이름</th><th className="workflow-limit-column">업무 한도</th><th>고유 ID</th><th>색상</th><th>분류</th><th className="workflow-deadline-column">자동 목표 마감일 (근무일)</th><th>사용 중</th><th /></tr></thead>
             <tbody>{draft.statuses.map((status, index) => {
               const count = data.issues.filter(issue => issue.projectId === projectId && issue.status === status.id).length;
               const existing = baseline.statuses.some(value => value.id === status.id);
-              const limitName = draft.statuses.some((value, row) => row !== index && value.label === status.label)
+              const statusName = draft.statuses.some((value, row) => row !== index && value.label === status.label)
                 ? `${status.label} (${status.id})` : status.label || status.id;
               return <tr key={index} className="workflow-status-row">
                 <td>
@@ -141,13 +156,19 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
                 </td>
                 <td><input className="field" aria-label={`상태 ${index + 1} 이름`} value={status.label} onChange={event => updateStatus(index, { label: event.target.value })} required maxLength={40} /></td>
                 <td className="workflow-limit-column">
-                  <input className="field workflow-limit-input" inputMode="numeric" aria-label={`업무 한도 ${limitName}`}
-                    aria-describedby={limitHint} aria-invalid={!validLimit(status.wipLimitText)} placeholder="미설정"
+                  <input className="field workflow-limit-input" inputMode="numeric" aria-label={`업무 한도 ${statusName}`}
+                    aria-describedby={limitHint} aria-invalid={!validOptionalInteger(status.wipLimitText, MAX_WORKFLOW_WIP_LIMIT)} placeholder="미설정"
                     value={status.wipLimitText} onChange={event => updateStatus(index, { wipLimitText: event.target.value })} />
                 </td>
                 <td><input className="field workflow-state-id" aria-label={`상태 ${index + 1} ID`} value={status.id} readOnly={existing} onChange={event => renameNewId(index, event.target.value)} required maxLength={48} pattern="[a-z][a-z0-9_-]*" title={existing ? '저장된 상태의 ID는 고정됩니다.' : '영문 소문자·숫자·밑줄·하이픈'} /></td>
                 <td><input type="color" aria-label={`상태 ${index + 1} 색상`} value={status.color} onChange={event => updateStatus(index, { color: event.target.value })} /></td>
                 <td><select className="field" aria-label={`상태 ${index + 1} 분류`} value={status.category} onChange={event => updateStatus(index, { category: event.target.value as WorkflowStatus['category'] })}>{Object.entries(STATUS_CATEGORY_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></td>
+                <td className="workflow-deadline-column">
+                  <input className="field workflow-deadline-input" inputMode="numeric" aria-label={`자동 목표 마감일 (근무일) ${statusName}`}
+                    aria-describedby={deadlineHint} aria-invalid={!validOptionalInteger(status.defaultDueWorkdaysText, MAX_WORKING_DURATION_DAYS)}
+                    placeholder="미설정" value={status.defaultDueWorkdaysText}
+                    onChange={event => updateStatus(index, { defaultDueWorkdaysText: event.target.value })} />
+                </td>
                 <td><span className="workflow-usage">{count}개</span></td>
                 <td><button className="issue-icon-button" type="button" aria-label={`${status.label} 상태 삭제`} title={count ? '업무에서 사용 중인 상태는 삭제할 수 없습니다.' : draft.initialStatusId === status.id ? '기본 상태를 먼저 변경하세요.' : '상태 삭제'} disabled={count > 0 || draft.initialStatusId === status.id} onClick={() => removeStatus(status.id)}><Trash2 size={14} /></button></td>
               </tr>;
@@ -155,7 +176,7 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
           </table>
         </div>
         <button className="btn btn-ghost" type="button" onClick={() => setDraft(previous => ({
-          ...previous, statuses: [...previous.statuses, { id: `state_${Date.now().toString(36)}`, label: '새 상태', color: '#588b9c', category: 'todo', wipLimitText: '' }],
+          ...previous, statuses: [...previous.statuses, { id: `state_${Date.now().toString(36)}`, label: '새 상태', color: '#588b9c', category: 'todo', wipLimitText: '', defaultDueWorkdaysText: '' }],
         }))}><Plus size={14} /> 상태 추가</button>
       </div>}
       {tab === 'transitions' && <div className="workflow-tab-content">

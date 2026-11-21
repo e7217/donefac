@@ -96,6 +96,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../sh
 import { documentLabelKey, documentSearchText, MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
 import { createCalendarMath } from '../shared/calendar.js';
+import { reservationLocalDateTime } from '../shared/time-reservations.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
@@ -566,12 +567,27 @@ export function createApp(options: {
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
   const issueAssignments=new IssueAssignmentRulesService(store);
-  type IssueChangeOptions = { assigneeExplicit?: boolean; checkTransition?: boolean };
+  type IssueChangeOptions = { assigneeExplicit?: boolean; checkTransition?: boolean; skipAutomaticDueDate?: boolean };
+  const defaultStatusDueDate = (before: Issue, proposed: Issue, skip = false): string | null => {
+    if (skip || before.projectId !== proposed.projectId || before.status === proposed.status ||
+        before.dueDate != null || proposed.dueDate != null) return null;
+    const status = workflows.get(proposed.projectId).statuses.find(status => status.id === proposed.status);
+    if (status?.defaultDueWorkdays == null) return null;
+    const transitionDate = reservationLocalDateTime(proposed.updatedAt).slice(0, 10);
+    return createCalendarMath(calendars.get(proposed.projectId)).shift(transitionDate, status.defaultDueWorkdays);
+  };
   const prepareIssueChange=(before:Issue,proposed:Issue,options:IssueChangeOptions={})=>{
-    const decision=issueAssignments.decide(before,proposed,options.assigneeExplicit ?? false);
-    const issue=validateIssue(decision?.outcome==='assigned'?{...proposed,assigneeId:decision.assigneeId}:proposed,before,options);
+    const automaticDueDate = defaultStatusDueDate(before, proposed, options.skipAutomaticDueDate);
+    const datedIssue = automaticDueDate ? { ...proposed, dueDate: automaticDueDate } : proposed;
+    const decision=issueAssignments.decide(before,datedIssue,options.assigneeExplicit ?? false);
+    const issue=validateIssue(decision?.outcome==='assigned'?{...datedIssue,assigneeId:decision.assigneeId}:datedIssue,before,options);
     issue.completedAt=done(issue)?(before.completedAt||issue.updatedAt):null;
-    return {issue,decision};
+    return {issue,decision,automaticDueDate};
+  };
+  const recordAutomaticDueDate = (actorId: string, issue: Issue, dueDate: string | null) => {
+    if (!dueDate) return;
+    const status = workflows.get(issue.projectId).statuses.find(status => status.id === issue.status);
+    recordActivity(actorId, 'issue', issue.id, '목표 마감일 자동 지정', `${status?.label ?? issue.status} · ${dueDate}`, issue.updatedAt);
   };
   const commitIssueAssignment=(decision:IssueAssignmentDecision|null,before:Issue,issue:Issue,actorId:string,source:'user'|'gitlab',sourceEventId:string|null=null)=>{
     if(!decision)return;
@@ -585,8 +601,11 @@ export function createApp(options: {
   const automation=new AutomationService(store,{
     getGitlabSettings:()=>gitlab.settings(),
     prepareChange:(before,status,onStatusChange)=>{
-      const {issue,decision}=prepareIssueChange(before,{...before,status,version:before.version+1,updatedAt:now()});
-      if(decision)onStatusChange((rule,event)=>commitIssueAssignment(decision,before,issue,rule.actorId,'gitlab',event.id));
+      const {issue,decision,automaticDueDate}=prepareIssueChange(before,{...before,status,version:before.version+1,updatedAt:now()});
+      if(decision || automaticDueDate)onStatusChange((rule,event)=>{
+        commitIssueAssignment(decision,before,issue,rule.actorId,'gitlab',event.id);
+        recordAutomaticDueDate(rule.actorId,issue,automaticDueDate);
+      });
       return issue;
     },
     commitChange:(rule,before,next,event)=>{
@@ -933,7 +952,10 @@ export function createApp(options: {
     createDocument: createReportDocument,
   });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
-  issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>validateIssue(proposed,before)});
+  issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>{
+    const dueDate = defaultStatusDueDate(before, proposed);
+    return validateIssue(dueDate ? { ...proposed, dueDate } : proposed, before);
+  }});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity,planningItems:projectId=>planning.forProject(projectId)});
   savedFieldBreakdowns.registerRoutes(app, { actor, activity });
   issueSchemas.registerRoutes(app,{actor,activity});
@@ -1132,13 +1154,15 @@ export function createApp(options: {
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
-  const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions) => {
+  const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions, updatedAt = now()) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('다른 프로젝트로 옮기려면 업무 상세에서 프로젝트 이동 미리보기를 사용해 주세요.');
     const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
-    const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
-    return {...prepareIssueChange(old,proposed,options),fields};
+    const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt};
+    const prepared = prepareIssueChange(old, proposed, { ...options, skipAutomaticDueDate: options?.skipAutomaticDueDate || fields.includes('dueDate') });
+    if (prepared.automaticDueDate) fields.push('dueDate');
+    return {...prepared,fields};
   };
-  const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,fields}:ReturnType<typeof prepareIssueUpdate>, history?: { action: string; detail: string }) => {
+  const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,automaticDueDate,fields}:ReturnType<typeof prepareIssueUpdate>, history?: { action: string; detail: string }) => {
     const actorId=actor(req);
     let detail = history?.detail ?? `${issue.key}: ${fields.join(', ')}`;
     if (old.reporterId !== issue.reporterId) {
@@ -1148,6 +1172,7 @@ export function createApp(options: {
     store.put('issues',issue);activity(req,'issue',issue.id,history?.action ?? '티켓 변경',detail);
     if(issue.assigneeId&&issue.assigneeId!==old.assigneeId)notifyIssue(issue,actorId,'issue-assigned',[issue.assigneeId],issue.updatedAt);
     commitIssueAssignment(decision,old,issue,actorId,'user');
+    recordAutomaticDueDate(actorId,issue,automaticDueDate);
     return issue;
   };
   const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => commitIssueUpdate(req,old,prepareIssueUpdate(old,values));
@@ -1162,7 +1187,7 @@ export function createApp(options: {
     prepare(before, destinationId) {
       const updated = { ...before, cycleId: destinationId, version: before.version + 1, updatedAt: now() };
       const { cycle } = validateIssue(structuredClone(updated), before);
-      return { issue: { ...updated, cycle }, decision: null, fields: ['cycleId'] };
+      return { issue: { ...updated, cycle }, decision: null, automaticDueDate: null, fields: ['cycleId'] };
     },
     validationMessage(error) {
       return (error instanceof ApiError || error instanceof WorkflowError || error instanceof PlanningError || error instanceof IssueSchemaError) &&
@@ -1193,12 +1218,17 @@ export function createApp(options: {
   });
   issueBulkEdit.registerRoutes(app,{
     actor,
-    configurationToken:issueEditConfiguration,
+    configurationToken(projectId, changes) {
+      const editToken = issueEditConfiguration(projectId);
+      const destination = workflows.get(projectId).statuses.find(status => status.id === changes.status);
+      if (destination?.defaultDueWorkdays == null || Object.hasOwn(changes, 'dueDate')) return editToken;
+      return JSON.stringify([editToken, calendars.get(projectId).version]);
+    },
     fieldBreakdownMatches,
-    prepare(before, changes) {
+    prepare(before, changes, preparedAt) {
       const { customFields } = changes;
       const values = customFields ? { ...changes, customFields: { ...before.customFields, ...customFields } } : changes;
-      const prepared = prepareIssueUpdate(before, values, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId') });
+      const prepared = prepareIssueUpdate(before, values, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId') }, preparedAt);
       if (!customFields) return prepared;
 
       const { issue } = prepared;
@@ -1223,7 +1253,7 @@ export function createApp(options: {
     actor,
     configurationToken:issueEditConfiguration,
     workflow:projectId=>workflows.get(projectId),
-    prepare:(before,changes)=>prepareIssueUpdate(before,{status:changes.status},{checkTransition:false}),
+    prepare:(before,changes,preparedAt)=>prepareIssueUpdate(before,{status:changes.status},{checkTransition:false,skipAutomaticDueDate:true},preparedAt),
     commit(req,before,change){
       const {statuses}=workflows.get(before.projectId);
       const from=statuses.find(status=>status.id===before.status)?.label ?? before.status;
@@ -2407,6 +2437,9 @@ export function createApp(options: {
     if (data.schemaVersion < 81 && Array.isArray(data.workflows) && data.workflows.some((workflow: { transitions?: unknown } | null) =>
       Array.isArray(workflow?.transitions) && workflow.transitions.some((edge: { requireResolvedBlockers?: unknown } | null) => edge?.requireResolvedBlockers === true)
     )) fail('차단 업무 해결 전이 규칙이 있는 백업은 schemaVersion 81이 필요합니다.');
+    if (data.schemaVersion < 93 && Array.isArray(data.workflows) && data.workflows.some((workflow: { statuses?: unknown } | null) =>
+      Array.isArray(workflow?.statuses) && workflow.statuses.some((status: { defaultDueWorkdays?: unknown } | null) => status?.defaultDueWorkdays != null)
+    )) fail('상태별 자동 목표 마감일이 있는 백업은 schemaVersion 93이 필요합니다.');
     const importedWorkflows=workflows.validateImport(data.schemaVersion>=3?data.workflows:[],data.projects,data.issues,importedSchemas);
     validateVisibilityStatuses(importedSchemas,importedWorkflows);
     if(data.schemaVersion<13&&Array.isArray(data.savedViews)&&data.savedViews.some((value:unknown)=>

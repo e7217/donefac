@@ -150,7 +150,6 @@ test('native v92 preserves named queries and retained missing sources, rejecting
   await f.call(`/views/${view.id}?expectedVersion=${view.version}`, 200, 'DELETE');
   const original = await f.call<SavedFieldBreakdown>(f.path, 201, 'POST', { name: '백업할 집계', query: { groupBy: 'priority' } });
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 92);
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(new Map(backup.savedFieldBreakdowns.map(preset => [preset.id, preset])).get(orphan.id), orphan);
   const path = `${f.path}/${original.id}`;
@@ -166,7 +165,7 @@ test('native v92 preserves named queries and retained missing sources, rejecting
   await replace({ ...backup, savedFieldBreakdowns: [{ ...orphan, query: { groupBy: 'status', savedViewId: foreign.id } }] }, 400);
   assert.deepEqual(await f.list(), [orphan]);
 
-  await replace(backup);
+  await replace({ ...backup, schemaVersion: 92 });
   const restored = (await f.list()).find(preset => preset.id === original.id)!;
   assert.ok(restored.version > removed.version);
   assert.deepEqual(restored.query, original.query);
