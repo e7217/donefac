@@ -6,10 +6,11 @@ import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
-import type { DocPage, DocRevision, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText } from '../../shared/document-nodes';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
+import type { DocumentSelectionHighlight } from '../../shared/document-selection-highlight';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
@@ -17,7 +18,7 @@ import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import { DocumentLabelListCard } from './DocumentLabelList';
-import { DocumentOutline, jumpToReadonlyHeading, type DocumentOutlineEntry } from './DocumentOutline';
+import { DocumentOutline, jumpToReadonlyHeading, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
 import { documentRevisionLabel } from './document-utils';
@@ -50,7 +51,8 @@ function safeUrl(value: unknown, image = false): string | undefined {
   try { const url = new URL(value); if ((['https:', 'http:'].includes(url.protocol) || !image && ['mailto:', 'tel:'].includes(url.protocol)) && !url.username && !url.password) return value; } catch { /* Untrusted content stays text when the URL is invalid. */ }
 }
 type PinnedSource = { documentId: string; revisionId: string };
-type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string };
+type RenderedExcerpt = DocumentSelectionHighlight & { anchorRendered: boolean };
+type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -87,33 +89,55 @@ function subscribeToRevision(documentId: string, revisionId: string) {
   } };
 }
 
-type RevisionLoad = { revision: DocRevision } | { error: string; missing: boolean };
-function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel }: {
+type RevisionLoad = { revision: DocRevision; excerpt?: DocumentSelectionHighlight | null } | { error: string; missing: boolean };
+function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel, selection }: {
   documentId: string;
   revisionId: string;
   label: string;
   nodeBudget: number;
   sourceLabel?: string;
+  selection?: DocumentSourceSelection;
 }) {
   const [open, setOpen] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState<RevisionLoad | null>(null);
+  const toggleButton = useRef<HTMLButtonElement>(null);
+  const openingFocus = useRef<Element | null>(null);
+  const excerptRequested = selection !== undefined;
+  const { from, to, text: excerptText } = selection ?? {};
+  const canRevealExcerpt = useCallback(() => {
+    const active = document.activeElement;
+    return active !== null && (active === toggleButton.current || active === openingFocus.current);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     const subscription = subscribeToRevision(documentId, revisionId);
     let active = true;
-    subscription.result.then(revision => {
+    subscription.result.then(async revision => {
       if (!active) return;
-      if (revision.id === revisionId && revision.documentId === documentId) setLoaded({ revision });
-      else setLoaded({ error: '고정 버전 정보를 확인할 수 없습니다.', missing: false });
+      if (revision.id !== revisionId || revision.documentId !== documentId) {
+        setLoaded({ error: '고정 버전 정보를 확인할 수 없습니다.', missing: false });
+        return;
+      }
+      let excerpt: DocumentSelectionHighlight | null | undefined;
+      if (excerptRequested) {
+        excerpt = null;
+        if (from !== undefined && to !== undefined && excerptText !== undefined) {
+          excerpt = await import('../../shared/document-selection-highlight').then(
+            ({ locateDocumentSelection }) => locateDocumentSelection(revision.content, { from, to, text: excerptText }),
+            () => null,
+          );
+        }
+      }
+      if (active) setLoaded({ revision, excerpt });
     }, error => {
       if (!active) return;
       const missing = error instanceof ApiError && error.status === 404;
       setLoaded({ error: missing ? '고정 버전을 찾을 수 없습니다.' : '고정 버전을 불러오지 못했습니다.', missing });
     });
     return () => { active = false; subscription.release(); };
-  }, [documentId, revisionId, open, attempt]);
+  }, [documentId, revisionId, open, attempt, excerptRequested, from, to, excerptText]);
 
   useEffect(() => {
     const imported = () => { setOpen(false); setLoaded(null); };
@@ -121,13 +145,23 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
     return () => window.removeEventListener('teamspace:workspace-imported', imported);
   }, []);
 
-  const revision = loaded && 'revision' in loaded ? loaded.revision : undefined;
+  const saved = loaded && 'revision' in loaded ? loaded : undefined;
+  const revision = saved?.revision;
   const revisionLabel = revision?.confluenceSourceVersion != null ? documentRevisionLabel(revision) : revision ? `고정 버전 ${revision.version}` : '고정 버전';
   const title = revision?.title || label || '제목 없는 문서';
   const toggleLabel = sourceLabel ? (open ? '원문 저장본 접기' : '원문 저장본 열기') : (open ? '고정 버전 내용 접기' : '고정 버전 내용 보기');
-  return <section className="doc-included-content doc-pinned-include" aria-label={`${sourceLabel ?? '고정 포함 문서'} ${title}`}>
-    <button type="button" className="doc-reference-card document" aria-expanded={open}
-      aria-label={toggleLabel} onClick={() => { setLoaded(null); setOpen(!open); }}>
+  return <section className="doc-included-content doc-pinned-include" aria-label={`${sourceLabel ?? '고정 포함 문서'} ${title}`}
+    onKeyDown={event => {
+      if (!open || !selection || event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      setLoaded(null);
+      openingFocus.current = null;
+      toggleButton.current?.focus();
+    }}>
+    <button ref={toggleButton} type="button" className="doc-reference-card document" aria-expanded={open}
+      aria-label={toggleLabel} onClick={() => { openingFocus.current = open ? null : document.activeElement; setLoaded(null); setOpen(!open); }}>
       <span className="doc-reference-icon"><FileClock size={15} aria-hidden="true" /></span>
       <span><small>{revisionLabel}</small><strong>{title}</strong></span>
       {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
@@ -136,21 +170,23 @@ function PinnedRevision({ documentId, revisionId, label, nodeBudget, sourceLabel
     {open && loaded && 'error' in loaded && <div className="doc-pinned-message"><p role="alert">{loaded.error}</p>
       {!loaded.missing && <button className="btn btn-ghost" type="button" onClick={() => { setLoaded(null); setAttempt(previous => previous + 1); }}>고정 버전 다시 불러오기</button>}
     </div>}
-    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned" pinnedSource={{ documentId, revisionId }} showOutline={Boolean(sourceLabel)} />}
+    {open && revision && <ReadonlyDocumentContent content={revision.content} documentId={documentId} nodeBudget={nodeBudget} mode="pinned"
+      pinnedSource={{ documentId, revisionId }} showOutline={Boolean(sourceLabel)} selectionHighlight={saved?.excerpt} canRevealExcerpt={canRevealExcerpt} />}
   </section>;
 }
 
 const keepReading = () => {};
 
-export function DocumentDecisionRevision({ data, documentId, revisionId, label, sourceLabel = '결정 근거 원문' }: {
+export function DocumentDecisionRevision({ data, documentId, revisionId, label, sourceLabel = '결정 근거 원문', selection }: {
   data: WorkspaceSnapshot;
   documentId: string;
   revisionId: string;
   label: string;
   sourceLabel?: string;
+  selection?: DocumentSourceSelection;
 }) {
   return <DocumentBlocksProvider data={data} documentId={documentId} openIssue={keepReading} openDocument={keepReading}>
-    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} sourceLabel={sourceLabel} />
+    <PinnedRevision documentId={documentId} revisionId={revisionId} label={label} nodeBudget={30_000} sourceLabel={sourceLabel} selection={selection} />
   </DocumentBlocksProvider>;
 }
 
@@ -171,15 +207,27 @@ function renderIncluded(context: Context, id: string, label: string, state: Rend
   if (!document) return <Notice key={key}>포함 문서를 찾을 수 없습니다: {label || id}</Notice>;
   if (state.visited.has(id)) return <Notice key={key}>순환 문서 포함을 중단했습니다: {document.title}</Notice>;
   if (state.includeDepth >= MAX_INCLUDE_DEPTH) return <Notice key={key}>문서 포함 깊이 제한(5단계)에 도달했습니다: {document.title}</Notice>;
-  const next = { ...state, documentId: id, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined };
+  const next = { ...state, documentId: id, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined, excerpt: undefined };
   const rendered = renderNode(document.content, context, next, `${key}:body`);
   state.remaining = next.remaining; state.exhausted = next.exhausted;
   return <section className="doc-included-content" key={key} aria-label={`포함된 문서 ${document.title}`}>{documentCard(context, id, label, true)}<div className="doc-readonly-content" data-document-outline-root="">{rendered}{state.includeDepth === 0 && state.exhausted && <Notice>포함된 내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div></section>;
 }
+function excerptMark(content: ReactNode, state: RenderState, key: string) {
+  const anchor = state.excerpt?.anchor === key;
+  if (state.excerpt && anchor) state.excerpt.anchorRendered = true;
+  return <mark data-document-excerpt="" data-document-excerpt-start={anchor ? '' : undefined} tabIndex={anchor ? -1 : undefined}>{content}</mark>;
+}
 function renderNode(node: RichContent, context: Context, state: RenderState, key: string): ReactNode {
   if (state.remaining-- <= 0 || state.structuralDepth >= 60) { state.exhausted = true; return null; }
   if (node.type === 'text' || node.type === 'statusBadge') {
-    let result: ReactNode = node.type === 'statusBadge' ? <ReadonlyStatusBadge attrs={node.attrs || {}} /> : node.text || '';
+    const text = node.text || '';
+    const excerpt = state.excerpt?.marks.get(key);
+    const wholeNodeSelected = excerpt?.kind === 'badge' || (excerpt?.kind === 'text' && excerpt.from === 0 && excerpt.to === text.length);
+    let result: ReactNode = node.type === 'statusBadge' ? <ReadonlyStatusBadge attrs={node.attrs || {}} /> : text;
+    if (excerpt?.kind === 'text' && !wholeNodeSelected) {
+      const { from, to } = excerpt;
+      result = <>{text.slice(0, from)}{excerptMark(text.slice(from, to), state, key)}{text.slice(to)}</>;
+    }
     for (const mark of node.marks || []) {
       if (mark.type === 'bold') result = <strong>{result}</strong>;
       else if (mark.type === 'italic') result = <em>{result}</em>;
@@ -188,6 +236,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       else if (mark.type === 'code') result = <code>{result}</code>;
       else if (mark.type === 'link') { const href = safeUrl(mark.attrs?.href); result = href ? <a href={href} target="_blank" rel="noopener noreferrer" onClick={event => event.stopPropagation()}>{result}</a> : result; }
     }
+    if (wholeNodeSelected) result = excerptMark(result, state, key);
     return <span key={key}>{result}</span>;
   }
   if (node.type === 'documentRevisionInclude' && state.mode !== 'pinned') {
@@ -264,7 +313,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId }: {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId, selectionHighlight, canRevealExcerpt }: {
   content: RichContent;
   documentId?: string;
   nodeBudget?: number;
@@ -274,15 +323,19 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   sectionId?: string | null;
   sectionLinkHref?: (sectionId: string) => string;
   referenceIssueId?: string;
+  selectionHighlight?: DocumentSelectionHighlight | null;
+  canRevealExcerpt?: () => boolean;
 }) {
   const context = contextOf(useContext(BlockContext));
   const contentRoot = useRef<HTMLDivElement>(null);
   const lastSection = useRef<{ documentId?: string; sectionId: string } | null>(null);
   const outline: DocumentOutlineEntry[] = [];
   const sourceDocumentId = documentId ?? context.documentId;
-  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId };
+  const excerpt = mode === 'pinned' ? selectionHighlight : undefined;
+  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined };
   const body = renderNode(content, context, state, 'readonly');
   const sectionTarget = state.section?.target;
+  const excerptTarget = state.excerpt?.anchorRendered ? state.excerpt.anchor : undefined;
   const goToHeading = useCallback((target: string) => {
     const root = contentRoot.current;
     if (!root) return false;
@@ -296,8 +349,20 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
     });
     return () => cancelAnimationFrame(frame);
   }, [documentId, sectionId, sectionTarget, goToHeading]);
+  const goToExcerpt = useCallback(() => {
+    const root = contentRoot.current;
+    const target = root?.querySelector<HTMLElement>('[data-document-excerpt-start]');
+    if (root && target?.closest('[data-document-outline-root]') === root) revealDocumentTarget(target, root, true);
+  }, []);
+  useEffect(() => {
+    if (!excerptTarget || !canRevealExcerpt) return;
+    const frame = requestAnimationFrame(() => { if (canRevealExcerpt()) goToExcerpt(); });
+    return () => cancelAnimationFrame(frame);
+  }, [excerptTarget, canRevealExcerpt, goToExcerpt]);
   return <>
     {sectionId && !sectionTarget && <p className="document-section-not-found" role="status">이 문서에서 연결된 절을 찾을 수 없습니다.</p>}
+    {excerptTarget && <button type="button" className="btn btn-ghost doc-excerpt-jump" onClick={goToExcerpt}>발췌 위치로 이동</button>}
+    {excerpt !== undefined && !excerptTarget && <p className="doc-pinned-message" role="status">저장본에서 발췌 위치를 찾을 수 없습니다.</p>}
     {showOutline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
     <div className="doc-readonly-content" data-document-outline-root="" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;

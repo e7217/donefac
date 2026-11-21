@@ -566,7 +566,8 @@ function IssuePanelContent(props: IssuePanelProps) {
               <h4>결정 근거</h4>
               <blockquote>{source.text}</blockquote>
               <Suspense fallback={<p className="issue-section-empty" role="status">원문 저장본 열기를 준비하는 중…</p>}>
-                <DocumentDecisionRevision key={source.revisionId} data={data} documentId={doc.id} revisionId={source.revisionId} label={doc.title} />
+                <DocumentDecisionRevision key={source.revisionId} data={data} documentId={doc.id} revisionId={source.revisionId} label={doc.title}
+                  selection={source} />
               </Suspense>
             </section>}
           </div>;

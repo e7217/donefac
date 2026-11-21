@@ -102,7 +102,7 @@ export function DocumentLinkedWork({ data, document, openIssue, refresh, notify,
         <h4>결정 근거</h4>
         <blockquote>{link.documentSource.text}</blockquote>
         <DocumentDecisionRevision key={link.documentSource.revisionId} data={data} documentId={document.id}
-          revisionId={link.documentSource.revisionId} label={document.title} />
+          revisionId={link.documentSource.revisionId} label={document.title} selection={link.documentSource} />
       </section>}
     </li>)}</ul> : <div className="docs-panel-empty" role="status">
       <Link2 size={21} aria-hidden="true" /><strong>{rows.length ? '조건에 맞는 업무가 없습니다.' : '연결된 업무가 없습니다.'}</strong>

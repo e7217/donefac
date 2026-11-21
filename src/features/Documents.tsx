@@ -1377,7 +1377,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   {comment.documentSource && <section className="docs-comment-source" aria-label="댓글이 달린 본문">
                     <blockquote>{comment.documentSource.text}</blockquote>
                     <DocumentDecisionRevision data={data} documentId={comment.resourceId} revisionId={comment.documentSource.revisionId}
-                      label={selectedPage.title} sourceLabel="댓글 원문 저장본" />
+                      label={selectedPage.title} sourceLabel="댓글 원문 저장본" selection={comment.documentSource} />
                   </section>}
                   <p>{comment.body}</p>
                 </article>;

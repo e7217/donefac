@@ -13,20 +13,20 @@ export type DocumentOutlineEntry<Target extends string | number = string> = {
   sectionLinkPending?: boolean;
 };
 
-export function jumpToDocumentHeading(heading: HTMLElement, contentRoot: HTMLElement, moveFocus = false) {
-  if (!contentRoot.contains(heading)) return;
-  for (let parent = heading.parentElement; parent && parent !== contentRoot; parent = parent.parentElement) {
+export function revealDocumentTarget(target: HTMLElement, contentRoot: HTMLElement, moveFocus = false) {
+  if (!contentRoot.contains(target)) return;
+  for (let parent = target.parentElement; parent && parent !== contentRoot; parent = parent.parentElement) {
     if (parent instanceof HTMLDetailsElement) parent.open = true;
   }
-  heading.scrollIntoView({ block: 'center', inline: 'nearest' });
-  if (moveFocus) heading.focus({ preventScroll: true });
+  target.scrollIntoView({ block: 'center', inline: 'nearest' });
+  if (moveFocus) target.focus({ preventScroll: true });
 }
 
 export function jumpToReadonlyHeading(root: HTMLElement, target: string): boolean {
   const heading = Array.from(root.querySelectorAll<HTMLElement>(`[data-document-outline-target="${CSS.escape(target)}"]`))
     .find(element => element.closest('[data-document-outline-root]') === root);
   if (!heading) return false;
-  jumpToDocumentHeading(heading, root, true);
+  revealDocumentTarget(heading, root, true);
   return true;
 }
 

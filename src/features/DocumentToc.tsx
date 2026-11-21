@@ -4,7 +4,7 @@ import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { NodeViewWrapper, type Editor, type NodeViewProps } from '@tiptap/react';
 import { documentTocOptions, isDocumentTocLayout, isDocumentTocLevel, type DocumentTocLevel, type DocumentTocOptions } from '../../shared/document-nodes';
 import { editorHeadings, useOutlineDocument } from './DocumentEditorOutline';
-import { jumpToDocumentHeading, jumpToReadonlyHeading, OutlineEntries, type DocumentOutlineEntry } from './DocumentOutline';
+import { jumpToReadonlyHeading, OutlineEntries, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 
 const levels: DocumentTocLevel[] = [1, 2, 3];
 const headingPageSize = 100;
@@ -51,7 +51,7 @@ export function DocumentTocNodeView({ node, editor, selected, updateAttributes, 
   function navigate(position: number) {
     if (editor.isDestroyed || editor.state.doc !== content) return;
     const heading = editor.view.nodeDOM(position);
-    if (heading instanceof HTMLElement) jumpToDocumentHeading(heading, editor.view.dom);
+    if (heading instanceof HTMLElement) revealDocumentTarget(heading, editor.view.dom);
   }
   return <NodeViewWrapper as="aside" className={`document-toc${selected ? ' is-selected' : ''}`} data-teamspace-node="documentToc" contentEditable={false}>
     <DocumentToc entries={entries} options={options} navigate={navigate} editable controls={editor.isEditable && <details className="document-toc-settings">

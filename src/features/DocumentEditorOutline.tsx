@@ -6,7 +6,7 @@ import type { Node as EditorNode } from '@tiptap/pm/model';
 import { documentSectionHash, isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { RichContent } from '../../shared/types';
 import { newRequestId } from '../lib/request-id';
-import { DocumentOutline, jumpToDocumentHeading, type DocumentOutlineEntry } from './DocumentOutline';
+import { DocumentOutline, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 
 const emptyDocument = () => null;
 const headingCache = new WeakMap<EditorNode, DocumentOutlineEntry<number>[]>();
@@ -81,7 +81,7 @@ export function DocumentEditorOutline({ editor, documentId, projectId, sectionId
       if (editor.isDestroyed || editor.state.doc !== content) return;
       const heading = editor.view.nodeDOM(routeTarget);
       if (heading instanceof HTMLElement) {
-        jumpToDocumentHeading(heading, editor.view.dom, true);
+        revealDocumentTarget(heading, editor.view.dom, true);
         lastJump.current = { editor, documentId, sectionId };
       }
     });
@@ -91,7 +91,7 @@ export function DocumentEditorOutline({ editor, documentId, projectId, sectionId
   function navigate(target: number) {
     if (!editor || editor.isDestroyed || editor.state.doc !== content) return;
     const heading = editor.view.nodeDOM(target);
-    if (heading instanceof HTMLElement) jumpToDocumentHeading(heading, editor.view.dom);
+    if (heading instanceof HTMLElement) revealDocumentTarget(heading, editor.view.dom);
   }
 
   function assignSectionLink(target: number) {
