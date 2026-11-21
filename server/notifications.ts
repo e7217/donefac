@@ -10,6 +10,7 @@ export const MAX_NOTIFICATION_DETAIL_LENGTH = 500;
 const KINDS: ReadonlySet<string> = new Set(TEAM_NOTIFICATION_KINDS);
 const DEADLINE_KINDS: ReadonlySet<string> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
 const COMMENT_MENTION_KINDS: ReadonlySet<string> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
+const COMMENT_REPLY_KIND = 'document-comment-reply';
 const DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
 const COLUMNS = `id,recipient_id AS recipientId,actor_id AS actorId,kind,project_id AS projectId,
   target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail,comment_id AS commentId`;
@@ -66,12 +67,12 @@ function validateDetail(kind: string, detail: unknown, present: boolean): string
 }
 
 function validateCommentId(kind: string, commentId: unknown, present: boolean): string | null {
-  if (COMMENT_MENTION_KINDS.has(kind)) {
+  if (COMMENT_MENTION_KINDS.has(kind) || kind === COMMENT_REPLY_KIND) {
     if (present && validId(commentId)) return commentId;
   } else if (!present) {
     return null;
   }
-  throw new TeamNotificationError('댓글 멘션 알림의 댓글 ID를 확인해 주세요.');
+  throw new TeamNotificationError('댓글 알림의 댓글 ID를 확인해 주세요.');
 }
 
 function publicNotification({ detail, commentId, ...row }: StoredNotification): TeamNotification {
@@ -100,8 +101,9 @@ function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<s
     // A receipt remains available after permanent deletion of its target comment.
     if (comment && (comment.resourceType !== (row.kind === 'issue-comment-mentioned' ? 'issue' : 'document') ||
         comment.resourceId !== row.targetId || comment.authorId !== row.actorId ||
-        !comment.mentions?.some(mention => mention.userId === row.recipientId))) {
-      throw new TeamNotificationError('댓글 멘션 알림의 대상과 수신자를 확인해 주세요.');
+        (row.kind === COMMENT_REPLY_KIND ? !comment.parentCommentId :
+          !comment.mentions?.some(mention => mention.userId === row.recipientId)))) {
+      throw new TeamNotificationError('댓글 알림의 대상과 수신자를 확인해 주세요.');
     }
   }
   if (deadlineReminder) {

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, Comment, DocPage, DocumentSelectionCommentResult, TeamNotificationPage, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Comment, DocPage, DocumentCommentReplyResult, DocumentSelectionCommentResult, TeamNotificationPage, WorkspaceSnapshot } from '../../shared/types.js';
 
 const owner = 'user-seo';
 const reviewer = 'user-min';
@@ -16,6 +16,7 @@ const quote = '검토할 시험 조건';
 const commentsPath = (id: string) => `/comments?resourceType=document&resourceId=${id}`;
 const createPath = (id: string) => `/documents/${id}/selection-comments`;
 const resolvePath = (comment: Comment) => `${createPath(comment.resourceId)}/${comment.id}/resolution`;
+const replyPath = (comment: Comment) => `${createPath(comment.resourceId)}/${comment.id}/replies`;
 
 type Backup = WorkspaceSnapshot & {
   schemaVersion: number;
@@ -190,4 +191,83 @@ test('backup validation and trash restore preserve real resolution metadata and 
   await target.call(resolvePath(active), { method: 'PATCH', body: { state: 'open', expectedVersion: 2 } }, 409);
   const fresh = await target.resolve(active, 'open', 3, owner);
   assert.equal(fresh.resolution?.version, 4);
+});
+
+test('anchored replies enforce the live thread version and send one exact notification per recipient across retry', async t => {
+  const f = await fixture(t);
+  const document = await f.createDoc('문장 답글 검토');
+  const foreign = await f.createDoc('다른 문장 답글 검토');
+  const { comment: root } = await f.createComment(document);
+  const ordinary = await f.call<Comment>('/comments', { method: 'POST', body: {
+    resourceType: 'document', resourceId: document.id, body: '문서 전체에 남긴 댓글',
+  } }, 201);
+  const { users } = await f.call<WorkspaceSnapshot>('/workspace');
+  const [writer, mentioned] = users.filter(user => user.id !== owner && user.id !== reviewer);
+  assert.ok(writer && mentioned);
+  const mention = `@${mentioned.name}`;
+  const payload = {
+    requestId: randomUUID(), expectedResolutionVersion: 0,
+    body: `${mention} 시험 기록을 확인했습니다.`, mentions: [{ userId: mentioned.id, from: 0, to: mention.length }],
+  };
+  const send = (input: unknown = payload, status = 201, actorId = writer.id) =>
+    f.call<DocumentCommentReplyResult>(replyPath(root), { method: 'POST', actor: actorId, body: input }, status);
+  for (const invalid of [{ ...payload, requestId: 'invalid' }, { ...payload, expectedResolutionVersion: -1 },
+    { ...payload, expectedResolutionVersion: '0' }, { ...payload, body: '' }, { ...payload, parentCommentId: ordinary.id }]) {
+    await send(invalid, 400);
+  }
+  assert.deepEqual(await f.call(commentsPath(document.id)), [root, ordinary]);
+  for (const url of [replyPath(ordinary), `${createPath(foreign.id)}/${root.id}/replies`]) {
+    const rejected = await f.call<{ details: { reason: string } }>(url, { method: 'POST', actor: writer.id, body: payload }, 404);
+    assert.equal(rejected.details.reason, 'thread_missing');
+  }
+
+  const { comment: reply, duplicate } = await send();
+  assert.equal(duplicate, false);
+  assert.deepEqual(reply, {
+    id: reply.id, parentCommentId: root.id, resourceType: 'document', resourceId: document.id, authorId: writer.id,
+    body: payload.body, mentions: payload.mentions, createdAt: reply.createdAt,
+  });
+  await f.call(replyPath(reply), { method: 'POST', actor: writer.id, body: { ...payload, requestId: randomUUID() } }, 404);
+  await f.call(resolvePath(reply), { method: 'PATCH', actor: owner, body: { state: 'resolved', expectedVersion: 0 } }, 404);
+  const exactAlerts = async (actorId: string, commentId = reply.id) =>
+    (await f.call<TeamNotificationPage>('/notifications', { actor: actorId })).items.filter(item => item.commentId === commentId);
+  for (const [actorId, kind] of [[owner, 'document-comment-reply'], [reviewer, 'document-comment-reply'], [mentioned.id, 'document-comment-mentioned']]) {
+    const alerts = await exactAlerts(actorId);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].kind, kind);
+    assert.equal(alerts[0].targetId, document.id);
+    assert.equal(alerts[0].actorId, writer.id);
+  }
+  assert.deepEqual(await exactAlerts(writer.id), []);
+
+  const resolution = await f.resolve(root, 'resolved', 0, owner);
+  assert.equal(resolution.resolution?.version, 1);
+  await f.restart();
+  assert.deepEqual(await send(payload, 200), { comment: reply, duplicate: true });
+  await send({ ...payload, body: `${mention} 같은 요청 ID의 다른 내용` }, 409);
+  await send(payload, 409, owner);
+  const whileResolved = await f.call<{ details: { reason: string; currentResolutionVersion: number } }>(replyPath(root), {
+    method: 'POST', actor: writer.id, body: { ...payload, requestId: randomUUID(), expectedResolutionVersion: 1 },
+  }, 409);
+  assert.deepEqual(whileResolved.details, { reason: 'thread_resolved', currentResolutionVersion: 1 });
+  const reopened = await f.resolve(root, 'open', 1, owner);
+  assert.equal(reopened.resolution?.version, 2);
+  const stale = await f.call<{ details: { reason: string; currentResolutionVersion: number } }>(replyPath(root), {
+    method: 'POST', actor: writer.id, body: { ...payload, requestId: randomUUID() },
+  }, 409);
+  assert.deepEqual(stale.details, { reason: 'thread_changed', currentResolutionVersion: 2 });
+  const { comment: followUp } = await send({
+    requestId: randomUUID(), expectedResolutionVersion: 2, body: '기록을 다시 대조했습니다.',
+  }, 201, reviewer);
+  const participantAlert = await exactAlerts(writer.id, followUp.id);
+  assert.equal(participantAlert.length, 1);
+  assert.equal(participantAlert[0].kind, 'document-comment-reply');
+  assert.equal((await exactAlerts(reviewer)).length, 1);
+  assert.deepEqual(await f.call(commentsPath(document.id)), [reopened, ordinary, reply, followUp]);
+  const key = await f.call<ApiKeyCreated>('/api-keys', { method: 'POST', body: {
+    name: '문장 답글 읽기', access: 'write', projectIds: [projectId],
+  } }, 201);
+  const headers = { Authorization: `Bearer ${key.token}` };
+  assert.deepEqual(await f.call(`/v1${commentsPath(document.id)}`, { headers }), [reopened, ordinary, reply, followUp]);
+  await f.call(`/v1${replyPath(root)}`, { method: 'POST', headers, body: payload }, 403);
 });

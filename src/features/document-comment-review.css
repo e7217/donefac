@@ -56,6 +56,7 @@
 
 .docs-comment-review-actions {
   display: flex;
+  flex-wrap: wrap;
   flex-basis: 100%;
   gap: 4px;
 }
@@ -73,10 +74,104 @@
   cursor: default;
 }
 
+.docs-comment-replies,
+.docs-comment-reply-form {
+  margin: 10px 0 0 21px;
+  padding-inline-start: 10px;
+  border-inline-start: 2px solid #e5ebf6;
+}
+
+.docs-comment-replies {
+  display: grid;
+  gap: 6px;
+}
+
+.docs-comment-reply {
+  min-width: 0;
+  padding: 7px;
+  border-radius: 6px;
+  background: #f6f8fc;
+}
+
+.docs-comment-reply:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.docs-comment-reply .docs-comment-head {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.docs-comment-reply .docs-comment-head time {
+  color: #5d6b83;
+}
+
+.docs-comment-reply .docs-comment-reply-link {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  color: #445775;
+}
+
+.docs-comment-reply > p {
+  margin: 3px 0 0;
+  color: #52617a;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.docs-comment-reply-form {
+  display: grid;
+  gap: 6px;
+}
+
+.docs-comment-reply-form label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #445775;
+}
+
+.docs-comment-reply-form textarea {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.docs-comment-reply-form p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.docs-comment-reply-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.docs-comment-reply-actions .btn {
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
 @media (max-width: 560px) {
   .docs-comment-filters button,
-  .docs-comment-review-actions .btn {
+  .docs-comment-review-actions .btn,
+  .docs-comment-reply .docs-comment-reply-link,
+  .docs-comment-reply .comment-trash-button,
+  .docs-comment-reply-actions .btn {
     min-width: 44px;
     min-height: 44px;
+  }
+
+  .docs-comment-replies,
+  .docs-comment-reply-form {
+    margin-inline-start: 11px;
+    padding-inline-start: 7px;
   }
 }

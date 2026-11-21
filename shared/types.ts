@@ -848,10 +848,12 @@ export interface Comment {
   body: string;
   createdAt: string;
   documentSource?: DocumentDecisionSource;
+  parentCommentId?: string;
   mentions?: CommentMention[];
   resolution?: DocumentCommentResolution;
 }
 export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }
+export interface DocumentCommentReplyResult { comment: Comment; duplicate: boolean }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }
 export interface AttachmentHead extends Attachment { currentVersionId: string; versionCount: number; hasVersionHistory: boolean }
 export type TrashResourceType = 'issue' | 'document';
@@ -898,7 +900,7 @@ export const COMMENT_MENTION_NOTIFICATION_KINDS = ['issue-comment-mentioned', 'd
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', ...ISSUE_RISK_NOTIFICATION_KINDS,
   ...ISSUE_DEADLINE_REMINDER_KINDS, ...COMMENT_MENTION_NOTIFICATION_KINDS,
-  'document-created', 'document-comment', 'document-updated', 'document-review-requested',
+  'document-created', 'document-comment', 'document-comment-reply', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn',
 ] as const;
 export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];

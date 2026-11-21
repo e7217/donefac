@@ -45,6 +45,7 @@ import { contentMarkdown, contentText, DOCUMENT_TEMPLATES, documentRevisionLabel
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, CommentMentionText, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
+import { DocumentReplyComposer, DocumentReplyList, useDocumentCommentReply } from './DocumentCommentReplies';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
@@ -128,6 +129,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => publicationOpener.current?.focus());
   }, [onClosePublicationLink,publicationLink,selectedDocumentId]);
   const [storageProblem, setStorageProblem] = useState(false);
+  const reportReplyStorageProblem = useCallback(() => setStorageProblem(true), []);
+  const reply = useDocumentCommentReply(actorId, draft?.id, reportReplyStorageProblem);
+  const { isSending: isReplySending, hasDraft: hasReplyDraft, clearDocument: clearReplyDrafts } = reply;
   const [search, setSearch] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -495,13 +499,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (creatingRequest.current || templateCreateAttempt.current || templateDraftDirty.current || draftRef.current?.dirty
-        || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) {
+        || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
+        || isReplySending() || hasReplyDraft(actorRef.current, draftRef.current?.id)) {
         rememberDraft(draftRef.current); rememberComment(); event.preventDefault(); event.returnValue = '';
       }
     };
     window.addEventListener('beforeunload', handler);
     return () => { window.removeEventListener('beforeunload', handler); rememberDraft(draftRef.current); rememberComment(); };
-  }, [rememberDraft, rememberComment]);
+  }, [rememberDraft, rememberComment, isReplySending, hasReplyDraft]);
 
   useEffect(() => {
     const guard = (event: Event) => {
@@ -513,7 +518,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         }
         return;
       }
-      if (savingRef.current || creatingRequest.current) {
+      if (savingRef.current || creatingRequest.current || isReplySending()) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
@@ -522,7 +527,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         event.preventDefault();
         return;
       }
-      if (draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) {
+      if (draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
+        || hasReplyDraft(actorRef.current, draftRef.current?.id)) {
         if (!window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 이동할까요?')) event.preventDefault();
         else { rememberDraft(draftRef.current); rememberComment(); }
       }
@@ -530,7 +536,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('teamspace:navigate', guard);
     return () => window.removeEventListener('teamspace:navigate', guard);
-  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId]);
+  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft]);
 
   useEffect(() => {
     if (teamCreation && !creating && !teamCreationRejected) createSubmit.current?.focus({ preventScroll: true });
@@ -629,9 +635,24 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   const documentId = draft?.id;
   const commentActivation = documentId === selectedDocumentId ? commentFocus?.activation : undefined;
+  const { rootComments, repliesByParent } = useMemo(() => {
+    const rootComments: Comment[] = [];
+    const repliesByParent = new Map<string, Comment[]>();
+    for (const comment of comments) {
+      if (comment.resourceId !== documentId) continue;
+      if (!comment.parentCommentId) rootComments.push(comment);
+      else {
+        const siblings = repliesByParent.get(comment.parentCommentId);
+        if (siblings) siblings.push(comment);
+        else repliesByParent.set(comment.parentCommentId, [comment]);
+      }
+    }
+    return { rootComments, repliesByParent };
+  }, [comments, documentId]);
   const focusedComment = commentFocus && comments.find(comment => comment.id === commentFocus.commentId);
-  const linkedCommentMissing = commentActivation !== undefined && loadedCommentActivation === commentActivation && !focusedComment && !commentError;
-  const visibleComments = commentFilter === 'all' ? comments : comments.filter(comment => commentFilterFor(comment) === commentFilter);
+  const focusedRoot = rootComments.find(comment => comment.id === (focusedComment?.parentCommentId ?? focusedComment?.id));
+  const linkedCommentMissing = commentActivation !== undefined && loadedCommentActivation === commentActivation && !focusedRoot && !commentError;
+  const visibleComments = commentFilter === 'all' ? rootComments : rootComments.filter(comment => commentFilterFor(comment) === commentFilter);
   useEffect(() => {
     if (!documentId) return;
     rememberComment();
@@ -679,13 +700,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [documentId, actorId, commentActivation]);
 
   useEffect(() => {
-    if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments') return;
+    if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments' || issueDrawerOpen || publicationOpen || documentAction || newOpen || templateManager) return;
     const article = document.getElementById(`document-comment-${focusCommentId.current}`);
-    if (!article) return;
+    if (!article || article.closest('[inert]')) return;
     focusCommentId.current = null;
     article.scrollIntoView({ block: 'nearest' });
     article.focus({ preventScroll: true });
-  }, [comments, sidebarOpen, sideTab]);
+  }, [comments, sidebarOpen, sideTab, commentFilter, issueDrawerOpen, publicationOpen, documentAction, newOpen, templateManager]);
 
   useEffect(() => {
     if (!commentFocus || commentActivation !== commentFocus.activation || loadedCommentActivation !== commentFocus.activation
@@ -695,8 +716,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       setSideTab('comments');
       return;
     }
-    if (focusedComment && commentFilter !== 'all' && commentFilterFor(focusedComment) !== commentFilter) {
-      setCommentFilter(commentFilterFor(focusedComment));
+    if (focusedRoot && commentFilter !== 'all' && commentFilterFor(focusedRoot) !== commentFilter) {
+      setCommentFilter(commentFilterFor(focusedRoot));
       return;
     }
     const target = document.getElementById(`document-comment-${commentFocus.commentId}`) ?? commentsHeading.current;
@@ -704,7 +725,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     handledCommentActivation.current = commentFocus.activation;
     target.scrollIntoView({ block: 'nearest' });
     target.focus({ preventScroll: true });
-  }, [commentFocus, commentActivation, loadedCommentActivation, focusedComment, commentFilter, issueDrawerOpen, publicationOpen, documentAction,
+  }, [commentFocus, commentActivation, loadedCommentActivation, focusedRoot, commentFilter, issueDrawerOpen, publicationOpen, documentAction,
     newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
   useEffect(() => {
@@ -724,8 +745,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) onSelectDocument(id);
       return;
     }
-    if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return; }
-    if ((draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending) &&
+    if (savingRef.current || isReplySending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return; }
+    if ((draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
+      || hasReplyDraft(actorRef.current, draftRef.current?.id)) &&
       !window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return;
     rememberDraft(draftRef.current);
     rememberComment();
@@ -943,6 +965,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     notify('발췌 댓글을 등록했습니다.', 'success');
   }
 
+  function showSavedReply(comment: Comment) {
+    const current = commentContextRef.current;
+    if (current?.documentId === comment.resourceId && current.actorId === comment.authorId && activeActorRef.current === comment.authorId) {
+      focusCommentId.current = comment.id;
+      setComments(items => items.some(item => item.id === comment.id) ? items : [...items, comment]);
+      setSidebarOpen(true);
+      setSideTab('comments');
+    }
+    window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
+    void refresh().catch(() => undefined);
+    notify('답글을 등록했습니다.', 'success');
+  }
+
+  function archiveCommentFromList(removed: Comment) {
+    const current = commentContextRef.current;
+    if (current?.documentId === removed.resourceId && current.actorId === actorId && activeActorRef.current === actorId) {
+      setComments(items => items.filter(item => item.id !== removed.id && item.parentCommentId !== removed.id));
+    }
+  }
+
   async function changeCommentResolution(comment: Comment, trigger: HTMLButtonElement) {
     const context = commentContextRef.current;
     if (!context?.actorId || !comment.documentSource || context.documentId !== comment.resourceId
@@ -1039,8 +1081,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!captured || savingRef.current) return;
     const capturedActor = actorRef.current;
     if (data.documents.some(page => page.parentId === captured.id)) { notify('하위 문서를 먼저 다른 위치나 휴지통으로 옮겨 주세요.', 'error'); return; }
-    if (liveStateRef.current?.pending || commentBusy) { notify('공동 편집과 댓글 전송이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
-    const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentDraftRef.current.body.trim());
+    if (liveStateRef.current?.pending || commentBusy || isReplySending()) { notify('공동 편집과 댓글 전송이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
+    const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentDraftRef.current.body.trim()) || hasReplyDraft(capturedActor, captured.id);
     if (!window.confirm(`“${captured.title}” 문서를 휴지통으로 옮길까요?${hasDraft ? ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.' : ''}`)) return;
     savingRef.current = true; setSaving(true);
     try {
@@ -1048,6 +1090,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
       rememberComment(emptyCommentDraft(), { actorId: capturedActor, documentId: captured.id });
+      clearReplyDrafts(capturedActor, captured.id);
       if (reselectedCommentDraft.current?.actorId === capturedActor && reselectedCommentDraft.current.documentId === captured.id) reselectedCommentDraft.current = null;
       try { localStorage.removeItem(selectionCommentCacheKey(capturedActor, captured.id)); } catch { setStorageProblem(true); }
       const sameContext = draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
@@ -1498,19 +1541,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 const resolved = resolution?.state === 'resolved';
                 const resolutionActor = resolution && data.users.find(item => item.id === resolution.actorId);
                 const pending = resolvingCommentId === comment.id;
+                const threadReplies = repliesByParent.get(comment.id) ?? [];
+                const replyEditor = reply.current?.parentId === comment.id ? reply.current : null;
                 return <article className="docs-comment" id={`document-comment-${comment.id}`} tabIndex={-1} key={comment.id}>
                   <div className="docs-comment-head">
                     <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
                     <strong>{user?.name || '팀원'}</strong>
                     <time title={when(comment.createdAt)}>{relativeTime(comment.createdAt)}</time>
                     <CommentTrashButton comment={comment} actorId={actorId} notify={notify} refresh={refresh}
-                      disabled={commentBusy || saving || pending || comment.resourceId !== documentId}
-                      onArchived={removed => {
-                        const current = commentContextRef.current;
-                        if (current?.documentId === removed.resourceId && current.actorId === actorId && activeActorRef.current === actorId) {
-                          setComments(previous => previous.filter(value => value.id !== removed.id));
-                        }
-                      }} />
+                      disabled={commentBusy || saving || pending || reply.busy || comment.resourceId !== documentId}
+                      confirmation={threadReplies.length ? '댓글과 답글을 휴지통으로 옮길까요? 휴지통에서 함께 복원할 수 있습니다.' : undefined}
+                      onArchived={archiveCommentFromList} />
                   </div>
                   {comment.documentSource && <section className="docs-comment-source" aria-label="댓글이 달린 본문">
                     <blockquote>{comment.documentSource.text}</blockquote>
@@ -1536,8 +1577,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                         aria-label="댓글 링크 복사" title="댓글 링크 복사" onClick={() => onCopyCommentLink(comment.id)}>
                         <Link2 size={14} aria-hidden="true" />
                       </button>}
+                      {(!resolved || reply.canRecover(comment.id)) && <button type="button" className="btn btn-ghost"
+                        aria-label={resolved ? '답글 결과 확인 열기' : '답글 쓰기'} aria-expanded={Boolean(replyEditor)}
+                        disabled={reply.busy || pending || saving || !actorId}
+                        onClick={event => replyEditor ? reply.close() : reply.open(comment, event.currentTarget)}>
+                        <MessageSquare size={14} aria-hidden="true" />{resolved ? '답글 결과 확인' : '답글'}
+                      </button>}
                     </div>
                   </div>}
+                  {comment.documentSource && <>
+                    <DocumentReplyList replies={threadReplies} users={data.users} actorId={actorId} notify={notify} refresh={refresh}
+                      disabled={reply.busy || saving} onArchived={archiveCommentFromList} onCopyCommentLink={onCopyCommentLink} />
+                    {replyEditor && <DocumentReplyComposer key={JSON.stringify([actorId, comment.id])} editor={replyEditor}
+                      resolved={resolved} busy={reply.busy} users={data.users} onChange={reply.edit} onClose={reply.close}
+                      onSubmit={() => void reply.submit(comment, showSavedReply)} />}
+                  </>}
                 </article>;
               })}
               <form className="docs-comment-form" onSubmit={submitComment}>

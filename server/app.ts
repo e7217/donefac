@@ -24,6 +24,7 @@ import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent }
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
+import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
@@ -70,7 +71,7 @@ import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
-import { TrashItemsService, trashItemFiles } from './trash-items.js';
+import { TrashItemsService, trashItemComments, trashItemFiles, validateCommentReplyTopology } from './trash-items.js';
 import { DocumentTreeMoveError, DocumentTreeMoveService } from './document-tree-move.js';
 import { ProjectWorkloadService } from './project-workload.js';
 import { registerTeamWorkloadRoutes } from './team-workload.js';
@@ -176,6 +177,7 @@ export function createApp(options: {
   const documentContent=new DocumentContentService(store);
   const documentFollowUp=new DocumentFollowUpService(store);
   const documentSelectionComments=new DocumentSelectionCommentService(store);
+  const documentCommentReplies=new DocumentCommentReplyService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const documentCreation = new DocumentCreationService(store);
@@ -257,11 +259,13 @@ export function createApp(options: {
     if (mentioned.size) {
       notifications.notify({ ...fields, kind: `${resourceType}-comment-mentioned`, recipientIds: [...mentioned], commentId: comment.id });
     }
-    notifications.notify({ ...fields, kind: `${resourceType}-comment`,
-      recipientIds: usualRecipients.filter(userId => userId === null || !mentioned.has(userId)) });
+    const recipients = usualRecipients.filter(userId => userId === null || !mentioned.has(userId));
+    if (resourceType === 'document' && comment.parentCommentId) {
+      notifications.notify({ ...fields, kind: 'document-comment-reply', recipientIds: recipients, commentId: comment.id });
+    } else notifications.notify({ ...fields, kind: `${resourceType}-comment`, recipientIds: recipients });
   };
-  const notifyDocumentComment = (document: DocPage, comment: Comment) =>
-    notifyComment(comment, document.projectId, document.title, [document.authorId, ...documentSubscribers(document)]);
+  const notifyDocumentComment = (document: DocPage, comment: Comment, participants: string[] = []) =>
+    notifyComment(comment, document.projectId, document.title, [document.authorId, ...documentSubscribers(document), ...participants]);
   const stopIssueWatch = store.onChange(({before,after,context})=>{
     const old=before as Issue | undefined, issue=after as Issue | undefined;
     if(!old || !issue)return;
@@ -1492,6 +1496,7 @@ export function createApp(options: {
   app.post('/api/comments',(req,res)=>{
     const {resourceType,resourceId}=req.body;
     if(resourceType!=='issue'&&resourceType!=='document')return fail('댓글 대상을 확인해 주세요.');
+    if (Object.hasOwn(req.body, 'parentCommentId')) return fail('문장 댓글 답글 경로를 사용해 주세요.');
     const body = text(req.body.body, '댓글', 20000);
     const mentions = parseCommentMentions(body, req.body.mentions);
     const c: Comment = { id: uid(), resourceType, resourceId, authorId: actor(req), body, createdAt: now(),
@@ -1517,6 +1522,18 @@ export function createApp(options: {
       },
     });
     res.status(result.duplicate?200:201).json(result);
+  });
+  app.post('/api/documents/:id/selection-comments/:commentId/replies', (req, res) => {
+    const result = documentCommentReplies.create({
+      documentId: String(req.params.id), parentCommentId: String(req.params.commentId), actorId: actor(req), body: req.body,
+    }, {
+      validateBody: body => text(body, '답글', 20000),
+      onCreated(document, reply, participants) {
+        notifyDocumentComment(document, reply, participants);
+        activity(req, 'document', document.id, '댓글 답글 작성', reply.body.slice(0,100));
+      },
+    });
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.patch('/api/documents/:id/selection-comments/:commentId/resolution', (req, res) => {
     const actorId = req.header('X-Actor-Id');
@@ -1960,7 +1977,7 @@ export function createApp(options: {
       links => links.some((link: GitlabLink) => Object.hasOwn(link, 'mergeCommitShas')),
     )) fail('GitLab 병합 커밋 증거를 포함한 백업은 schemaVersion 72가 필요합니다.');
     if(data.schemaVersion<31&&data.trashItems!==undefined&&(!Array.isArray(data.trashItems)||data.trashItems.length))fail('개별 댓글·첨부 휴지통을 포함한 백업은 schemaVersion 31이 필요합니다.');
-    const importedTrashItems=trashItems.validateImport(data.schemaVersion>=31?data.trashItems:[],{...data,trash:importedTrash});
+    const importedTrashItems=trashItems.validateImport(data.schemaVersion>=31?data.trashItems:[],{...data,trash:importedTrash},data.schemaVersion);
     if (data.schemaVersion < 24 && (data.gitlabLinks.some((link: { kind: string }) => link.kind === 'branch') ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.kind === 'branch')))) {
       fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
@@ -2025,7 +2042,8 @@ export function createApp(options: {
     const importedTeamCapacity=teamCapacity.validateImport(data.teamWorkloadCapacity,data.users,{legacy:data.schemaVersion<19});
     const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];
     const archiveVersions=[...importedTrash.flatMap(entry=>entry.attachmentVersions),...importedTrashItems.flatMap(entry=>entry.versions)];
-    const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(entry=>entry.itemType==='comment'?[entry.item]:[])];
+    validateCommentReplyTopology(data.schemaVersion, data.comments, importedTrash, importedTrashItems);
+    const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(trashItemComments)];
     const allImportedComments=[...(data.comments as Comment[]),...archiveComments];
     const importedUserIds = new Set((data.users as User[]).map(user => user.id));
     for (const { body, mentions } of allImportedComments) {
@@ -2124,6 +2142,9 @@ export function createApp(options: {
       fail('업무·문서 생성 알림을 포함한 백업은 schemaVersion 29가 필요합니다.');
     }
     const issueRiskKinds:ReadonlySet<unknown>=new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+    if (data.schemaVersion < 77 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: { kind?: unknown } | null) => row?.kind === 'document-comment-reply',
+    )) fail('문장 댓글 답글 알림을 포함한 백업은 schemaVersion 77이 필요합니다.');
     const commentMentionKinds: ReadonlySet<unknown> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
     if (data.schemaVersion < 71 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
       (row: { kind?: unknown; commentId?: unknown } | null) => commentMentionKinds.has(row?.kind) || row?.commentId !== undefined,
@@ -2177,7 +2198,7 @@ export function createApp(options: {
       if (allImportedComments.some(comment => comment.resolution)) {
         advanceRestoredCommentResolutionVersions(allImportedComments, [
           ...store.all<Comment>('comments'), ...previousTrash.flatMap(entry => entry.comments),
-          ...trashItems.all().flatMap(entry => entry.itemType === 'comment' ? [entry.item] : []),
+          ...trashItems.all().flatMap(trashItemComments),
         ]);
       }
       for(const entry of importedTrash){
@@ -2189,6 +2210,7 @@ export function createApp(options: {
       timeReservations.clearForRestore();
       documentFollowUp.clearForImport();
       documentSelectionComments.clearForImport();
+      documentCommentReplies.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
       issuePaste.resetForImport();
@@ -2282,6 +2304,7 @@ export function createApp(options: {
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -383,17 +383,24 @@ export class ApiKeyService {
         if (!['issue', 'document'].includes(query.resourceType) || !query.resourceId) fail(400, '댓글 대상을 확인해 주세요.');
         this.resource(key, query.resourceType === 'issue' ? 'issues' : 'documents', query.resourceId);
         const comments = this.store.commentsForResource(query.resourceType as Comment['resourceType'], query.resourceId);
+        const byId = new Map(comments.map(comment => [comment.id, comment]));
         const readableRevisions = new Map<string, boolean>();
-        this.used(key);
-        response.set('Cache-Control', 'no-store').json(comments.map(comment => {
-          const { documentSource, ...plainComment } = comment;
-          if (!documentSource) return comment;
-          const revisionId = documentSource.revisionId;
+        const canReadSource = (revisionId: string) => {
           if (!readableRevisions.has(revisionId)) {
             const revision = this.store.get<DocRevision>('revisions', revisionId);
             readableRevisions.set(revisionId, Boolean(revision && revision.documentId === query.resourceId && this.canReadDocumentBody(key, revision.content)));
           }
-          return readableRevisions.get(revisionId) ? comment : plainComment;
+          return readableRevisions.get(revisionId);
+        };
+        this.used(key);
+        response.set('Cache-Control', 'no-store').json(comments.flatMap(comment => {
+          if (comment.parentCommentId !== undefined) {
+            const parent = byId.get(comment.parentCommentId);
+            return parent && parent.parentCommentId === undefined && parent.documentSource &&
+              canReadSource(parent.documentSource.revisionId) ? [comment] : [];
+          }
+          const { documentSource, ...plainComment } = comment;
+          return [!documentSource || canReadSource(documentSource.revisionId) ? comment : plainComment];
         }));
         return;
       }

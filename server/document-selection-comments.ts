@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Comment, DocPage, DocRevision, DocumentSelectionCommentResult } from '../shared/types.js';
 import { parseDocumentSourceSelection, resolveDocumentDecisionSource } from './document-follow-up.js';
 import { parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
+import { creationRequestId, deterministicCreationId } from './creation-request.js';
 import type { Store } from './store.js';
 
 type RequestInput = { documentId: string; actorId: string; body: unknown };
@@ -14,8 +15,6 @@ type ErrorDetails =
   | { reason: 'source_version_changed'; currentVersion: number }
   | { reason: 'request_reused' | 'receipt_unavailable' };
 
-const requestUuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-
 export class DocumentSelectionCommentError extends Error {
   constructor(readonly status: number, message: string, readonly details?: ErrorDetails) { super(message); }
 }
@@ -26,7 +25,7 @@ function parse(input: unknown) {
     throw new DocumentSelectionCommentError(400, '선택한 문장에 남길 댓글 요청을 확인해 주세요.');
   }
   const { requestId, expectedDocumentVersion, sourceSelection, body, mentions } = input as Record<string, unknown>;
-  if (typeof requestId !== 'string' || !requestUuid.test(requestId)) {
+  if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
     throw new DocumentSelectionCommentError(400, '댓글 요청 ID를 확인해 주세요.');
   }
   if (typeof expectedDocumentVersion !== 'number' || !Number.isSafeInteger(expectedDocumentVersion) || expectedDocumentVersion < 1) {
@@ -35,15 +34,6 @@ function parse(input: unknown) {
   const selection = parseDocumentSourceSelection(sourceSelection);
   if (!selection) throw new DocumentSelectionCommentError(400, '댓글을 남길 문서의 선택 범위를 확인해 주세요.');
   return { requestId: requestId.toLowerCase(), expectedDocumentVersion, selection, body, mentions };
-}
-
-function commentIdForRequest(documentId: string, actorId: string, requestId: string): string {
-  // Deterministic UUIDv8 keeps a restored comment identifiable after native import clears receipts.
-  const digest = createHash('sha256').update(JSON.stringify(['document-selection-comment', documentId, actorId, requestId])).digest();
-  digest[6] = (digest[6] & 0x0f) | 0x80;
-  digest[8] = (digest[8] & 0x3f) | 0x80;
-  const hex = digest.subarray(0, 16).toString('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export class DocumentSelectionCommentService {
@@ -90,7 +80,7 @@ export class DocumentSelectionCommentService {
           reason: 'source_version_changed', currentVersion: document.version,
         });
       }
-      const id = commentIdForRequest(documentId, actorId, requestId);
+      const id = deterministicCreationId(['document-selection-comment', documentId, actorId, requestId]);
       const archived = this.store.db.prepare("SELECT 1 FROM trash_items WHERE item_type='comment' AND item_id=?").get(id);
       if (archived || this.store.get<Comment>('comments', id)) {
         throw new DocumentSelectionCommentError(409, '이 요청의 기존 댓글을 확인해 주세요.', { reason: 'receipt_unavailable' });

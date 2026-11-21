@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIResponse, type Page } from '@playwright/test';
-import type { Comment, DocPage, DocumentSelectionCommentResult, RichContent, TeamNotificationPage, User, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIResponse, type Dialog, type Page } from '@playwright/test';
+import type { Comment, DocPage, DocumentCommentReplyResult, DocumentSelectionCommentResult, RichContent, TeamNotificationPage, User, WorkspaceSnapshot } from '../../shared/types';
 
 const actor = ({ id }: User) => ({ 'X-Actor-Id': id });
 const documentBody = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
@@ -150,6 +150,130 @@ test('360px에서 문장 댓글을 해결하고 멘션과 공유 링크로 원�
     if (removed.ok()) {
       const { trashEntryId } = await removed.json() as { trashEntryId: string };
       await request.delete(`/api/trash/${trashEntryId}`, { headers: actor(author) });
+    }
+  }
+});
+
+test('360px 문장 답글은 응답을 잃고 대화가 해결돼도 결과를 복구하고 같은 답글로 이동한다', async ({ page, request, browser, baseURL }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [author, reviewer] } = await expectJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const quote = '보정 표준의 버전과 측정값을 같이 남긴다.';
+  const updatedBody = '검토를 마친 뒤 본문을 정리했습니다.';
+  const plainDraft = '보내지 않은 문서 전체 댓글';
+  const replyBody = '보정 기록과 측정값을 같은 표에서 확인했습니다.';
+  const document = await expectJson<DocPage>(await request.post('/api/documents', { headers: actor(author), data: {
+    projectId: project.id, title: `답글 검증 ${randomUUID().slice(0, 8)}`, content: documentBody(quote),
+  } }), 201);
+  const path = `/api/documents/${document.id}`;
+  const routeUrl = `/#/${project.id}/documents/${document.id}`;
+  const authorContext = await browser.newContext({ baseURL, viewport: { width: 360, height: 820 } });
+  try {
+    const { comment: root } = await expectJson<DocumentSelectionCommentResult>(await request.post(`${path}/selection-comments`, {
+      headers: actor(author), data: { requestId: randomUUID(), expectedDocumentVersion: document.version,
+        sourceSelection: { from: 1, to: quote.length + 1, text: quote }, body: '표준과 측정값이 함께 있는지 확인해 주세요.' },
+    }), 201);
+    await expectJson<DocPage>(await request.patch(path, { headers: actor(author), data: {
+      expectedVersion: document.version, content: documentBody(updatedBody),
+    } }));
+    const replyPath = `${path}/selection-comments/${root.id}/replies`;
+    const attempts: unknown[] = [];
+    let initialReply: Comment | undefined;
+    await page.route(`**${replyPath}`, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postDataJSON());
+      if (attempts.length !== 1) return route.continue();
+      const committed = await route.fetch();
+      expect(committed.status(), await committed.text()).toBe(201);
+      initialReply = (await committed.json() as DocumentCommentReplyResult).comment;
+      await route.abort('failed');
+    });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.goto(routeUrl);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveText(updatedBody);
+    await editor.press('End');
+    await page.keyboard.insertText(' 미저장 본문');
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const article = page.locator(`#document-comment-${root.id}`);
+    const general = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await general.fill(plainDraft);
+    await article.getByRole('button', { name: '답글 쓰기', exact: true }).click();
+    const input = page.getByRole('textbox', { name: '답글 내용', exact: true });
+    await input.fill(replyBody);
+    await page.getByRole('button', { name: '답글 등록', exact: true }).click();
+    const retry = page.getByRole('button', { name: '답글 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    expect(initialReply?.parentCommentId).toBe(root.id);
+    await expect(input).toHaveValue(replyBody);
+    const resolved = await expectJson<Comment>(await request.patch(`${path}/selection-comments/${root.id}/resolution`, {
+      headers: actor(author), data: { state: 'resolved', expectedVersion: 0 },
+    }));
+    expect(resolved.resolution?.state).toBe('resolved');
+    const handleBeforeUnload = async (dialog: Dialog) => {
+      if (dialog.type() === 'beforeunload') await dialog.accept();
+      else await dialog.dismiss();
+    };
+    page.on('dialog', handleBeforeUnload);
+    await page.reload();
+    page.off('dialog', handleBeforeUnload);
+    const reopenPanel = page.getByRole('button', { name: '정보 패널 열기', exact: true });
+    await expect(editor).toHaveText(`${updatedBody} 미저장 본문`);
+    if (await reopenPanel.isVisible()) await reopenPanel.click();
+    await expect(article.getByText('해결됨', { exact: true })).toBeVisible();
+    await expect(general).toHaveValue(plainDraft);
+    await article.getByRole('button', { name: '답글 결과 확인 열기', exact: true }).click();
+    await expect(input).toHaveValue(replyBody);
+    const result = page.waitForResponse(response => new URL(response.url()).pathname === replyPath && response.request().method() === 'POST');
+    await retry.click();
+    const replay = await expectJson<DocumentCommentReplyResult>(await result);
+    expect(replay).toEqual({ comment: initialReply, duplicate: true });
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+    const nestedReply = article.locator(`#document-comment-${replay.comment.id}`);
+    await expect(nestedReply).toContainText(replyBody);
+    await expect(article.getByRole('button', { name: '답글 쓰기', exact: true })).toHaveCount(0);
+    await expect(general).toHaveValue(plainDraft);
+    await expect(editor).toHaveText(`${updatedBody} 미저장 본문`);
+
+    await authorContext.addInitScript(actorId => {
+      localStorage.setItem('teamspace.actor', actorId);
+      let copied = '';
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async (value: string) => { copied = value; }, readText: async () => copied,
+      } });
+    }, author.id);
+    const peer = await authorContext.newPage();
+    await peer.goto(routeUrl);
+    await peer.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const filters = filterButtons(peer);
+    await filters.open.click();
+    await expect(peer.locator(`#document-comment-${root.id}`)).toHaveCount(0);
+    await peer.getByRole('button', { name: '알림', exact: true }).click();
+    const inbox = peer.getByRole('dialog', { name: '팀 알림', exact: true });
+    await inbox.getByRole('button').filter({ hasText: document.title }).filter({ hasText: '문장 댓글 답글' }).click();
+    await expect(filters.resolved).toHaveAttribute('aria-pressed', 'true');
+    const peerRoot = peer.locator(`#document-comment-${root.id}`);
+    const peerReply = peerRoot.locator(`#document-comment-${replay.comment.id}`);
+    await expect(peerReply).toBeFocused();
+    await expect(peerRoot.locator('blockquote')).toContainText(quote);
+    await expect.poll(async () => (await expectJson<TeamNotificationPage>(await request.get('/api/notifications', {
+      headers: actor(author),
+    }))).items.find(item => item.commentId === replay.comment.id)?.readAt).toEqual(expect.any(String));
+
+    await peerReply.getByRole('button', { name: '답글 링크 복사', exact: true }).click();
+    const copied = await peer.evaluate(() => navigator.clipboard.readText());
+    expect(new URL(copied).hash).toBe(`${routeUrl.slice(1)}?comment=${encodeURIComponent(replay.comment.id)}`);
+    const fresh = await authorContext.newPage();
+    await fresh.goto(copied);
+    await expect(fresh.locator(`#document-comment-${replay.comment.id}`)).toBeFocused();
+    expect(await fresh.locator('body').evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(362);
+  } finally {
+    await authorContext.close();
+    const removed = await request.delete(path, { headers: actor(author) });
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`, { headers: actor(author) });
     }
   }
 });

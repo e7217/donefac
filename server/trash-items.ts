@@ -8,7 +8,7 @@ import { TrashError, trashPageBounds, type TrashArchive } from './trash.js';
 type Owner = Issue | DocPage;
 type ArchiveIdentity = Pick<TrashItemSummary, 'id' | 'ownerType' | 'ownerId' | 'title' | 'deletedAt' | 'deletedById'>;
 export type ArchivedTrashItem = ArchiveIdentity & (
-  { itemType: 'comment'; item: Comment; versions: [] } |
+  { itemType: 'comment'; item: Comment; versions: []; replies?: Comment[] } |
   { itemType: 'attachment'; item: Attachment; versions: AttachmentVersion[] }
 );
 type BackupReferences = {
@@ -43,6 +43,38 @@ function uuid(value: unknown): string {
 export function trashItemFiles(entry: ArchivedTrashItem): Attachment[] {
   if (entry.itemType === 'comment') return [];
   return [...new Map([entry.item, ...entry.versions].map(file => [file.id, file])).values()];
+}
+
+export function trashItemComments(entry: ArchivedTrashItem): Comment[] {
+  return entry.itemType === 'comment' ? [entry.item, ...(entry.replies ?? [])] : [];
+}
+
+function isReplyTo(reply: Comment, parent: Comment | undefined): boolean {
+  return reply.resourceType === 'document' && parent?.resourceType === 'document' && parent.id === reply.parentCommentId &&
+    parent.resourceId === reply.resourceId && parent.parentCommentId === undefined && Boolean(parent.documentSource) &&
+    !Object.hasOwn(reply, 'documentSource') && !Object.hasOwn(reply, 'resolution');
+}
+
+export function validateCommentReplyTopology(version: number, comments: Comment[], trash: TrashArchive[], items: ArchivedTrashItem[]): void {
+  const active = new Map(comments.map(comment => [comment.id, comment]));
+  const all = new Map(active);
+  const validate = (comment: Comment, container: ReadonlyMap<string, Comment>) => {
+    if (!Object.hasOwn(comment, 'parentCommentId')) return;
+    if (version < 77) fail(400, '문장 댓글 답글을 포함한 백업은 schemaVersion 77이 필요합니다.');
+    if (!validString(comment.parentCommentId) || !isReplyTo(comment, container.get(comment.parentCommentId))) {
+      fail(400, '백업에 포함된 답글과 원래 문장 댓글의 연결을 확인해 주세요.');
+    }
+  };
+  for (const comment of active.values()) validate(comment, active);
+  for (const entry of trash) {
+    const group = new Map(entry.comments.map(comment => [comment.id, comment]));
+    for (const comment of entry.comments) {
+      validate(comment, group);
+      all.set(comment.id, comment);
+    }
+  }
+  for (const item of items) if (item.itemType === 'comment') all.set(item.item.id, item.item);
+  for (const item of items) if (item.itemType === 'comment') validate(item.item, all);
 }
 
 function itemSummary(entry: ArchivedTrashItem, owner: OwnerSummary): TrashItemSummary {
@@ -95,9 +127,15 @@ export class TrashItemsService {
   archiveComment(item: Comment, deletedById: string): string {
     if (item.authorId !== deletedById) fail(403, '작성한 댓글만 휴지통에 보낼 수 있습니다.');
     const title = item.body.replace(/\s+/g, ' ').trim().slice(0, 120) || '댓글';
-    const entry: ArchivedTrashItem = { ...this.identity(item, deletedById, title), itemType: 'comment', item, versions: [] };
+    const replies = item.resourceType === 'document' && item.documentSource
+      ? this.store.commentsForResource('document', item.resourceId).filter(comment => comment.parentCommentId === item.id)
+      : [];
+    const entry: ArchivedTrashItem = {
+      ...this.identity(item, deletedById, title), itemType: 'comment', item, versions: [], ...(replies.length ? { replies } : {}),
+    };
     this.insert(entry);
     this.store.remove('comments', item.id);
+    for (const reply of replies) this.store.remove('comments', reply.id);
     return entry.id;
   }
 
@@ -140,9 +178,16 @@ export class TrashItemsService {
     const owner = this.liveOwner(entry.ownerType, entry.ownerId);
     if (!owner) fail(409, '원래 업무나 문서를 먼저 복원해 주세요.');
     if (entry.itemType === 'comment') {
-      if (this.store.get('comments', entry.item.id)) fail(409, '이미 같은 댓글 ID를 사용하고 있습니다.');
+      const parentId = entry.item.parentCommentId;
+      if (parentId !== undefined && !isReplyTo(entry.item, this.store.get<Comment>('comments', parentId))) {
+        fail(409, '원래 문장 댓글을 먼저 복원해 주세요.');
+      }
+      const comments = trashItemComments(entry);
+      if (comments.some(comment => this.store.get('comments', comment.id))) fail(409, '이미 같은 댓글 ID를 사용하고 있습니다.');
       // Historic comments must not trigger a new comment-created event.
-      this.store.withMutationContext({ origin: 'import', actorId: null }, () => this.store.put('comments', entry.item));
+      this.store.withMutationContext({ origin: 'import', actorId: null }, () => {
+        for (const comment of comments) this.store.put('comments', comment);
+      });
     } else {
       for (const file of trashItemFiles(entry)) {
         if (this.store.get('attachments', file.id) || this.store.get('attachment_versions', file.id)) fail(409, '이미 같은 파일 ID를 사용하고 있습니다.');
@@ -184,7 +229,7 @@ export class TrashItemsService {
 
   all(): ArchivedTrashItem[] { return this.store.all<ArchivedTrashItem>('trash_items'); }
 
-  validateImport(raw: unknown, refs: BackupReferences): ArchivedTrashItem[] {
+  validateImport(raw: unknown, refs: BackupReferences, version: number): ArchivedTrashItem[] {
     if (!Array.isArray(raw) || raw.length > 100_000) invalid('목록');
     if (!raw.length) return [];
     const users = new Set(refs.users.map(item => item.id));
@@ -195,7 +240,8 @@ export class TrashItemsService {
       ...refs.trash.flatMap(entry => [...entry.attachments, ...entry.attachmentVersions])].map(item => item?.id));
     const seen = new Set(refs.trash.map(entry => entry.id));
     return raw.map((candidate: unknown): ArchivedTrashItem => {
-      const { id: entryId, itemType, ownerId, ownerType, title, deletedAt, deletedById, item: rawItem, versions } = record(candidate);
+      const archived = record(candidate);
+      const { id: entryId, itemType, ownerId, ownerType, title, deletedAt, deletedById, item: rawItem, versions, replies } = archived;
       const id = uuid(entryId);
       if (seen.has(id) || (ownerType !== 'issue' && ownerType !== 'document') || !validString(ownerId) || !owners.has(key(ownerType, ownerId)) ||
           !validString(title) || title.length > 300 || !validDate(deletedAt) || new Date(deletedAt).toISOString() !== deletedAt ||
@@ -207,11 +253,24 @@ export class TrashItemsService {
       const item = record(rawItem);
       if (!owned(item) || !validString(item.id)) invalid('원본 소유자');
       if (itemType === 'comment') {
-        if (comments.has(item.id) || versions.length || !validString(item.body) || item.body.length > 20_000) invalid('댓글');
-        comments.add(item.id);
-        return { ...identity, itemType, item: item as unknown as Comment, versions: [] };
+        if (versions.length) invalid('댓글');
+        const readComment = (comment: Record<string, unknown>): Comment => {
+          if (!owned(comment) || !validString(comment.id) || comments.has(comment.id) ||
+              !validString(comment.body) || comment.body.length > 20_000) invalid('댓글');
+          comments.add(comment.id);
+          return comment as unknown as Comment;
+        };
+        const root = readComment(item);
+        if (!Object.hasOwn(archived, 'replies')) return { ...identity, itemType, item: root, versions: [] };
+        if (version < 77) fail(400, '문장 댓글 답글을 포함한 백업은 schemaVersion 77이 필요합니다.');
+        if (!Array.isArray(replies) || !replies.length || replies.length > 100_000 || root.parentCommentId !== undefined || !root.documentSource) {
+          invalid('문장 댓글 답글');
+        }
+        const thread = replies.map(value => readComment(record(value)));
+        if (thread.some(reply => !isReplyTo(reply, root))) invalid('문장 댓글 답글');
+        return { ...identity, itemType, item: root, versions: [], replies: thread };
       }
-      if (itemType !== 'attachment') invalid('종류');
+      if (itemType !== 'attachment' || Object.hasOwn(archived, 'replies')) invalid('종류');
       const validateFile = (file: Record<string, unknown>) => {
         const fileId = uuid(file.id);
         try { safeFilename(file.filename); } catch { invalid('파일명'); }
@@ -253,6 +312,10 @@ export class TrashItemsService {
       this.store.transaction(() => {
         const entry = this.get(req.params.id);
         this.queueCleanup(trashItemFiles(entry));
+        if (entry.itemType === 'comment' && entry.ownerType === 'document' && entry.item.documentSource) {
+          this.store.db.prepare(`DELETE FROM trash_items WHERE item_type='comment' AND owner_type='document' AND owner_id=?
+            AND json_extract(json,'$.item.parentCommentId')=?`).run(entry.ownerId, entry.item.id);
+        }
         this.store.remove('trash_items', entry.id);
         hooks.activity(req, entry.ownerType, entry.ownerId, `${itemLabel(entry.itemType)} 영구 삭제`, entry.itemType === 'attachment' ? entry.title : undefined);
       });

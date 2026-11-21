@@ -12,7 +12,8 @@ import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import type {
-  ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentPublicationView,
+  ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentCommentReplyResult,
+  DocumentPublicationView, DocumentSelectionCommentResult, TeamNotification,
   GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
   TrashItemPage, TrashItemSummary, TrashResourceType, TrashRestoreResult, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -36,6 +37,12 @@ type Backup = WorkspaceSnapshot & {
   trashItems?: unknown[];
 };
 type GitlabBackup = Omit<Backup, 'trashEntries'> & { trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
+type CommentBackup = Omit<Backup, 'trashEntries' | 'trashItems'> & {
+  comments: Comment[];
+  teamNotifications: TeamNotification[];
+  trashEntries: { id: string; comments: Comment[] }[];
+  trashItems: { id: string; item: Comment; replies?: Comment[] }[];
+};
 const branchInTrash = (backup: GitlabBackup, entry: TrashEntrySummary) => backup.trashEntries.find(row => row.id === entry.id)?.gitlabLinks.find(link => link.kind === 'branch');
 
 async function open(dataDir: string) {
@@ -135,6 +142,18 @@ function restore(f: Fixture, entry: TrashEntrySummary, status = 200) {
   return f.call<TrashRestoreResult>(`${trashPath(entry)}/restore`, 'POST', {}, status, reviewer);
 }
 
+async function makeThread(f: Fixture, document: DocPage, selectedText: string) {
+  const path = `${documentPath(document.id)}/selection-comments`;
+  const { comment: root } = await f.call<DocumentSelectionCommentResult>(path, 'POST', {
+    requestId: randomUUID(), expectedDocumentVersion: document.version,
+    sourceSelection: { from: 1, to: selectedText.length + 1, text: selectedText }, body: '선택 문장에 검토 의견을 남겼습니다.',
+  }, 201, reviewer);
+  const reply = async (body: string, author = actor) => (await f.call<DocumentCommentReplyResult>(`${path}/${root.id}/replies`, 'POST', {
+    requestId: randomUUID(), expectedResolutionVersion: 0, body,
+  }, 201, author)).comment;
+  return { root, reply };
+}
+
 test('individual comment trash enforces authorship and restores the same ordered discussion without redelivery', async t => {
   const f = await fixture(t);
   const issue = await makeIssue(f, '댓글 복원 검증', { assigneeId: actor });
@@ -182,6 +201,121 @@ test('individual comment trash enforces authorship and restores the same ordered
   assert.deepEqual(await f.call<unknown[]>('/webhook-deliveries'), deliveries);
   assert.deepEqual(await f.call('/notifications'), inbox);
   await f.call(`${itemPath(trashItemId)}/restore`, 'POST', {}, 404);
+});
+
+test('anchored comment replies survive individual and document trash, backup, and restore until their root is purged', async t => {
+  const f = await fixture(t);
+  const doc = await makeDocument(f, '답글과 원래 문서의 휴지통');
+  const path = `/comments?resourceType=document&resourceId=${doc.id}`;
+  const { root, reply } = await makeThread(f, doc, doc.title);
+  const first = await reply('답글만 먼저 휴지통으로 보냅니다.');
+  const second = await reply('나머지 답글은 문장 댓글과 함께 보관합니다.', reviewer);
+  const remove = async (comment: Comment) => (await f.call<{ trashItemId: string }>(`/comments/${comment.id}`, 'DELETE', undefined, 200, comment.authorId)).trashItemId;
+  const restoreItem = (id: string, status = 200) => f.call<TrashItemSummary>(`${itemPath(id)}/restore`, 'POST', {}, status);
+  const backup = () => f.call<CommentBackup>('/export');
+  const assertActive = async (...comments: Comment[]) => {
+    const actual = await f.call<Comment[]>(path);
+    assert.deepEqual(new Map(actual.map(comment => [comment.id, comment])), new Map(comments.map(comment => [comment.id, comment])));
+  };
+  await f.call(`/comments/${first.id}`, 'DELETE', undefined, 403, reviewer);
+  await assertActive(root, first, second);
+
+  const standalone = await remove(first);
+  const entireDocument = await archive(f, 'document', doc);
+  const documentCopy = await backup();
+  assert.deepEqual(documentCopy.trashEntries.find(entry => entry.id === entireDocument.id)?.comments, [root, second]);
+  assert.deepEqual(documentCopy.trashItems.find(item => item.id === standalone)?.item, first);
+  await f.call(path, 'GET', undefined, 404);
+  await f.call('/import', 'POST', { data: documentCopy });
+  await restoreItem(standalone, 409);
+  await restore(f, entireDocument);
+  await assertActive(root, second);
+  await restoreItem(standalone);
+  await assertActive(root, first, second);
+
+  const firstEntry = await remove(first);
+  const rootEntry = await remove(root);
+  await assertActive();
+  await restoreItem(firstEntry, 409);
+  const current = (await workspace(f)).documents.find(value => value.id === doc.id);
+  assert.ok(current);
+  const archivedOwner = await archive(f, 'document', current);
+  await restoreItem(rootEntry, 409);
+  const mixed = await backup();
+  assert.equal(mixed.schemaVersion, 77);
+  const bundled = mixed.trashItems.find(item => item.id === rootEntry);
+  assert.ok(bundled);
+  assert.deepEqual(bundled.item, root);
+  assert.deepEqual(bundled.replies, [second]);
+  assert.deepEqual(mixed.trashItems.find(item => item.id === firstEntry)?.item, first);
+  assert.deepEqual(mixed.trashEntries.find(entry => entry.id === archivedOwner.id)?.comments, []);
+
+  const corrupted = structuredClone(mixed);
+  corrupted.trashItems.find(item => item.id === rootEntry)!.replies![0].parentCommentId = first.id;
+  await f.call('/import', 'POST', { data: corrupted }, 400);
+  assert.deepEqual((await backup()).trashItems, mixed.trashItems);
+
+  await f.call('/import', 'POST', { data: mixed });
+  await f.restart();
+  await restore(f, archivedOwner);
+  await restoreItem(firstEntry, 409);
+  await restoreItem(rootEntry);
+  await assertActive(root, second);
+  await restoreItem(firstEntry);
+  await assertActive(root, first, second);
+  assert.deepEqual((await backup()).teamNotifications.filter(row => row.kind === 'document-comment-reply'),
+    mixed.teamNotifications.filter(row => row.kind === 'document-comment-reply'));
+
+  const removedReply = await remove(first);
+  const removedRoot = await remove(root);
+  await f.call(itemPath(removedRoot), 'DELETE');
+  await restoreItem(removedReply, 404);
+  assert.equal((await trashItems(f)).total, 0);
+  await assertActive();
+  await f.call('/import', 'POST', { data: await backup() });
+});
+
+test('native reply topology rejects corrupted links atomically and API keys respect the original revision scope', async t => {
+  const f = await fixture(t);
+  const outside = 'project-team';
+  const quote = '프로젝트 범위의 댓글 원문';
+  const content = docContent(quote);
+  content.content!.push({ type: 'issueSummary', attrs: { projectId: outside, savedViewId: null, label: '외부 프로젝트', groupBy: 'status' } });
+  const document = await f.call<DocPage>('/documents', 'POST', { projectId, title: quote, content }, 201);
+  const { root, reply } = await makeThread(f, document, quote);
+  const child = await reply('원문을 조회할 수 있는 키만 이 답글을 받습니다.');
+  const path = `/comments?resourceType=document&resourceId=${document.id}`;
+  const publicComments = async (name: string, projectIds: string[]) => {
+    const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name, access: 'read', projectIds }, 201);
+    const response = await f.request(`/v1${path}`, { headers: { Authorization: `Bearer ${key.token}` } });
+    assert.equal(response.status, 200);
+    return await response.json() as Comment[];
+  };
+  const { documentSource, ...redactedRoot } = root;
+  assert.ok(documentSource);
+  assert.deepEqual(await publicComments('원문을 볼 수 없는 합성 키', [projectId]), [redactedRoot]);
+  assert.deepEqual(await publicComments('두 프로젝트 모두 볼 수 있는 합성 키', [projectId, outside]), [root, child]);
+
+  const data = await f.call<CommentBackup>('/export');
+  const legacy = { ...data, schemaVersion: 76 };
+  const wrongParent = data.comments.map(comment => comment.id === child.id ? { ...comment, parentCommentId: child.id } : comment);
+  const duplicatedPin = data.comments.map(comment => comment.id === child.id ? { ...comment, documentSource } : comment);
+  const elsewhere = {
+    ...data,
+    comments: data.comments.filter(comment => comment.id !== root.id),
+    trashItems: [...data.trashItems, { id: randomUUID(), itemType: 'comment', ownerType: 'document', ownerId: document.id,
+      title: root.body, deletedAt: new Date().toISOString(), deletedById: reviewer, item: root, versions: [] }],
+  };
+  for (const corrupt of [legacy, { ...data, comments: wrongParent }, { ...data, comments: duplicatedPin }, elsewhere]) {
+    await f.call('/import', 'POST', { data: corrupt }, 400);
+    assert.deepEqual(await f.call<Comment[]>(path), [root, child]);
+    assert.equal((await trashItems(f)).total, 0);
+  }
+  await f.call('/import', 'POST', { data: {
+    ...legacy, comments: data.comments.filter(comment => comment.id !== child.id),
+    teamNotifications: data.teamNotifications.filter(row => row.commentId !== child.id),
+  } });
+  assert.deepEqual(await f.call<Comment[]>(path), [root]);
 });
 
 test('individual attachment and comment archives survive restart and backup; parent restore and purge preserve their lifecycle', async t => {

@@ -93,6 +93,8 @@
 
 문장 댓글은 열린 상태에서 시작한다. 팀원이 해결하거나 다시 열면 처리한 팀원과 시각을 기록한다. 댓글 패널에서 전체·미해결·해결됨을 열고, 알림과 공유 링크는 현재 상태에 맞게 해당 댓글과 원래 발췌를 표시한다. 문서 본문·고정 저장본과 작성 중인 초안은 그대로 사용한다. 다른 팀원이 먼저 상태를 바꾸면 최신 댓글을 읽고 다시 선택할 수 있다. 자체 백업 형식 73은 활성 상태와 휴지통에 보관한 문장 댓글의 처리 내역을 보존한다. [Docmost 문장 댓글](https://docmost.com/docs/user-guide/pages#comments) · [Confluence 문장 댓글 해결](https://support.atlassian.com/confluence-cloud/docs/comment-on-pages-and-blog-posts/#Resolve-inline-comments)
 
+문장 댓글에 한 단계 답글을 단다. 각 답글은 같은 문서의 원래 댓글을 참조하며 대화는 원래 발췌·해결 상태를 공유한다. 새 답글을 등록할 때 원래 댓글이 열린 상태인지, 마지막으로 확인한 해결 버전과 일치하는지 검증한다. 답글·이력·알림·요청 기록을 함께 저장하며, 응답이 끊긴 경우 대화 상태가 바뀐 뒤에도 이미 등록된 답글을 같은 요청으로 확인할 수 있다. 원래 댓글의 작성자와 대화 참여자는 해당 답글로 이동하는 알림을 받고 멘션과 같은 알림을 중복해서 받지 않는다. 원래 댓글의 휴지통 항목과 문서 백업은 함께 보관된 답글을 복원한다. [Confluence 문장 댓글과 답글](https://support.atlassian.com/confluence-cloud/docs/comment-on-pages-and-blog-posts/#view-inline-comments)
+
 업무·문서·문장 선택 댓글에서 `@`를 입력하면 팀원을 이름과 이메일로 찾는다. 선택한 팀원의 ID와 댓글에 삽입한 이름의 범위를 저장하며, 해당 범위를 다시 편집하면 멘션을 해제한다. 같은 댓글에서는 여러 번 선택하거나 일반 댓글의 수신 대상과 겹쳐도 팀원마다 멘션 알림을 한 번 저장한다. 알림에서 원래 댓글을 열 수 있다. 자체 백업 형식 71은 댓글과 휴지통의 멘션, 알림과 읽음 상태를 보존한다. [Jira 댓글에서 팀원 지정](https://support.atlassian.com/jira-software-cloud/docs/watch-share-and-comment-on-a-work-item/) · [Confluence 멘션](https://support.atlassian.com/confluence-cloud/docs/mention-a-person-team-or-ai-agent/)
 
 저장되거나 동기화된 본문의 문장을 새 티켓이나 기존 티켓의 결정 근거로 연결한다. 서버는 문서 버전과 선택 범위를 대조해 당시 저장본 ID를 연결에 기록한다. 이미 문서와 티켓이 연결돼 있으면 그 연결 ID와 관계 유형을 유지하며, 다른 발췌가 이미 고정돼 있으면 새 저장을 거절한다. 공동 편집에서 해당 버전의 이력이 필요하면 연결과 같은 트랜잭션에 기록한다. 티켓에서 발췌와 당시 저장본을 열고, 자체 백업 형식 48은 기존 업무의 활성·휴지통 연결에도 발췌와 원문을 대조해 복원한다.

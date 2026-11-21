@@ -259,6 +259,14 @@ curl --fail-with-body \
 
 댓글 목록과 문장 댓글 등록의 재시도 응답에도 현재 상태가 표시된다. 자체 백업 형식 73은 활성·휴지통 문장 댓글의 처리 기록을 보존하며, 같은 작업공간의 이전 기록을 되돌릴 때 편집 버전을 높여 이전 화면의 덮어쓰기를 막는다. 댓글 주소의 `?comment=<ID>`는 문서에서 해당 댓글을 연다.
 
+### 문장 댓글 답글
+
+브라우저의 `POST /api/documents/:id/selection-comments/:commentId/replies`에 `{requestId,expectedResolutionVersion,body,mentions?}`를 보낸다. `requestId`는 UUID v4이고 `expectedResolutionVersion`은 원래 댓글의 현재 해결 버전이다. 해결을 아직 기록하지 않은 댓글은 버전 0을 사용한다. 브라우저에서 댓글을 작성할 때와 같은 본문·멘션 규칙을 적용한다. 새 답글은 `{comment,duplicate:false}`와 `201`을 반환하고 `comment.parentCommentId`로 원래 문장 댓글을 가리킨다.
+
+새 답글은 같은 문서의 열린 문장 댓글에 쓴다. 해결 상태 또는 버전이 바뀌면 `409`와 `details.reason`의 `thread_resolved` 또는 `thread_changed`, `currentResolutionVersion`을 반환한다. 원래 댓글을 찾을 수 없으면 `404`와 `thread_missing`을 반환한다. 같은 작업자가 요청 ID·해결 버전·본문·멘션을 그대로 보내면 대화가 해결된 뒤에도 이미 저장한 활성 답글을 `200`과 `duplicate:true`로 반환한다. 요청 ID를 다른 입력에 재사용하면 `409`와 `request_reused`를, 저장한 답글이나 원래 댓글을 조회할 수 없으면 `409`와 `receipt_unavailable`을 반환한다.
+
+댓글 읽기 응답에는 답글의 `parentCommentId`가 포함된다. 프로젝트 범위 키의 읽기에는 원래 댓글의 고정 원문 범위도 적용한다. 답글 알림의 `commentId`는 답글을 가리키며 `?comment=<ID>`로 열 수 있다. 자체 백업 형식 77은 문서·댓글의 활성 및 휴지통 데이터와 답글 알림을 보존한다. 원래 댓글을 휴지통에 넣을 때 함께 보관한 답글은 원래 댓글과 함께 복원한다. 별도로 휴지통에 넣은 답글은 원래 댓글이 활성일 때 복원할 수 있다. 물리 백업은 댓글 요청 기록을 보존한다.
+
 ### 댓글 멘션
 
 일반 댓글 `POST /api/comments`와 문장 댓글 등록 요청에 `mentions` 배열을 추가할 수 있다. 각 항목은 `userId`, `from`, `to`를 사용한다. 양 끝의 공백을 정리한 `body`에서 `from`을 포함하고 `to`는 제외하는 UTF-16 위치다. 범위는 시작 위치순으로 최대 50개를 보내며, 각 범위가 겹치지 않고 `@`와 현재 팀원 이름을 정확히 담아야 한다. 같은 이름의 팀원은 ID로 구분한다. 배열을 생략하거나 비우면 일반 댓글과 같은 방식으로 처리한다.

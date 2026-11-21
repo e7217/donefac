@@ -26,6 +26,7 @@ const EVENT_LABELS: Record<TeamNotificationKind, string> = {
   'issue-deadline-overdue': '업무 마감 초과',
   'document-created': '새 문서',
   'document-comment': '문서 댓글',
+  'document-comment-reply': '문장 댓글 답글',
   'document-comment-mentioned': '문서 댓글에서 멘션',
   'document-updated': '문서 변경',
   'document-review-requested': '검토 요청',
