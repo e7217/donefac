@@ -85,4 +85,15 @@ test('Gantt export retains chart order, full dates and baseline references for v
   }
   assert.equal(buildGanttExportReport({ ...input, findings: new Map() }).dependencies[0].check?.kind, 'valid');
   assert.equal(buildGanttExportReport(input).dependencies[0].check, null);
+  assert.ok(report.rows.every(row => row.projectName === undefined));
+
+  const other = { ...project, id: 'internal-second-project', key: 'QA', name: '검증 프로젝트' };
+  const teamReport = buildGanttExportReport({
+    ...input, includeProjectLabel: true, nonworkingDates: [],
+    data: { ...input.data, projects: [project, other] },
+    issues: [successor, issue('QA-1', { projectId: other.id }), predecessor],
+  });
+  assert.deepEqual(teamReport.rows.filter(row => row.kind === 'issue' && !row.historical).map(row => [row.key, row.projectName]),
+    [[successor.key, project.name], ['QA-1', other.name], [predecessor.key, project.name]]);
+  assert.deepEqual(teamReport.nonworkingDates, []);
 });

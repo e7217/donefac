@@ -170,6 +170,11 @@
 .workload-preview li { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 8px; border-top: 1px solid var(--line); padding: 4px 0; }
 .workload-preview li strong { font-weight: 600; }
 
+.workload-preview-projects { margin-block: 9px; font-size: 12px; }
+.workload-preview-projects > strong { overflow-wrap: anywhere; }
+.workload-preview-project-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; }
+.workload-preview-project-filter > .field { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+
 @media (max-width: 600px) {
   .workload-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workload-rule-row.has-date { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }

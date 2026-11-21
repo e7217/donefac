@@ -108,11 +108,12 @@ test('Gantt HTML escapes user strings and includes print styles without active o
   const payload = '<img src="https://evil.test/x" onerror="alert(1)"> & \'<script>\r\n내용';
   const html = renderGanttExport(report({
     title: payload, baselineName: payload, capturedAt: '2026-11-21T11:03:04.000+09:00', filters: [payload],
-    rows: [row({ key: payload, title: payload, kindLabel: payload, status: payload, assignee: payload, startDate: payload })],
+    rows: [row({ key: payload, projectName: `프로젝트 ${payload}`, title: payload, kindLabel: payload, status: payload, assignee: payload, startDate: payload })],
     dependencies: [{ predecessorKey: payload, successorKey: payload, type: payload, lagDays: 0, check: { kind: 'invalid', reason: payload } }],
   }));
   assert.doesNotMatch(html, /<(?:script|iframe|img|link)\b|\s(?:src|href)="https?:\/\//);
   assert.ok(html.includes('&lt;img src=&quot;https://evil.test/x&quot; onerror=&quot;alert(1)&quot;&gt; &amp; &#39;&lt;script&gt;&#13;\n내용'));
+  assert.match(bodyRows(html, 'timeline-row')[0], /프로젝트 &lt;img src=&quot;https:\/\/evil\.test\/x&quot;/);
   assert.match(html, /<time datetime="2026-11-21T11:03:04\.000\+09:00">2026\.11\.21 02:03:04 UTC<\/time>/);
   assert.match(html, /Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"/);
   assert.match(html, /@page \{ size: A4 landscape;/);

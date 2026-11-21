@@ -108,7 +108,7 @@ function axis(plot: Plot, today: string): { labels: string; grid: string; todayL
 
 function timelineRow(row: GanttExportRow, plot: Plot, grid: string): string {
   const kind = row.historical ? `historical-${row.kind}` : row.kind;
-  const context = [row.key ?? row.projectKey, row.kindLabel].filter(value => value !== null);
+  const context = [row.key ?? row.projectKey, row.projectName ?? null, row.kindLabel].filter(value => value !== null);
   const fields = [
     ...(!row.historical ? [dateFields(row, row, plot)] : []),
     ...(row.baseline ? [dateFields(row.baseline, row, plot, true)] : []),

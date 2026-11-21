@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, isTeamOverviewIssueMetric } from '../shared/types';
@@ -55,7 +55,8 @@ const navigation = [
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   documentPreviewId?: string | null;
-  savedViewId?: string | null; ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
+  savedViewId?: string | null; ganttScope?: 'team'; ganttProject?: string | null;
+  ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   blockerScope?: DeliveryBlockerDraftScope | null;
   decisionFollowUpScope?: DecisionFollowUpScope | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
@@ -73,13 +74,22 @@ type WorkspaceCommentFocus = {
 };
 const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
+function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
+  if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
+}
+
 function routeHash(route: WorkspaceRoute) {
   const reportDetail = route.decisionFollowUpScope ? 'decision-follow-ups' : route.blockerScope ? 'blockers' : route.reportId;
+  const teamGantt = route.view === 'gantt' && route.ganttScope === 'team';
   const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? reportDetail :
-    (route.view === 'gantt' || route.view === 'planning' || route.view === 'backlog') ? route.planningId : null;
+    (route.view === 'gantt' && !teamGantt || route.view === 'planning' || route.view === 'backlog') ? route.planningId : null;
   const query = new URLSearchParams();
+  if (teamGantt) {
+    query.set('scope', 'team');
+    if (route.ganttProject) query.set('ganttProject', route.ganttProject);
+  }
   if (route.issueId) query.set('issue', route.issueId);
-  if ((route.view === 'issues' || route.view === 'gantt') && route.savedViewId) query.set('savedView', route.savedViewId);
+  if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'reports' && route.blockerScope) {
     if (route.blockerScope.savedViewId) query.set('savedView', route.blockerScope.savedViewId);
     if (route.blockerScope.reason) query.set('reason', route.blockerScope.reason);
@@ -130,7 +140,10 @@ function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): b
     sameDecisionFollowUpScope(previous.decisionFollowUpScope, next.decisionFollowUpScope);
 }
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
-  return hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next);
+  const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
+    previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
+    previous.ganttFocusIssueId === next.ganttFocusIssueId && previous.ganttFocusDate === next.ganttFocusDate;
+  return sameTeamGantt || hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next);
 }
 function hasReportIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'reports' && route.issueId);
@@ -166,11 +179,14 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     if (document) { documentId = document.id; projectId = document.projectId || projectId; }
   }
   const parameters = new URLSearchParams(query);
+  const ganttScope = view === 'gantt' && projectId && parameters.get('scope') === 'team' ? 'team' : undefined;
+  const requestedGanttProject = parameters.get('ganttProject');
+  const ganttProject = ganttScope && snapshot.projects.some(project => project.id === requestedGanttProject) ? requestedGanttProject : null;
   const requestedIssue = parameters.get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
     issueId = issue.id;
-    if (view !== 'teamoverview' && view !== 'reports' && !documentId) projectId = issue.projectId;
+    if (view !== 'teamoverview' && view !== 'reports' && !ganttScope && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
   const requestedDocumentPreview = parameters.get('documentPreview');
@@ -190,10 +206,10 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
   const requestedFocusDate = parameters.get('focusDate');
   const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
-  const planningId = (view === 'planning' || view === 'backlog' || view === 'gantt' && !ganttFocusIssueId) && projectId === parts[0] &&
+  const planningId = (view === 'planning' || view === 'backlog' || view === 'gantt' && !ganttScope && !ganttFocusIssueId) && projectId === parts[0] &&
     snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId &&
       (view !== 'backlog' || item.kind === 'cycle' && (item.status === 'planned' || item.status === 'active'))) ? parts[2] : null;
-  const savedViewId = view === 'issues' || (view === 'gantt' && !ganttFocusIssueId) ? parameters.get('savedView') || null : null;
+  const savedViewId = view === 'issues' || (view === 'gantt' && !ganttScope && !ganttFocusIssueId) ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
@@ -214,7 +230,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     date: teamDate && reservationDayRange(teamDate) ? teamDate : '',
     issueMetric, issueOffset,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, planningId, savedViewId, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters };
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, planningId, savedViewId,
+    ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -233,6 +250,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [decisionFollowUpScope, setDecisionFollowUpScope] = useState<DecisionFollowUpScope | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
+  const [ganttScope, setGanttScope] = useState<WorkspaceRoute['ganttScope']>();
+  const [ganttProject, setGanttProject] = useState<string | null>(null);
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
   const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
@@ -348,6 +367,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
+    setGanttScope(route.ganttScope);
+    setGanttProject(route.ganttProject ?? null);
     setGanttFocusIssueId(route.ganttFocusIssueId ?? null);
     setGanttFocusDate(route.ganttFocusDate ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
@@ -397,13 +418,29 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     return true;
   };
   const navigate = (nextView: View, nextProject = projectId, nextDoc?: string) => {
-    const sameView = nextView === view && nextProject === projectId;
+    const sameView = nextView === view && nextProject === projectId && !(nextView === 'gantt' && ganttScope === 'team');
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
       documentLabel: sameView ? documentLabel : null,
       planningId: sameView && nextView === 'backlog' ? planningId : null,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
+  };
+  const openTeamGantt = () => {
+    const current = acceptedRouteRef.current;
+    if (current?.view === 'gantt' && current.ganttScope === 'team') {
+      return requestRoute({ ...current, issueId: null, documentPreviewId: null });
+    }
+    return requestRoute({ projectId, view: 'gantt', documentId: null, issueId: null, ganttScope: 'team' });
+  };
+  const changeTeamGanttProject = (id: string | null) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'gantt' || current.ganttScope !== 'team' ||
+      (id !== null && !dataRef.current?.projects.some(project => project.id === id))) return false;
+    // The chart has already confirmed any drafts this filter would hide.
+    const next = { ...current, ganttProject: id };
+    if (routeHash(next) !== routeHash(current)) writeRoute(next, routeIndexRef.current + 1, 'push');
+    return true;
   };
   const openIssue = (id: string, capacityTrigger?: { opener: HTMLElement; fallback: HTMLElement | null }) => {
     const issue = dataRef.current?.issues.find(i => i.id === id);
@@ -412,6 +449,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const retainedPreview = current?.issueId === id ? current.documentPreviewId : null;
     if (current?.view === 'documents' && current.documentId) {
       requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview });
+      return;
+    }
+    if (current?.view === 'gantt' && current.ganttScope === 'team') {
+      if (requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
     }
     const sameProject = issue.projectId === projectId;
@@ -453,10 +494,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openIssueSchedule = (id: string, endpoint?: ScheduleDependencyEndpoint) => {
     const issue = dataRef.current?.issues.find(value => value.id === id);
     if (!issue) return false;
-    const target: WorkspaceRoute = {
-      projectId:issue.projectId, view:'gantt', documentId:null, issueId:null, ganttFocusIssueId:id, ganttFocusDate:endpoint,
-    };
     const current = acceptedRouteRef.current;
+    const teamRoute = current?.view === 'gantt' && current.ganttScope === 'team' ? current : null;
+    const target: WorkspaceRoute = {
+      projectId: teamRoute?.projectId ?? issue.projectId, view: 'gantt', documentId: null, issueId: null,
+      ganttScope: teamRoute?.ganttScope, ganttProject: teamRoute?.ganttProject, ganttFocusIssueId: id, ganttFocusDate: endpoint,
+    };
     if (endpoint && current && routeHash(current) === routeHash(target) && !confirmRouteNavigation(current, target)) return false;
     if (!requestRoute(target)) return false;
     setIssueFocusActivation(value => value + 1);
@@ -561,6 +604,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const props: FeatureProps = { data, projectId, actorId, refresh, notify, openIssue, openDocument };
   const projectIssues = data.issues.filter(i => i.projectId === projectId);
   const openedIssue = data.issues.find(issue => issue.id === issueId);
+  const teamGantt = view === 'gantt' && ganttScope === 'team';
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
   const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
@@ -576,12 +620,20 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       <button className="sidebar-search" onClick={() => setSearchOpen(true)}><Search size={16}/><span>업무와 문서 검색</span><kbd>⌘ K</kbd></button>
       <nav className="sidebar-section">
         <button className={`nav-item ${view === 'teamoverview' ? 'active' : ''}`} aria-current={view === 'teamoverview' ? 'page' : undefined} onClick={() => navigate('teamoverview')}><LayoutDashboard size={18}/><span>팀 개요</span></button>
+        <button type="button" className={`nav-item ${teamGantt ? 'active' : ''}`} aria-current={teamGantt ? 'page' : undefined} disabled={!project}
+          data-gantt-focus-control="" onPointerDown={keepGanttDateFocus} onClick={openTeamGantt}><SquareChartGantt size={18}/><span>전체 프로젝트 간트</span></button>
         <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId)}</span></button>
         <button className={`nav-item ${view === 'trash' ? 'active' : ''}`} onClick={() => navigate('trash')}><Trash2 size={17}/><span>휴지통</span></button>
       </nav>
       <div className="sidebar-section-title"><span>프로젝트</span><button className="icon-btn" title="프로젝트 만들기" aria-label="프로젝트 만들기" onClick={() => setProjectModal(true)}><Plus size={15}/></button></div>
       <div className="project-list">{data.projects.map(p => <button key={p.id} className={`project-item ${p.id === projectId ? 'selected' : ''}`} onClick={() => navigate('overview', p.id)}><span className="project-symbol" style={{background: p.color + '17', color: p.color}}>{p.key.slice(0,1)}</span><span>{p.name}</span>{p.id === projectId && <ChevronDown size={14}/>}</button>)}</div>
-      {project && <nav className="project-navigation">{navigation.map(item => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={17}/><span>{item.label}</span>{item.id === 'issues' && <span className="nav-count">{projectIssues.length}</span>}</button>)}</nav>}
+      {project && <nav className="project-navigation">{navigation.map(item => {
+        const active = view === item.id && (item.id !== 'gantt' || !teamGantt);
+        const exitsTeamGantt = item.id === 'gantt' && teamGantt;
+        return <button key={item.id} className={`nav-item ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined}
+          data-gantt-focus-control={exitsTeamGantt ? '' : undefined} onPointerDown={exitsTeamGantt ? keepGanttDateFocus : undefined}
+          onClick={() => navigate(item.id)}><item.icon size={17}/><span>{item.label}</span>{item.id === 'issues' && <span className="nav-count">{projectIssues.length}</span>}</button>;
+      })}</nav>}
       <div className="sidebar-note"><Sparkles size={17}/><strong>업무와 지식을 한곳에</strong><p>계획에서 구현, 그리고 문서까지.<br/>우리 팀의 흐름을 연결하세요.</p></div>
       <div className="sidebar-footer">
         <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings2 size={17}/><span>워크스페이스 설정</span></button>
@@ -590,7 +642,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       </div>
     </aside>
     <div className="workspace-content" inert={workspaceObscured}>
-      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/>{view === 'teamoverview' ? <strong>팀 개요</strong> : <><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : view === 'trash' ? '휴지통' : navigation.find(n => n.id === view)?.label}</strong></>}</div><div className="topbar-actions">
+      <header className="topbar"><button className="icon-btn mobile-only" aria-label="메뉴 열기" data-gantt-focus-control={view === 'gantt' ? '' : undefined}
+        onPointerDown={view === 'gantt' ? keepGanttDateFocus : undefined} onClick={() => setSidebarOpen(true)}><ListTodo size={20}/></button><div className="breadcrumbs"><span className="breadcrumb-workspace">워크스페이스</span><ChevronRight size={14}/>{view === 'teamoverview' || teamGantt ? <strong>{teamGantt ? '전체 프로젝트 간트' : '팀 개요'}</strong> : <><span>{project?.name || '새 프로젝트'}</span><ChevronRight size={14}/><strong>{view === 'settings' ? '설정' : view === 'mywork' ? '내 업무' : view === 'trash' ? '휴지통' : navigation.find(n => n.id === view)?.label}</strong></>}</div><div className="topbar-actions">
         <PublicationInboxButton actorId={actorId} onClick={() => navigate('publication')}/>
         {actorId && <TeamNotifications actorId={actorId} users={data.users} onOpen={openNotification}/>}
         <button className="icon-btn" aria-label="통합 검색" title="통합 검색" onClick={() => setSearchOpen(true)}><Search size={18}/></button>
@@ -618,10 +671,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}
-        {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
+        {view === 'gantt' && <Gantt {...props} allProjects={teamGantt} teamProjectFilter={ganttProject} onChangeTeamProjectFilter={changeTeamGanttProject}
+          onOpenProjectGantt={id => requestRoute({ projectId: id, view: 'gantt', documentId: null, issueId: null })}
+          initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
           focusIssueId={ganttFocusIssueId} focusDateEndpoint={ganttFocusDate} issueOverlayOpen={Boolean(openedIssue)} issueFocusActivation={issueFocusActivation}
           onLocateIssueDate={openIssueSchedule}
-          onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId})}
+          onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId,ganttScope,ganttProject})}
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>

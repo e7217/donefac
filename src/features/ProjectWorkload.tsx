@@ -309,3 +309,44 @@ export function WorkloadPreviewSummary({ data, projectId, startDate, endDate, pr
     </>}
   </section>;
 }
+
+export function GanttWorkloadPreviewSummary({ allProjects = false, projectId, ...props }: SummaryProps & { allProjects?: boolean }) {
+  if (!allProjects) return <WorkloadPreviewSummary {...props} projectId={projectId} />;
+  return <TeamGanttWorkloadPreview {...props} />;
+}
+
+function TeamGanttWorkloadPreview({ data, startDate, endDate, preview }: Omit<SummaryProps, 'projectId'>) {
+  const [projectId, setProjectId] = useState('');
+  const projects = useMemo(() => {
+    const issueProjects = new Map(data.issues.map(issue => [issue.id, issue.projectId]));
+    const changesByProject = new Map<string, SchedulePreview['changes']>();
+    for (const change of preview.changes) {
+      const id = issueProjects.get(change.id);
+      if (!id) return null;
+      const changes = changesByProject.get(id);
+      if (changes) changes.push(change);
+      else changesByProject.set(id, [change]);
+    }
+    const affected = data.projects.flatMap(project => {
+      const changes = changesByProject.get(project.id);
+      return changes ? [{ project, changes }] : [];
+    });
+    return affected.length === changesByProject.size ? affected : null;
+  }, [data.issues, data.projects, preview.changes]);
+  const selected = projects?.find(({ project }) => project.id === projectId) ?? projects?.[0];
+  const scoped = useMemo(() => selected ? { ...preview, changes: selected.changes } : null, [preview, selected]);
+
+  if (!projects) return <section className="workload-preview" aria-label="일정 미리보기 업무량 비교">
+    <p>업무나 프로젝트가 변경되었습니다. 일정을 다시 미리 보면 업무량을 비교할 수 있습니다.</p>
+  </section>;
+  if (!selected || !scoped) return null;
+  const { project } = selected;
+  return <div className="workload-preview-projects">
+    {projects.length > 1 ? <label className="workload-preview-project-filter">업무량 비교 프로젝트
+      <select className="field" value={project.id} onChange={event => setProjectId(event.currentTarget.value)}>
+        {projects.map(({ project }) => <option value={project.id} key={project.id}>{project.key} · {project.name}</option>)}
+      </select>
+    </label> : <strong>업무량 비교 · {project.key} · {project.name}</strong>}
+    <WorkloadPreviewSummary data={data} projectId={project.id} startDate={startDate} endDate={endDate} preview={scoped} />
+  </div>;
+}
