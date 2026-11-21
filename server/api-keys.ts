@@ -479,6 +479,7 @@ export class ApiKeyService {
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
     const issueClone = /^\/api\/issues\/([^/]+)\/clone$/.exec(path);
+    const closeAsDuplicate = /^\/api\/issues\/([^/]+)\/close-as-duplicate$/.exec(path);
     const cycleCompletion = /^\/api\/planning-items\/([^/]+)\/complete(\/preview)?$/.exec(path);
     const resourceLink = /^\/api\/resource-links\/([^/]+)$/.exec(path);
     const dependency = /^\/api\/dependencies\/([^/]+)$/.exec(path);
@@ -495,6 +496,10 @@ export class ApiKeyService {
       const issue = request.body.issue;
       if (!issue || typeof issue !== 'object' || Array.isArray(issue)) fail(400, '복제할 업무 정보를 확인해 주세요.');
       this.references(key, issue, Object.hasOwn(issue, 'projectId') ? issue.projectId : source.projectId, 'issue');
+    } else if (request.method === 'POST' && closeAsDuplicate) {
+      this.query(request, []);
+      this.resource(key, 'issues', this.decode(closeAsDuplicate[1]));
+      this.resource(key, 'issues', request.body?.originalIssueId);
     } else if ((request.method === 'PATCH' || request.method === 'DELETE') && detail) {
       const id = this.decode(detail[2]);
       const source = this.resource(key, detail[1] as 'issues' | 'documents', id);

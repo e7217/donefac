@@ -435,6 +435,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
 
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
+  const savedRelationIssue = baseDraft && baseDraft.version > issue.version ? baseDraft : issue;
   const bodyOnlyReferences = [...bodyReferences.values()].filter(({ document }) => !linkedDocumentIds.has(document.id));
   const activities = data.activities.filter(a => a.resourceId === issueId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const children = data.issues.filter(i => i.parentId === issueId).map(child => ({
@@ -552,6 +553,36 @@ function IssuePanelContent(props: IssuePanelProps) {
       }
       if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); }
     } finally { savingRef.current = false; setSaving(false); }
+  }
+  function reflectDuplicateClosure(updated: Issue, observed = false) {
+    if (!baseDraft || updated.version <= baseDraft.version) return;
+    if (observed) {
+      const comparableFields = (value: ReturnType<typeof editableIssue>) => Object.entries(value)
+        .filter(([field]) => field !== 'status' && field !== 'assigneeId' && field !== 'dueDate');
+      const before = editableIssue(baseDraft, baseDraft.labels.join(', '));
+      const after = editableIssue(updated, updated.labels.join(', '));
+      const changedOutsideClosure = JSON.stringify(comparableFields(before)) !== JSON.stringify(comparableFields(after));
+      const overlappingDraft = (['assigneeId', 'dueDate'] as const)
+        .some(field => after[field] !== before[field] && draft?.[field] !== baseDraft[field]);
+      if (dirty && (updated.version !== baseDraft.version + 1 || changedOutsideClosure || overlappingDraft)) {
+        setConflict(true);
+        setError({ message: '최신 업무에 다른 변경이 있습니다. 현재 초안과 최신 업무를 확인해 주세요.' });
+        return;
+      }
+    }
+    if (baseDraft.version + 1 !== updated.version) return;
+    setDraft(current => current?.version === baseDraft.version ? {
+      ...current,
+      version: updated.version,
+      updatedAt: updated.updatedAt,
+      status: updated.status,
+      completedAt: updated.completedAt,
+      assigneeId: current.assigneeId === baseDraft.assigneeId ? updated.assigneeId : current.assigneeId,
+      dueDate: current.dueDate === baseDraft.dueDate ? updated.dueDate : current.dueDate,
+    } : current);
+    setBaseDraft(current => current?.version === baseDraft.version ? updated : current);
+    setError(null);
+    setConflict(false);
   }
   async function reloadLatest() {
     const hadUnsaved = dirtyRef.current;
@@ -845,8 +876,10 @@ function IssuePanelContent(props: IssuePanelProps) {
           <span className="issue-related-status" style={{ color: status.color }}>{status.label}</span><ChevronRight size={14} aria-hidden="true" />
         </button>)}
       </section>
-      <IssueRelations issueId={issue.id} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
+      <IssueRelations issue={savedRelationIssue} data={data} openIssue={navigateIssue} refresh={refresh} notify={notify}
         refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} controlsRef={relationControls} highlightOpenBlockers={Boolean(error?.openBlockers)}
+        duplicateCloseDisabled={conflict || baseDraft?.version !== savedRelationIssue.version}
+        hasUnsavedStatus={draft.status !== baseDraft?.status} onDuplicateClosed={reflectDuplicateClosure}
         onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <div className="issue-linked-documents-heading">

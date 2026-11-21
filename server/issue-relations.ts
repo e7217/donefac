@@ -71,6 +71,30 @@ export class IssueRelationsService {
     return this.store.transaction(() => this.createInTransaction(issueId, input, audit, notifyChange));
   }
 
+  createDuplicateInTransaction(issueId: string, originalIssueId: string, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
+    if (!this.store.db.isTransaction) throw new Error('Closing a duplicate issue requires a transaction.');
+    if (!isRelationId(issueId) || !isRelationId(originalIssueId) || issueId === originalIssueId) {
+      throw new IssueRelationError(400, '중복인 업무와 원본 업무를 서로 다르게 선택해 주세요.');
+    }
+    this.requireIssue(issueId);
+    this.requireIssue(originalIssueId);
+    const conflictingOriginal = this.store.db.prepare(`SELECT 1 FROM issue_relations
+      WHERE source_issue_id=? AND target_issue_id<>?
+        AND json_extract(json,'$.origin')='teamspace' AND json_extract(json,'$.type')='duplicates' LIMIT 1`)
+      .get(issueId, originalIssueId);
+    if (conflictingOriginal) throw new IssueRelationError(409, '이미 다른 업무가 이 중복 업무의 원본으로 지정되어 있습니다.');
+
+    // UNION visits each original once, including when existing links already contain a cycle.
+    const cycle = this.store.db.prepare(`WITH RECURSIVE originals(id) AS (
+      SELECT ?
+      UNION
+      SELECT relation.target_issue_id FROM issue_relations AS relation JOIN originals ON relation.source_issue_id=originals.id
+      WHERE json_extract(relation.json,'$.origin')='teamspace' AND json_extract(relation.json,'$.type')='duplicates'
+    ) SELECT 1 FROM originals WHERE id=? LIMIT 1`).get(originalIssueId, issueId);
+    if (cycle) throw new IssueRelationError(409, '중복 업무 관계가 순환하므로 원본으로 지정할 수 없습니다.');
+    return this.createInTransaction(issueId, { otherIssueId: originalIssueId, type: 'duplicates', direction: 'outgoing' }, audit, notifyChange);
+  }
+
   createInTransaction(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
     if (!this.store.db.isTransaction) throw new Error('Creating an issue relation requires a transaction.');
     const { type, direction, value: otherId } = relationInput(input, 'otherIssueId');

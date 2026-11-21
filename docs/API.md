@@ -84,6 +84,12 @@ curl --fail-with-body \
 
 `/api/v1`의 동일한 경로에서 양쪽 프로젝트가 키의 허용 범위에 있어야 한다. 조회에는 읽기 키를 사용할 수 있으며, 관계 추가·수정·해제에는 쓰기 키가 필요하다.
 
+### 중복 업무 종료
+
+`POST /api/issues/:id/close-as-duplicate`에 `{originalIssueId,status,expectedVersion,expectedOriginalVersion,expectedWorkflowVersion}`을 보낸다. `id`는 열린 중복 업무이며 원본 업무는 다른 프로젝트에도 있을 수 있다. `status`에는 현재 업무 유형의 워크플로에서 허용하는 `done` 또는 `cancelled` 범주의 상태 ID를 넣는다. 기존 상태 전이의 필수 입력, 열린 차단 업무, 자동 담당자와 목표 마감일 규칙을 적용한다.
+
+성공 시 `200`과 `{issue,relation}`을 반환한다. 중복 업무에서 원본 업무 방향으로 관계를 저장하며 같은 Teamspace 관계를 재사용한다. 두 업무와 워크플로 버전이 일치해야 한다. 직접 만든 중복 관계에 다른 원본이 이미 지정됐거나 새 연결이 순환을 만들면 `409`를 반환한다. 상태·관계·변경 이력은 함께 저장한다. 응답을 잃은 경우 최신 업무와 관계를 조회해 적용 결과를 확인한다. `/api/v1`에는 두 업무의 프로젝트를 허용하는 쓰기 키를 사용한다.
+
 ## 업무와 문서의 직접 연결
 
 `GET /api/v1/issues/:id/resource-links`와 `GET /api/v1/documents/:id/resource-links`는 `id`, `issueId`, `documentId`, `kind`가 포함된 배열을 반환한다. 활성 상태의 업무와 문서가 모두 키의 프로젝트 범위에 있어야 목록에 표시된다. 팀 공통 문서는 전체 프로젝트 키를 사용한다.

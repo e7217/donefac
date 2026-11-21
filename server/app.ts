@@ -100,7 +100,7 @@ import { reservationLocalDateTime } from '../shared/time-reservations.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
-import type { IssueCloneResult } from '../shared/types.js';
+import type { IssueCloneResult, IssueCloseAsDuplicateResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
@@ -2154,6 +2154,41 @@ export function createApp(options: {
     const relation = createdRelation ?? findTeamspaceIssueRelation(store, { ...endpoints, type: 'related' }) ?? null;
     const response: IssueCloneResult = { ...result, relation };
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
+  });
+  app.post('/api/issues/:id/close-as-duplicate', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (!input || typeof input !== 'object' || Array.isArray(input) ||
+        Object.keys(input).some(key => !['originalIssueId', 'status', 'expectedVersion', 'expectedOriginalVersion', 'expectedWorkflowVersion', 'actorId'].includes(key))) {
+      return fail('중복 업무 종료 요청을 확인해 주세요.');
+    }
+    const { originalIssueId, status, expectedVersion, expectedOriginalVersion, expectedWorkflowVersion } = input;
+    if (!isRelationId(originalIssueId) || originalIssueId === req.params.id ||
+        ![expectedVersion, expectedOriginalVersion, expectedWorkflowVersion].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0)) {
+      return fail('다른 원본 업무를 선택하고 확인한 업무·워크플로 버전을 보내 주세요.');
+    }
+    const result: IssueCloseAsDuplicateResult = store.transaction(() => {
+      const before = get<Issue>('issues', req.params.id);
+      checkVersion(before, expectedVersion);
+      const original = get<Issue>('issues', originalIssueId);
+      if (original.version !== expectedOriginalVersion) {
+        return fail('원본 업무가 변경되었습니다. 최신 업무를 확인해 주세요.', 409,
+          { reason: 'original_version_changed', currentVersion: original.version });
+      }
+      const workflow = workflows.get(before.projectId);
+      if (workflow.version !== expectedWorkflowVersion) {
+        return fail('업무의 워크플로가 변경되었습니다. 최신 상태를 확인한 뒤 다시 변경해 주세요.', 409,
+          { reason: 'workflow_changed', currentWorkflowVersion: workflow.version });
+      }
+      const terminal = (id: unknown) => workflow.statuses.some(value => value.id === id &&
+        (value.category === 'done' || value.category === 'cancelled'));
+      if (terminal(before.status)) return fail('이미 종료된 업무입니다. 현재 상태와 원본 업무를 확인해 주세요.', 409);
+      if (!terminal(status)) return fail('종료 상태를 선택해 주세요.', 422);
+      const prepared = prepareIssueUpdate(before, { status });
+      const { relation } = issueRelations.createDuplicateInTransaction(before.id, original.id, relationAudit(req), relationNotification(req));
+      const issue = commitIssueUpdate(req, before, prepared, { action: '중복으로 닫기', detail: `${before.key} → 원본 ${original.key}` });
+      return { issue, relation };
+    });
+    res.set('Cache-Control', 'no-store').json(result);
   });
   app.get('/api/issues/:id/relations',(req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));

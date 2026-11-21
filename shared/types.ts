@@ -684,6 +684,14 @@ export interface RecurringIssueRule extends RecurringIssueConfig {
 }
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export interface IssueCloneResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
+export interface IssueCloseAsDuplicateInput {
+  originalIssueId: string;
+  status: IssueStatus;
+  expectedVersion: number;
+  expectedOriginalVersion: number;
+  expectedWorkflowVersion: number;
+}
+export interface IssueCloseAsDuplicateResult { issue: Issue; relation: IssueRelation }
 export interface IssuePasteDiagnostic { line: number | null; message: string }
 export interface IssuePastePreviewRow extends Pick<Issue,
   'title' | 'description' | 'type' | 'status' | 'priority' | 'assigneeId' | 'startDate' | 'endDate' | 'dueDate' | 'labels'
