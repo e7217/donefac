@@ -7,10 +7,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { Dependency, DocPage, GitlabLink, Issue, IssueOrderMoveResult, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, ResourceLink, User, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Dependency, DocPage, GitlabLink, Issue, IssueOrderMoveResult, IssueRelation, IssueTimeReservationEntry, Milestone, PlanningItem, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, ProjectWorkloadCapacity, ResourceLink, SavedView, ScheduleBaseline, TeamScheduleBlocker, TeamWorkloadCapacity, User, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const header = 'X-Teamspace-Board-Revision';
+const ganttHeader = 'X-Teamspace-Gantt-Revision';
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-workspace-board-revision-'));
@@ -46,19 +47,25 @@ async function fixture(t: TestContext) {
     assert.equal(response.status, status, `${method} ${path}: ${text}`);
     return JSON.parse(text) as T;
   }
-  async function workspace(since?: string, status = 200) {
-    const response = await request(`/workspace${since === undefined ? '' : `?teamBoardSince=${encodeURIComponent(since)}`}`);
+  async function revisions(since?: { query: 'teamBoardSince' | 'ganttSince'; token: string }, status = 200) {
+    const response = await request(`/workspace${since === undefined ? '' : `?${new URLSearchParams({ [since.query]: since.token })}`}`);
     assert.equal(response.status, status);
-    const revision = response.headers.get(header);
-    assert.ok(revision && /^[a-f0-9]{32}$/u.test(revision));
+    const boardRevision = response.headers.get(header);
+    const ganttRevision = response.headers.get(ganttHeader);
+    assert.ok(boardRevision && /^[a-f0-9]{32}$/u.test(boardRevision));
+    assert.ok(ganttRevision && /^[a-f0-9]{32}$/u.test(ganttRevision));
     assert.equal(response.headers.get('cache-control'), 'no-store');
     if (status === 204) {
       assert.equal(await response.text(), '');
-      return { revision, data: null };
+      return { boardRevision, ganttRevision, data: null };
     }
-    return { revision, data: await response.json() as WorkspaceSnapshot };
+    return { boardRevision, ganttRevision, data: await response.json() as WorkspaceSnapshot };
   }
-  return { db, request, call, workspace, async restart() { await active.close(); active = await start(); } };
+  async function workspace(since?: string, status = 200) {
+    const { boardRevision, data } = await revisions(since === undefined ? undefined : { query: 'teamBoardSince', token: since }, status);
+    return { revision: boardRevision, data };
+  }
+  return { db, request, call, workspace, revisions, async restart() { await active.close(); active = await start(); } };
 }
 
 test('workspace token checks skip document snapshot work while unchanged and survive restart', async t => {
@@ -83,14 +90,19 @@ test('workspace token checks skip document snapshot work while unchanged and sur
   assert.deepEqual((await f.workspace()).data?.documents.find(page => page.id === doc.id), changed);
   // A deliberately unreadable document must stay outside the matching-token fast path.
   const stored = f.db.prepare('SELECT json FROM documents WHERE id=?').get(doc.id) as { json: string };
+  const ganttRevision = (await f.revisions()).ganttRevision;
   try {
     f.db.prepare('UPDATE documents SET json=? WHERE id=?').run('not valid JSON', doc.id);
     assert.deepEqual(await f.workspace(initial.revision, 204), { revision: initial.revision, data: null });
+    assert.deepEqual(await f.revisions({ query: 'ganttSince', token: ganttRevision }, 204), {
+      boardRevision: initial.revision, ganttRevision, data: null,
+    });
   } finally {
     f.db.prepare('UPDATE documents SET json=? WHERE id=?').run(stored.json, doc.id);
   }
   await f.restart();
   assert.deepEqual(await f.workspace(initial.revision, 204), { revision: initial.revision, data: null });
+  await f.revisions({ query: 'ganttSince', token: ganttRevision }, 204);
   assert.deepEqual((await f.workspace()).data?.documents.find(page => page.id === doc.id), changed);
 });
 
@@ -165,4 +177,99 @@ test('workspace revision includes board and issue context changes, and excludes 
   assert.equal(restored.issues.find(issue => issue.id === first.id)?.status, moved.status);
   assert.equal(restored.resourceLinks.find(item => item.id === resource.id)?.documentId, doc.id);
   await f.workspace(current.revision, 204);
+});
+
+test('Gantt conditional reads detect schedule changes without invalidating the board revision', async t => {
+  const f = await fixture(t);
+  let current = await f.revisions();
+  const zero = '0'.repeat(32);
+  assert.deepEqual(await f.revisions({ query: 'ganttSince', token: zero }), current);
+  for (const suffix of ['ganttSince=', 'ganttSince=invalid', `ganttSince=${zero}&ganttSince=${zero}`,
+    `ganttSince=${current.ganttRevision}&teamBoardSince=${current.boardRevision}`]) {
+    const response = await f.request(`/workspace?${suffix}`);
+    assert.equal(response.status, 400);
+    await response.body?.cancel();
+  }
+
+  async function advanced(shared = false) {
+    const next = await f.revisions({ query: 'ganttSince', token: current.ganttRevision });
+    assert.notEqual(next.ganttRevision, current.ganttRevision);
+    assert.ok(next.data);
+    if (shared) assert.notEqual(next.boardRevision, current.boardRevision);
+    else {
+      assert.equal(next.boardRevision, current.boardRevision);
+      assert.deepEqual(await f.revisions({ query: 'teamBoardSince', token: current.boardRevision }, 204), {
+        boardRevision: next.boardRevision, ganttRevision: next.ganttRevision, data: null,
+      });
+    }
+    current = next;
+    return next.data;
+  }
+
+  const calendarPath = `/projects/${projectId}/calendar`;
+  const initialCalendar = await f.call<WorkCalendar>(calendarPath);
+  const calendar = await f.call<WorkCalendar>(calendarPath, 200, 'PATCH', {
+    expectedVersion: initialCalendar.version, name: '간트 갱신 달력', workingWeekdays: [1, 2, 3, 4],
+  });
+  assert.deepEqual((await advanced()).calendars?.find(item => item.projectId === projectId), calendar);
+  f.db.exec('BEGIN IMMEDIATE');
+  try {
+    f.db.prepare('UPDATE project_calendars SET json=? WHERE id=?').run(JSON.stringify({ ...calendar, name: '커밋하지 않은 달력' }), projectId);
+    await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
+  } finally { f.db.exec('ROLLBACK'); }
+  f.db.prepare('UPDATE project_calendars SET json=json WHERE id=?').run(projectId);
+  f.db.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('testUnrelatedWorkspaceSetting', 'true');
+  await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
+
+  const plan = await f.call<PlanningItem>('/planning-items', 201, 'POST', { projectId, kind: 'cycle', name: '간트 갱신 계획' });
+  assert.deepEqual((await advanced()).planningItems?.find(item => item.id === plan.id), plan);
+  const view = await f.call<SavedView>('/views', 201, 'POST', { projectId, name: '간트 갱신 보기', layout: 'list',
+    filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } });
+  assert.deepEqual((await advanced()).savedViews?.find(item => item.id === view.id), view);
+  const milestone = await f.call<Milestone>('/milestones', 201, 'POST', { projectId, title: '간트 갱신 이정표', date: '2026-12-01' });
+  const withMilestone = await advanced();
+  assert.deepEqual(withMilestone.milestones?.find(item => item.id === milestone.id), milestone);
+  const baseline = await f.call<ScheduleBaseline>('/baselines', 201, 'POST', { projectId, name: '간트 갱신 기준선',
+    expectedIssueVersions: Object.fromEntries(withMilestone.issues.filter(issue => issue.projectId === projectId).map(issue => [issue.id, issue.version])),
+    expectedMilestoneVersions: { [milestone.id]: milestone.version }, expectedCalendarVersion: calendar.version });
+  assert.deepEqual((await advanced()).baselines?.find(item => item.id === baseline.id), baseline);
+
+  const capacityPath = `/projects/${projectId}/workload-capacity`;
+  const originalProjectCapacity = await f.call<ProjectWorkloadCapacity>(capacityPath);
+  const projectCapacity = await f.call<ProjectWorkloadCapacity>(capacityPath, 200, 'PATCH', {
+    expectedVersion: originalProjectCapacity.version, defaultDailyMinutes: 350,
+  });
+  assert.deepEqual((await advanced()).workloadCapacities?.find(item => item.projectId === projectId), projectCapacity);
+  const originalTeamCapacity = await f.call<TeamWorkloadCapacity>('/workload-capacity');
+  const teamCapacity = await f.call<TeamWorkloadCapacity>('/workload-capacity', 200, 'PATCH', {
+    expectedVersion: originalTeamCapacity.version, defaultDailyMinutes: 360,
+  });
+  assert.deepEqual((await advanced()).teamWorkloadCapacity, teamCapacity);
+
+  const first = await f.call<Issue>('/issues', 201, 'POST', { projectId, title: '간트 갱신 선행 업무' });
+  assert.deepEqual((await advanced(true)).issues.find(item => item.id === first.id), first);
+  const second = await f.call<Issue>('/issues', 201, 'POST', { projectId, title: '간트 갱신 후행 업무' });
+  await advanced(true);
+  const dependency = await f.call<Dependency>('/dependencies', 201, 'POST', { predecessorId: first.id, successorId: second.id });
+  assert.deepEqual((await advanced(true)).dependencies.find(item => item.id === dependency.id), dependency);
+
+  const other = await f.call<Issue>('/issues', 201, 'POST', { projectId: 'project-team', title: '간트 갱신 차단 업무' });
+  await advanced(true);
+  const link = await f.call<IssueRelation>(`/issues/${first.id}/relations`, 201, 'POST', { otherIssueId: other.id, type: 'blocks', direction: 'outgoing' });
+  await advanced();
+  assert.ok((await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers')).some(item => item.id === link.id));
+  const reservationPath = `/issues/${first.id}/time-reservations`;
+  const reservation = await f.call<IssueTimeReservationEntry>(reservationPath, 201, 'POST', { requestId: randomUUID(), userId: 'user-seo',
+    startAt: '2026-11-23T10:00:00.000Z', endAt: '2026-11-23T11:00:00.000Z' });
+  await advanced();
+  assert.deepEqual(await f.call<IssueTimeReservationEntry[]>(reservationPath), [reservation]);
+
+  await f.restart();
+  await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.ok(!Object.keys(backup).some(key => /(?:board|gantt)Revision/i.test(key)));
+  await f.call('/import', 200, 'POST', { data: backup });
+  const restored = await advanced(true);
+  assert.equal(restored.calendars?.find(item => item.projectId === projectId)?.name, calendar.name);
+  await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
 });

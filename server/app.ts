@@ -5,7 +5,7 @@ import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, a
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
 import { AttachmentAppend } from './attachment-append.js';
 import { Store } from './store.js';
-import { TeamBoardRevision } from './team-board-revision.js';
+import { WorkspaceRevisions } from './workspace-revisions.js';
 import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
@@ -218,7 +218,6 @@ export function createApp(options: {
   const cycleCompletionRecords = new CycleCompletionRecords(store);
   const cycleCompletion = new CycleCompletionService(store, cycleCompletionRecords);
   const issueOrders = new IssueOrderService(store);
-  const teamBoardRevision = new TeamBoardRevision(store);
   const documentOrders = new DocumentOrderService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
@@ -236,6 +235,7 @@ export function createApp(options: {
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
   const issueRelations=new IssueRelationsService(store);
+  const workspaceRevisions = new WorkspaceRevisions(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);
   const documentTreeMove=new DocumentTreeMoveService(store,trash);
@@ -928,12 +928,16 @@ export function createApp(options: {
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
   app.get('/api/workspace',(req,res)=>{
-    const since = req.query.teamBoardSince;
-    if (since !== undefined && (typeof since !== 'string' || !/^[a-f0-9]{32}$/u.test(since))) {
+    const { teamBoardSince, ganttSince } = req.query;
+    if (teamBoardSince !== undefined && (typeof teamBoardSince !== 'string' || !/^[a-f0-9]{32}$/u.test(teamBoardSince))) {
       return fail('팀 보드에서 확인한 버전을 보내 주세요.');
     }
-    const { revision, data } = teamBoardRevision.read(since, snapshot);
-    res.set({ 'X-Teamspace-Board-Revision': revision, 'Cache-Control': 'no-store' });
+    if (ganttSince !== undefined && (typeof ganttSince !== 'string' || !/^[a-f0-9]{32}$/u.test(ganttSince))) {
+      return fail('간트에서 확인한 버전을 보내 주세요.');
+    }
+    if (teamBoardSince !== undefined && ganttSince !== undefined) return fail('갱신을 확인할 보기 하나만 지정해 주세요.');
+    const { boardRevision, ganttRevision, data } = workspaceRevisions.read({ teamBoardSince, ganttSince }, snapshot);
+    res.set({ 'X-Teamspace-Board-Revision': boardRevision, 'X-Teamspace-Gantt-Revision': ganttRevision, 'Cache-Control': 'no-store' });
     if (data === null) return res.status(204).end();
     res.json(data);
   });

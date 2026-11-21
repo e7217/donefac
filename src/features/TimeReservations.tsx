@@ -18,6 +18,7 @@ type Props = Scope & Pick<FeatureProps, 'actorId' | 'notify'> & {
   users: User[];
   onDraftChange: TrackDraft;
   onChanged?: FeatureProps['refresh'];
+  refreshVersion?: number;
 };
 type ReservationDraft = { issueId: string; userId: string; start: string; end: string };
 type ReservationEditor = { draft: ReservationDraft; initial: ReservationDraft; original: IssueTimeReservationEntry | null };
@@ -61,7 +62,7 @@ function reservationError(cause: unknown) {
 }
 
 export function TimeReservations(props: Props) {
-  const { issue, initialIssue, issues = [], actorId, users, notify, onDraftChange, onChanged } = props;
+  const { issue, initialIssue, issues = [], actorId, users, notify, onDraftChange, onChanged, refreshVersion } = props;
   const [date, setDate] = useState(() => validListDate(initialIssue?.startDate) ? initialIssue.startDate : todayInTeamTimeZone());
   const [userFilter, setUserFilter] = useState('');
   const [revision, setRevision] = useState(0);
@@ -74,6 +75,7 @@ export function TimeReservations(props: Props) {
   const [latest, setLatest] = useState<IssueTimeReservation | null>(null);
   const [uncertain, setUncertain] = useState(false);
   const request = useRef<CreateAttempt | null>(null);
+  const acceptedRefresh = useRef(refreshVersion);
   const pendingRef = useRef(false);
   const addButton = useRef<HTMLButtonElement>(null);
   const form = useRef<HTMLFormElement>(null);
@@ -104,6 +106,15 @@ export function TimeReservations(props: Props) {
     for (const event of events) window.addEventListener(event, reload);
     return () => { for (const event of events) window.removeEventListener(event, reload); };
   }, []);
+
+  useEffect(() => {
+    if (refreshVersion === undefined || refreshVersion === acceptedRefresh.current || editor || deleting || pending) return;
+    const timer = setTimeout(() => {
+      acceptedRefresh.current = refreshVersion;
+      setRevision(value => value + 1);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [refreshVersion, editor, deleting, pending]);
 
   function discard() {
     if (pendingRef.current) return;

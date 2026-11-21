@@ -234,3 +234,18 @@
   color: var(--accent);
   font-weight: 600;
 }
+
+.gantt-refresh-button[aria-disabled='true'] {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.gantt-refresh-feedback {
+  margin: 8px 0;
+  color: #435a50;
+  font-size: 12px;
+}
+
+.gantt-refresh-feedback.issue-form-error {
+  color: #8a3930;
+}

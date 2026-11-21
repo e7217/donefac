@@ -9,19 +9,17 @@ import { orderProjectIssues } from '../../shared/issue-view';
 import { allowedNextStatuses, projectWorkflow, statusMeta, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { api, ApiError, dateLabel, patch } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { IssueTypeIcon, StatusDot } from './Issues';
 import { IssueGitlabSummary } from './IssueGitlabSummary';
 import { errorMessage } from './schedule-utils';
 import './team-board.css';
 
-type RefreshMode = 'automatic' | 'manual';
-export type RefreshTeamBoard = (signal: AbortSignal, mode: RefreshMode, canApply: () => boolean) => Promise<'updated' | 'unchanged' | 'skipped'>;
-
 type Props = FeatureProps & {
   filters: TeamBoardFilters;
   onFiltersChange: (filters: TeamBoardFilters) => void;
   onOpenBoardIssue: (id: string, trigger: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
-  refreshBoard: RefreshTeamBoard;
+  refreshBoard: WorkspaceRefresh;
   issueOverlayOpen: boolean;
 };
 type StatusEdit = { issue: Issue; current: WorkflowStatus; choices: WorkflowStatus[]; workflowVersion: number; opener: HTMLElement };
@@ -34,101 +32,11 @@ const HEADING = '전체 프로젝트 보드';
 const STALE = '업무 또는 프로젝트 워크플로가 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
 const UNKNOWN = '상태 변경 결과를 확인하지 못했습니다. 최신 상태를 확인해 주세요.';
 const REFRESH = '상태를 저장했습니다. 보드에 반영하려면 최신 업무를 불러와 주세요.';
-const REFRESH_INTERVAL_MS = 15_000;
-const REFRESH_REQUEST_TIMEOUT_MS = 12_000;
-const MAX_AUTOMATIC_REFRESH_WAIT_MS = 60_000;
 const refreshMessages = {
   updated: '팀 보드를 새로고침했습니다.',
   skipped: '팀 보드 새로고침을 건너뛰었습니다.',
   failed: '팀 보드를 새로고침하지 못했습니다. 다시 시도해 주세요.',
 } as const;
-
-function useTeamBoardRefresh(refreshBoard: RefreshTeamBoard, paused: boolean, hasLocalInteraction: () => boolean) {
-  const [requestMode, setRequestMode] = useState<RefreshMode | null>(null);
-  const [feedback, setFeedback] = useState<keyof typeof refreshMessages | null>(null);
-  const pausedRef = useRef(paused);
-  const controls = useRef<{ reconsider: () => void; manual: () => void }>(null);
-
-  useLayoutEffect(() => {
-    pausedRef.current = paused;
-    controls.current?.reconsider();
-  }, [paused]);
-
-  useEffect(() => {
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let inFlight: AbortController | null = null;
-    let retryDelay = REFRESH_INTERVAL_MS;
-    let resumeAfterAbort = false;
-    const clearTimer = () => clearTimeout(timer);
-    const visible = () => active && !pausedRef.current && document.visibilityState === 'visible';
-    const available = () => visible() && !hasLocalInteraction() && !document.querySelector('dialog:modal, [role="dialog"][aria-modal="true"]');
-
-    function schedule(delay: number) {
-      clearTimer();
-      if (visible()) timer = setTimeout(() => void check('automatic'), delay);
-    }
-
-    async function check(mode: RefreshMode) {
-      if (inFlight || !available()) {
-        if (mode === 'automatic' && !inFlight) schedule(retryDelay);
-        return;
-      }
-      clearTimer();
-      const controller = new AbortController();
-      inFlight = controller;
-      const canApply = () => !controller.signal.aborted && available();
-      let timedOut = false;
-      const deadline = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, REFRESH_REQUEST_TIMEOUT_MS);
-      setRequestMode(mode);
-      if (mode === 'manual') setFeedback(null);
-      try {
-        const outcome = await refreshBoard(controller.signal, mode, canApply);
-        if (!canApply()) return;
-        if (outcome !== 'skipped') retryDelay = REFRESH_INTERVAL_MS;
-        if (mode === 'manual') setFeedback(outcome === 'skipped' ? 'skipped' : 'updated');
-        else if (outcome !== 'skipped') setFeedback(previous => previous === 'failed' ? null : previous);
-      } catch {
-        if (!available() || (controller.signal.aborted && !timedOut)) return;
-        if (mode === 'automatic') retryDelay = Math.min(retryDelay * 2, MAX_AUTOMATIC_REFRESH_WAIT_MS);
-        setFeedback('failed');
-      } finally {
-        clearTimeout(deadline);
-        inFlight = null;
-        if (active) {
-          setRequestMode(null);
-          schedule(resumeAfterAbort ? 0 : retryDelay);
-        }
-        resumeAfterAbort = false;
-      }
-    }
-
-    function reconsider() {
-      clearTimer();
-      if (!visible() || hasLocalInteraction()) {
-        resumeAfterAbort = false;
-        inFlight?.abort();
-      } else if (inFlight) resumeAfterAbort = inFlight.signal.aborted;
-      else schedule(0);
-    }
-
-    controls.current = { reconsider, manual: () => void check('manual') };
-    document.addEventListener('visibilitychange', reconsider);
-    reconsider();
-    return () => {
-      active = false;
-      clearTimer();
-      inFlight?.abort();
-      controls.current = null;
-      document.removeEventListener('visibilitychange', reconsider);
-    };
-  }, [refreshBoard, hasLocalInteraction]);
-
-  return { requestMode, feedback, manualRefresh: () => controls.current?.manual() };
-}
 
 function destinations(data: WorkspaceSnapshot, issue: Issue, category?: StatusCategory) {
   return allowedNextStatuses(data, issue).filter(status => status.id !== issue.status && (category === undefined || status.category === category));
@@ -146,7 +54,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
   const [copyFallback, setCopyFallback] = useState<{ filterKey: string; url: string } | null>(null);
   const refreshPaused = issueOverlayOpen || Boolean(editing) || dragging;
   const hasLocalInteraction = useCallback(() => Boolean(chooserOpen.current || drag.current), []);
-  const { requestMode, feedback, manualRefresh } = useTeamBoardRefresh(refreshBoard, refreshPaused, hasLocalInteraction);
+  const { requestMode, feedback, manualRefresh } = useWorkspaceRefresh(refreshBoard, refreshPaused, hasLocalInteraction);
   useLayoutEffect(() => {
     const focused = focusedCard.current;
     if (!focused || focused.control.isConnected || refreshPaused || document.activeElement !== document.body) return;

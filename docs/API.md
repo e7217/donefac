@@ -79,6 +79,10 @@ curl --fail-with-body \
 
 브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 Teamspace 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
 
+## 저장된 간트 데이터 갱신
+
+브라우저의 `GET /api/workspace`는 `X-Teamspace-Gantt-Revision` 헤더를 보낸다. 마지막으로 받은 32자리 16진수 값을 `?ganttSince=…`에 보내면 같은 버전은 빈 본문의 `204`, 다른 버전은 `200`과 최신 워크스페이스다. 업무·선후행, 프로젝트 달력·계획·저장 보기·마일스톤·기준선, 작업량 설정, 프로젝트 간 차단 관계와 시간 예약이 저장될 때 간트 버전이 바뀐다. 간트 전용 설정은 팀 보드 버전을 유지한다. 한 요청에는 `teamBoardSince`와 `ganttSince` 중 하나를 사용한다.
+
 ## 선후행 업무 연결
 
 `GET /api/v1/projects/:id/dependencies`는 프로젝트에 두 업무가 모두 있는 연결을 `Dependency[]`로 반환한다. 각 항목에는 `id`, `predecessorId`, `successorId`, `type`, `lagDays`, `version`이 있다. 읽기 키로 조회하고 쓰기 키로 변경한다. 변경할 두 업무와 차단 관계의 두 업무는 모두 키의 허용 범위에 있어야 한다. 아래 브라우저 경로의 `/api`를 `/api/v1`으로 바꿔 자동화 키를 사용한다.

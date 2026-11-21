@@ -4,7 +4,7 @@ import type { TeamWorkloadCapacity, User } from '../shared/types.js';
 import { nextWorkloadCapacityVersion, parseWorkloadCapacityValues, WorkloadError } from './project-workload.js';
 import type { Store } from './store.js';
 
-const settingKey = 'teamWorkloadCapacity';
+export const teamWorkloadCapacitySettingKey = 'teamWorkloadCapacity';
 
 function capacityObject(raw: unknown): Record<string, unknown> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -31,7 +31,7 @@ export class TeamWorkloadCapacityService {
   constructor(private readonly store: Store) {}
 
   get(): TeamWorkloadCapacity {
-    return this.store.setting(settingKey) ?? defaultTeamWorkloadCapacity();
+    return this.store.setting(teamWorkloadCapacitySettingKey) ?? defaultTeamWorkloadCapacity();
   }
 
   save(body: unknown, onSaved?: (capacity: TeamWorkloadCapacity) => void): TeamWorkloadCapacity {
@@ -48,7 +48,7 @@ export class TeamWorkloadCapacityService {
       const capacity = parseCapacity(
         { ...prior, ...input }, nextWorkloadCapacityVersion(prior.version), new Date().toISOString(), this.store.all<User>('users'),
       );
-      this.store.setSetting(settingKey, capacity);
+      this.store.setSetting(teamWorkloadCapacitySettingKey, capacity);
       onSaved?.(capacity);
       return capacity;
     });
@@ -75,7 +75,7 @@ export class TeamWorkloadCapacityService {
   }
 
   replaceImported(capacity: TeamWorkloadCapacity, previousVersion: number): void {
-    this.store.setSetting(settingKey, {
+    this.store.setSetting(teamWorkloadCapacitySettingKey, {
       ...capacity, version: nextWorkloadCapacityVersion(Math.max(capacity.version, previousVersion)),
     });
   }

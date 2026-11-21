@@ -133,13 +133,30 @@ async function verifyIntegrations(session, anonymous, origin) {
   const webhookPath = `${gitlabPath}/webhook`;
   const workspace = await call(session, 'GET', '/api/workspace', 200);
   const beforeBoard = workspace.headers()['x-teamspace-board-revision'];
+  const beforeGantt = workspace.headers()['x-teamspace-gantt-revision'];
   assert.match(beforeBoard, /^[a-f0-9]{32}$/u);
+  assert.match(beforeGantt, /^[a-f0-9]{32}$/u);
   const boardCheck = `/api/workspace?teamBoardSince=${beforeBoard}`;
   const unchanged = await call(session, 'GET', boardCheck, 204);
   assert.equal(unchanged.headers()['cache-control'], 'no-store');
   assert.equal(unchanged.headers()['x-teamspace-board-revision'], beforeBoard);
   assert.equal((await unchanged.body()).length, 0);
   assert.equal((await call(anonymous, 'GET', boardCheck, 401)).headers()['x-teamspace-board-revision'], undefined);
+  const ganttCheck = `/api/workspace?ganttSince=${beforeGantt}`;
+  await call(session, 'GET', ganttCheck, 204);
+  assert.equal((await call(anonymous, 'GET', ganttCheck, 401)).headers()['x-teamspace-gantt-revision'], undefined);
+  const calendarPath = '/api/projects/project-neo/calendar';
+  const calendar = await (await call(session, 'GET', calendarPath, 200)).json();
+  const calendarName = 'HTTPS 파일럿 작업 달력';
+  await call(session, 'PATCH', calendarPath, 200, {
+    headers: { Origin: origin }, data: { expectedVersion: calendar.version, name: calendarName },
+  });
+  await call(session, 'GET', boardCheck, 204);
+  const changedCalendar = await call(session, 'GET', ganttCheck, 200);
+  const afterCalendar = changedCalendar.headers()['x-teamspace-gantt-revision'];
+  assert.match(afterCalendar, /^[a-f0-9]{32}$/u);
+  assert.notEqual(afterCalendar, beforeGantt);
+  assert.equal((await changedCalendar.json()).calendars.find(item => item.projectId === 'project-neo').name, calendarName);
   await call(anonymous, 'POST', webhookPath, 401, { data: webhook });
   await call(session, 'POST', webhookPath, 401, { headers: { Origin: origin }, data: webhook });
   const incoming = await call(anonymous, 'POST', webhookPath, 200, {
@@ -150,6 +167,7 @@ async function verifyIntegrations(session, anonymous, origin) {
   const afterBoard = changedBoard.headers()['x-teamspace-board-revision'];
   assert.match(afterBoard, /^[a-f0-9]{32}$/u);
   assert.notEqual(afterBoard, beforeBoard);
+  assert.notEqual(changedBoard.headers()['x-teamspace-gantt-revision'], afterCalendar);
   assert.ok((await changedBoard.json()).gitlabLinks.some(link => link.issueId === 'issue-2' &&
     link.kind === 'merge_request' && link.title === webhook.object_attributes.title));
   await call(session, 'GET', `/api/workspace?teamBoardSince=${afterBoard}`, 204);
@@ -328,7 +346,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board refresh, scoped integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, scoped integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();
