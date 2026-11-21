@@ -3,6 +3,7 @@ import test from 'node:test';
 import { parse } from 'marked';
 import { renderDocumentExportMarkdown, type DocumentMarkdownExportResolvers } from '../../server/document-export-markdown.js';
 import type { RichContent } from '../../shared/types.js';
+import { contentMarkdown } from '../../src/features/document-utils.js';
 
 type Mark = NonNullable<RichContent['marks']>[number];
 const text = (value: string, ...marks: Mark[]): RichContent => ({ type: 'text', text: value, marks });
@@ -11,6 +12,26 @@ const paragraph = (...content: RichContent[]): RichContent => ({ type: 'paragrap
 const render = (content: RichContent[], resolve: DocumentMarkdownExportResolvers = {
   document: () => undefined, attachment: () => undefined,
 }) => renderDocumentExportMarkdown({ id: 'root', title: '팀 문서 [검토]', content: { type: 'doc', content } }, resolve);
+
+test('Markdown exports preserve the reading order, formatting and section links inside document columns', () => {
+  const heading: RichContent = { type: 'heading', attrs: { level: 2, sectionId: 'column-left' }, content: [text('작업 절차')] };
+  const column = (...content: RichContent[]): RichContent => ({ type: 'documentColumn', content });
+  const doc: RichContent[] = [
+    { type: 'documentColumnLayout', attrs: { weights: [3, 7], border: true }, content: [
+      column(heading, paragraph(text('승인 필요', { type: 'bold' }))),
+      column(paragraph(link('절로 이동', '#column-left')),
+        { type: 'codeBlock', attrs: { language: 'sh' }, content: [text('echo 준비')] }),
+    ] },
+    { type: 'documentColumnLayout', attrs: { weights: [1], border: false }, content: [column(paragraph(text('공통 점검')))] },
+  ];
+  const offline = render(doc);
+  assert.deepEqual(offline.diagnostics.map(({ code, nodeType }) => [code, nodeType]), [['layout_linearized', 'documentColumnLayout']]);
+  const standalone = contentMarkdown({ type: 'doc', content: doc });
+  for (const markdown of [offline.markdown, standalone]) {
+    const html = parse(markdown, { async: false, gfm: true });
+    assert.match(html, /id="column-left"[\s\S]*<h2>작업 절차<\/h2>[\s\S]*<strong>승인 필요<\/strong>[\s\S]*href="#column-left">절로 이동<\/a>[\s\S]*<pre><code class="language-sh">echo 준비\n<\/code><\/pre>[\s\S]*<p>공통 점검<\/p>/u);
+  }
+});
 
 test('offline Markdown renders rich Korean text, nested structures and stable navigation', () => {
   const result = render([

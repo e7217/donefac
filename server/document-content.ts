@@ -4,7 +4,7 @@ import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelLis
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
   isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
-  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, type DocumentIssueBlockTarget,
+  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { documentSelectionText } from '../shared/document-selection.js';
@@ -85,6 +85,10 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     }
     if (node.type === 'documentExcerptInclude' && attributes.noPanel !== undefined && typeof attributes.noPanel !== 'boolean') {
       invalid('포함한 발췌의 원본 안내 표시 설정을 확인해 주세요.');
+    }
+    if (node.type === 'documentColumnLayout' &&
+        !normalizeDocumentColumnLayoutOptions(attributes, Array.isArray(node.content) ? node.content.length : 0)) {
+      invalid('문서 열의 개수와 너비 비율, 테두리 설정을 확인해 주세요.');
     }
     if (node.type === 'issueList' || node.type === 'issueSummary') {
       const label = node.type === 'issueList' ? '업무 목록' : '업무 현황';

@@ -1658,6 +1658,82 @@ function labelListExport(target: MigrationFixture, instance: string, name: strin
   return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
 }
 
+test('Confluence layouts migrate through HTTP and upgrade exact former projections on a newer source revision', async t => {
+  const initial = await fixture(), restored = await fixture();
+  t.after(() => Promise.all([initial.close(), restored.close()]));
+  const instance = 'synthetic-column-layout';
+  const layout = '<ac:layout><ac:layout-section ac:type="two_left_sidebar"><ac:layout-cell><h2>설치</h2><p><strong>필수</strong> 도구</p></ac:layout-cell><ac:layout-cell><p><a href="#설치">설치 절 열기</a></p><p>오른쪽 본문</p></ac:layout-cell></ac:layout-section></ac:layout>';
+  const excerpt = '<ac:structured-macro ac:name="excerpt"><ac:rich-text-body><p>저장된 요약</p></ac:rich-text-body></ac:structured-macro>';
+  const rows = [
+    { id: '100', title: '필드 해시가 있는 문서', body: layout },
+    { id: '101', title: '당시 표시를 대조할 문서', body: layout + excerpt },
+    { id: '102', title: '팀에서 변경한 문서', body: layout + excerpt },
+  ];
+  const source = await labelListExport(initial, instance, 'columns-v1', rows);
+  const plan = await initial.preview(await initial.configuration(source, 'LAYOUT'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(!plan.notices.some(item => item.code.includes('LAYOUT')));
+  const applied = await initial.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const exported = await initial.call<Backup>('/export');
+  assert.equal(exported.status, 200);
+  const backup = exported.data;
+  const documents = rows.map(row => backup.documents.find(document => document.projectId === projectId && document.title === row.title)!);
+  assert.equal(documents.length, 3);
+  for (const document of documents) {
+    assert.equal(documentContentSchemaVersion(document.content), 12);
+    const [row] = document.content.content!;
+    assert.equal(row.type, 'documentColumnLayout');
+    assert.deepEqual({ ...row.attrs }, { weights: [3, 7], border: false });
+    const left = row.content?.[0], right = row.content?.[1];
+    const sectionId = left?.content?.[0]?.attrs?.sectionId;
+    assert.equal(typeof sectionId, 'string');
+    assert.equal(right?.content?.[0]?.content?.[0]?.marks?.[0]?.attrs?.href, documentSectionHash(document.id, sectionId as string));
+  }
+
+  // Recreate the current backup format before native columns and both old comparison cases.
+  const priorLiteral = { type: 'codeBlock', content: [{ type: 'text', text: `[XML ac:layout]\n${layout}` }] };
+  const makePrior = (document: DocPage, edited: boolean) => normalizeDocumentContent({ type: 'doc', content: [priorLiteral,
+    ...(document.content.content?.slice(1) ?? []),
+    ...(edited ? [{ type: 'paragraph', content: [{ type: 'text', text: '팀에서 보탠 내용을 유지' }] }] : []),
+  ] });
+  const previous = new Map(documents.map(document => [document.id, makePrior(document, false)]));
+  const edited = documents[2];
+  const locallyChanged = makePrior(edited, true);
+  backup.schemaVersion = 78;
+  for (const receipt of backup.sourceImports) delete receipt.integrity;
+  for (const record of backup.sourceRecords) {
+    if (record.targetId === documents[0].id && record.confluencePageFieldHashes) {
+      record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(previous.get(documents[0].id)!.content)])));
+    } else if (record.targetId && previous.has(record.targetId)) delete record.confluencePageFieldHashes;
+  }
+  for (const document of documents) Object.assign(document, document.id === edited.id ? locallyChanged : previous.get(document.id)!);
+  for (const revision of backup.revisions) if (previous.has(revision.documentId)) Object.assign(revision, previous.get(revision.documentId)!);
+  const imported = await restored.call('/import', 'POST', { data: backup });
+  assert.equal(imported.status, 200, JSON.stringify(imported.data));
+
+  const incoming = await labelListExport(restored, instance, 'columns-v2', rows.map(row => ({ ...row, version: 2 })));
+  const preview = await restored.preview({ ...await restored.configuration(incoming), appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  for (const document of documents) {
+    const decision = preview.documentRefresh?.find(row => row.documentId === document.id)?.fields.find(field => field.field === 'content')?.decision;
+    assert.equal(decision, document.id === edited.id ? 'conflict' : 'apply', document.title);
+  }
+  const refreshed = await restored.apply(preview);
+  assert.equal(refreshed.status, 201, JSON.stringify(refreshed.data));
+  const saved = (await restored.call<Backup>('/export')).data;
+  assert.deepEqual(saved.documents.find(document => document.id === edited.id)?.content, JSON.parse(JSON.stringify(locallyChanged.content)));
+  for (const document of documents.slice(0, 2)) {
+    const current = saved.documents.find(candidate => candidate.id === document.id)!;
+    assert.equal(documentContentSchemaVersion(current.content), 12);
+    assert.ok(current.plainText.includes('오른쪽 본문'));
+    const archived = saved.sourceRecords.filter(record => record.targetId === document.id && record.record.kind === 'page');
+    assert.deepEqual(archived.map(record => record.record.text), [rows[documents.indexOf(document)].body, rows[documents.indexOf(document)].body]);
+  }
+});
+
 test('Confluence excerpt migration upgrades verified older projections while preserving independently edited bodies', async t => {
   const initial = await fixture(), restored = await fixture();
   t.after(() => Promise.all([initial.close(), restored.close()]));

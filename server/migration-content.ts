@@ -10,6 +10,7 @@ import { normalizeDocumentLabelListOptions } from '../shared/document-label-list
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
 import { parseConfluenceLabelList } from './migration-confluence-label-list.js';
+import { parseConfluenceColumnLayout } from './migration-confluence-layout.js';
 import { confluenceSectionAliases, scanConfluenceSections, type ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // Format references (conversion is local and never requests these URLs):
@@ -31,6 +32,7 @@ export interface MigrationContentContext {
   legacyDocumentLabelList?: boolean;
   legacyDocumentChildList?: boolean;
   legacyDocumentExcerpt?: boolean;
+  legacyDocumentLayout?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   sectionLinks?: {
@@ -401,6 +403,7 @@ class Converter {
     if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt'].includes(type)) return this.marked(children(), { type: ({ b: 'bold', strong: 'bold', i: 'italic', em: 'italic', s: 'strike', strike: 'strike', del: 'strike', u: 'underline', code: 'code', tt: 'code' } as Record<string, string>)[type] });
     switch (type) {
       case 'migration-root': case 'div': case 'ac:rich-text-body': return this.xmlParts(node.children, depth, true);
+      case 'ac:layout': return this.richDocument ? this.columnLayout(node, depth) : this.fallback(`XML ${type}`, serializeXml(node));
       case 'p': return flow(children());
       case 'span': {
         let nodes = children(); const style = node.attrs.style || '';
@@ -480,9 +483,27 @@ class Converter {
       case 'img': return this.image({ kind: 'attachment', url: node.attrs.src }, node.attrs.alt || '');
       case 'ac:task-list': return [{ type: 'taskList', content: node.children.filter(value => typeof value !== 'string' || value.trim()).flatMap(value => this.xml(value, depth + 1)) }];
       case 'ac:task': { const body = child('ac:task-body'), status = child('ac:task-status'); return [{ type: 'taskItem', attrs: { checked: Boolean(status && this.xmlText(status).trim() === 'complete') }, content: flow(body ? this.xmlParts(body.children, depth + 1, true) : []) }]; }
-      case 'ac:structured-macro': case 'ac:macro': return this.macro(node, depth + 1);
+      case 'ac:structured-macro': case 'ac:macro': return this.richDocument && node.attrs['ac:name'] === 'section'
+        ? this.columnLayout(node, depth) : this.macro(node, depth + 1);
       default: return this.fallback(`XML ${type}`, serializeXml(node));
     }
+  }
+  private columnLayout(node: XmlNode, depth: number): RichContent[] {
+    const rows = parseConfluenceColumnLayout(node, depth === 1);
+    if (!rows || this.context.legacyDocumentLayout) {
+      const code = rows ? 'LEGACY_LAYOUT_REPRESENTATION' : 'LAYOUT_STRUCTURE_UNSUPPORTED';
+      const message = rows ? '이전 이관에서 사용한 열 배치 원문 코드 블록을 확인했습니다.'
+        : '현재 편집기로 표현할 수 없는 열 배치 구조나 설정을 원문 코드 블록으로 보존했습니다.';
+      this.warn(code, message);
+      const raw = serializeXml(node);
+      return [codeBlock(node.name === 'ac:layout' ? `[XML ac:layout]\n${raw}` : raw)];
+    }
+    return rows.map(({ columns, weights, border }) => {
+      this.tick(depth + 1);
+      return { type: 'documentColumnLayout', attrs: { weights: [...weights], border }, content: columns.map(column => ({
+        type: 'documentColumn', content: flow(this.xmlParts(column.children, depth + 2, true)),
+      })) };
+    });
   }
   macro(node: XmlNode, depth: number): RichContent[] {
     this.tick(depth); const name = node.attrs['ac:name'] || '', params: Record<string, string> = Object.create(null);
@@ -729,7 +750,7 @@ class Converter {
     const roots = build(parsed, 0); if (cdataIndex !== rawCdata.length) throw new Error('CDATA 수가 일치하지 않습니다.');
     if (this.context.sectionLinks) {
       this.sourceTitle = title;
-      this.sections = scanConfluenceSections(roots, () => this.tick());
+      this.sections = scanConfluenceSections(roots, () => this.tick(), this.richDocument && !this.context.legacyDocumentLayout);
     }
     return flow(roots.flatMap(value => this.xml(value)));
   }

@@ -31,6 +31,7 @@ const diagnosticMessages = {
   external_image: '오프라인 파일로 확인할 수 없는 이미지를 제외했습니다.',
   external_link: '오프라인 대상이 없는 주소는 링크 없이 표시했습니다.',
   issue_reference: '업무 참조의 표시 이름만 보존했습니다.',
+  layout_linearized: '단 안의 블록을 왼쪽 단부터 순서대로 내보냈습니다.',
   live_include: '최신 문서에 따라 바뀌는 포함 본문을 별도로 펼치지 않았습니다.',
   pinned_revision_unavailable: '요청한 문서 저장본이 이번 내보내기 범위에 없습니다.',
   unsupported_node: '이 블록의 텍스트만 보존했습니다.',
@@ -373,7 +374,10 @@ class DocumentMarkdownRenderer {
   private block(node: RichContent): string {
     const attrs = node.attrs;
     switch (node.type) {
-      case 'doc': case 'listItem': case 'taskItem': case 'detailsContent': case 'tableRow': case 'tableCell': case 'tableHeader':
+      case 'doc': case 'listItem': case 'taskItem': case 'detailsContent': case 'tableRow': case 'tableCell': case 'tableHeader': case 'documentColumn':
+        return this.blocks(node.content);
+      case 'documentColumnLayout':
+        if (!this.ticket && (attrs?.border === true || (node.content?.length ?? 0) > 1)) this.warn('layout_linearized', node);
         return this.blocks(node.content);
       case 'text': case 'statusBadge': case 'hardBreak': return this.inline([node]);
       case 'paragraph': case 'detailsSummary': return this.inline(node.content ?? []);

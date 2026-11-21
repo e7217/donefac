@@ -135,6 +135,7 @@ const lossyConfluenceConversions = new Set([
   'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'LEGACY_TOC_REPRESENTATION',
   'LEGACY_LABEL_LIST_REPRESENTATION', 'CHILD_LIST_PARAMETERS_UNSUPPORTED', 'CHILD_LIST_SCOPE_UNRESOLVED',
   'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
+  'LAYOUT_STRUCTURE_UNSUPPORTED', 'LEGACY_LAYOUT_REPRESENTATION',
   ...lossyConfluenceCalloutConversions, ...lossyConfluenceExcerptConversions,
 ]);
 
@@ -155,6 +156,10 @@ function hasConfluenceExcerptMacro(record: LegacyRecord): boolean {
   });
 }
 
+function hasConfluenceColumnLayout(record: LegacyRecord): boolean {
+  return /<ac:layout(?=[\s/>])|<ac:(?:structured-macro|macro)\s[^<>]*\bac:name\s*=\s*(?:"section"|'section')/u.test(record.text);
+}
+
 function previousConfluencePageFieldDigests(archive: SourceRecordArchive, currentContent: DocPage['content']): ConfluenceMigrationPageFieldHashes {
   if (archive.confluencePageFieldHashes) return archive.confluencePageFieldHashes;
   const { record } = archive;
@@ -171,16 +176,20 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
       // An older document can still exactly match a former renderer's conversion.
       const earlierContent = { legacyDocumentChildList: true, legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
+      const legacyLayout = hasConfluenceColumnLayout(record) ? { legacyDocumentLayout: true } : {};
       const legacyOptions = [
-        ...(hasConfluenceExcerptMacro(record) ? [{}] : []),
-        { legacyDocumentChildList: true }, earlierContent, { ...earlierContent, legacyAnnotations: true },
+        ...(legacyLayout.legacyDocumentLayout ? [legacyLayout] : []),
+        ...(hasConfluenceExcerptMacro(record) ? [{ ...legacyLayout, legacyDocumentExcerpt: true }] : []),
+        ...[{ legacyDocumentChildList: true }, earlierContent, { ...earlierContent, legacyAnnotations: true }]
+          .map(options => ({ ...options, ...legacyLayout, legacyDocumentExcerpt: true })),
       ];
       for (const options of legacyOptions) {
-        const legacy = convertLegacyContent(record, { resolveReference, legacyDocumentExcerpt: true, ...options });
+        const legacy = convertLegacyContent(record, { resolveReference, ...options });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
           !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION',
-            'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION'].includes(item.code)) });
+            'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
+            'LEGACY_LAYOUT_REPRESENTATION'].includes(item.code)) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -917,7 +926,7 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
       const needsBodyReview = newer && hasConfluenceBody(row) &&
-        (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row));
+        (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row) || hasConfluenceColumnLayout(row));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
           resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
@@ -929,7 +938,7 @@ class Planner{
           if (lossyConfluenceCalloutConversions.has(diagnostic.code) || lossyConfluenceExcerptConversions.has(diagnostic.code) ||
             ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
             'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_PARAMETERS_UNSUPPORTED',
-            'CHILD_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_EXCERPT_UNSUPPORTED'].includes(diagnostic.code)) {
+            'CHILD_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LAYOUT_STRUCTURE_UNSUPPORTED'].includes(diagnostic.code)) {
             this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
           }
         }

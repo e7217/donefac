@@ -30,9 +30,9 @@ export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'c
   return revision.confluenceSourceVersion == null ? `버전 ${revision.version}` : `Confluence 원본 버전 ${revision.confluenceSourceVersion}`;
 }
 
-export function hasDocumentAnnotations(node: RichContent): boolean {
-  return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude'].includes(node.type) ||
-    (node.content?.some(hasDocumentAnnotations) ?? false);
+export function hasDocumentFormattedBlocks(node: RichContent): boolean {
+  return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude', 'documentColumnLayout'].includes(node.type) ||
+    (node.content?.some(hasDocumentFormattedBlocks) ?? false);
 }
 
 function escapeHtml(value: string) {

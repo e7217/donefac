@@ -175,6 +175,12 @@ curl --fail-with-body \
 
 두 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 11`을 보낸다. 공동 편집 프로토콜 11, 문서 JSON 형식 11, 자체 백업 형식 69가 두 노드를 보존한다.
 
+### 문서 다단 구역
+
+본문 형식 12의 `documentColumnLayout`에는 `attrs: { "weights": [3, 7], "border": false }`와 1~3개의 `documentColumn`을 넣는다. `weights`의 길이는 단의 수와 같으며 각 값은 1~1,000 사이의 정수 비율이다. `border`의 기본값은 `false`다. `documentColumn`에는 속성 없이 하나 이상의 본문 블록을 넣는다.
+
+다단 구역을 편집하거나 교체하는 `PATCH`에는 `contentSchemaVersion: 12`를 보낸다. 공동 편집 프로토콜 12, 문서 JSON 형식 12, 자체 백업 형식 79에 다단 설정과 각 단의 내용을 보존한다. Markdown은 왼쪽 단의 첫 블록부터 저장 순서대로 내보내며, 배치가 바뀐 경우 ZIP의 `manifest.json`에 `layout_linearized`를 기록한다.
+
 ## 티켓 설명의 서식
 
 일반 업무 생성·수정과 복제·하위 업무 양식에서 `description`은 최대 200,000자의 원문 문자열이다. `descriptionFormat`을 `markdown`으로 지정하면 저장된 설명을 Markdown으로 표시한다. `plain`을 보내면 원문 문자열을 유지하면서 서식 설정을 해제한다. 생성 시 생략하면 평문이며, 수정 시 생략하면 현재 설정을 유지한다. 응답은 Markdown일 때 `descriptionFormat`을 포함한다. `/api/v1/issues`의 프로젝트 범위 읽기·쓰기에도 같은 규칙을 적용한다.

@@ -7,7 +7,28 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 11;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 12;
+export const MAX_DOCUMENT_COLUMNS = 3;
+
+export interface DocumentColumnLayoutOptions {
+  weights: number[];
+  border: boolean;
+}
+
+export function normalizeDocumentColumnLayoutOptions(attrs: unknown, columnCount: number): DocumentColumnLayoutOptions | null {
+  if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs) ||
+      Object.keys(attrs).some(key => key !== 'weights' && key !== 'border')) return null;
+  const { weights, border = false } = attrs as Record<string, unknown>;
+  if (!Array.isArray(weights) || weights.length < 1 || weights.length > MAX_DOCUMENT_COLUMNS || weights.length !== columnCount ||
+      typeof border !== 'boolean') return null;
+  const tracks = Array.from(weights);
+  if (!tracks.every(weight => Number.isInteger(weight) && weight >= 1 && weight <= 1000)) return null;
+  return { weights: tracks, border };
+}
+
+export function documentColumnLayoutTracks(weights: readonly number[]): string {
+  return weights.map(weight => `minmax(0, ${weight}fr)`).join(' ');
+}
 export type DocumentTocLevel = 1 | 2 | 3;
 export type DocumentTocLayout = 'list' | 'flat';
 export interface DocumentTocOptions {
@@ -36,9 +57,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'documentExcerptInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentColumnLayout' || nodeType === 'documentColumn') return 12;
   if (nodeType === 'documentExcerpt' || nodeType === 'documentExcerptInclude') return 11;
   if (nodeType === 'documentChildList') return 10;
   if (nodeType === 'documentLabelList') return 9;
@@ -314,6 +336,44 @@ export const DetailsContent = Node.create({
   parseHTML() { return [{ tag: 'div[data-teamspace-details-content]' }]; }, renderHTML() { return ['div', { 'data-teamspace-details-content': '' }, 0]; },
 });
 
+const layoutGrid = ':scope > div[data-layout-grid]';
+const columnElement = 'div[data-teamspace-node="documentColumn"]';
+export const DocumentColumnLayout = Node.create({
+  name: 'documentColumnLayout', group: 'block', content: `documentColumn{1,${MAX_DOCUMENT_COLUMNS}}`, defining: true, isolating: true,
+  addAttributes() {
+    return {
+      weights: { default: [1], rendered: false, parseHTML: () => null },
+      border: { default: false, rendered: false, parseHTML: () => null },
+    };
+  },
+  parseHTML() {
+    return [{
+      tag: 'div[data-teamspace-node="documentColumnLayout"]',
+      contentElement: layoutGrid,
+      getAttrs: element => {
+        const grid = element.querySelector(layoutGrid);
+        const weights = element.getAttribute('data-layout-weights');
+        const border = element.getAttribute('data-layout-border');
+        if (!grid || Array.from(grid.children).some(child => !child.matches(columnElement)) ||
+            !weights || !/^\d+(?:,\d+){0,2}$/u.test(weights) || (border !== null && border !== 'false' && border !== 'true')) return false;
+        return normalizeDocumentColumnLayoutOptions({ weights: weights.split(',').map(Number), border: border === 'true' }, grid.childElementCount) ?? false;
+      },
+    }];
+  },
+  renderHTML({ node }) {
+    const { weights, border } = normalizeDocumentColumnLayoutOptions(node.attrs, node.childCount) ??
+      { weights: Array.from({ length: node.childCount }, () => 1), border: false };
+    return ['div', { 'data-teamspace-node': 'documentColumnLayout', 'data-layout-weights': weights.join(','), 'data-layout-border': String(border) },
+      ['div', { 'data-layout-grid': '', style: `--document-column-tracks: ${documentColumnLayoutTracks(weights)}` }, 0]];
+  },
+});
+
+export const DocumentColumn = Node.create({
+  name: 'documentColumn', content: 'block+', defining: true, isolating: true, selectable: false,
+  parseHTML() { return [{ tag: columnElement }]; },
+  renderHTML() { return ['div', { 'data-teamspace-node': 'documentColumn' }, 0]; },
+});
+
 const calloutContent = ':scope > div[data-teamspace-callout-content]';
 export const Callout = Node.create({
   name: 'callout', group: 'block', content: 'block+', defining: true, isolating: true,
@@ -386,7 +446,8 @@ export const StatusBadge = Node.create({
 export function documentNodeExtensions() {
   return [
     IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, DocumentExcerpt, DocumentExcerptInclude,
-    IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList, DocumentChildList,
+    IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, DocumentColumnLayout, DocumentColumn,
+    Callout, StatusBadge, DocumentToc, DocumentLabelList, DocumentChildList,
   ];
 }
 

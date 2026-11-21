@@ -1,13 +1,13 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type Editor, type NodeViewProps } from '@tiptap/react';
 import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
-import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude } from '../../shared/document-nodes';
+import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
@@ -23,8 +23,10 @@ import { DocumentChildListCard } from './DocumentChildList';
 import { DocumentOutline, jumpToReadonlyHeading, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
+import { documentColumnLayoutEditingPlugin, exitDocumentColumnLayout } from './document-column-layout';
 import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
+import './document-column-layout.css';
 
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude' | 'documentExcerptInclude';
 export type ReferenceSelection = { kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string };
@@ -338,6 +340,15 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'taskItem': return <li key={key} className="doc-readonly-task"><input type="checkbox" checked={attrs.checked === true} disabled readOnly aria-label={attrs.checked ? '완료된 할 일' : '미완료 할 일'} /><div>{children}</div></li>;
     case 'blockquote': return <blockquote key={key}>{children}</blockquote>;
     case 'callout': return <ReadonlyCallout key={key} attrs={attrs}>{children}</ReadonlyCallout>;
+    case 'documentColumnLayout': {
+      const layout = normalizeDocumentColumnLayoutOptions(attrs, children.length);
+      if (!layout) return <div key={key}>{children}</div>;
+      return <div key={key} className="document-column-layout-readonly" role="group" aria-label="문서 다단 구역"
+        data-teamspace-node="documentColumnLayout" data-layout-weights={layout.weights.join(',')} data-layout-border={String(layout.border)}>
+        <div data-layout-grid="" style={{ '--document-column-tracks': documentColumnLayoutTracks(layout.weights) } as CSSProperties}>{children}</div>
+      </div>;
+    }
+    case 'documentColumn': return <div key={key} data-teamspace-node="documentColumn">{children}</div>;
     case 'documentExcerpt': return state.mode
       ? <aside key={key} className="document-excerpt-definition" aria-label="저장된 발췌 구역">
         <div className="document-excerpt-heading"><strong>발췌 구역{attrs.hidden === true ? ' · 원본 숨김' : ''}</strong></div>
@@ -518,7 +529,10 @@ function detailsBody(editor: Editor): boolean {
   return false;
 }
 export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExtension[] {
-  return extensions.map(extension => extension.name === 'documentToc' ? extension.extend({ addNodeView() {
+  return extensions.map(extension => extension.name === 'documentColumnLayout' ? extension.extend({
+    addKeyboardShortcuts() { return { 'Mod-Shift-Enter': () => exitDocumentColumnLayout(this.editor) }; },
+    addProseMirrorPlugins() { return [documentColumnLayoutEditingPlugin()]; },
+  }) : extension.name === 'documentToc' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentTocNodeView);
   } }) : extension.name === 'documentChildList' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentChildListNodeView);

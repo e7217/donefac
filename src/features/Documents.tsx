@@ -7,7 +7,7 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, Columns2, Columns3, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   RotateCcw, Table2, TableOfContents, Tag, Trash2, Unlink, X,
@@ -33,6 +33,7 @@ import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
+import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
 import { DocumentLinkedWork } from './DocumentLinkedWork';
@@ -1230,7 +1231,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     ]).run();
   }
 
-  const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind }))[] = [
+  function insertColumns(count: 2 | 3, slash?: { from: number; to: number; text: string }) {
+    if (editor?.isEditable && !insertDocumentColumnLayout(editor, count, slash)) notify('이 위치에는 다단 구역을 넣을 수 없습니다.', 'error');
+  }
+
+  const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind } | { columns: 2 | 3 }))[] = [
     { label: '제목 1', search: 'h1 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 1 }).run() },
     { label: '제목 2', search: 'h2 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 2 }).run() },
     { label: '글머리 목록', search: 'list bullet 목록', action: () => editor?.chain().focus().toggleBulletList().run() },
@@ -1238,6 +1243,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '인용', search: 'quote 인용', action: () => editor?.chain().focus().toggleBlockquote().run() },
     { label: '코드 블록', search: 'code 코드', action: () => editor?.chain().focus().toggleCodeBlock().run() },
     { label: '표', search: 'table 표', action: () => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
+    { label: '2단 구역', search: 'columns 2cols layout 2열 배치 다단 구역', columns: 2 },
+    { label: '3단 구역', search: 'columns 3cols layout 3열 배치 다단 구역', columns: 3 },
     { label: '업무 참조', search: 'issue ticket 업무 참조', action: () => openReference('issueReference') },
     { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', action: () => { if (editor) openIssueBlock(editor, 'issueList'); } },
     { label: '업무 현황', search: 'issue summary chart 업무 현황 집계', action: () => { if (editor) openIssueBlock(editor, 'issueSummary'); } },
@@ -1268,6 +1275,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       setAnnotationSelection({ editor, documentId: current.id, kind: command.annotation, opener: null, mode: 'insert',
         bookmark: editor.state.selection.getBookmark(), slash: { from, to, text } });
       setInsertKind(null); setIssueBlockSelection(null); setReferenceSelection(null);
+    } else if ('columns' in command) {
+      insertColumns(command.columns, { from, to, text });
     } else {
       editor.chain().focus().deleteRange({ from, to }).run();
       command.action();
@@ -1376,6 +1385,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
+  const inColumnLayout = editor?.isActive('documentColumnLayout');
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
@@ -1483,6 +1493,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('인용', <Quote size={15} />, () => editor?.chain().focus().toggleBlockquote().run(), editor?.isActive('blockquote'))}
                 {button('코드 블록', <Code2 size={16} />, () => editor?.chain().focus().toggleCodeBlock().run(), editor?.isActive('codeBlock'))}
                 {button('표 삽입', <Table2 size={15} />, () => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}
+                {button('2단 구역 삽입', <Columns2 size={15} />, () => insertColumns(2))}
+                {button('3단 구역 삽입', <Columns3 size={15} />, () => insertColumns(3))}
                 {button('이미지 URL 삽입', <ImageIcon size={15} />, () => { setInsertKind('image'); setInsertUrl(''); })}
                 <button type="button" className="docs-format-btn" aria-label="참조 새로고침" title="참조 새로고침" disabled={referencesRefreshing} onMouseDown={event => event.preventDefault()} onClick={() => void refreshReferences()}>{referencesRefreshing ? <Loader2 className="docs-spin" size={15} /> : <RefreshCw size={15} />}</button>
                 {button('업무 참조 삽입', <Link2 size={15} />, () => openReference('issueReference'))}
@@ -1507,6 +1519,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}
                   onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }} />
               </div>
+              {editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
+                <button type="button" aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter" title="Ctrl/⌘+Shift+Enter"
+                  onMouseDown={event => event.preventDefault()} onClick={() => exitDocumentColumnLayout(editor)}><CornerDownRight size={12} aria-hidden="true" /> 구역 다음 본문으로 이동</button>
+                <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => unwrapDocumentColumnLayout(editor)}>다단 구역 해제</button>
+              </div>}
               {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
               {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor}

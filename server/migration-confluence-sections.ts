@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { parseConfluenceColumnLayout } from './migration-confluence-layout.js';
 
 export interface ConfluenceStorageNode { name: string; attrs: Record<string, string>; children: (ConfluenceStorageNode | string)[] }
 type Node = ConfluenceStorageNode;
@@ -41,7 +42,7 @@ function anchor(value: Node | string, tick: () => void): Anchor | undefined {
   return result ? { ...result, node: value } : undefined;
 }
 
-export function scanConfluenceSections(roots: readonly (Node | string)[], tick: () => void) {
+export function scanConfluenceSections(roots: readonly (Node | string)[], tick: () => void, allowColumns: boolean) {
   const candidates: { node: Node; anchors: Anchor[]; headingAliases: string[] }[] = [];
   const declarations = new Map<string, Set<Node>>();
   function declare(name: string, node: Node) {
@@ -60,7 +61,7 @@ export function scanConfluenceSections(roots: readonly (Node | string)[], tick: 
     }
   }
   countDeclarations(roots);
-  function visit(children: readonly (Node | string)[]) {
+  function visit(children: readonly (Node | string)[], depth: number) {
     let nearby: Anchor[] = [];
     for (const value of children) {
       tick();
@@ -92,15 +93,19 @@ export function scanConfluenceSections(roots: readonly (Node | string)[], tick: 
               headingAliases: [...new Set([headingName, title].filter(validName))] });
           }
         }
-      } else if (containers.has(value.name)) visit(value.children);
-      else if (isMacro(value) && containerMacros.has(value.attrs['ac:name'])) {
+      } else if (containers.has(value.name)) visit(value.children, depth + 1);
+      else if (allowColumns && (value.name === 'ac:layout' || isMacro(value) && value.attrs['ac:name'] === 'section')) {
+        for (const row of parseConfluenceColumnLayout(value, depth === 1) ?? []) {
+          for (const column of row.columns) visit(column.children, depth + 3);
+        }
+      } else if (isMacro(value) && containerMacros.has(value.attrs['ac:name'])) {
         const body = value.children.find(child => typeof child !== 'string' && ['ac:rich-text-body', 'ac:plain-text-body'].includes(child.name));
-        if (body && typeof body !== 'string') visit(body.children);
+        if (body && typeof body !== 'string') visit(body.children, depth + 2);
       }
       nearby = [];
     }
   }
-  visit(roots);
+  visit(roots, 0);
   const aliases = new Map<string, Node | null>();
   for (const candidate of candidates) {
     for (const name of [...candidate.anchors.map(value => value.name), ...candidate.headingAliases]) {
