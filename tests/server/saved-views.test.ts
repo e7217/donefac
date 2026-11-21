@@ -134,6 +134,77 @@ test('native backup preserves saved priority and label criteria and rejects loss
   } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('saved view reporter criterion persists through old-client edits and clears explicitly', async () => {
+  const f = await fixture();
+  try {
+    const reporter = { kind: 'member', memberId: 'user-seo' };
+    const created = await f.request('/views', 'POST', { ...definition, filters: { ...definition.filters, reporter } });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.deepEqual(created.data.filters.reporter, reporter);
+    const path = `/views/${created.data.id}`;
+    for (const reporter of ['user-seo', { kind: 'member', memberId: 'missing' }, { kind: 'unset', memberId: 'user-seo' }, { kind: 'unknown', extra: true }]) {
+      const filters = { ...definition.filters, reporter };
+      assert.equal((await f.request('/views', 'POST', { ...definition, name: '잘못된 요청자 조건', filters })).status, 400);
+      assert.equal((await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters })).status, 400);
+    }
+    const oldClientFilters = { ...definition.filters, query: '변경한 검색어' };
+    const edited = await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters: oldClientFilters });
+    assert.equal(edited.status, 200);
+    assert.deepEqual(edited.data.filters, { ...oldClientFilters, reporter });
+    let version = edited.data.version;
+    for (const kind of ['unset', 'unknown']) {
+      const changed = await f.request(path, 'PATCH', { expectedVersion: version, filters: { ...oldClientFilters, reporter: { kind } } });
+      assert.equal(changed.status, 200);
+      assert.deepEqual(changed.data.filters.reporter, { kind });
+      version = changed.data.version;
+    }
+    const cleared = await f.request(path, 'PATCH', { expectedVersion: version, filters: { ...oldClientFilters, reporter: null } });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(cleared.data.filters, oldClientFilters);
+    assert.deepEqual((await f.request('/views?projectId=project-neo')).data, [cleared.data]);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('native backup reporter filters validate workspace members and require format 85', async () => {
+  const f = await fixture();
+  try {
+    const reporters = [{ kind: 'member', memberId: 'user-seo' }, { kind: 'unset' }, { kind: 'unknown' }];
+    const saved: SavedView[] = [];
+    for (const reporter of reporters) {
+      const created = await f.request('/views', 'POST', { ...definition, name: `요청자 ${reporter.kind}`, filters: { ...definition.filters, reporter } });
+      assert.equal(created.status, 201, JSON.stringify(created.data));
+      saved.push(created.data);
+    }
+    const { data: backup } = await f.request('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    assert.deepEqual(saved.map(view => (backup.savedViews as SavedView[]).find(entry => entry.id === view.id)?.filters.reporter), reporters);
+
+    const importedMember = { ...backup.users.find((user: { id: string }) => user.id === 'user-seo'), id: 'imported-reporter', email: 'reporter@example.invalid' };
+    const restoredPackage = structuredClone(backup);
+    const memberView = (restoredPackage.savedViews as SavedView[]).find(entry => entry.id === saved[0].id)!;
+    memberView.filters.reporter = { kind: 'member', memberId: importedMember.id };
+    const rejected = await f.request('/import', 'POST', { data: restoredPackage });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.data.error, /요청자 필터/);
+    restoredPackage.users.push(importedMember);
+    const older = { ...structuredClone(restoredPackage), schemaVersion: 84 };
+    const versionRejected = await f.request('/import', 'POST', { data: older });
+    assert.equal(versionRejected.status, 400);
+    assert.match(versionRejected.data.error, /schemaVersion 85/);
+    const list = async () => (await f.request('/views?projectId=project-neo')).data as SavedView[];
+    const untouched = await list();
+    assert.deepEqual(saved.map(view => untouched.find(entry => entry.id === view.id)), saved);
+
+    assert.equal((await f.request('/import', 'POST', { data: restoredPackage })).status, 200);
+    const restored = await list();
+    assert.deepEqual(saved.map(view => restored.find(entry => entry.id === view.id)?.filters.reporter), [memberView.filters.reporter, ...reporters.slice(1)]);
+    assert.ok(restored.every(view => view.version > 1));
+    for (const view of older.savedViews as SavedView[]) delete view.filters.reporter;
+    assert.equal((await f.request('/import', 'POST', { data: older })).status, 200);
+    assert.ok((await list()).every(view => !Object.hasOwn(view.filters, 'reporter')));
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('native backup preserves saved view definitions and rejects bad restore atomically',async()=>{
   const f=await fixture();try{
     const created=await f.request('/views','POST',definition);assert.equal(created.status,201);

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { TrashArchive } from '../../server/trash.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { Issue, TrashRestoreResult, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = { schemaVersion: number; issues: Issue[]; trashEntries: TrashArchive[] };
@@ -39,7 +40,7 @@ function reporter(issue: Issue | undefined) {
   return Object.hasOwn(issue, 'reporterId') ? issue.reporterId : 'absent';
 }
 
-test('native 84 preserves reporter, explicit blank and historical absence across live and trash restore', async t => {
+test('native backup preserves reporter, explicit blank and historical absence across live and trash restore', async t => {
   const from = await open(t);
   const to = await open(t);
   const { projects: [project], users: [actor, other], issues: [historical] } = await from<WorkspaceSnapshot>('/workspace');
@@ -51,7 +52,7 @@ test('native 84 preserves reporter, explicit blank and historical absence across
   const archived = await create('휴지통 요청자');
   const { trashEntryId } = await from<{ trashEntryId: string }>(`/issues/${archived.id}?expectedVersion=${archived.version}`, 200, 'DELETE');
   const backup = await from<Backup>('/export');
-  assert.equal(backup.schemaVersion, 84);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const exportReporters = (data: Backup) => {
     const entry = data.trashEntries.find(value => value.id === trashEntryId);
     return [

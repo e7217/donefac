@@ -1247,6 +1247,8 @@ export interface IssueViewLabelFilter {
   presence?: 'set' | 'empty';
 }
 
+export type IssueViewReporterFilter = { kind: 'member'; memberId: string } | { kind: 'unset' } | { kind: 'unknown' };
+
 export interface SavedViewState {
   layout: 'list' | 'board';
   boardGrouping?: 'assignee';
@@ -1260,9 +1262,10 @@ export interface SavedViewState {
     gitlab?: IssueViewGitlabFilter;
     priorities?: Priority[];
     labels?: IssueViewLabelFilter;
+    reporter?: IssueViewReporterFilter;
   };
 }
-export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type'] as const;
+export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type', 'reporter'] as const;
 export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIONS[number];
 export type IssueFieldBreakdownSelection = {
   savedViewId?: string | null;

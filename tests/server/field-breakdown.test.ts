@@ -102,6 +102,41 @@ test('duplicate user labels are disambiguated without changing exact value ident
   assert.equal(values(missingOption)[0].label, 'old-option');
 });
 
+test('reporter dimensions keep explicit blanks and missing records separate in rows, columns and revision fingerprints', () => {
+  const reporter = field('user', { id: 'builtin:reporter', name: '요청자', options: [] });
+  const issues = [issue('1', {}, { reporterId: 'alice' }), issue('2', {}, { reporterId: 'bob' }),
+    issue('3', {}, { reporterId: null }), issue('4')];
+  const grouped = input('user', issues, { field: reporter, groupBy: 'reporter' });
+  const rows = buildIssueFieldBreakdown(grouped);
+  assert.equal(rows.report.populatedIssues, 2);
+  assert.equal(rows.report.missingIssues, 2);
+  assert.equal(new Set(values(rows).map(bucket => bucket.label)).size, 2);
+  assert.deepEqual(rows.report.groups.filter(bucket => bucket.kind === 'missing'), [
+    { id: 'missing', label: '미지정', kind: 'missing', count: 1 },
+    { id: 'unknown', label: '기록 없음', kind: 'missing', count: 1 },
+  ]);
+  assert.deepEqual(rows.issuesByBucket.get('missing')?.map(item => item.id), ['3']);
+  assert.deepEqual(rows.issuesByBucket.get('unknown')?.map(item => item.id), ['4']);
+
+  const compared = input('select', issues, {
+    field: field('select', { id: 'builtin:status', name: '상태', options: [{ id: 'todo', name: '대기', archived: false }] }),
+    groupBy: 'status', comparison: { by: 'reporter', field: reporter },
+  });
+  const columns = buildIssueFieldBreakdown(compared);
+  assert.deepEqual(columns.report.comparison?.columns.slice(-2), [
+    { id: 'missing', label: '미지정', count: 1 }, { id: 'unknown', label: '기록 없음', count: 1 },
+  ]);
+  assert.equal(columns.columnByIssue.get('3'), 'missing');
+  assert.equal(columns.columnByIssue.get('4'), 'unknown');
+  const swapped = [...issues.slice(0, 2), issue('3'), issue('4', {}, { reporterId: null })];
+  for (const [source, original] of [[grouped, rows], [compared, columns]] as const) {
+    const next = buildIssueFieldBreakdown({ ...source, issues: swapped });
+    assert.deepEqual(next.report.groups, original.report.groups);
+    assert.deepEqual(next.report.comparison, original.report.comparison);
+    assert.notEqual(next.report.revision, original.report.revision);
+  }
+});
+
 test('long Unicode labels remain bounded and distinguish truncated prefixes and special bucket labels', () => {
   const prefix = '😀'.repeat(180);
   const first = `${prefix}${'a'.repeat(19000)}-first`, second = `${prefix}${'b'.repeat(19000)}-second`;

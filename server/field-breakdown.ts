@@ -54,9 +54,14 @@ function distinguishLabels(groups: ReadonlyMap<string, IssueFieldBreakdownColumn
   }
 }
 
-function builtinValue(issue: Issue, by: IssueFieldBreakdownDimension): string | null {
+function builtinValue(issue: Issue, by: IssueFieldBreakdownDimension): string | null | undefined {
+  if (by === 'reporter') return issue.reporterId;
   return by === 'assignee' ? issue.assigneeId : issue[by];
 }
+
+const missingValueLabel = (by?: IssueFieldBreakdownDimension) => by === 'assignee' || by === 'reporter' ? '미지정' : '값 없음';
+const unknownReporterLabel = '기록 없음';
+const specialGroupOrder = new Map([['missing', 1], ['unknown', 2]]);
 
 const valueId = (field: CustomFieldDefinition, value: string | number | boolean) => `value:${hash([field.id, field.kind, value])}`;
 
@@ -140,12 +145,15 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
   const columnByIssue = new Map<string, string>();
   const columns = new Map<string, IssueFieldBreakdownColumn>();
   const counts = new Map<string, Map<string, number>>();
-  const missing: IssueFieldBreakdownBucket = { id: 'missing', label: groupBy === 'assignee' ? '미지정' : '값 없음', kind: 'missing', count: 0 };
+  const missing: IssueFieldBreakdownBucket = { id: 'missing', label: missingValueLabel(groupBy), kind: 'missing', count: 0 };
+  const unknown: IssueFieldBreakdownBucket | null = groupBy === 'reporter'
+    ? { id: 'unknown', label: unknownReporterLabel, kind: 'missing', count: 0 } : null;
   const notApplicable: IssueFieldBreakdownBucket = { id: 'not-applicable', label: '유형 미적용', kind: 'not_applicable', count: 0 };
-  buckets.set(missing.id, missing);
-  buckets.set(notApplicable.id, notApplicable);
-  issuesByBucket.set(missing.id, []);
-  issuesByBucket.set(notApplicable.id, []);
+  const specialBuckets = unknown ? [missing, unknown, notApplicable] : [missing, notApplicable];
+  for (const bucket of specialBuckets) {
+    buckets.set(bucket.id, bucket);
+    issuesByBucket.set(bucket.id, []);
+  }
   const seen = new Set<string>(), numericValues: number[] = [];
   const summaries = new Map<string, IssueFieldBreakdownIssue>();
   const fingerprints: unknown[][] = [];
@@ -171,10 +179,11 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     let columnId: string | undefined;
     if (comparison) {
       const comparedValue = builtinValue(issue, comparison.by);
-      columnId = hasCustomValue(comparedValue) ? valueId(comparison.field, comparedValue!) : 'missing';
+      const unknownReporter = comparison.by === 'reporter' && comparedValue === undefined;
+      columnId = hasCustomValue(comparedValue) ? valueId(comparison.field, comparedValue!) : (unknownReporter ? 'unknown' : 'missing');
       let column = columns.get(columnId);
       if (!column) {
-        const label = columnId === 'missing' ? (comparison.by === 'assignee' ? '미지정' : '값 없음')
+        const label = columnId === 'unknown' ? unknownReporterLabel : columnId === 'missing' ? missingValueLabel(comparison.by)
           : fieldValueLabel(comparison.field, comparedValue, users);
         column = { id: columnId, label: displayLabel(label), count: 0 };
         columns.set(columnId, column);
@@ -184,11 +193,13 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     }
     const applicable = fieldApplies(field, issue.type);
     const value = applicable ? (groupBy ? builtinValue(issue, groupBy) : ownValue(issue, field)) : undefined;
+    const emptyBucket = value === undefined ? unknown ?? missing : missing;
+    const valueFingerprint = value == null ? (emptyBucket === unknown ? 'unknown' : null) : hash([field.kind, value]);
     fingerprints.push([issue.id, issue.version, issue.key, issue.title, issue.type, applicable,
-      value === undefined || value === null ? null : hash([field.kind, value]), ...(columnId ? [columnId] : [])]);
+      valueFingerprint, ...(columnId ? [columnId] : [])]);
     if (!applicable) { add(notApplicable, issue); continue; }
     applicableIssues++;
-    if (!hasCustomValue(value)) { add(missing, issue); continue; }
+    if (!hasCustomValue(value)) { add(emptyBucket, issue); continue; }
     validatePresentValue(field, value!);
     populatedIssues++;
     if (field.kind === 'number') numericValues.push(value as number);
@@ -213,7 +224,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
   const groups = [...buckets.values()].filter(bucket => bucket.kind === 'value').sort(
     (left, right) => right.count - left.count || compareText(left.label, right.label) || compareText(left.id, right.id),
   );
-  groups.push(missing, notApplicable);
+  groups.push(...specialBuckets);
   const numeric = field.kind === 'number' ? numericStatistics(numericValues) : null;
   const savedView = input.savedView ? { id: input.savedView.id, name: input.savedView.name, version: input.savedView.version } : null;
   let comparisonResult: IssueFieldBreakdown['comparison'];
@@ -223,7 +234,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       ? new Map(comparison.field.options.map((option, index) => [valueId(comparison.field, option.id), index]))
       : new Map<string, number>();
     const orderedColumns = [...columns.values()].sort((left, right) =>
-      Number(left.id === 'missing') - Number(right.id === 'missing') ||
+      (specialGroupOrder.get(left.id) ?? 0) - (specialGroupOrder.get(right.id) ?? 0) ||
       (workflowOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (workflowOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER) ||
       compareText(left.label, right.label) || compareText(left.id, right.id));
     const columnPosition = new Map(orderedColumns.map((column, index) => [column.id, index]));
@@ -247,7 +258,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       projectId, field: { id: field.id, name: field.name, kind: field.kind, archived: field.archived },
       ...(groupBy ? { groupBy } : {}), ...(comparisonResult ? { comparison: comparisonResult } : {}),
       savedView, revision, generatedAt: input.generatedAt, totalIssues: input.issues.length,
-      applicableIssues, populatedIssues, missingIssues: missing.count, notApplicableIssues: notApplicable.count,
+      applicableIssues, populatedIssues, missingIssues: missing.count + (unknown?.count ?? 0), notApplicableIssues: notApplicable.count,
       groups, numeric,
     },
     issuesByBucket, columnByIssue,

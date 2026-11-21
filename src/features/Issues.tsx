@@ -15,6 +15,7 @@ import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { IssuePriorityLabelFilters } from './IssuePriorityLabelFilters';
+import { IssueReporterFilterSelect } from './IssueReporterSelect';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { BoardCapacityDetails, BoardCapacityNote, BoardCapacitySummary, type BoardStatusCapacity } from './IssueBoardCapacity';
@@ -36,7 +37,7 @@ type BoardDrop = IssuePlacement & BoardCell;
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
-type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels'>;
+type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 const assigneeCollator = new Intl.Collator('ko', { numeric: true });
 
@@ -129,13 +130,13 @@ export function Issues(props: FeatureProps & {
   const [type, setType] = useState('all');
   const [projectFilters, setProjectFilters] = useState(() => new Map<string, ProjectFilters>());
   const [filterEditorEpoch, setFilterEditorEpoch] = useState(0);
-  const { fieldFilter, planning, gitlab, priorities, labels } = projectFilters.get(projectId) ?? {};
+  const { fieldFilter, planning, gitlab, priorities, labels, reporter } = projectFilters.get(projectId) ?? {};
   const planningItems = data.planningItems ?? [];
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
   const filters = useMemo(() => ({
     query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
-    ...(gitlab ? { gitlab } : {}), ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}),
-  }), [query, status, assignee, type, fieldFilter, planning, gitlab, priorities, labels]);
+    ...(gitlab ? { gitlab } : {}), ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
+  }), [query, status, assignee, type, fieldFilter, planning, gitlab, priorities, labels, reporter]);
   const gitlabSummary = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
@@ -190,12 +191,12 @@ export function Issues(props: FeatureProps & {
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     setPasteScope(currentPasteScope);
   }
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels);
+  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels || reporter);
   function updateProjectFilters(change: ProjectFilters) {
     setProjectFilters(previous => {
       const next = new Map(previous);
       const filters = { ...previous.get(projectId), ...change };
-      if (filters.fieldFilter || filters.planning || filters.gitlab || filters.priorities || filters.labels) next.set(projectId, filters);
+      if (filters.fieldFilter || filters.planning || filters.gitlab || filters.priorities || filters.labels || filters.reporter) next.set(projectId, filters);
       else next.delete(projectId);
       return next;
     });
@@ -207,8 +208,8 @@ export function Issues(props: FeatureProps & {
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
     setType(value.filters.type);
-    const { fieldFilter, planning, gitlab, priorities, labels } = value.filters;
-    updateProjectFilters({ fieldFilter, planning, gitlab, priorities, labels });
+    const { fieldFilter, planning, gitlab, priorities, labels, reporter } = value.filters;
+    updateProjectFilters({ fieldFilter, planning, gitlab, priorities, labels, reporter });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
@@ -463,6 +464,8 @@ export function Issues(props: FeatureProps & {
       <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} disabled={bulk.locked} onChange={e => setQuery(e.target.value)} /></div>
       <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} disabled={bulk.locked} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
       <select className="issue-filter" aria-label="담당자 필터" value={assignee} disabled={bulk.locked} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
+      <IssueReporterFilterSelect filter={reporter} users={data.users} disabled={bulk.locked}
+        onChange={next => updateProjectFilters({ reporter: next })} />
       <select className="issue-filter" aria-label="유형 필터" value={type} disabled={bulk.locked} onChange={e => setType(e.target.value)}><option value="all">모든 유형</option>{type !== 'all' && !issueTypes.some(item => item.id === type) && <option value={type}>{type} (저장된 조건)</option>}{issueTypes.map(item => <option key={item.id} value={item.id}>{item.name}{item.archived ? ' (보관됨)' : ''}</option>)}</select>
       <select className="issue-filter" aria-label="GitLab 조건" value={gitlab ?? ''} disabled={bulk.locked}
         onChange={event => updateProjectFilters({ gitlab: (event.target.value || undefined) as IssueViewGitlabFilter | undefined })}>
@@ -484,7 +487,7 @@ export function Issues(props: FeatureProps & {
       <IssuePlanningFilters key={`planning:${projectId}:${filterEditorEpoch}`} projectId={projectId} planningItems={planningItems}
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
-    <SavedViews projectId={projectId} planningItems={planningItems} views={projectViews} selectedId={savedViewId}
+    <SavedViews projectId={projectId} planningItems={planningItems} users={data.users} views={projectViews} selectedId={savedViewId}
       current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />

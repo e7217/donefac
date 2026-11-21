@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
-import { createIssueViewMatcher, IssueViewPlanningFilterError, parseIssueViewPlanningFilter } from '../../shared/issue-view.js';
+import { createIssueViewMatcher, IssueViewPlanningFilterError, IssueViewReporterFilterError, parseIssueViewPlanningFilter, parseIssueViewReporterFilter } from '../../shared/issue-view.js';
 import type { Issue, PlanningItem, SavedViewState } from '../../shared/types.js';
 
 const projectId = 'team-project';
@@ -21,6 +21,34 @@ function issue(extra: Partial<Issue> = {}): Issue {
 }
 
 const matcher = (criteria: Partial<SavedViewState['filters']> = {}) => createIssueViewMatcher({ ...defaultFilters, ...criteria }, { users: [] }, schema);
+
+test('reporter filter admits exact member IDs, explicit unset and missing data', () => {
+  const parse = (value: unknown) => parseIssueViewReporterFilter(value, [{ id: 'owner' }, { id: 'all' }]);
+  assert.equal(parse(undefined), undefined);
+  assert.equal(parse(null), undefined);
+  assert.deepEqual(parse({ kind: 'member', memberId: 'all' }), { kind: 'member', memberId: 'all' });
+  assert.deepEqual(parse({ kind: 'unset' }), { kind: 'unset' });
+  assert.deepEqual(parse({ kind: 'unknown' }), { kind: 'unknown' });
+  for (const invalid of [
+    [], {}, 'owner', { kind: 'all' }, { kind: 'member' }, { kind: 'member', memberId: 2 },
+    { kind: 'member', memberId: 'owner ' }, { kind: 'member', memberId: 'missing' },
+    { kind: 'member', memberId: 'owner', extra: true }, { kind: 'unset', memberId: undefined },
+    { kind: 'unknown', memberId: null }, Object.create({ kind: 'unset' }),
+    { get kind() { throw new Error('unexpected reporter getter'); } },
+  ]) assert.throws(() => parse(invalid), IssueViewReporterFilterError);
+});
+
+test('saved reporter criteria compose with status and assignee without merging missing and unset', () => {
+  const legacy = issue();
+  const unset = issue({ reporterId: null });
+  const member = issue({ reporterId: 'owner', assigneeId: 'user-seo', status: 'review' });
+  const examples = [legacy, unset, member, issue({ reporterId: 'user-seo', assigneeId: 'owner' })];
+  assert.deepEqual(examples.filter(matcher()), examples);
+  assert.deepEqual(examples.filter(matcher({ reporter: { kind: 'unknown' } })), [legacy]);
+  assert.deepEqual(examples.filter(matcher({ reporter: { kind: 'unset' } })), [unset]);
+  const match = matcher({ reporter: { kind: 'member', memberId: 'owner' }, assigneeId: 'user-seo', status: 'review' });
+  assert.deepEqual([...examples, { ...member, status: 'todo' }, { ...member, assigneeId: 'owner' }].filter(match), [member]);
+});
 
 test('planning filter canonicalizes omitted input and validates selector scope, kind and date bounds', () => {
   const plans = [plan('prior-cycle', 'cycle', {status: 'archived'}), plan('team-module', 'module'), plan('other-cycle', 'cycle', {projectId: 'another-project'})];

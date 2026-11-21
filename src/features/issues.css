@@ -161,3 +161,6 @@
 
 .issue-results { flex-wrap: wrap; gap: 6px 12px; }
 .issue-export-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-inline-start: auto; }
+.issue-reporter-filter { max-width: 100%; min-width: 0; }
+.issue-reporter-filter > span { font-size: 11px; flex-shrink: 0; }
+.issue-reporter-filter > select { min-width: 0; max-width: 14rem; text-overflow: ellipsis; }

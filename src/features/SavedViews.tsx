@@ -2,17 +2,19 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { BarChart3, Bookmark, Check, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import type { PlanningItem, SavedView, SavedViewState } from '../../shared/types';
+import type { PlanningItem, SavedView, SavedViewState, User } from '../../shared/types';
 import { issuePriorityLabelFilterLabels } from '../../shared/issue-view';
 import { api, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
+import { issueReporterFilterLabel } from './IssueReporterSelect';
 import './saved-views.css';
 
 type Props = {
   projectId: string;
   planningItems: readonly PlanningItem[];
+  users: readonly User[];
   views: SavedView[];
   selectedId: string | null;
   current: SavedViewState;
@@ -34,7 +36,7 @@ export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, planningItems, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, planningItems, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -170,6 +172,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
           name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
             priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
+            reporter: editing.state.filters.reporter ?? null,
           }, expectedVersion: editing.target.version,
         })
         : await post<SavedView>('/views', {projectId, name, ...editing.state});
@@ -289,6 +292,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
       <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{editorState.filters.status === 'all' ? '모든 상태' : `상태: ${editorState.filters.status}`}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
+        {editorState.filters.reporter && <span>{issueReporterFilterLabel(editorState.filters.reporter, users)}</span>}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
         {issuePriorityLabelFilterLabels(editorState.filters).map(label => <span key={label}>{label}</span>)}
       </div>

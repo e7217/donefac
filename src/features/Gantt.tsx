@@ -48,7 +48,7 @@ import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
-import { IssueReporterSelect } from './IssueReporterSelect';
+import { issueReporterFilterLabel, IssueReporterSelect } from './IssueReporterSelect';
 import './issues.css';
 import './gantt.css';
 
@@ -485,6 +485,7 @@ function ProjectGantt(props: GanttProps) {
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
   const sharedFilters = sharedView?.filters;
   const sharedGitlabFilter = sharedFilters?.gitlab;
+  const sharedReporterLabel = sharedFilters?.reporter ? issueReporterFilterLabel(sharedFilters.reporter, data.users) : undefined;
   const sharedPlanningFilter = sharedFilters?.planning;
   const sharedPlanningLabels = issuePlanningFilterLabels(sharedPlanningFilter, projectPlans);
   const sharedPriorityLabelCriteria = sharedFilters ? issuePriorityLabelFilterLabels(sharedFilters) : [];
@@ -723,6 +724,7 @@ function ProjectGantt(props: GanttProps) {
         const name = assigneeId === 'none' ? '미지정' : data.users.find(value => value.id === assigneeId)?.name;
         filters.push(`담당자 · ${name ?? '현재 담당자 없음'}`);
       }
+      if (sharedReporterLabel) filters.push(sharedReporterLabel);
       if (fieldFilter?.rules.length) filters.push(`사용자 정의 필드 조건 ${fieldFilter.rules.length}개`);
       filters.push(...sharedPriorityLabelCriteria);
       filters.push(...sharedPlanningLabels);
@@ -1341,6 +1343,9 @@ function ProjectGantt(props: GanttProps) {
       {sharedView && onOpenSavedIssueView && <button type="button" className="btn btn-ghost" disabled={busy}
         onClick={() => onOpenSavedIssueView(sharedView.id)}>업무 보기에서 열기 <ArrowRight size={14} aria-hidden="true" /></button>}
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+      {sharedReporterLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 요청자 조건">
+        <li>{sharedReporterLabel}</li>
+      </ul>}
       {sharedPriorityLabelCriteria.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 우선순위·라벨 조건">
         {sharedPriorityLabelCriteria.map(label => <li key={label}>{label}</li>)}
       </ul>}

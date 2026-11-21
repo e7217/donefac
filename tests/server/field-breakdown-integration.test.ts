@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, CustomFieldValue, Issue, IssueFieldBreakdown, IssueFieldBreakdownPage, Project, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, CustomFieldValue, Issue, IssueBulkEditPreview, IssueFieldBreakdown, IssueFieldBreakdownPage, Project, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 const allFilters = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
 async function fixture() {
@@ -237,6 +237,78 @@ test('status by assignee uses a saved view and project workflow even with no cus
     assert.deepEqual(ids(updated.data.issues), [unassigned.id]);
     const doneCell = await readCell({ ...cell, revision: refreshed.revision, bucketId: complete.id, comparisonBucketId: assignedColumn.id });
     assert.deepEqual(ids(doneCell.data.issues), [done.id]);
+  } finally { await f.close(); }
+});
+
+test('reporter cross-tabs support exact rows and columns, scoped saved views and stale bulk edit guards', async () => {
+  const f = await fixture();
+  try {
+    const { id: projectId } = f.project;
+    const prefix = '요청자 집계 대상';
+    const named = await f.make(`${prefix} 기록됨`, {}, { reporterId: 'user-seo' });
+    const blank = await f.make(`${prefix} 미지정`, {}, { reporterId: null });
+    const historical = await f.make(`${prefix} 예전 업무`);
+    await f.make('저장 보기 범위 밖', {}, { reporterId: 'user-seo' });
+    const exported = await f.call<{ issues: Issue[] }>('/export');
+    assert.equal(exported.status, 200);
+    delete exported.data.issues.find(issue => issue.id === historical.id)!.reporterId;
+    const imported = await f.call('/import', 'POST', { data: exported.data });
+    assert.equal(imported.status, 200, JSON.stringify(imported.data));
+    const { issues, users } = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const unchanged = issues.find(issue => issue.id === blank.id)!;
+    const legacy = issues.find(issue => issue.id === historical.id)!;
+    const reporter = users.find(user => user.id === named.reporterId)!;
+
+    const filters = { ...allFilters, query: prefix };
+    const view = await f.call<SavedView>('/views', 'POST', { projectId, name: '요청 집계 범위', layout: 'board', filters });
+    const onlyLegacy = await f.call<SavedView>('/views', 'POST', { projectId, name: '기록 없는 요청', layout: 'list',
+      filters: { ...filters, reporter: { kind: 'unknown' } },
+    });
+    const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '요청자 집계 키', access: 'read', projectIds: [projectId], expiresAt: null });
+    assert.equal(view.status, 201, JSON.stringify(view.data));
+    assert.equal(onlyLegacy.status, 201, JSON.stringify(onlyLegacy.data));
+    assert.equal(key.status, 201, JSON.stringify(key.data));
+    const token = key.data.token;
+    const path = `/v1/projects/${projectId}/field-breakdown`;
+    const query = { groupBy: 'reporter', comparisonBy: 'assignee', savedViewId: view.data.id };
+    const read = async (state: Record<string, unknown>) => {
+      const response = await f.call<IssueFieldBreakdown>(path, 'POST', state, token);
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      return response.data;
+    };
+    const readCell = (state: Record<string, unknown>) => f.call<IssueFieldBreakdownPage>(`${path}/issues`, 'POST', state, token);
+    const report = await read(query);
+    assert.equal(report.totalIssues, 3);
+    assert.deepEqual(report.field, { id: 'builtin:reporter', name: '요청자', kind: 'user', archived: false });
+    assert.ok(report.comparison && report.comparison.columns.length === 1);
+    const comparisonBucketId = report.comparison.columns[0].id;
+    const namedBucket = group(report, 'value', reporter.name);
+    const cell = { ...query, revision: report.revision, bucketId: 'missing', comparisonBucketId };
+    for (const [bucketId, issue] of [[namedBucket.id, named], ['missing', blank], ['unknown', historical]] as const) {
+      const response = await readCell({ ...cell, bucketId });
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      assert.deepEqual(ids(response.data.issues), [issue.id]);
+      assert.equal(report.comparison.counts[bucketId]?.[comparisonBucketId], 1);
+    }
+    const reverse = await read({ groupBy: 'status', comparisonBy: 'reporter', savedViewId: onlyLegacy.data.id });
+    assert.equal(reverse.totalIssues, 1);
+    assert.deepEqual(reverse.comparison?.columns, [{ id: 'unknown', label: '기록 없음', count: 1 }]);
+    assert.equal((await f.call('/v1/projects/project-team/field-breakdown', 'POST', query, token)).status, 403);
+
+    const bulkPath = `/projects/${projectId}/issues/bulk`;
+    const reviewed = await f.call<IssueBulkEditPreview>(`${bulkPath}-preview`, 'POST', {
+      issues: [{ id: unchanged.id, expectedVersion: unchanged.version }], changes: { priority: 'urgent' }, fieldBreakdown: cell,
+    });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    assert.ok(reviewed.data.previewId);
+    const updated = await f.call<Issue>(`/issues/${legacy.id}`, 'PATCH', { expectedVersion: legacy.version, reporterId: reporter.id });
+    assert.equal(updated.status, 200, JSON.stringify(updated.data));
+    assert.equal((await readCell(cell)).status, 409);
+    const rejected = await f.call<{ details: { reason: string } }>(`${bulkPath}-apply`, 'POST', { previewId: reviewed.data.previewId });
+    assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+    assert.equal(rejected.data.details.reason, 'field_breakdown_stale');
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.id === unchanged.id), unchanged);
+    assert.equal((await read({ groupBy: 'status', comparisonBy: 'reporter', savedViewId: onlyLegacy.data.id })).totalIssues, 0);
   } finally { await f.close(); }
 });
 

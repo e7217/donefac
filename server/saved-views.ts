@@ -4,8 +4,8 @@ import type { PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewSta
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import {
-  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError,
-  parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter, parseIssueViewPriorities,
+  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError,
+  parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter, parseIssueViewPriorities, parseIssueViewReporterFilter,
 } from '../shared/issue-view.js';
 import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
@@ -39,12 +39,14 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const gitlab = previous && gitlabInput === null ? undefined : parseIssueViewGitlabFilter(gitlabInput);
     const priorities = Object.hasOwn(filters, 'priorities') ? parseIssueViewPriorities(filters.priorities) : previous?.priorities;
     const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
+    const reporter = parseIssueViewReporterFilter(Object.hasOwn(filters, 'reporter') ? filters.reporter : previous?.reporter, users);
     return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), filters: {
       query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
-      ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}),
+      ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
     } };
   } catch (error) {
-    if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError || error instanceof IssueViewPriorityLabelFilterError) return fail(error.message, error.status);
+    if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError ||
+        error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewReporterFilterError) return fail(error.message, error.status);
     throw error;
   }
 }

@@ -21,7 +21,7 @@ function identifier(value: unknown, label: string): string {
   return value;
 }
 
-const groupingNames = { status: '상태', priority: '우선순위', assignee: '담당자', type: '업무 유형' } satisfies Record<IssueFieldBreakdownDimension, string>;
+const groupingNames = { status: '상태', priority: '우선순위', assignee: '담당자', reporter: '요청자', type: '업무 유형' } satisfies Record<IssueFieldBreakdownDimension, string>;
 
 function dimension(value: unknown): IssueFieldBreakdownDimension {
   if (typeof value !== 'string' || !(ISSUE_FIELD_BREAKDOWN_DIMENSIONS as readonly string[]).includes(value)) {
@@ -68,7 +68,7 @@ function builtinField(by: IssueFieldBreakdownDimension, schema: ProjectIssueSche
   const options: CustomFieldDefinition['options'] = by === 'status' ? workflow!.statuses.map(status => ({ id: status.id, name: status.label, archived: false }))
     : by === 'priority' ? Object.entries(PRIORITY).map(([id, name]) => ({ id, name, archived: false }))
     : by === 'type' ? schema.issueTypes.map(({ id, name, archived }) => ({ id, name, archived })) : [];
-  return { id: `builtin:${by}`, name: groupingNames[by], kind: by === 'assignee' ? 'user' : 'select', archived: false,
+  return { id: `builtin:${by}`, name: groupingNames[by], kind: by === 'assignee' || by === 'reporter' ? 'user' : 'select', archived: false,
     required: false, description: '', issueTypes: [], options };
 }
 

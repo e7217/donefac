@@ -43,7 +43,7 @@ const GROUP_PAGE_SIZE = 25;
 const ISSUE_PAGE_SIZE = 50;
 const COMPARISON_PAGE_SIZE = 10;
 const DIMENSION_LABELS: Record<IssueFieldBreakdownDimension, string> = {
-  status: '상태', priority: '우선순위', assignee: '담당자', type: '유형',
+  status: '상태', priority: '우선순위', assignee: '담당자', reporter: '요청자', type: '유형',
 };
 const KIND_LABELS: Record<CustomFieldKind, string> = {
   text: '텍스트',
