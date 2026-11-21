@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
@@ -32,16 +32,18 @@ const LegacyImportSettings = lazy(() => import('./features/LegacyImportSettings'
 const ApiKeysSettings = lazy(() => import('./features/ApiKeysSettings').then(module => ({default: module.ApiKeysSettings})));
 const Development = lazy(() => import('./features/Development').then(module => ({default:module.Development})));
 const Planning = lazy(() => import('./features/Planning').then(module => ({default: module.Planning})));
+const CycleBoard = lazy(() => import('./features/CycleBoard').then(module => ({default: module.CycleBoard})));
 const Reports = lazy(() => import('./features/Reports').then(module => ({default: module.Reports})));
 const Documents = lazy(() => import('./features/Documents').then(module => ({default: module.Documents})));
 const DocumentPublicationLibrary = lazy(() => import('./features/DocumentPublicationLibrary').then(module => ({default: module.DocumentPublicationLibrary})));
 const TeamOverview = lazy(() => import('./features/TeamOverview').then(module => ({default: module.TeamOverview})));
 const Trash = lazy(() => import('./features/Trash').then(module => ({default: module.Trash})));
 
-type View = 'overview' | 'issues' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash' | 'teamoverview';
+type View = 'overview' | 'issues' | 'backlog' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash' | 'teamoverview';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
+  { id: 'backlog', label: '백로그 · 사이클', icon: CalendarRange },
   { id: 'gantt', label: '간트 · 일정', icon: SquareChartGantt },
   { id: 'planning', label: '사이클 · 모듈 · 릴리스', icon: FolderPlus },
   { id: 'reports', label: '보고서', icon: BarChart3 },
@@ -69,12 +71,12 @@ type WorkspaceCommentFocus = {
   commentId: string;
   activation: number;
 };
-const validViews: View[] = ['overview','issues','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
+const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 function routeHash(route: WorkspaceRoute) {
   const reportDetail = route.decisionFollowUpScope ? 'decision-follow-ups' : route.blockerScope ? 'blockers' : route.reportId;
   const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? reportDetail :
-    (route.view === 'gantt' || route.view === 'planning') ? route.planningId : null;
+    (route.view === 'gantt' || route.view === 'planning' || route.view === 'backlog') ? route.planningId : null;
   const query = new URLSearchParams();
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt') && route.savedViewId) query.set('savedView', route.savedViewId);
@@ -188,8 +190,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
   const requestedFocusDate = parameters.get('focusDate');
   const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
-  const planningId = (view === 'planning' || view === 'gantt' && !ganttFocusIssueId) && projectId === parts[0] &&
-    snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId) ? parts[2] : null;
+  const planningId = (view === 'planning' || view === 'backlog' || view === 'gantt' && !ganttFocusIssueId) && projectId === parts[0] &&
+    snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId &&
+      (view !== 'backlog' || item.kind === 'cycle' && (item.status === 'planned' || item.status === 'active'))) ? parts[2] : null;
   const savedViewId = view === 'issues' || (view === 'gantt' && !ganttFocusIssueId) ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
@@ -397,6 +400,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const sameView = nextView === view && nextProject === projectId;
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
       documentLabel: sameView ? documentLabel : null,
+      planningId: sameView && nextView === 'backlog' ? planningId : null,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined});
@@ -458,7 +462,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setIssueFocusActivation(value => value + 1);
     return true;
   };
-  const openPlanIn = (nextView: 'planning' | 'gantt', id: string) =>
+  const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) =>
     requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
   const openDocument = (id: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
@@ -607,15 +611,22 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}
           onOpenBoardCapacityIssue={openIssue}
+          onOpenCycleBoard={() => openPlanIn('backlog')}
           onChangeSavedView={id => requestRoute({projectId,view:'issues',documentId:null,issueId,savedViewId:id})}
           onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,savedViewId:id})}/>}
+        {view === 'backlog' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>사이클 계획을 불러오는 중입니다.</p></div>}>
+          <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
+            onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
+        </Suspense>}
         {view === 'gantt' && <Gantt {...props} initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
           focusIssueId={ganttFocusIssueId} focusDateEndpoint={ganttFocusDate} issueOverlayOpen={Boolean(openedIssue)} issueFocusActivation={issueFocusActivation}
           onLocateIssueDate={openIssueSchedule}
           onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId})}
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
-        {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}><Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}/></Suspense>}
+        {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
+          <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)} onOpenCycleBoard={id => openPlanIn('backlog', id)} />
+        </Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>
           <Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope} decisionFollowUpScope={decisionFollowUpScope}
             onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} issueOverlayOpen={reportIssueOpen}/>

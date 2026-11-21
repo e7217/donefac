@@ -5,3 +5,5 @@
 @media(max-width:680px){.planning-feature{padding:25px 17px 40px}.planning-feature .feature-heading{align-items:flex-start}.planning-feature .feature-heading h1{font-size:21px}.planning-feature .feature-heading>.btn{font-size:10px;white-space:nowrap}}
 .planning-detail-column { min-width: 0; }
 .planning-gantt-link { margin-bottom: 10px; text-decoration: none; }
+.planning-heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+@media(max-width:680px) { .planning-heading-actions { justify-content: flex-start; } }

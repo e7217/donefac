@@ -1,7 +1,7 @@
 'use client';
 
 import { useId, useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState, type User, type WorkflowStatus } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
@@ -107,6 +107,7 @@ export function Issues(props: FeatureProps & {
   savedViewId?: string | null;
   onChangeSavedView?: (id: string | null) => boolean;
   onOpenGantt?: (viewId: string) => void;
+  onOpenCycleBoard?: () => void;
   onOpenBoardCapacityIssue?: (id: string, source: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
 }) {
   const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt, onOpenBoardCapacityIssue } = props;
@@ -441,6 +442,9 @@ export function Issues(props: FeatureProps & {
   return <div className="issues-feature">
     <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
       <div className="issue-heading-actions">
+        {projectSelected && props.onOpenCycleBoard && <button className="btn" type="button" onClick={props.onOpenCycleBoard}>
+          <CalendarRange size={15} aria-hidden="true" />백로그 · 사이클
+        </button>}
         {projectSelected && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
         {projectSelected && view === 'list' && <button className="btn" type="button" disabled={Boolean(busy) || bulk.busy}
           onClick={beginPaste}><ClipboardPaste size={15} aria-hidden="true" />업무 붙여넣기</button>}

@@ -1070,6 +1070,26 @@ export function createApp(options: {
     });
     res.json(result);
   });
+  app.post('/api/projects/:id/cycle-board/move', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const result = issueOrders.moveOnCycleBoard(req.params.id, actor(req), req.body, (issue, placement) => {
+      const { sourceCycle, targetCycle, orderChanged, anchor, position } = placement;
+      const sourceId = sourceCycle?.id ?? null;
+      const targetId = targetCycle?.id ?? null;
+      const cycleLabel = targetCycle?.name ?? '백로그';
+      const membership = sourceId !== targetId ? `${sourceCycle?.name ?? '백로그'} → ${cycleLabel}` : cycleLabel;
+      const rank = orderChanged && anchor ? ` · ${anchor.key} ${position === 'before' ? '앞으로' : '뒤로'} 이동` : '';
+      const history = { action: '사이클 보드 이동', detail: `${issue.key} · ${membership}${rank}` };
+      if (sourceId !== targetId) {
+        const prepared = prepareIssueUpdate(issue, { cycleId: targetId });
+        const { cycleId, cycle, version, updatedAt } = prepared.issue;
+        return commitIssueUpdate(req, issue, { ...prepared, issue: { ...issue, cycleId, cycle, version, updatedAt } }, history);
+      }
+      activity(req, 'issue', issue.id, history.action, history.detail);
+      return issue;
+    });
+    res.json(result);
+  });
   app.get('/api/issues/:id/gitlab-links', (req, res) => {
     if (Object.keys(req.query).some(key => key !== 'kind' && key !== 'offset')) return fail('GitLab 활동 조회 조건을 확인해 주세요.');
     const kind = req.query.kind ?? '';
@@ -2220,6 +2240,7 @@ export function createApp(options: {
       documentCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
       cycleCompletion.resetForImport();
+      issueOrders.clearCycleMovesForImport();
       outbound.resetForImport();
       migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);

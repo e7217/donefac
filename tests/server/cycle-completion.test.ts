@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import type {
-  ApiKeyCreated, CycleCompletionPreview, CycleCompletionResult, Issue, PlanningItem, ProjectWorkflow, WorkspaceSnapshot,
+  ApiKeyCreated, CycleCompletionPreview, CycleCompletionResult, Issue, PlanningItem, ProjectIssueOrder, ProjectWorkflow, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -95,7 +95,7 @@ test('cycle completion follows workflow categories and carries live tickets with
     assert.equal((await app.call(`/issues/${trashed.id}`, 'DELETE', { expectedVersion: trashed.version })).status, 200);
     assert.equal((await app.call('/dependencies', 'POST', { predecessorId: parent.id, successorId: carried.id, type: 'FS', lagDays: 0 })).status, 201);
     const before = await workspace(app);
-    const order = (await app.call(`/projects/${projectId}/issue-order`)).data;
+    const order = (await app.call<ProjectIssueOrder>(`/projects/${projectId}/issue-order`)).data;
 
     const preview = await review(app, source, destination);
     assert.ok(preview.previewId && preview.expiresAt);
@@ -117,7 +117,9 @@ test('cycle completion follows workflow categories and carries live tickets with
     for (const unchanged of [parent.id, abandoned.id, existing.id]) assert.deepEqual(findIssue(after, unchanged), findIssue(before, unchanged));
     assert.equal(findIssue(after, trashed.id), undefined);
     assert.deepEqual(after.dependencies, before.dependencies);
-    assert.deepEqual((await app.call(`/projects/${projectId}/issue-order`)).data, order);
+    const afterOrder = (await app.call<ProjectIssueOrder>(`/projects/${projectId}/issue-order`)).data;
+    assert.deepEqual(afterOrder.issueIds, order.issueIds);
+    assert.notEqual(afterOrder.version, order.version);
     assert.equal(after.activities.filter(row => row.resourceId === source.id).length, before.activities.filter(row => row.resourceId === source.id).length + 1);
     assert.equal(after.activities.filter(row => row.resourceId === carried.id).length, before.activities.filter(row => row.resourceId === carried.id).length + 1);
   });

@@ -322,6 +322,14 @@ curl --fail-with-body \
 
 자동화 클라이언트는 프로젝트 범위의 키로 `/api/v1/projects/:id/issue-order`에 같은 요청을 보낸다. 이동에는 쓰기 키가 필요하다.
 
+## 백로그와 사이클 사이에서 업무 이동
+
+브라우저의 `POST /api/projects/:id/cycle-board/move`에 `requestId`(UUID v4), `issueId`, 조회한 프로젝트 순서의 `expectedVersion`, `expectedIssueVersion`, `sourceCycle`, `targetCycle`, `anchorId`, `position`을 보낸다. 사이클은 `{id,expectedVersion}`으로 지정한다. `null`은 사이클 미지정 백로그다. 출발·도착 사이클은 같은 프로젝트의 `planned` 또는 `active` 상태여야 한다.
+
+`position`은 `before` 또는 `after`다. `anchorId`가 있으면 같은 프로젝트의 대상 그룹에 속한 업무여야 한다. `null`과 `before` 또는 `after`를 사용하면 실제 대상 그룹의 처음 또는 끝으로 이동한다. 대상 그룹이 비어 있으면 기존 프로젝트 순위를 유지한다. 순서와 업무·사이클의 버전이 일치할 때 배정·순서·이력을 한 트랜잭션에 기록한다. 다른 경로에서 사이클 배정이 바뀌어도 업무 순서 비교 버전이 갱신된다.
+
+응답은 `{order,issue,duplicate}`다. 같은 작업자·프로젝트·요청 ID·입력으로 7일 이내에 재전송하면 현재 업무와 순서에 `duplicate:true`를 반환한다. 이전 이동이나 이력을 다시 쓰지 않는다. 현재 업무를 찾을 수 없거나 요청 ID·버전·배정이 충돌하면 `409`를 반환한다. 자체 JSON 복원은 배정과 순서를 보존하며 이동 요청 기록을 초기화한다. 물리 백업은 이동 요청 기록도 보존한다.
+
 ## 공유 보기의 보드 그룹
 
 브라우저의 `POST /api/views`와 `PATCH /api/views/:id`에서 `layout: 'board'`와 `boardGrouping: 'assignee'`로 담당자별 보드를 저장한다. 수정 시 `boardGrouping`을 생략하면 설정을 유지하고 `null`을 보내면 지운다. `layout: 'list'`도 묶음을 지운다. 응답에서 `boardGrouping`이 없으면 기본 보드다. 자체 백업 형식 76은 이 표시 설정을 보존한다. 간트와 문서의 업무 목록·현황 및 보고서는 보기의 필터로 업무를 선택한다.

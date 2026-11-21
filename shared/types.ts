@@ -1200,6 +1200,18 @@ export interface IssueOrderMove {
   assigneeId?: string | null;
 }
 export interface IssueOrderMoveResult { order: ProjectIssueOrder; issue: Issue }
+type CycleBoardVersion = { id: string; expectedVersion: number };
+export interface CycleBoardMoveInput {
+  requestId: string;
+  issueId: string;
+  expectedVersion: string;
+  expectedIssueVersion: number;
+  sourceCycle: CycleBoardVersion | null;
+  targetCycle: CycleBoardVersion | null;
+  anchorId: string | null;
+  position: 'before' | 'after';
+}
+export interface CycleBoardMoveResult extends IssueOrderMoveResult { duplicate: boolean }
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
