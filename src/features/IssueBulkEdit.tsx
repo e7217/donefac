@@ -1,20 +1,24 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ListChecks, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { ListChecks, Plus, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
+import { fieldValueLabel, hasCustomValue, projectIssueSchema } from '../../shared/issue-schema';
 import {
-  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type FeatureProps, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type CustomFieldDefinition, type CustomFieldValue, type FeatureProps, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditTarget, type IssueBulkEditValues, type IssueFieldBreakdownSelection,
   type Priority, type WorkflowStatus,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
+import { CustomFieldInput } from './CustomFields';
 import { errorMessage } from './schedule-utils';
 import './issue-bulk-edit.css';
 
 type BasicChanges = Pick<IssueBulkEditChanges, 'status' | 'priority' | 'assigneeId'>;
 type DueDateMode = 'keep' | 'set' | 'clear';
+type CustomFieldMode = 'set' | 'clear';
+type CustomFieldDraft = Pick<CustomFieldDefinition, 'id' | 'name' | 'kind'> & { mode: CustomFieldMode; value: CustomFieldValue };
 
 interface EditFields {
   changes: BasicChanges;
@@ -22,6 +26,7 @@ interface EditFields {
   dueDate: string;
   addLabelsText: string;
   removeLabels: string[];
+  customFieldDrafts: CustomFieldDraft[];
 }
 
 interface EditSession extends EditFields {
@@ -33,7 +38,7 @@ interface EditSession extends EditFields {
   applyUncertain: boolean;
 }
 
-const emptyFields: EditFields = { changes: {}, dueDateMode: 'keep', dueDate: '', addLabelsText: '', removeLabels: [] };
+const emptyFields: EditFields = { changes: {}, dueDateMode: 'keep', dueDate: '', addLabelsText: '', removeLabels: [], customFieldDrafts: [] };
 
 function initialSession(scope: string): EditSession {
   return { ...emptyFields, scope, ids: new Set(), preview: null, error: '', refreshRequired: false, applyUncertain: false };
@@ -48,7 +53,28 @@ type ReportSelection = {
   pageTargets: readonly IssueBulkEditTarget[];
 };
 
-export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: FeatureProps, visible: readonly IssueBulkEditTarget[], report?: ReportSelection) {
+function customFieldError(draft: CustomFieldDraft, field: CustomFieldDefinition | undefined, users: FeatureProps['data']['users']): string {
+  if (!field || field.archived || field.kind !== draft.kind) return '필드 설정이 변경되었습니다. 이 변경을 제외한 뒤 필요한 필드를 다시 추가해 주세요.';
+  if (draft.mode === 'clear') return '';
+  const { value } = draft;
+  if (!hasCustomValue(value)) return '값을 지정하거나 변경 방식을 ‘값 지우기’로 선택해 주세요.';
+  if (field.kind === 'select' || field.kind === 'multi_select') {
+    const optionIds = Array.isArray(value) ? value : [value];
+    if (optionIds.some(id => !field.options.some(option => option.id === id && !option.archived))) return '사용할 수 있는 선택지를 지정해 주세요.';
+  }
+  if (field.kind === 'user' && !users.some(user => user.id === value)) return '현재 팀원을 선택해 주세요.';
+  if (field.kind === 'date' && !isCalendarDate(value)) return '유효한 날짜를 지정해 주세요.';
+  if (field.kind === 'url' && typeof value === 'string') {
+    try {
+      const url = new URL(value.trim());
+      if ((url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password) return '';
+    } catch { /* Invalid URL text is kept for correction. */ }
+    return '인증 정보가 없는 http(s) URL을 입력해 주세요.';
+  }
+  return '';
+}
+
+export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: FeatureProps, visible: readonly IssueBulkEditTarget[], report?: ReportSelection) {
   const selection = report?.fieldBreakdown;
   const scope = JSON.stringify([projectId, actorId, report ? [selection?.fieldId, selection?.groupBy, selection?.savedViewId,
     selection?.comparisonBy, selection?.bucketId, selection?.comparisonBucketId] : null]);
@@ -58,7 +84,14 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
   const active = session?.scope === scope;
   const selected = active ? visible.filter(issue => session.ids.has(issue.id)) : [];
   const fields = active ? session : emptyFields;
-  const { dueDateMode, dueDate, addLabelsText, removeLabels } = fields;
+  const { dueDateMode, dueDate, addLabelsText, removeLabels, customFieldDrafts } = fields;
+  const customFieldDefinitions = projectIssueSchema(data, projectId).fields;
+  const customFieldsById = new Map(customFieldDefinitions.map(field => [field.id, field]));
+  const customFieldErrors = new Map<string, string>();
+  for (const draft of customFieldDrafts) {
+    const error = customFieldError(draft, customFieldsById.get(draft.id), data.users);
+    if (error) customFieldErrors.set(draft.id, error);
+  }
   const addLabels = [...new Set(addLabelsText.split(',').map(label => label.trim()).filter(Boolean))];
   const validDueDate = dueDateMode !== 'set' || isCalendarDate(dueDate);
   const changes: IssueBulkEditChanges = {
@@ -66,6 +99,9 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     ...(dueDateMode === 'clear' ? { dueDate: null } : dueDateMode === 'set' && validDueDate ? { dueDate } : {}),
     ...(addLabels.length ? { addLabels } : {}),
     ...(removeLabels.length ? { removeLabels } : {}),
+    ...(customFieldDrafts.length && !customFieldErrors.size ? {
+      customFields: Object.fromEntries(customFieldDrafts.map(({ id, mode, value }) => [id, mode === 'clear' ? null : value])),
+    } : {}),
   };
   const removalOptions = [...new Set([...removeLabels, ...selected.flatMap(issue => issue.labels)])]
     .sort((first, second) => first.localeCompare(second, 'ko'));
@@ -77,7 +113,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
   }
   const changeCount = Object.keys(changes).length;
   const applyUncertain = active && session.applyUncertain;
-  const dirty = active && (selected.length > 0 || changeCount > 0 || dueDateMode !== 'keep' || Boolean(addLabelsText) || applyUncertain);
+  const dirty = active && (selected.length > 0 || changeCount > 0 || dueDateMode !== 'keep' || Boolean(addLabelsText) || customFieldDrafts.length > 0 || applyUncertain);
   const input = JSON.stringify({
     issues: selected.map(({ id, version }) => ({ id, expectedVersion: version })), changes,
     ...(report?.fieldBreakdown ? { fieldBreakdown: report.fieldBreakdown } : {}),
@@ -204,6 +240,20 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
       : current.removeLabels.length < ISSUE_BULK_LABEL_LIMIT ? [...current.removeLabels, label] : current.removeLabels }));
   }
 
+  function addCustomField(field: CustomFieldDefinition) {
+    updateFields(current => current.customFieldDrafts.some(draft => draft.id === field.id) ? {} : {
+      customFieldDrafts: [...current.customFieldDrafts, { id: field.id, name: field.name, kind: field.kind, mode: 'set', value: null }],
+    });
+  }
+
+  function updateCustomField(id: string, update: Partial<Pick<CustomFieldDraft, 'mode' | 'value'>>) {
+    updateFields(current => ({ customFieldDrafts: current.customFieldDrafts.map(draft => draft.id === id ? { ...draft, ...update } : draft) }));
+  }
+
+  function removeCustomField(id: string) {
+    updateFields(current => ({ customFieldDrafts: current.customFieldDrafts.filter(draft => draft.id !== id) }));
+  }
+
   async function request(task: (signal: AbortSignal) => Promise<void>) {
     if (pending.current) return;
     const controller = new AbortController();
@@ -223,7 +273,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     return api<T>(`${path}/${action}`, { method: 'POST', body, signal, headers: { 'X-Actor-Id': actorId } });
   }
 
-  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && !labelsError &&
+  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && !labelsError && !customFieldErrors.size &&
     !session.refreshRequired && !applyUncertain && (!report || Boolean(report.fieldBreakdown));
   async function review() {
     if (!canPreview) return;
@@ -288,6 +338,7 @@ export function useIssueBulkEdit({ projectId, actorId, refresh, notify }: Featur
     selectedCount: selected.length, visibleCount: visible.length, reportScoped,
     pageCount: pageTargets.length, pageSelectedCount, canTogglePage, togglePage, clearSelection,
     dueDateMode, dueDate, addLabelsText, removalOptions, removeLabels, labelsError, toggleLabelRemoval,
+    customFieldDefinitions, customFieldsById, customFieldDrafts, customFieldErrors, addCustomField, updateCustomField, removeCustomField,
     setDueDateMode: (value: DueDateMode) => updateFields(() => ({ dueDateMode: value })),
     setDueDate: (value: string) => updateFields(() => ({ dueDate: value })),
     setAddLabelsText: (value: string) => updateFields(() => ({ addLabelsText: value })),
@@ -310,7 +361,8 @@ export function IssueBulkSelectVisible({ editor }: { editor: BulkEditor }) {
   </label>;
 }
 
-const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자', dueDate: '마감일', labels: '라벨' } satisfies Record<keyof IssueBulkEditValues, string>;
+type BulkBasicField = Exclude<keyof IssueBulkEditValues, 'customFields'>;
+const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자', dueDate: '마감일', labels: '라벨' } satisfies Record<BulkBasicField, string>;
 const outcomes = { changed: '변경 예정', unchanged: '변경 없음', blocked: '변경 불가' };
 const memberPrefix = 'team-member:';
 const displayLabel = (label: string) => !label || label.trim() !== label || /[",\p{Cc}]/u.test(label) ? JSON.stringify(label) : label;
@@ -322,12 +374,18 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
   onClose: () => void;
 }) {
   const { changes, preview } = editor;
-  function valueLabel(field: keyof IssueBulkEditValues, values: IssueBulkEditValues) {
+  function valueLabel(field: BulkBasicField, values: IssueBulkEditValues) {
     if (field === 'status') return statuses.find(status => status.id === values.status)?.label ?? values.status;
     if (field === 'priority') return PRIORITY[values.priority];
     if (field === 'dueDate') return values.dueDate ?? '미지정';
     if (field === 'labels') return values.labels?.length ? values.labels.map(displayLabel).join(', ') : '없음';
     return values.assigneeId ? users.find(user => user.id === values.assigneeId)?.name ?? values.assigneeId : '미지정';
+  }
+
+  function customValueLabel(id: string, value: CustomFieldValue | undefined) {
+    if (!hasCustomValue(value)) return '미지정';
+    const field = editor.customFieldsById.get(id);
+    return field ? fieldValueLabel(field, value, users) : String(value);
   }
 
   return <section className="issue-bulk-editor" aria-label="업무 일괄 편집">
@@ -385,6 +443,7 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
           </div>
           {editor.removeLabels.length > 0 && <p role="status">{editor.removeLabels.length}개 선택 · 최대 {ISSUE_BULK_LABEL_LIMIT}개</p>}
         </details>
+        <BulkCustomFields editor={editor} users={users} />
       </fieldset>
       {editor.labelsError && <p className="issue-bulk-error" role="alert">{editor.labelsError}</p>}
       <p className="issue-bulk-note">{editor.reportScoped ? '같은 집계 그룹의 여러 페이지에서 업무를 선택할 수 있습니다.' : '현재 목록의 업무만 선택할 수 있습니다.'} 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
@@ -402,7 +461,7 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
         {preview.rows.map(row => <li key={row.id}>
           <div className="issue-bulk-preview-heading"><strong>{row.key} {row.title}</strong><span>{outcomes[row.outcome]}</span></div>
           {row.reason && <p className="issue-bulk-row-reason">{row.reason}</p>}
-          {row.after && transitionLabels(row.before, row.after, valueLabel)}
+          {row.after && transitionLabels(row.before, row.after, valueLabel, editor.customFieldsById, customValueLabel)}
         </li>)}
       </ul>
       {preview.previewId && <button type="button" className="btn btn-primary" disabled={editor.busy}
@@ -411,15 +470,92 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
   </section>;
 }
 
+function BulkCustomFields({ editor, users }: { editor: BulkEditor; users: FeatureProps['data']['users'] }) {
+  const idPrefix = useId();
+  const fieldPicker = useRef<HTMLSelectElement>(null);
+  const [fieldId, setFieldId] = useState('');
+  const addedIds = new Set(editor.customFieldDrafts.map(draft => draft.id));
+  const available = editor.customFieldDefinitions.filter(field => !field.archived && !addedIds.has(field.id));
+  const pickedField = available.find(field => field.id === fieldId);
+  if (!available.length && !editor.customFieldDrafts.length) return null;
+
+  function addField() {
+    if (!pickedField) return;
+    editor.addCustomField(pickedField);
+    setFieldId('');
+    requestAnimationFrame(() => document.getElementById(`${idPrefix}-${pickedField.id}-mode`)?.focus());
+  }
+
+  function removeField(id: string) {
+    editor.removeCustomField(id);
+    requestAnimationFrame(() => fieldPicker.current?.focus());
+  }
+
+  return <section className="issue-bulk-custom-fields" aria-label="사용자 정의 필드 일괄 변경">
+    <h3>사용자 정의 필드</h3>
+    {available.length > 0 && <div className="issue-bulk-custom-picker">
+      <select ref={fieldPicker} className="field" aria-label="변경할 사용자 정의 필드" value={pickedField?.id ?? ''}
+        onChange={event => setFieldId(event.currentTarget.value)}>
+        <option value="">필드 선택</option>
+        {available.map(field => <option value={field.id} key={field.id}>{field.name}</option>)}
+      </select>
+      <button className="btn" type="button" disabled={!pickedField} onClick={addField}>
+        <Plus size={14} aria-hidden="true" />필드 변경 추가
+      </button>
+    </div>}
+    {editor.customFieldDrafts.map(draft => {
+      const definition = editor.customFieldsById.get(draft.id);
+      const name = definition?.name ?? draft.name;
+      const error = editor.customFieldErrors.get(draft.id);
+      const errorId = error ? `${idPrefix}-${draft.id}-error` : undefined;
+      const editable = definition && !definition.archived && definition.kind === draft.kind;
+      return <div className="issue-bulk-custom-row" key={draft.id}>
+        <div className="issue-bulk-custom-row-heading">
+          <strong>{name}</strong>
+          <button type="button" className="btn btn-ghost" aria-label={`${name} 변경 제외`} onClick={() => removeField(draft.id)}>제외</button>
+        </div>
+        {editable && <div className="issue-bulk-custom-controls">
+          <label>변경 방식<select id={`${idPrefix}-${draft.id}-mode`} className="field" aria-label={`${name} 변경 방식`}
+            value={draft.mode} onChange={event => editor.updateCustomField(draft.id, { mode: event.currentTarget.value === 'clear' ? 'clear' : 'set' })}>
+            <option value="set">값 지정</option>
+            <option value="clear">값 지우기</option>
+          </select></label>
+          {draft.mode === 'set' && <div className="issue-bulk-custom-value">
+            <span aria-hidden="true">변경할 값</span>
+            <CustomFieldInput field={definition} value={draft.value} label={`${name} 일괄 변경 값`} users={users}
+              multipleControl="checkboxes" errorId={errorId} onChange={value => editor.updateCustomField(draft.id, { value })} />
+          </div>}
+        </div>}
+        {error && <p className="issue-bulk-error" id={errorId}>{error}</p>}
+      </div>;
+    })}
+  </section>;
+}
+
 function transitionLabels(before: IssueBulkEditValues, after: IssueBulkEditValues,
-  label: (field: keyof IssueBulkEditValues, values: IssueBulkEditValues) => string) {
-  const fields = (Object.keys(fieldLabels) as (keyof IssueBulkEditValues)[]).filter(field => {
+  label: (field: BulkBasicField, values: IssueBulkEditValues) => string,
+  customFields: ReadonlyMap<string, CustomFieldDefinition>, customLabel: (id: string, value: CustomFieldValue | undefined) => string) {
+  const fields = (Object.keys(fieldLabels) as BulkBasicField[]).filter(field => {
     if (field !== 'labels') return before[field] !== after[field];
     const previous = before.labels ?? [], next = after.labels ?? [];
     return previous.length !== next.length || previous.some((value, index) => value !== next[index]);
   });
-  if (!fields.length) return null;
-  return <dl className="issue-bulk-changes">{fields.map(field => <div key={field}>
-    <dt>{fieldLabels[field]}</dt><dd>{label(field, before)} → {label(field, after)}</dd>
-  </div>)}</dl>;
+  const customFieldIds = new Set([...Object.keys(before.customFields ?? {}), ...Object.keys(after.customFields ?? {})]);
+  const customChanges = [...customFieldIds].flatMap(id => {
+    const previous = before.customFields?.[id] ?? null;
+    const next = after.customFields?.[id] ?? null;
+    const same = Array.isArray(previous) && Array.isArray(next)
+      ? previous.length === next.length && previous.every(value => next.includes(value))
+      : previous === next;
+    return same ? [] : [{ id, previous, next }];
+  });
+  if (!fields.length && !customChanges.length) return null;
+  return <dl className="issue-bulk-changes">
+    {fields.map(field => <div key={field}>
+      <dt>{fieldLabels[field]}</dt><dd>{label(field, before)} → {label(field, after)}</dd>
+    </div>)}
+    {customChanges.map(({ id, previous, next }) => <div key={`custom:${id}`}>
+      <dt>{customFields.get(id)?.name ?? id}</dt><dd>{customLabel(id, previous)} → {customLabel(id, next)}</dd>
+    </div>)}
+  </dl>;
 }

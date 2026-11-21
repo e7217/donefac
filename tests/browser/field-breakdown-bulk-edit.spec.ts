@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
-import type { Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueFieldBreakdown, IssueFieldBreakdownPage, Project, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { CustomFieldDefinition, Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueFieldBreakdown, IssueFieldBreakdownPage, Project, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   const body = await response.text();
@@ -30,7 +30,7 @@ async function fixture(request: APIRequestContext) {
     async renameView() {
       view = await json<SavedView>(await request.patch(`/api/views/${view.id}`, { data: { expectedVersion: view.version, name: `${prefix} 다시 저장` } }));
     },
-    async issue(title: string, data: { assigneeId?: string; status?: string; labels?: string[] } = {}) {
+    async issue(title: string, data: Partial<Pick<Issue, 'assigneeId' | 'status' | 'labels' | 'customFields'>> = {}) {
       const issue = await json<Issue>(await request.post('/api/issues', { data: { projectId: project.id, status: 'todo', title, ...data } }), 201);
       issues.push(issue);
       return issue;
@@ -245,5 +245,113 @@ test('저장 보기가 바뀌면 집계 일괄 적용을 멈추고 편집값을 
     const after = await f.savedIssues();
     expect(after.find(issue => issue.id === first.id)).toEqual(first);
     expect(after.find(issue => issue.id === second.id)?.priority).toBe('high');
+  } finally { await f.close(); }
+});
+
+test('360px 집계 업무에서 0과 아니요, 값 지우기 및 필수 증빙을 상태와 함께 적용한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  const f = await fixture(request);
+  try {
+    const projectPath = `/api/projects/${f.project.id}`;
+    const schema = await json<ProjectIssueSchema>(await request.get(`${projectPath}/issue-schema`));
+    const base = { description: '', required: false, issueTypes: [], options: [], archived: false };
+    const fields: CustomFieldDefinition[] = [
+      { ...base, id: 'score', name: '검토 점수', kind: 'number' },
+      { ...base, id: 'verified', name: '검토 여부', kind: 'checkbox' },
+      { ...base, id: 'areas', name: '검토 범위', kind: 'multi_select', options: [
+        { id: 'edge', name: '엣지', archived: false }, { id: 'cloud', name: '클라우드', archived: false },
+      ] },
+      { ...base, id: 'memo', name: '이전 메모', kind: 'text' },
+      { ...base, id: 'proof', name: '검토 필수 증빙', kind: 'text', visibleWhen: { statusIds: ['review'], fieldMatch: null } },
+      { ...base, id: 'keep', name: '보존할 값', kind: 'text' },
+    ];
+    await json<ProjectIssueSchema>(await request.patch(`${projectPath}/issue-schema`, { data: { ...schema, expectedVersion: schema.version, fields } }));
+    const workflow = await json<ProjectWorkflow>(await request.get(`${projectPath}/workflow`));
+    await json<ProjectWorkflow>(await request.patch(`${projectPath}/workflow`, { data: {
+      ...workflow, expectedVersion: workflow.version, fieldRules: [
+        ...workflow.fieldRules, { issueType: '*', statusId: 'review', requiredFields: ['custom:score', 'custom:verified', 'custom:proof'] },
+      ],
+    } }));
+    const values = { score: 2, verified: true, areas: ['edge'], memo: '초기 메모' };
+    const first = await f.issue(`${f.prefix} 선택 첫째`, { customFields: { ...values, keep: '첫째 고유 기록' } });
+    const second = await f.issue(`${f.prefix} 선택 둘째`, { customFields: { ...values, keep: '둘째 고유 기록' } });
+    const unselected = await f.issue(`${f.prefix} 고르지 않은 업무`, { customFields: { ...values, keep: '선택 안 한 기록' } });
+    const outside = await f.issue('저장 보기 밖의 사용자 필드 업무', { customFields: values });
+    const before = await f.savedIssues();
+
+    const report = await openReport(page, f, 3);
+    await report.edit();
+    await report.choose(first).check();
+    await report.choose(second).check();
+    await expect(report.choose(unselected)).not.toBeChecked();
+    await report.editor.getByRole('combobox', { name: '일괄 변경 상태', exact: true }).selectOption('review');
+    const custom = report.editor.getByRole('region', { name: '사용자 정의 필드 일괄 변경', exact: true });
+    async function add(id: string) {
+      await custom.getByRole('combobox', { name: '변경할 사용자 정의 필드', exact: true }).selectOption(id);
+      await custom.getByRole('button', { name: '필드 변경 추가', exact: true }).click();
+    }
+    await add('score');
+    await custom.getByLabel('검토 점수 일괄 변경 값', { exact: true }).fill('0');
+    await add('verified');
+    await custom.getByRole('combobox', { name: '검토 여부 일괄 변경 값', exact: true }).selectOption('false');
+    await add('areas');
+    const areas = custom.getByRole('group', { name: '검토 범위 일괄 변경 값', exact: true });
+    await areas.getByRole('checkbox', { name: '엣지', exact: true }).check();
+    await areas.getByRole('checkbox', { name: '클라우드', exact: true }).check();
+    await add('memo');
+    await custom.getByRole('combobox', { name: '이전 메모 변경 방식', exact: true }).selectOption({ label: '값 지우기' });
+    await expect(custom.getByLabel('이전 메모 일괄 변경 값', { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const preview = async () => {
+      const pending = postAt(page, `${f.bulkPath}-preview`);
+      await report.editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+      return await pending;
+    };
+    const apply = report.editor.getByRole('button', { name: '일괄 적용', exact: true });
+    const pendingValues = { score: 0, verified: false, areas: ['edge', 'cloud'], memo: null };
+    const initialResponse = await preview();
+    expect(initialResponse.request().postDataJSON()).toMatchObject({ changes: { status: 'review', customFields: pendingValues } });
+    const blocked = await json<IssueBulkEditPreview>(initialResponse);
+    expect(blocked).toMatchObject({ previewId: null, blocked: 2, changed: 0 });
+    expect(sortIds(blocked.rows)).toEqual(sortIds([first, second]));
+    expect(blocked.rows.every(row => row.outcome === 'blocked' && row.reason?.includes('검토 필수 증빙'))).toBeTruthy();
+    await expect(apply).toHaveCount(0);
+    expect(await f.savedIssues()).toEqual(before);
+
+    await add('proof');
+    await custom.getByLabel('검토 필수 증빙 일괄 변경 값', { exact: true }).fill('공동 검토 근거');
+    const response = await preview();
+    const intended = { ...pendingValues, proof: '공동 검토 근거' };
+    expect(response.request().postDataJSON()).toMatchObject({
+      changes: { status: 'review', customFields: intended },
+      fieldBreakdown: { ...report.scope, revision: report.report.revision, bucketId: report.row.id, comparisonBucketId: report.unassigned.id },
+    });
+    const accepted = await json<IssueBulkEditPreview>(response);
+    expect(accepted.previewId).toBeTruthy();
+    expect(accepted.changed).toBe(2);
+    expect(sortIds(accepted.rows)).toEqual(sortIds([first, second]));
+    for (const row of accepted.rows) {
+      expect(row.before.customFields).toEqual({ ...values, proof: null });
+      expect(row.after?.customFields).toEqual(intended);
+    }
+    const rows = report.editor.getByRole('list', { name: '업무 변경 항목', exact: true });
+    await expect(rows.getByText('검토 점수', { exact: true }).first()).toBeVisible();
+    await expect(rows.getByText('검토 여부', { exact: true }).first()).toBeVisible();
+    expect(await f.savedIssues()).toEqual(before);
+    const sending = postAt(page, `${f.bulkPath}-apply`);
+    await apply.click();
+    const saved = await json<IssueBulkEditResult>(await sending);
+    expect(sortIds(saved.updated)).toEqual(sortIds([first, second]));
+    await expect(report.cell(1)).toBeVisible();
+    const current = await f.savedIssues();
+    for (const issue of [first, second]) {
+      const stored = current.find(row => row.id === issue.id);
+      expect(stored).toMatchObject({ status: 'review', version: issue.version + 1, customFields: {
+        score: 0, verified: false, areas: ['edge', 'cloud'], proof: '공동 검토 근거', keep: issue.customFields?.keep,
+      } });
+      expect(stored?.customFields?.memo ?? null).toBeNull();
+    }
+    for (const issue of [unselected, outside]) expect(current.find(row => row.id === issue.id)).toEqual(issue);
   } finally { await f.close(); }
 });

@@ -108,6 +108,65 @@
 
 .issue-bulk-removal-option input { flex-shrink: 0; accent-color: #286c5d; }
 
+.issue-bulk-custom-fields {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid #d5e7dd;
+}
+
+.issue-bulk-custom-picker,
+.issue-bulk-custom-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.issue-bulk-custom-controls {
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr);
+}
+
+.issue-bulk-custom-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #d5e7dd;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.issue-bulk-custom-row-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.issue-bulk-custom-row-heading .btn {
+  flex: none;
+  min-height: 28px;
+  padding: 3px 7px;
+}
+
+.issue-bulk-custom-value {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.issue-bulk-custom-controls .field {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 .issue-bulk-editor .issue-bulk-error {
   margin-top: 10px;
   padding: 7px 9px;
@@ -155,7 +214,7 @@
 .issue-bulk-changes { margin: 5px 0 0; font-size: 12px; }
 .issue-bulk-changes div { display: flex; flex-wrap: wrap; gap: 2px 8px; }
 .issue-bulk-changes dt { font-weight: 600; }
-.issue-bulk-changes dd { margin: 0; color: #456759; }
+.issue-bulk-changes dd { margin: 0; color: #456759; overflow-wrap: anywhere; }
 
 .issue-table .issue-bulk-selection {
   width: 40px;
@@ -185,4 +244,5 @@
   .issue-bulk-editor { padding: 12px; }
   .issue-bulk-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .issue-bulk-label-removal { grid-column: 1 / -1; }
+  .issue-bulk-custom-controls { grid-template-columns: minmax(0, 1fr); }
 }

@@ -219,9 +219,11 @@ curl --fail-with-body \
 
 ## 업무 일괄 편집
 
-브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
+브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?,customFields?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 생략한 필드는 유지한다. 상태 전이에서 담당자를 생략하면 배정 규칙이 실행될 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
 
 `addLabels`와 `removeLabels`는 각각 중복 없는 1~100개 문자열 배열이며, 라벨 하나는 최대 60자다. 양쪽에 같은 이름을 넣으면 요청을 거절한다. 대소문자와 공백을 포함한 이름을 그대로 비교한다. 해당 티켓에 있는 제거 대상만 지우고, 없는 추가 대상을 기존 목록 뒤에 붙인다.
+
+`customFields`에는 변경할 필드 ID와 각 값을 넣는다. 명시적인 `null`은 값을 지우고, 생략한 ID의 값은 유지한다. 숫자 `0`과 확인 여부 `false`도 입력값이다. 상태와 필드 변경을 같은 요청에서 검토할 수 있다. 업무마다 변경 후 상태·유형·필드 조건을 확인하며, 현재 양식에서 표시되거나 해당 워크플로에서 명시적으로 요구하는 활성 필드에 적용한다. `rows[].before.customFields`와 `rows[].after.customFields`에는 요청한 ID의 값만 표시하며, 비어 있는 값은 `null`로 반환한다. 사용자 정의 필드를 포함한 미리보기의 데이터가 64MiB 한도를 넘으면 `413`을 반환한다.
 
 집계에서 선택한 업무의 미리보기에는 `fieldBreakdown`을 함께 보낸다. 집계에 사용한 `fieldId` 또는 `groupBy`, 선택 속성 `savedViewId`와 `comparisonBy`, 조회한 `revision`과 `bucketId`, 셀을 선택했으면 `comparisonBucketId`를 담는다. 미리보기와 적용의 같은 트랜잭션에서 현재 집계 버전과 각 대상의 소속을 확인한다. 범위나 선택이 달라지면 `409`와 `details.reason`의 `field_breakdown_stale`을 반환한다. 적용이 이미 완료된 요청의 재시도는 저장한 결과를 반환한다.
 

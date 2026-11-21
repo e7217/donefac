@@ -92,10 +92,10 @@ import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
 import type { IssueCloneResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
-import { isTerminalStatus } from '../shared/workflow-helpers.js';
+import { isTerminalStatus, requiredFieldsFor } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
-import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
+import { fieldApplies, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
@@ -1120,7 +1120,28 @@ export function createApp(options: {
     actor,
     configurationToken:issueEditConfiguration,
     fieldBreakdownMatches,
-    prepare:(before,changes)=>prepareIssueUpdate(before,changes,{assigneeExplicit:Object.hasOwn(changes,'assigneeId')}),
+    prepare(before, changes) {
+      const { customFields } = changes;
+      const values = customFields ? { ...changes, customFields: { ...before.customFields, ...customFields } } : changes;
+      const prepared = prepareIssueUpdate(before, values, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId') });
+      if (!customFields) return prepared;
+
+      const { issue } = prepared;
+      const schema = issueSchemas.get(issue.projectId);
+      const requested = schema.fields.filter(field => Object.hasOwn(customFields, field.id));
+      const unavailable = requested.filter(field => field.archived || !fieldApplies(field, issue.type));
+      if (unavailable.length) fail(`${unavailable.map(field => field.name).join(', ')} 필드는 보관되었거나 현재 업무 유형에서 편집할 수 없습니다.`, 422);
+
+      const visible = visibleIssueFieldIds(schema, issue);
+      const hidden = requested.filter(field => !visible.has(field.id));
+      if (hidden.length) {
+        const required = new Set(requiredFieldsFor({ workflows: [workflows.get(issue.projectId)], issueSchemas: [schema] },
+          issue.projectId, issue.type, issue.status, before.status));
+        const excluded = hidden.filter(field => !required.has(`custom:${field.id}`));
+        if (excluded.length) fail(`${excluded.map(field => field.name).join(', ')} 필드는 현재 표시 조건에 맞지 않습니다.`, 422);
+      }
+      return prepared;
+    },
     commit:commitIssueUpdate,
   });
   issueBulkEdit.registerStatusMigrationRoutes(app,{

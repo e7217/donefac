@@ -8,8 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import {
-  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
-  type IssueBulkEditPreview, type IssueBulkEditResult, type IssueFieldBreakdown, type IssueFieldBreakdownPage, type ProjectWorkflow, type SavedView, type TeamNotificationPage,
+  ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type CustomFieldDefinition, type CustomFieldValue, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
+  type IssueBulkEditPreview, type IssueBulkEditResult, type IssueFieldBreakdown, type IssueFieldBreakdownPage, type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type TeamNotificationPage,
   type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -21,6 +21,7 @@ const alternate = 'user-yun';
 const rulesPath = `/projects/${projectId}/assignment-rules`;
 const runsPath = `/projects/${projectId}/assignment-runs`;
 const workflowPath = `/projects/${projectId}/workflow`;
+const schemaPath = `/projects/${projectId}/issue-schema`;
 const bulkPath = (project = projectId) => `/projects/${project}/issues/bulk`;
 const issueFields = ({ status, priority, assigneeId }: Issue) => ({ status, priority, assigneeId });
 const issueVersions = (issues: Issue[]) => issues.map(({ id, version }) => ({ id, expectedVersion: version }));
@@ -85,6 +86,10 @@ async function fixture(t: TestContext) {
       transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'review' ? { ...edge, requiredFields } : edge),
     });
   }
+  async function installFields(fields: CustomFieldDefinition[]) {
+    const before = await expectStatus<ProjectIssueSchema>(200, schemaPath);
+    return expectStatus<ProjectIssueSchema>(200, schemaPath, 'PATCH', { ...before, expectedVersion: before.version, fields });
+  }
   async function enableEndpoint() {
     const { endpoint } = await expectStatus<WebhookEndpointCreated>(201, '/webhook-endpoints', 'POST', {
       name: '합성 일괄 편집 수신처', url: 'http://127.0.0.1:9/receiver', eventTypes: ['issue.updated'], projectIds: [projectId],
@@ -101,7 +106,11 @@ async function fixture(t: TestContext) {
     await service.close();
     service = await start();
   }
-  return { call, expectStatus, createIssue, createRule, requireForReview, enableEndpoint, database, snapshot, deliveries, runs, inbox, preview, apply, restart };
+  return { call, expectStatus, createIssue, createRule, requireForReview, installFields, enableEndpoint, database, snapshot, deliveries, runs, inbox, preview, apply, restart };
+}
+
+function customField(id: string, name: string, kind: CustomFieldDefinition['kind'], options: Partial<CustomFieldDefinition> = {}): CustomFieldDefinition {
+  return { id, name, kind, archived: false, description: '', required: false, issueTypes: [], options: [], ...options };
 }
 
 test('bulk review shows blocked and unchanged rows, assigns automatically, and replays the exact receipt after restart', async t => {
@@ -278,6 +287,149 @@ test('field breakdown bulk requires exact cohort and matching revision until a b
   assert.equal((await f.apply(ready.previewId, reviewer)).status, 404);
   assert.deepEqual((await f.snapshot()).issues, applied.issues);
   assert.deepEqual(await f.deliveries(), deliveries);
+});
+
+test('custom field bulk projects requested values with their types and preserves unrelated fields and unchanged issues', async t => {
+  const f = await fixture(t);
+  const options = [{ id: 'red', name: '빨강', archived: false }, { id: 'blue', name: '파랑', archived: false }, { id: 'legacy', name: '이전 분류', archived: false }];
+  const fields = [
+    customField('memo', '비울 메모', 'text'), customField('score', '검토 점수', 'number'),
+    customField('verified', '검토 여부', 'checkbox'), customField('state', '분류', 'select', { options }),
+    customField('areas', '범위', 'multi_select', { options }), customField('inspector', '검토자', 'user'),
+    customField('review_date', '검토 날짜', 'date'), customField('guide', '가이드 주소', 'url'),
+    customField('keep', '유지할 내용', 'text'),
+  ];
+  await f.installFields(fields);
+  const desired: Record<string, CustomFieldValue> = {
+    score: 0, verified: false, state: 'red', areas: ['blue', 'red'], inspector: reviewer,
+    review_date: '2026-12-03', guide: 'https://example.test/review',
+  };
+  const customFields = { ...desired, memo: null };
+  const prior: Record<string, CustomFieldValue> = {
+    memo: '지울 메모', score: 7, verified: true, state: 'blue', areas: ['blue', 'legacy'], inspector: alternate,
+    review_date: '2026-11-28', guide: 'https://example.test/previous',
+  };
+  const changed = await f.createIssue('일괄 편집할 사용자 정의 값', { customFields: { ...prior, keep: '첫째 기록 보존' } });
+  const unchanged = await f.createIssue('이미 같은 값과 없는 메모', { customFields: { ...desired, keep: '둘째 기록 보존' } });
+  const outside = await f.createIssue('선택 밖 사용자 정의 값', { customFields: { ...prior, keep: '선택 밖 기록 보존' } });
+  await f.installFields(fields.map(field => field.id === 'areas' ? {
+    ...field, options: field.options.map(option => option.id === 'legacy' ? { ...option, archived: true } : option),
+  } : field));
+  const before = await f.snapshot();
+  await f.enableEndpoint();
+
+  const archived = await f.preview([changed, unchanged], { customFields: { areas: ['blue', 'legacy'] } });
+  assert.deepEqual([archived.previewId, archived.unchanged, archived.blocked], [null, 1, 1]);
+  assert.equal(archived.rows[1].id, unchanged.id);
+  assert.match(archived.rows[1].reason ?? '', /범위|이전 분류/);
+
+  const plan = await f.preview([changed, unchanged], { customFields });
+  assert.ok(plan.previewId);
+  assert.deepEqual([plan.changed, plan.unchanged, plan.blocked], [1, 1, 0]);
+  const [update, keep] = plan.rows;
+  assert.deepEqual(update.before.customFields, prior);
+  assert.deepEqual(update.after?.customFields, customFields);
+  assert.deepEqual(keep.before.customFields, customFields);
+  assert.deepEqual(keep.after?.customFields, customFields);
+  assert.equal(keep.outcome, 'unchanged');
+  const empty = await f.preview([unchanged], { customFields: { memo: null } });
+  assert.equal(empty.previewId, null);
+  assert.equal(empty.unchanged, 1);
+  assert.deepEqual(empty.rows[0].before.customFields, { memo: null });
+  assert.deepEqual(empty.rows[0].after?.customFields, { memo: null });
+  const reorder = await f.preview([unchanged], { customFields: { areas: ['red', 'blue'] } });
+  assert.equal(reorder.previewId, null);
+  assert.equal(reorder.unchanged, 1);
+  assert.deepEqual((await f.snapshot()).issues, before.issues);
+  assert.deepEqual(await f.deliveries(), []);
+
+  const saved = await f.apply(plan.previewId);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.deepEqual(saved.data, { previewId: plan.previewId, updated: [{ id: changed.id, key: changed.key, version: changed.version + 1 }], unchanged: 1 });
+  const after = await f.snapshot();
+  const updated = after.issues.find(issue => issue.id === changed.id);
+  assert.ok(updated?.customFields);
+  assert.equal(updated.customFields.memo ?? null, null);
+  const remaining = Object.fromEntries(Object.entries(updated.customFields).filter(([id]) => id !== 'memo'));
+  assert.deepEqual(remaining, { ...desired, keep: '첫째 기록 보존' });
+  assert.deepEqual(after.issues.find(issue => issue.id === unchanged.id), unchanged);
+  assert.deepEqual(after.issues.find(issue => issue.id === outside.id), outside);
+  const deliveries = await f.deliveries();
+  assert.equal(deliveries.length, 1);
+  await f.restart();
+  assert.deepEqual(await f.apply(plan.previewId), saved);
+  assert.deepEqual((await f.snapshot()).issues, after.issues);
+  assert.deepEqual(await f.deliveries(), deliveries);
+});
+
+test('custom field bulk checks resulting status, visibility and requirements together and invalidates stale proposals atomically', async t => {
+  const f = await fixture(t);
+  const fields = [
+    customField('needs_proof', '증빙 사용', 'checkbox'),
+    customField('proof', '검토 증빙', 'text', { required: true, visibleWhen: { statusIds: ['review'], fieldMatch: { fieldId: 'needs_proof', value: true } } }),
+    customField('score', '검증 점수', 'number'),
+    customField('local', '작업 전용 필드', 'text', { issueTypes: ['작업'] }),
+    customField('old_note', '보관 전 값', 'text'),
+    customField('transition_note', '전이 필수 근거', 'text', { visibleWhen: { statusIds: ['cancelled'], fieldMatch: null } }),
+  ];
+  await f.installFields(fields);
+  await f.requireForReview(['custom:score']);
+  const first = await f.createIssue('증빙이 적용되는 업무', { type: '작업', customFields: { needs_proof: true, old_note: '보관 원문' } });
+  const second = await f.createIssue('증빙을 숨긴 다른 유형 업무', { type: '버그', customFields: { needs_proof: false } });
+  await f.installFields(fields.map(field => field.id === 'old_note' ? { ...field, archived: true } : field));
+  const before = await f.snapshot();
+
+  const hidden = await f.preview([first, second], { status: 'review', customFields: { score: 0, proof: '최종 검토 근거' } });
+  assert.deepEqual([hidden.previewId, hidden.changed, hidden.blocked], [null, 1, 1]);
+  assert.equal(hidden.rows[0].after?.status, 'review');
+  assert.deepEqual(hidden.rows[0].after?.customFields, { score: 0, proof: '최종 검토 근거' });
+  assert.equal(hidden.rows[1].after, null);
+  assert.match(hidden.rows[1].reason ?? '', /검토 증빙/);
+  for (const [selected, changes, missing] of [
+    [[first], { status: 'review', customFields: { score: 0 } }, '검토 증빙'],
+    [[first], { status: 'review', customFields: { proof: '최종 검토 근거' } }, '검증 점수'],
+    [[first, second], { customFields: { local: '유형에만 필요한 값' } }, '작업 전용 필드'],
+    [[first], { customFields: { old_note: null } }, '보관 전 값'],
+    [[first], { customFields: { transition_note: '일반 설정에서는 숨은 값' } }, '전이 필수 근거'],
+  ] as const) {
+    const blocked = await f.preview([...selected], changes);
+    assert.equal(blocked.previewId, null);
+    assert.equal(blocked.blocked, 1);
+    assert.ok(blocked.rows.some(row => row.reason?.includes(missing)), JSON.stringify(blocked.rows));
+  }
+  assert.deepEqual((await f.snapshot()).issues, before.issues);
+
+  await f.requireForReview(['custom:score', 'custom:transition_note']);
+  const changes = { status: 'review', customFields: { needs_proof: true, score: 0, proof: '최종 검토 근거', transition_note: '이번 전이에 필요한 근거' } } as const;
+  const prepared = await f.preview([first, second], changes);
+  assert.ok(prepared.previewId);
+  assert.equal(prepared.changed, 2);
+  await f.installFields(fields.map(field => field.id === 'proof' ? { ...field, name: '바뀐 검토 증빙' } : field.id === 'old_note' ? { ...field, archived: true } : field));
+  assert.equal((await f.apply(prepared.previewId)).status, 409);
+  assert.deepEqual((await f.snapshot()).issues, before.issues);
+
+  const fresh = await f.preview([first, second], changes);
+  assert.ok(fresh.previewId);
+  const changedRow = await f.expectStatus<Issue>(200, `/issues/${second.id}`, 'PATCH', { expectedVersion: second.version, title: '외부에서 수정한 업무 제목' });
+  const stale = await f.snapshot();
+  assert.equal((await f.apply(fresh.previewId)).status, 409);
+  assert.deepEqual((await f.snapshot()).issues, stale.issues);
+
+  const final = await f.preview([first, changedRow], changes);
+  assert.ok(final.previewId);
+  assert.deepEqual(final.rows.map(row => row.after?.customFields), [changes.customFields, changes.customFields]);
+  assert.equal((await f.apply(final.previewId)).status, 200);
+  const saved = (await f.snapshot()).issues;
+  const firstSaved = saved.find(issue => issue.id === first.id);
+  const secondSaved = saved.find(issue => issue.id === second.id);
+  assert.ok(firstSaved && secondSaved);
+  assert.equal(firstSaved.status, 'review');
+  assert.equal(secondSaved.status, 'review');
+  assert.deepEqual(firstSaved.customFields, { ...changes.customFields, old_note: '보관 원문' });
+  assert.deepEqual(secondSaved.customFields, changes.customFields);
+  const clearRequired = await f.preview([firstSaved, secondSaved], { customFields: { proof: null } });
+  assert.deepEqual([clearRequired.previewId, clearRequired.changed, clearRequired.blocked], [null, 0, 2]);
+  assert.deepEqual((await f.snapshot()).issues, saved);
 });
 
 test('bulk due dates and label edits preserve unrelated labels and replay the same applied receipt', async t => {

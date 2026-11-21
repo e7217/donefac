@@ -629,10 +629,11 @@ export interface WorkflowStatusMigrationPreviewInput {
   toStatusId: string;
   expectedWorkflowVersion: number;
 }
-export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'labels'>>;
+export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'labels' | 'customFields'>>;
 export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate'>> & {
   addLabels?: string[];
   removeLabels?: string[];
+  customFields?: Record<string, CustomFieldValue>;
 };
 export type IssueBulkEditTarget = Pick<Issue, 'id' | 'version' | 'labels'>;
 export interface IssueBulkEditPreviewInput {

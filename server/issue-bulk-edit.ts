@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { isCalendarDate } from '../shared/calendar.js';
+import { hasCustomValue } from '../shared/issue-schema.js';
 import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT,
-  type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
+  type CustomFieldValue, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditValues,
   type IssueFieldBreakdownSelection, type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
 } from '../shared/types.js';
+import { MAX_PACKAGE_BYTES } from './attachments.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
 import { parseFieldBreakdownSelection } from './field-breakdown-routes.js';
 import type { Store } from './store.js';
@@ -44,7 +46,7 @@ interface BulkEditCandidate<T> { before: Issue; row: IssueBulkEditRow; prepared?
 
 const TABLE = 'issue_bulk_edit_previews';
 const STALE_MESSAGE = '업무 또는 프로젝트 설정이 변경되었습니다. 다시 미리 확인해 주세요.';
-const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels']);
+const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels', 'customFields']);
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 
 function fail(status: number, message: string, details?: unknown): never {
@@ -73,6 +75,23 @@ function parseLabels(value: unknown, operation: 'add' | 'remove'): string[] {
   });
   if (new Set(labels).size !== labels.length) fail(400, '같은 라벨을 중복으로 지정할 수 없습니다.');
   return labels;
+}
+
+function parseCustomFields(value: unknown): Record<string, CustomFieldValue> {
+  const entries = Object.entries(object(value));
+  if (!entries.length || entries.length > 100) fail(400, '변경할 사용자 정의 필드를 1~100개 선택해 주세요.');
+  const parsed: [string, CustomFieldValue][] = entries.map(([id, fieldValue]) => {
+    if (!/^[a-z][a-z0-9_-]{0,47}$/.test(id) || id === 'constructor' || id === 'prototype') {
+      fail(400, '변경할 사용자 정의 필드 ID를 확인해 주세요.');
+    }
+    if (fieldValue === null || typeof fieldValue === 'boolean' ||
+        (typeof fieldValue === 'string' && fieldValue.length <= 20_000) ||
+        (typeof fieldValue === 'number' && Number.isFinite(fieldValue))) return [id, fieldValue];
+    if (Array.isArray(fieldValue) && fieldValue.length <= 200 &&
+        fieldValue.every(option => typeof option === 'string' && option.length <= 48)) return [id, fieldValue];
+    return fail(400, '변경할 사용자 정의 필드 값의 형식과 길이를 확인해 주세요.');
+  });
+  return Object.fromEntries(parsed);
 }
 
 function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
@@ -115,6 +134,7 @@ function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
   }
   if (Object.hasOwn(change, 'addLabels')) changes.addLabels = parseLabels(change.addLabels, 'add');
   if (Object.hasOwn(change, 'removeLabels')) changes.removeLabels = parseLabels(change.removeLabels, 'remove');
+  if (Object.hasOwn(change, 'customFields')) changes.customFields = parseCustomFields(change.customFields);
   if (changes.addLabels?.some(label => changes.removeLabels?.includes(label))) fail(400, '같은 라벨을 함께 추가하고 제거할 수 없습니다.');
   const fieldBreakdown = Object.hasOwn(input, 'fieldBreakdown') ? parseFieldBreakdownSelection(input.fieldBreakdown) : undefined;
   return { issues, changes, ...(fieldBreakdown ? { fieldBreakdown } : {}) };
@@ -142,8 +162,22 @@ function parseStatusMigration(raw: unknown): WorkflowStatusMigrationPreviewInput
   return { fromStatusId, toStatusId, expectedWorkflowVersion };
 }
 
-function issueUpdate(before: Issue, { addLabels, removeLabels, ...fields }: IssueBulkEditChanges): IssueUpdate {
-  if (!addLabels && !removeLabels) return fields;
+function customFieldValue(fields: Issue['customFields'], id: string): CustomFieldValue {
+  const value = fields && Object.hasOwn(fields, id) ? fields[id] : null;
+  return hasCustomValue(value) ? value : null;
+}
+
+function sameCustomValue(left: CustomFieldValue, right: CustomFieldValue): boolean {
+  return Array.isArray(left) && Array.isArray(right) ? sameLabels([...left].sort(), [...right].sort()) : left === right;
+}
+
+function issueUpdate(before: Issue, { addLabels, removeLabels, customFields, ...fields }: IssueBulkEditChanges): IssueUpdate {
+  const update: IssueUpdate = fields;
+  if (customFields) update.customFields = Object.fromEntries(Object.entries(customFields).map(([id, value]) => {
+    const previous = customFieldValue(before.customFields, id);
+    return [id, sameCustomValue(previous, value) ? previous : value];
+  }));
+  if (!addLabels && !removeLabels) return update;
   const removed = new Set(removeLabels);
   const labels = before.labels.filter(label => !removed.has(label));
   const retained = new Set(labels);
@@ -151,14 +185,15 @@ function issueUpdate(before: Issue, { addLabels, removeLabels, ...fields }: Issu
     retained.add(label);
     labels.push(label);
   }
-  return { ...fields, labels };
+  return { ...update, labels };
 }
 
-function values({ status, priority, assigneeId, dueDate, labels }: Issue, update: IssueUpdate): IssueBulkEditValues {
+function values({ status, priority, assigneeId, dueDate, labels, customFields }: Issue, update: IssueUpdate): IssueBulkEditValues {
   // Include these fields when requested so reviews saved before their introduction still match on replay.
   return { status, priority, assigneeId,
     ...(Object.hasOwn(update, 'dueDate') ? { dueDate } : {}),
     ...(Object.hasOwn(update, 'labels') ? { labels } : {}),
+    ...(update.customFields ? { customFields: Object.fromEntries(Object.keys(update.customFields).map(id => [id, customFieldValue(customFields, id)])) } : {}),
   };
 }
 
@@ -166,17 +201,24 @@ function sameLabels(left: string[] | undefined, right: string[] | undefined): bo
   return left === right || (left !== undefined && right !== undefined && left.length === right.length && left.every((label, index) => label === right[index]));
 }
 
+function sameCustomFields(left: Issue['customFields'], right: Issue['customFields']): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const ids = Object.keys(left);
+  return ids.length === Object.keys(right).length && ids.every(id => Object.hasOwn(right, id) && sameCustomValue(left[id], right[id]));
+}
+
 function sameValues(left: IssueBulkEditValues | null, right: IssueBulkEditValues | null): boolean {
   return left === null || right === null ? left === right
     : left.status === right.status && left.priority === right.priority && left.assigneeId === right.assigneeId
-      && left.dueDate === right.dueDate && sameLabels(left.labels, right.labels);
+      && left.dueDate === right.dueDate && sameLabels(left.labels, right.labels) && sameCustomFields(left.customFields, right.customFields);
 }
 
 function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare']): BulkEditCandidate<T> {
   const { id, key, title } = before;
   const update = issueUpdate(before, changes);
   const row = { id, key, title, before: values(before, update) };
-  if (sameValues(row.before, { ...row.before, ...update })) {
+  if (!update.customFields && sameValues(row.before, { ...row.before, ...update })) {
     return { before, row: { ...row, after: row.before, outcome: 'unchanged', reason: null } };
   }
   try {
@@ -233,9 +275,18 @@ export class IssueBulkEditService {
   }
 
   private review<T extends { issue: Issue }>(scope: BulkEditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
-    const rows = issues.map(issue => candidate(issue, scope.changes, hooks.prepare).row);
+    const rows: IssueBulkEditRow[] = [];
     const counts = { changed: 0, unchanged: 0, blocked: 0 };
-    for (const row of rows) counts[row.outcome]++;
+    let remainingBytes = scope.changes.customFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
+    for (const issue of issues) {
+      const { row } = candidate(issue, scope.changes, hooks.prepare);
+      if (scope.changes.customFields) {
+        remainingBytes -= Buffer.byteLength(JSON.stringify(row)) + 1;
+        if (remainingBytes < 0) fail(413, '미리보기 데이터가 너무 큽니다. 업무 또는 변경할 필드 수를 줄여 주세요.');
+      }
+      rows.push(row);
+      counts[row.outcome]++;
+    }
     if (counts.blocked || !counts.changed) return { previewId: null, expiresAt: null, rows, ...counts };
 
     const id = randomUUID();
