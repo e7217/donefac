@@ -1,0 +1,103 @@
+.legacy-batch-entry {
+  margin: 0 0 16px;
+}
+
+.legacy-batch {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 8px;
+  padding: clamp(10px, 3vw, 15px);
+  border: 1px solid #dce6df;
+  border-radius: 8px;
+  background: #f7faf8;
+}
+
+.legacy-batch h3,
+.legacy-batch p {
+  margin: 0;
+}
+
+.legacy-batch header p,
+.legacy-batch-progress,
+.legacy-batch-result,
+.legacy-batch-row-head small {
+  color: #4e6659;
+  font-size: 13px;
+}
+
+.legacy-batch-picker,
+.legacy-batch fieldset label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.legacy-batch .field {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.legacy-batch-rows {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legacy-batch-rows > li {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e0e9e1;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.legacy-batch-row-head,
+.legacy-batch-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.legacy-batch-row-head strong {
+  overflow-wrap: anywhere;
+}
+
+.legacy-batch-state {
+  color: #315948;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.legacy-batch-rows [data-state='failed'] .legacy-batch-state,
+.legacy-batch-rows [data-state='unknown'] .legacy-batch-state {
+  color: #8a3930;
+}
+
+.legacy-batch fieldset {
+  display: grid;
+  grid-template-columns: minmax(0, .7fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+@media (max-width: 520px) {
+  .legacy-batch fieldset {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .legacy-batch .btn {
+    min-height: 40px;
+  }
+}

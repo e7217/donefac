@@ -1,0 +1,208 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
+
+const repo = fileURLToPath(new URL('../../', import.meta.url));
+const packageBytes = 64 * 1024 * 1024;
+const totalBytes = 512 * 1024 * 1024;
+const created = '2020-03-01T00:00:00Z';
+const privateTitle = 'PRIVATE_TITLE_SENTINEL';
+const privateFile = 'Private Source File.txt';
+const privateInstance = 'private-instance-hint';
+const privateObject = 'PrivateCustomType';
+const privateAuthor = 'PRIVATE_AUTHOR_ID';
+const privateBody = 'PRIVATE_BODY_CONTENT';
+const privatePermission = 'PRIVATE_PERMISSION_GROUP';
+const privateSource = 'https://private-fixture-jira.invalid/jira/rest/api/2/issue';
+const privateVersion = 'PRIVATE_SOURCE_VERSION';
+const privateZone = 'PRIVATE_SOURCE_ZONE';
+const plainBackup = `<entity-engine-xml>
+  <Project id="10" pkey="OLD" name="${privateTitle}"/><Status id="1" pname="Open"/><IssueType id="2" pname="Task"/>
+  <Issue id="1000" project="10" number="1" summary="${privateTitle}" status="1" issuetype="2" created="${created}" updated="${created}"/>
+</entity-engine-xml>`;
+
+const xml = (path, content) => ({ path, bytes: Buffer.from(content) });
+const json = (path, content) => xml(path, JSON.stringify(content));
+const attachment = Buffer.from('PRIVATE_ATTACHMENT_BYTES\n');
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function fixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), 'teamspace-migration-profile-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  async function write(filename, value) { await writeFile(join(directory, filename), value); }
+  async function manifest(packages) { await write('private-manifest.json', JSON.stringify({ packages })); }
+  async function run(output = 'profile.json') {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/pilot-migration.mjs', 'profile',
+      join(directory, 'private-manifest.json'), join(directory, output)], {
+      cwd: repo, env: { ...process.env, TEAMSPACE_DATA_DIR: join(directory, 'do-not-start'),
+        TEAMSPACE_PILOT_ACCESS_FILE: join(directory, 'missing-key'), TEAMSPACE_PILOT_ORIGIN: 'https://no-pilot.invalid' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', bytes => { stdout += bytes; });
+    child.stderr.on('data', bytes => { stderr += bytes; });
+    return new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', code => resolve({ code, stdout, stderr }));
+    });
+  }
+  return { directory, write, manifest, run };
+}
+
+function assertSanitized(text, fixtureDirectory, extra = []) {
+  for (const source of [fixtureDirectory, privateTitle, privateFile, privateObject, privateAuthor, privateBody,
+    privatePermission, privateSource, privateInstance, privateVersion, privateZone, 'private-manifest.json', ...extra]) {
+    assert.equal(text.includes(source), false, `The shareable result contained a source identifier: ${source}`);
+  }
+}
+
+function source(file, product = 'jira', instanceKey = privateInstance) { return { file, product, instanceKey }; }
+
+test('offline profile reads Jira XML, Jira REST and Confluence ZIP and writes only privacy-safe review evidence', { timeout: 45_000 }, async t => {
+  const f = await fixture(t);
+  const jira = zip([
+    xml('entities.xml', plainBackup.replace('</entity-engine-xml>', `
+      <ApplicationUser id="31" userKey="${privateAuthor}" lowerUserName="${privateAuthor}"/>
+      <User id="32" userName="${privateAuthor}" displayName="${privateAuthor}" active="1"/>
+      <IssueLink id="600" source="1000" destination="917000123"/>
+      <ChangeGroup id="33" issue="1000" author="${privateAuthor}" created="${created}"/>
+      <ChangeItem id="34" group="33" fieldtype="jira" field="status" oldvalue="2" oldstring="${privateTitle}" newvalue="1" newstring="Open"/>
+      <Worklog id="35" issue="1000" author="${privateAuthor}" startdate="${created}" timeworked="91" created="${created}" body="${privateBody}"/>
+      <FileAttachment id="700" issue="1000" filename="${privateFile}" filesize="${attachment.length}" created="${created}"/>
+      <Action id="36" issue="1000" type="${privateObject}" created="${created}"/>
+    </entity-engine-xml>`)),
+    { path: 'attachments/PRIVATE_SPACE/PRIVATE_ISSUE/700', bytes: attachment },
+  ]);
+  const jsonArchive = zip([
+    json('issues/PRIVATE_ISSUE.json', { id: '1001', key: 'PRIVATE-2', self: `${privateSource}/1001`, fields: {
+      summary: privateTitle, description: privateBody, created, updated: created, project: { id: '10', key: 'PRIVATE' },
+      status: { id: '1', name: 'Open' }, issuetype: { id: '2', name: 'Task' },
+      reporter: { accountId: privateAuthor, displayName: privateAuthor, emailAddress: 'private-fixture@example.test' },
+      attachment: [{ id: '881', filename: privateFile, content: `https://private-fixture-jira.invalid/attachments/${privateFile}` }],
+    } }),
+    json('jira-worklogs/worklog.json', { self: `${privateSource}/1001/worklog`, startAt: 0, total: 1, worklogs: [
+      { id: '350', self: `${privateSource}/1001/worklog/350`, issueId: '1001', started: created, timeSpentSeconds: 91, comment: privateBody },
+    ] }),
+  ]);
+  const confluence = zip([
+    xml('exportDescriptor.properties', `version=${privateVersion}\ntimezone=${privateZone}\n`),
+    xml('entities.xml', `<hibernate-generic>
+      <object class="ConfluenceUserImpl"><id name="key">${privateAuthor}</id><property name="name">${privateAuthor}</property></object>
+      <object class="Space"><id name="id">200</id><property name="key">PRIVATE_SPACE</property></object>
+      <object class="SpacePermission"><id name="id">201</id><property name="type">VIEWSPACE</property>
+        <property name="groupName">${privatePermission}</property><property name="space" class="Space"><id name="id">200</id></property></object>
+      <object class="Page"><id name="id">202</id><property name="title">${privateTitle}</property><property name="version">1</property>
+        <property name="space" class="Space"><id name="id">200</id></property>
+        <property name="creator" class="ConfluenceUserImpl"><id name="key">${privateAuthor}</id></property></object>
+      <object class="BodyContent"><id name="id">203</id><property name="body"><![CDATA[<p>${privateBody}</p>]]></property>
+        <property name="content" class="Page"><id name="id">202</id></property></object>
+      <object class="${privateObject}"><id name="id">204</id><property name="body">${privateBody}</property></object>
+    </hibernate-generic>`),
+  ]);
+  const names = ['private-jira-admin.zip', 'private-jira-REST.zip', 'private-wiki.zip'];
+  await Promise.all([jira, jsonArchive, confluence].map((bytes, index) => f.write(names[index], bytes)));
+  await f.manifest(names.map((name, index) => source(name, index === 2 ? 'confluence' : 'jira')));
+  const before = (await readdir(f.directory)).sort();
+  const result = await f.run();
+  assert.equal(result.code, 2, result.stdout + result.stderr);
+  const reportPath = join(f.directory, 'profile.json');
+  const raw = await readFile(reportPath, 'utf8');
+  assertSanitized(raw + result.stdout + result.stderr, f.directory, [...names, '917000123', 'PRIVATE_ISSUE', 'PRIVATE_SPACE', 'private-fixture@example.test']);
+  assert.equal((await stat(reportPath)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(f.directory)).sort(), [...before, 'profile.json'].sort());
+  const report = JSON.parse(raw);
+  assert.equal(report.format, 'teamspace-migration-source-profile');
+  assert.equal(report.version, 1);
+  assert.equal(report.status, 'review');
+  assert.deepEqual(report.limits, { packageCount: 20, packageBytes, totalBytes });
+  assert.equal(report.totals.bytes, jira.length + jsonArchive.length + confluence.length);
+  assert.deepEqual(report.packages.map(item => [item.ordinal, item.product, item.analysis.format, item.sha256]), [
+    [1, 'jira', 'jira-backup-xml', hash(jira)], [2, 'jira', 'jira-json', hash(jsonArchive)], [3, 'confluence', 'confluence-xml', hash(confluence)],
+  ]);
+  const [backup, rest, wiki] = report.packages.map(item => item.analysis);
+  assert.equal(backup.counts.issue, 1);
+  assert.equal(backup.counts.attachment, 1);
+  assert.equal(backup.coverage.references.unresolvedInPackage, 1);
+  assert.deepEqual(backup.coverage.attachments, { matched: 1, unconfirmed: 0, empty: 0, overUploadLimit: 0 });
+  assert.deepEqual(backup.coverage.jira, { changeGroups: 1, statusChanges: 1, worklogs: 1 });
+  assert.ok(backup.diagnostics.some(group => group.code === 'MISSING_REFERENCE' && group.severity === 'warning'));
+  assert.deepEqual(backup.unsupported, { types: 1, objects: 1 });
+  assert.equal(rest.counts.issue, 1);
+  assert.equal(rest.coverage.jira.worklogs, 1);
+  assert.equal(rest.coverage.attachments.unconfirmed, 1);
+  assert.equal(wiki.counts.page, 1);
+  assert.deepEqual(wiki.coverage.metadata, { declaredVersionPresent: true, timezonePresent: true });
+  assert.equal(wiki.coverage.confluence.pagesWithBody, 1);
+  assert.equal(wiki.coverage.restrictions.spacePermissionRecords, 1);
+  assert.deepEqual(wiki.unsupported, { types: 1, objects: 1 });
+
+  const again = await f.run();
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /이미 있는 파일/u);
+  assertSanitized(again.stdout + again.stderr, f.directory, names);
+  assert.equal(await readFile(reportPath, 'utf8'), raw);
+});
+
+test('offline profile continues after missing, malformed, oversized and duplicate packages', { timeout: 45_000 }, async t => {
+  const f = await fixture(t);
+  const names = ['missing-private.xml', 'malformed-private.xml', 'oversized-private.zip', 'good-private.xml', 'duplicate-private.xml', 'good-other-private.xml'];
+  const good = Buffer.from(plainBackup);
+  await f.write(names[1], `<entity-engine-xml><Issue id="${privateAuthor}">`);
+  await f.write(names[2], 'sparse file');
+  await truncate(join(f.directory, names[2]), packageBytes + 1);
+  for (const name of names.slice(3)) await f.write(name, good);
+  await f.manifest(names.map((name, index) => source(name, index === 4 ? 'confluence' : 'jira', index === 4 ? ` ${privateInstance} `
+    : index === 5 ? 'another-private-instance' : privateInstance)));
+  const result = await f.run();
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const raw = await readFile(join(f.directory, 'profile.json'), 'utf8');
+  assertSanitized(raw + result.stdout + result.stderr, f.directory, [...names, 'another-private-instance']);
+  const report = JSON.parse(raw);
+  assert.equal(report.status, 'blocked');
+  assert.deepEqual(report.packages.map(item => [item.status, item.failure ?? null]), [
+    ['blocked', 'FILE_NOT_FOUND'], ['blocked', 'ANALYSIS_REJECTED'], ['blocked', 'FILE_NOT_SUPPORTED'],
+    ['analyzed', null], ['blocked', 'DUPLICATE_PACKAGE'], ['analyzed', null],
+  ]);
+  assert.deepEqual(report.totals, { packages: 6, analyzed: 2, review: 0, blocked: 4,
+    bytes: good.length * 3 + Buffer.byteLength(`<entity-engine-xml><Issue id="${privateAuthor}">`) });
+  assert.equal(report.packages[4].sha256, hash(good));
+  assert.equal(report.packages[0].sha256, undefined);
+  assert.equal(report.packages[2].sha256, undefined);
+  assert.equal(report.packages[5].analysis.counts.issue, 1);
+
+  await f.manifest([source(names[3])]);
+  const clean = await f.run('clean-profile.json');
+  assert.equal(clean.code, 0, clean.stdout + clean.stderr);
+  assert.equal(JSON.parse(await readFile(join(f.directory, 'clean-profile.json'), 'utf8')).status, 'analyzed');
+});
+
+test('offline profile bounds the manifest count and skips a file that exceeds the remaining aggregate buffer budget', { timeout: 45_000 }, async t => {
+  const f = await fixture(t);
+  const largeInput = 'private-sparse.zip';
+  await f.write(largeInput, 'not an archive');
+  await truncate(join(f.directory, largeInput), packageBytes);
+  await f.write('private-final.xml', plainBackup);
+
+  await f.manifest(Array.from({ length: 21 }, () => source(largeInput)));
+  const invalid = await f.run();
+  assert.equal(invalid.code, 1);
+  assert.match(invalid.stderr, /1~20/u);
+  await assert.rejects(stat(join(f.directory, 'profile.json')), { code: 'ENOENT' });
+
+  await f.manifest([...Array.from({ length: 8 }, () => source(largeInput)), source('private-final.xml')]);
+  const result = await f.run();
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const raw = await readFile(join(f.directory, 'profile.json'), 'utf8');
+  assertSanitized(raw + result.stdout + result.stderr, f.directory, [largeInput, 'private-final.xml']);
+  const report = JSON.parse(raw);
+  assert.equal(report.totals.bytes, totalBytes);
+  assert.equal(report.packages[0].failure, 'ANALYSIS_REJECTED');
+  assert.ok(report.packages.slice(1, -1).every(item => item.failure === 'DUPLICATE_PACKAGE'));
+  assert.deepEqual(report.packages.at(-1), { ordinal: 9, product: 'jira', status: 'blocked', failure: 'TOTAL_SIZE_LIMIT' });
+});

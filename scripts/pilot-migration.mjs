@@ -2,14 +2,18 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
 const runFormat = 'teamspace-migration-rehearsal';
 const reportFormat = 'teamspace-migration-rehearsal-report';
+const profileFormat = 'teamspace-migration-source-profile';
 const jsonLimit = 1024 * 1024;
 const packageLimit = 20;
+const totalPackageBytes = 512 * 1024 * 1024;
+const profileTimeout = 25_000;
 const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/;
 const sha256 = /^[a-f\d]{64}$/;
 const products = new Set(['jira', 'confluence']);
@@ -28,23 +32,28 @@ const onTerminate = () => interrupt(143);
 
 function digest(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
-async function readBoundedFile(path, limit) {
+class BoundedFileError extends Error {
+  constructor(reason, message) { super(message); this.reason = reason; }
+}
+
+async function readBoundedFile(path, limit, remaining = limit) {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const first = await file.stat({ bigint: true });
     if (!first.isFile() || first.size <= 0n || first.size > BigInt(limit)) {
-      throw new Error('지원하는 크기의 일반 파일이 필요합니다.');
+      throw new BoundedFileError('FILE_NOT_SUPPORTED', '지원하는 크기의 일반 파일이 필요합니다.');
     }
+    if (first.size > BigInt(remaining)) throw new BoundedFileError('TOTAL_SIZE_LIMIT', '원본 패키지 합계 크기를 초과했습니다.');
     const bytes = Buffer.alloc(Number(first.size));
     for (let offset = 0; offset < bytes.length;) {
       signal.throwIfAborted();
       const { bytesRead } = await file.read(bytes, offset, bytes.length - offset, offset);
-      if (!bytesRead) throw new Error('읽는 동안 파일 크기가 바뀌었습니다.');
+      if (!bytesRead) throw new BoundedFileError('FILE_CHANGED', '읽는 동안 파일 크기가 바뀌었습니다.');
       offset += bytesRead;
     }
     const last = await file.stat({ bigint: true });
     if (last.size !== first.size || last.ctimeNs !== first.ctimeNs || last.mtimeNs !== first.mtimeNs) {
-      throw new Error('읽는 동안 파일이 바뀌었습니다.');
+      throw new BoundedFileError('FILE_CHANGED', '읽는 동안 파일이 바뀌었습니다.');
     }
     return bytes;
   } finally { await file.close(); }
@@ -119,6 +128,74 @@ async function withPilot(directory, action) {
   const pilot = await startRehearsalPilot(directory, { signal });
   try { return await action(apiCall(pilot)); }
   finally { await pilot.close(); }
+}
+
+function analyzeProfile(input, bytes) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    // Buffer.alloc in the bounded reader owns its buffer. The worker receives exactly the bytes already hashed.
+    const worker = new Worker(new URL('./pilot-migration-profile-worker.mjs', import.meta.url), {
+      workerData: { bytes, filename: basename(input.path), product: input.product, instanceKey: input.instanceKey },
+      transferList: [bytes.buffer], execArgv: [],
+      resourceLimits: { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64, stackSizeMb: 4 },
+    });
+    let done = false;
+    function finish(result, aborted = false) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      void worker.terminate();
+      if (aborted) reject(signal.reason);
+      else resolve(result);
+    }
+    const abort = () => finish(null, true);
+    const timer = setTimeout(() => finish({ status: 'blocked', failure: 'ANALYSIS_TIMEOUT' }), profileTimeout);
+    signal.addEventListener('abort', abort, { once: true });
+    worker.once('message', result => finish(result));
+    worker.once('error', error => finish({ status: 'blocked', failure: error.code === 'ERR_WORKER_OUT_OF_MEMORY' ? 'ANALYSIS_LIMIT' : 'ANALYSIS_UNAVAILABLE' }));
+    worker.once('exit', () => finish({ status: 'blocked', failure: 'ANALYSIS_UNAVAILABLE' }));
+  });
+}
+
+async function profile(manifestPath, outputPath) {
+  const inputs = await loadManifest(manifestPath);
+  const packages = [], namespacedHashes = new Set();
+  const totals = { packages: inputs.length, analyzed: 0, review: 0, blocked: 0, bytes: 0 };
+  for (const [index, input] of inputs.entries()) {
+    signal.throwIfAborted();
+    const item = { ordinal: index + 1, product: input.product };
+    let result;
+    try {
+      const bytes = await readBoundedFile(input.path, LEGACY_MAX_RAW_BYTES, totalPackageBytes - totals.bytes);
+      item.size = bytes.length;
+      item.sha256 = digest(bytes);
+      totals.bytes += item.size;
+      const fingerprint = JSON.stringify([input.instanceKey, item.sha256]);
+      if (namespacedHashes.has(fingerprint)) result = { status: 'blocked', failure: 'DUPLICATE_PACKAGE' };
+      else {
+        namespacedHashes.add(fingerprint);
+        try { result = await analyzeProfile(input, bytes); }
+        catch { signal.throwIfAborted(); result = { status: 'blocked', failure: 'ANALYSIS_UNAVAILABLE' }; }
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      result = { status: 'blocked', failure: error instanceof BoundedFileError ? error.reason
+        : ['ENOENT', 'ENOTDIR'].includes(error.code) ? 'FILE_NOT_FOUND' : 'FILE_UNREADABLE' };
+    }
+    packages.push({ ...item, ...result });
+    totals[result.status]++;
+  }
+  const status = totals.blocked ? 'blocked' : totals.review ? 'review' : 'analyzed';
+  const report = { format: profileFormat, version: 1, checkedAt: new Date().toISOString(), status,
+    limits: { packageCount: packageLimit, packageBytes: LEGACY_MAX_RAW_BYTES, totalBytes: totalPackageBytes }, totals, packages };
+  signal.throwIfAborted();
+  try { await writeJson(outputPath, report); }
+  catch (error) {
+    throw new Error(error.code === 'EEXIST' ? '이미 있는 파일에는 원본 분석 보고서를 저장할 수 없습니다.' : '원본 분석 보고서 파일을 저장할 수 없습니다.');
+  }
+  console.log(`원본 분석 보고서를 저장했습니다 (${status}).`);
+  process.exitCode = status === 'analyzed' ? 0 : status === 'review' ? 2 : 1;
 }
 
 async function stage(manifestPath, root) {
@@ -229,6 +306,7 @@ async function verify(directory) {
 }
 
 const usage = [
+  'npm run pilot:rehearsal -- profile <manifest.json> <새 분석 보고서.json>',
   'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리>',
   'npm run pilot:rehearsal -- review <리허설 디렉터리>',
   'npm run pilot:rehearsal -- verify <리허설 디렉터리>',
@@ -238,7 +316,8 @@ process.once('SIGINT', onInterrupt);
 process.once('SIGTERM', onTerminate);
 try {
   const [command, ...args] = process.argv.slice(2);
-  if (command === 'stage' && args.length === 2) await stage(resolve(args[0]), resolve(args[1]));
+  if (command === 'profile' && args.length === 2) await profile(resolve(args[0]), resolve(args[1]));
+  else if (command === 'stage' && args.length === 2) await stage(resolve(args[0]), resolve(args[1]));
   else if (command === 'review' && args.length === 1) await review(resolve(args[0]));
   else if (command === 'verify' && args.length === 1) await verify(resolve(args[0]));
   else if (!command || command === '--help') console.log(usage);

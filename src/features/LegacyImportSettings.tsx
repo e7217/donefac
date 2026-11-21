@@ -3,37 +3,63 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Archive, ChevronLeft, ChevronRight, FileSearch, Loader2, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
 import type { FeatureProps, LegacyDiagnosticPage, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacyRecordKind, LegacyRecordPage } from '../../shared/types';
-import { api, ApiError } from '../lib/api';
+import { api } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail, legacyRecordKindLabels as KINDS } from './LegacyRecordDetail';
+import { LegacyImportBatch } from './LegacyImportBatch';
+import { LEGACY_FILE_ACCEPT, MAX_LEGACY_FILE_BYTES, MAX_LEGACY_INSTANCE_LENGTH, legacyFileProblem, legacySizeLabel as sizeLabel, uploadLegacyFile, type LegacyImportProduct as Product } from './legacy-import-upload';
 import './legacy-import.css';
 
-const MAX_FILE_BYTES = 64 * 1024 * 1024, PAGE_SIZE = 50;
-type Product = 'auto' | 'jira' | 'confluence';
+const PAGE_SIZE = 50;
 type Tab = 'records' | 'diagnostics' | 'files';
 const message = (cause: unknown) => cause instanceof Error ? cause.message : '원본 분석 요청을 처리하지 못했습니다.';
-const sizeLabel = (bytes: number) => bytes < 1024 ? `${bytes.toLocaleString()} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 const dateLabel = (value: string | null) => value ? new Date(value).toLocaleString('ko-KR') : '원본에 없음';
 
-export function LegacyImportSettings(props: FeatureProps) { return <ActorLegacyImportSettings key={props.actorId} {...props} />; }
-function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
+type Props = FeatureProps & {
+  onPackageInventoryChange: () => void;
+  onPrepareMigration: (packages: LegacyPackageSummary[]) => boolean;
+};
+
+export function LegacyImportSettings(props: Props) { return <ActorLegacyImportSettings key={props.actorId} {...props} />; }
+function ActorLegacyImportSettings({ actorId, notify, onPackageInventoryChange, onPrepareMigration }: Props) {
   const [packages, setPackages] = useState<LegacyPackageSummary[]>([]), [loading, setLoading] = useState(true), [listError, setListError] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null), [detail, setDetail] = useState<LegacyPackageDetail | null>(null), [detailLoading, setDetailLoading] = useState(false), [detailError, setDetailError] = useState('');
   const [file, setFile] = useState<File | null>(null), [instanceKey, setInstanceKey] = useState(''), [product, setProduct] = useState<Product>('auto');
   const [baseline, setBaseline] = useState<{ instanceKey: string; product: Product }>({ instanceKey: '', product: 'auto' });
   const [pending, setPending] = useState(false), [actionError, setActionError] = useState(''), [refreshKey, setRefreshKey] = useState(0);
+  const [batchPending, setBatchPending] = useState(false);
   const [tab, setTab] = useState<Tab>('records'), [kind, setKind] = useState(''), [query, setQuery] = useState(''), [appliedQuery, setAppliedQuery] = useState(''), [recordOffset, setRecordOffset] = useState(0);
   const [recordPage, setRecordPage] = useState<LegacyRecordPage | null>(null), [recordLoading, setRecordLoading] = useState(false), [recordError, setRecordError] = useState(''), [selectedRecord, setSelectedRecord] = useState<LegacyRecord | null>(null);
   const [recordDetailLoading, setRecordDetailLoading] = useState(false), [recordDetailError, setRecordDetailError] = useState('');
   const [severity, setSeverity] = useState(''), [diagnosticOffset, setDiagnosticOffset] = useState(0), [diagnosticPage, setDiagnosticPage] = useState<LegacyDiagnosticPage | null>(null), [diagnosticLoading, setDiagnosticLoading] = useState(false), [diagnosticError, setDiagnosticError] = useState('');
   const [fileOffset, setFileOffset] = useState(0);
   const active = useRef(true), busy = useRef(false), dirty = useRef(false), fileInput = useRef<HTMLInputElement>(null), listSequence = useRef(0), detailSequence = useRef(0), recordSequence = useRef(0), diagnosticSequence = useRef(0), recordDetailSequence = useRef(0);
+  const batchDraft = useRef<(() => void) | null>(null);
+  const trackBatchDraft = useCallback((changed: boolean, discard: () => void) => { batchDraft.current = changed ? discard : null; }, []);
+  const beginBatch = useCallback(() => {
+    if (busy.current) return false;
+    busy.current = true;
+    setBatchPending(true);
+    return true;
+  }, []);
+  const finishBatch = useCallback(() => {
+    busy.current = false;
+    if (active.current) setBatchPending(false);
+  }, []);
+  const rememberPackage = useCallback((summary: LegacyPackageSummary) => {
+    if (!active.current) return;
+    listSequence.current++;
+    setLoading(false);
+    setPackages(values => [summary, ...values.filter(value => value.id !== summary.id)]);
+    onPackageInventoryChange();
+  }, [onPackageInventoryChange]);
+  const inputsLocked = pending || batchPending;
   const isDirty = Boolean(file || instanceKey !== baseline.instanceKey || product !== baseline.product);
   useEffect(() => { dirty.current = isDirty; }, [isDirty]);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const loadPackages = useCallback(async () => {
     const sequence = ++listSequence.current; setLoading(true);
-    try { const values = await api<LegacyPackageSummary[]>('/legacy-import/packages'); if (active.current && sequence === listSequence.current) { setPackages(values); setListError(''); } }
+    try { const values = await api<LegacyPackageSummary[]>('/legacy-import/packages'); if (active.current && sequence === listSequence.current) { setPackages(values); setListError(''); return values; } }
     catch (cause) { if (active.current && sequence === listSequence.current) setListError(message(cause)); }
     finally { if (active.current && sequence === listSequence.current) setLoading(false); }
   }, []);
@@ -71,12 +97,12 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       if (busy.current) { event.preventDefault(); notify('원본 분석·삭제가 끝난 뒤 이동해 주세요.', 'error'); return; }
-      if (dirty.current) {
+      if (dirty.current || batchDraft.current) {
         if (!window.confirm('선택한 원본 파일과 입력 중인 분석 설정을 버리고 이동할까요?')) event.preventDefault();
-        else afterAcceptedNavigation(event, resetDraft);
+        else afterAcceptedNavigation(event, () => { resetDraft(); batchDraft.current?.(); });
       }
     };
-    const unload = (event: BeforeUnloadEvent) => { if (busy.current || dirty.current) { event.preventDefault(); event.returnValue = ''; } };
+    const unload = (event: BeforeUnloadEvent) => { if (busy.current || dirty.current || batchDraft.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', unload);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); };
   }, [notify, resetDraft]);
@@ -91,19 +117,16 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
   }
   async function upload(event: FormEvent) {
     event.preventDefault(); if (!file || !instanceKey.trim() || busy.current) return;
-    if (file.size > MAX_FILE_BYTES) { setActionError('원본 파일은 64 MiB 이하여야 합니다. 선택한 파일과 입력은 유지됩니다.'); return; }
-    if (!/\.(?:zip|xml|csv|json)$/i.test(file.name)) { setActionError('ZIP·XML·CSV·JSON 파일을 선택해 주세요.'); return; }
+    const invalid = legacyFileProblem(file);
+    if (invalid) { setActionError(`${invalid} 선택한 파일과 입력은 유지됩니다.`); return; }
     busy.current = true; setPending(true); setActionError('');
     try {
-      const params = new URLSearchParams({ filename: file.name, instanceKey: instanceKey.trim(), product });
-      const response = await fetch(`/api/legacy-import/packages?${params}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': actorId }, body: file });
-      if (!response.ok) { const value = await response.json().catch(() => null) as { error?: string } | null; throw new ApiError(response.status, typeof value?.error === 'string' ? value.error : '원본 분석을 완료하지 못했습니다.'); }
-      const summary = await response.json() as LegacyPackageSummary;
+      const { summary, reused } = await uploadLegacyFile(file, instanceKey, product, actorId);
       if (!active.current) return;
-      setPackages(values => [summary, ...values.filter(value => value.id !== summary.id)]); setFile(null); if (fileInput.current) fileInput.current.value = '';
+      rememberPackage(summary); setFile(null); if (fileInput.current) fileInput.current.value = '';
       const saved = { instanceKey: instanceKey.trim(), product }; setInstanceKey(saved.instanceKey); setBaseline(saved); dirty.current = false;
       choosePackage(summary.id); setTab('records'); setRefreshKey(value => value + 1);
-      notify(response.status === 200 ? '동일한 원본 분석 패키지를 다시 열었습니다.' : '원본 분석을 저장했습니다. 현재 업무·문서는 변경되지 않았습니다.');
+      notify(reused ? '동일한 원본 분석 패키지를 다시 열었습니다.' : '원본 분석을 저장했습니다. 현재 업무·문서는 변경되지 않았습니다.');
     } catch (cause) { if (active.current) setActionError(`${message(cause)} 선택한 파일과 입력은 유지됩니다.`); }
     finally { busy.current = false; if (active.current) setPending(false); }
   }
@@ -113,27 +136,33 @@ function ActorLegacyImportSettings({ actorId, notify }: FeatureProps) {
     try {
       await api(`/legacy-import/packages/${encodeURIComponent(detail.summary.id)}?expectedVersion=${detail.summary.version}`, { method: 'DELETE', headers: { 'X-Actor-Id': actorId } });
       if (!active.current) return;
+      listSequence.current++;
+      setLoading(false);
       setPackages(values => values.filter(value => value.id !== detail.summary.id)); setSelectedId(null); setDetail(null); clearRecord(); notify('원본 분석 패키지를 삭제했습니다.');
+      onPackageInventoryChange();
     } catch (cause) { if (active.current) setActionError(`${message(cause)} 기존 미리보기와 입력은 유지됩니다. 새로고침으로 최신 버전을 확인하세요.`); }
     finally { busy.current = false; if (active.current) setPending(false); }
   }
   const selectedDetail = detail?.summary.id === selectedId ? detail : null;
   return <section className="card legacy-import-settings" aria-label="기존 도구 원본 분석">
-    <header className="legacy-card-heading"><div><h2><Archive size={20} />기존 도구 원본 분석</h2><p>Jira·Confluence 내보내기 파일을 읽고 이관할 원본과 누락 항목을 확인합니다.</p></div><button className="btn btn-ghost" aria-label="원본 분석 새로고침" disabled={loading || pending} onClick={() => setRefreshKey(value => value + 1)}><RefreshCw size={16} />새로고침</button></header>
+    <header className="legacy-card-heading"><div><h2><Archive size={20} />기존 도구 원본 분석</h2><p>Jira·Confluence 내보내기 파일을 읽고 이관할 원본과 누락 항목을 확인합니다.</p></div><button className="btn btn-ghost" aria-label="원본 분석 새로고침" disabled={loading || inputsLocked} onClick={() => setRefreshKey(value => value + 1)}><RefreshCw size={16} />새로고침</button></header>
     <p className="legacy-analysis-notice"><strong>원본을 분석하고 누락 항목을 확인하세요.</strong> 분석을 마치면 아래 실제 데이터 이관에서 적용 대상과 매핑을 검토할 수 있습니다.</p>
-    <form className="legacy-upload-form" aria-label="원본 파일 분석" onSubmit={event => void upload(event)}><fieldset disabled={pending}>
-      <label>원본 파일<input ref={fileInput} className="field" type="file" accept=".zip,.xml,.csv,.json" aria-label="Jira·Confluence 원본 파일" onChange={event => { setFile(event.target.files?.[0] || null); setActionError(''); }} /></label>
-      <label>원본 인스턴스 식별값<input className="field" aria-label="원본 인스턴스 식별값" value={instanceKey} onChange={event => setInstanceKey(event.target.value)} maxLength={500} placeholder="예: jira-team-original" required /></label>
+    <form className="legacy-upload-form" aria-label="원본 파일 분석" onSubmit={event => void upload(event)}><fieldset disabled={inputsLocked}>
+      <label>원본 파일<input ref={fileInput} className="field" type="file" accept={LEGACY_FILE_ACCEPT} aria-label="Jira·Confluence 원본 파일" onChange={event => { setFile(event.target.files?.[0] || null); setActionError(''); }} /></label>
+      <label>원본 인스턴스 식별값<input className="field" aria-label="원본 인스턴스 식별값" value={instanceKey} onChange={event => setInstanceKey(event.target.value)} maxLength={MAX_LEGACY_INSTANCE_LENGTH} placeholder="예: jira-team-original" required /></label>
       <label>원본 도구<select className="field" aria-label="원본 도구" value={product} onChange={event => setProduct(event.target.value as Product)}><option value="auto">자동 판별</option><option value="jira">Jira</option><option value="confluence">Confluence</option></select></label>
       <p className="legacy-upload-help">파일을 로컬에서 분석합니다. 같은 서버의 새 내보내기 파일에는 처음 이관 때 입력한 원본 인스턴스 식별값을 사용하세요. ZIP·XML·CSV·JSON, 최대 64 MiB.</p>
-      {file && <p className="legacy-file-selected">{file.name} · {sizeLabel(file.size)}{file.size > MAX_FILE_BYTES && <strong> · 64 MiB 한도 초과</strong>}</p>}
-      <div className="legacy-upload-actions"><button className="btn btn-ghost" type="button" disabled={!isDirty} onClick={() => { if (window.confirm('선택한 파일과 분석 설정 입력을 초기화할까요?')) resetDraft(); }}><X size={15} />입력 초기화</button><button className="btn btn-primary" type="submit" disabled={!file || file.size > MAX_FILE_BYTES || !instanceKey.trim()}>{pending ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}{pending ? '처리 중…' : '원본 분석 시작'}</button></div>
+      {file && <p className="legacy-file-selected">{file.name} · {sizeLabel(file.size)}{file.size > MAX_LEGACY_FILE_BYTES && <strong> · 64 MiB 한도 초과</strong>}</p>}
+      <div className="legacy-upload-actions"><button className="btn btn-ghost" type="button" disabled={!isDirty} onClick={() => { if (window.confirm('선택한 파일과 분석 설정 입력을 초기화할까요?')) resetDraft(); }}><X size={15} />입력 초기화</button><button className="btn btn-primary" type="submit" disabled={!file || file.size > MAX_LEGACY_FILE_BYTES || !instanceKey.trim()}>{pending ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}{pending ? '처리 중…' : '원본 분석 시작'}</button></div>
     </fieldset></form>
+    <LegacyImportBatch actorId={actorId} disabled={pending} packages={packages} defaults={baseline}
+      onBegin={beginBatch} onEnd={finishBatch} onDraftChange={trackBatchDraft} onConfirmed={rememberPackage} readInventory={loadPackages}
+      onOpenPackage={id => { choosePackage(id); setTab('records'); }} onPrepareMigration={onPrepareMigration} />
     {pending && <p className="legacy-pending" role="status">원본 파일을 분석하거나 패키지를 정리하는 중입니다. 처리 결과가 나올 때까지 기다려 주세요.</p>}
     {actionError && <p className="legacy-error" role="alert">{actionError}</p>}{listError && <p className="legacy-error" role="alert">{listError} 기존 목록은 유지됩니다.</p>}
-    <div className="legacy-package-layout"><aside className="legacy-package-list" aria-label="원본 분석 패키지 목록"><h3>보관한 분석</h3>{loading && !packages.length ? <p className="muted">목록을 불러오는 중…</p> : !packages.length ? <p className="muted">아직 분석한 원본 파일이 없습니다.</p> : packages.map(value => <button type="button" key={value.id} className={`legacy-package-item ${selectedId === value.id ? 'is-selected' : ''}`} disabled={pending} onClick={() => choosePackage(value.id)}><strong>{value.filename}</strong><span>{value.source.product === 'jira' ? 'Jira' : 'Confluence'} · {value.source.instanceKey}</span><small>객체 {Object.values(value.counts).reduce((sum, count) => sum + (count || 0), 0).toLocaleString()} · 오류 {value.errors} · 경고 {value.warnings}</small><small>{dateLabel(value.createdAt)}</small></button>)}</aside>
+    <div className="legacy-package-layout"><aside className="legacy-package-list" aria-label="원본 분석 패키지 목록"><h3>보관한 분석</h3>{loading && !packages.length ? <p className="muted">목록을 불러오는 중…</p> : !packages.length ? <p className="muted">아직 분석한 원본 파일이 없습니다.</p> : packages.map(value => <button type="button" key={value.id} className={`legacy-package-item ${selectedId === value.id ? 'is-selected' : ''}`} disabled={inputsLocked} onClick={() => choosePackage(value.id)}><strong>{value.filename}</strong><span>{value.source.product === 'jira' ? 'Jira' : 'Confluence'} · {value.source.instanceKey}</span><small>객체 {Object.values(value.counts).reduce((sum, count) => sum + (count || 0), 0).toLocaleString()} · 오류 {value.errors} · 경고 {value.warnings}</small><small>{dateLabel(value.createdAt)}</small></button>)}</aside>
       <div className="legacy-package-preview">{detailLoading && <p className="muted">분석 상세를 불러오는 중…</p>}{detailError && <p className="legacy-error" role="alert">{detailError}</p>}{!selectedId && <div className="legacy-preview-empty"><FileSearch size={30} /><p>패키지를 선택하면 원본 객체·진단·파일 목록을 볼 수 있습니다.</p></div>}
-        {selectedDetail && <><header className="legacy-summary-heading"><div><h3>{selectedDetail.summary.filename}</h3><p>{selectedDetail.summary.source.format} · {selectedDetail.summary.source.instanceKey}</p></div><button className="btn btn-ghost" aria-label="선택한 원본 분석 삭제" disabled={pending || detailLoading} onClick={() => void deletePackage()}><Trash2 size={15} />분석 삭제</button></header>
+        {selectedDetail && <><header className="legacy-summary-heading"><div><h3>{selectedDetail.summary.filename}</h3><p>{selectedDetail.summary.source.format} · {selectedDetail.summary.source.instanceKey}</p></div><button className="btn btn-ghost" aria-label="선택한 원본 분석 삭제" disabled={inputsLocked || detailLoading} onClick={() => void deletePackage()}><Trash2 size={15} />분석 삭제</button></header>
           <div className="legacy-summary-counts" aria-label="원본 분석 요약">{Object.entries(selectedDetail.summary.counts).map(([key, count]) => <span key={key}>{KINDS[key as LegacyRecordKind] || key} <strong>{count}</strong></span>)}<span>오류 <strong>{selectedDetail.summary.errors}</strong></span><span>경고 <strong>{selectedDetail.summary.warnings}</strong></span><span>파일 <strong>{selectedDetail.summary.fileCount}</strong></span></div>
           <dl className="legacy-summary-metadata"><dt>원본 도구 버전</dt><dd>{selectedDetail.summary.source.declaredVersion || '원본에 없음'}</dd><dt>원본 시간대</dt><dd>{selectedDetail.summary.source.timezone || '원본에 없음'}</dd><dt>파일 크기 / 해제 크기</dt><dd>{sizeLabel(selectedDetail.summary.size)} / {sizeLabel(selectedDetail.summary.expandedBytes)}</dd><dt>SHA-256</dt><dd><code>{selectedDetail.summary.sha256}</code></dd></dl>
           {selectedDetail.unsupported.length > 0 && <div className="legacy-unsupported"><strong>지원하지 않는 원본 객체</strong><ul>{selectedDetail.unsupported.map(value => <li key={value.type}>{value.type} · {value.count}개</li>)}</ul></div>}

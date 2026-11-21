@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
 import { ISSUE_TYPES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationJiraPlanningChoice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory } from '../../shared/types';
@@ -101,15 +101,22 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   return actions.join(' · ');
 }
 
-export function MigrationApplySettings(props: FeatureProps) { return <ActorMigration key={`${props.actorId}:${props.projectId}`} {...props} />; }
-function ActorMigration(props: FeatureProps) {
-  const { actorId, data, notify } = props;
+export type PrepareMigration = (packages: LegacyPackageSummary[]) => boolean;
+type MigrationApplyProps = FeatureProps & {
+  packageInventoryVersion: number;
+  prepareMigrationRef: Ref<PrepareMigration>;
+};
+
+export function MigrationApplySettings(props: MigrationApplyProps) { return <ActorMigration key={`${props.actorId}:${props.projectId}`} {...props} />; }
+function ActorMigration(props: MigrationApplyProps) {
+  const { actorId, data, notify, packageInventoryVersion, prepareMigrationRef } = props;
   const [packages, setPackages] = useState<LegacyPackageSummary[]>([]), [imports, setImports] = useState<SourceImport[]>([]);
   const [selected, setSelected] = useState<string[]>([]), [options, setOptions] = useState<MigrationOptions | null>(null), [configuration, setConfiguration] = useState<MigrationConfiguration | null>(null);
   const [preview, setPreview] = useState<MigrationPreview | null>(null), [acknowledgements, setAcknowledgements] = useState<string[]>([]), [selectedImport, setSelectedImport] = useState<string | null>(null);
   const [planningDraft, setPlanningDraft] = useState<{ key: string; selections: JiraPlanningSelections } | null>(null);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(''), [error, setError] = useState(''), [listError, setListError] = useState(''), [clock, setClock] = useState(() => Date.now());
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
+  const migrationHeading = useRef<HTMLHeadingElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
   const savedAppendDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
@@ -120,7 +127,28 @@ function ActorMigration(props: FeatureProps) {
     catch (cause) { if (active.current && sequence === loadSequence.current) setListError(errorText(cause)); }
     finally { if (active.current && sequence === loadSequence.current) setLoading(false); }
   }, []);
-  useEffect(() => { active.current = true; const timer = setTimeout(() => void load(), 0); return () => { active.current = false; clearTimeout(timer); }; }, [load]);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => { const timer = setTimeout(() => void load(), 0); return () => clearTimeout(timer); }, [load, packageInventoryVersion]);
+  useImperativeHandle(prepareMigrationRef, () => incoming => {
+    if (busyRef.current) {
+      notify('진행 중인 이관 요청이 끝난 뒤 다시 선택해 주세요.', 'error');
+      return false;
+    }
+    const confirmed = new Map(incoming.map(item => [item.id, item]));
+    const ids = [...confirmed.keys()];
+    if (!ids.length) return false;
+    const replace = !sameIds(ids, selected) || Boolean(configuration && !sameIds(ids, configuration.packageIds));
+    if (replace && (selected.length || configuration || preview) &&
+        !window.confirm('현재 이관 패키지 선택과 매핑 및 미리보기를 새 패키지 선택으로 바꿀까요?')) return false;
+    if (replace) {
+      reset();
+      setSelected(ids);
+      dirtyRef.current = true;
+    }
+    setPackages(previous => [...confirmed.values(), ...previous.filter(item => !confirmed.has(item.id))]);
+    requestAnimationFrame(() => migrationHeading.current?.focus());
+    return true;
+  });
   useEffect(() => { const timer = setInterval(() => setClock(Date.now()), 10_000); return () => clearInterval(timer); }, []);
   useEffect(() => {
     const guard = (event: Event) => { if (event.defaultPrevented) return; if (busyRef.current) { event.preventDefault(); notify('이관 요청 결과를 확인한 뒤 이동해 주세요.', 'error'); return; } if (dirtyRef.current) { if (!window.confirm('이관 매핑과 검토 중인 미리보기를 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, reset); } };
@@ -266,13 +294,14 @@ function ActorMigration(props: FeatureProps) {
   const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
   const receiptPlanningCounts = receiptMode === 'new' && receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(jiraPlanningCountLabels, key)) : [];
   return <section className="card migration-apply" aria-label="실제 데이터 이관">
-    <header className="migration-heading"><div><h2><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
+    <header className="migration-heading"><div><h2 ref={migrationHeading} tabIndex={-1}><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>
     {listError && <p className="migration-error" role="alert">{listError} 현재 매핑과 미리보기는 유지됩니다.</p>}{error && <p className="migration-error" role="alert">{error}</p>}{pending && <p role="status" className="migration-pending"><Loader2 className="spin" size={17} />{pending}</p>}
     <fieldset disabled={Boolean(pending) || hasPlanningChanges} className="migration-fieldset"><h3>가져올 원본</h3>
       <Paged title="이관 패키지" items={packages} label={item => `${item.filename} ${item.source.instanceKey}`} render={item => <label className="migration-package"><input type="checkbox" aria-label={`이관 패키지 ${item.filename}`} checked={selected.includes(item.id)} onChange={event => { setSelected(previous => event.target.checked ? [...previous, item.id] : previous.filter(id => id !== item.id)); setPreview(null); setAcknowledgements([]); }} /><span><strong>{item.filename}</strong><small>{item.source.product} · {item.source.instanceKey} · 분석 오류 {item.errors}, 경고 {item.warnings}</small></span></label>} />
       {!loading && !packages.length && <p>먼저 위의 원본 분석에서 내보내기 파일을 등록하세요.</p>}
       {selected.some(id => !packages.some(item => item.id === id)) && <p className="migration-error" role="alert">선택한 패키지 일부가 최신 목록에 없습니다. 현재 입력을 유지했으므로 원본 목록을 다시 확인하세요.</p>}
+      {selected.length > 0 && <p role="status">이관 패키지 {selected.length.toLocaleString()}개 선택</p>}
       <button className="btn" disabled={!selected.length} onClick={() => void loadOptions()}>선택 패키지 매핑 불러오기</button>
       {configuration && options && <div className="migration-mappings" aria-label="이관 매핑">
         {!matching && <p className="migration-error" role="alert">패키지 선택이 변경되었습니다. 매핑을 다시 불러와야 미리보기를 만들 수 있습니다.</p>}
