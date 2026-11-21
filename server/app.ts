@@ -919,6 +919,7 @@ export function createApp(options: {
   automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges},{
     capacity:projectId=>workload.get(projectId),teamCapacity:()=>teamCapacity.get(),
     workflow:projectId=>workflows.get(projectId),validateChange:validateScheduleChange,
+    teamBlockers:()=>issueRelations.teamScheduleBlockers(),
   });
   schedulePaste.registerRoutes(app,{
     actor,

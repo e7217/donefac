@@ -20,6 +20,7 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   onClose: () => void;
   onDraftChange: (dirty: boolean, pending: boolean) => void;
   onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
+  onReviewSchedule: (relation: TeamScheduleBlocker, source: Issue, target: Issue, opener: HTMLButtonElement) => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
 };
 
@@ -33,7 +34,7 @@ interface Draft {
 
 export function GanttTeamBlockers({
   id, data, visibleIssueIds, selectedIssueIds, busy, openIssue, refresh, notify,
-  onClose, onDraftChange, onLocateIssueDate, onPointerDown,
+  onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onPointerDown,
 }: Props) {
   const heading = useId();
   const formHeading = useId();
@@ -259,12 +260,18 @@ export function GanttTeamBlockers({
     {loadError && <p className="gantt-team-blockers-status" role="alert">차단 관계를 불러오지 못했습니다. {loadError}</p>}
     {rows.length > 0 ? <>
       <ul className="gantt-team-blockers-list" role="list" aria-label="프로젝트 간 차단 관계 목록">
-        {rows.slice(offset, offset + ROWS_PER_PAGE).map(({ relation, source, target }) => <li key={relation.id}>
+        {rows.slice(offset, offset + ROWS_PER_PAGE).map(({ relation, source, target }) => <li key={relation.id} data-team-blocker-id={relation.id}>
           <BlockerEndpoint issue={source} project={projectNames.get(source.projectId)} label="차단하는 업무"
             disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
           <ArrowRight className="gantt-team-blockers-arrow" size={16} aria-hidden="true" />
           <BlockerEndpoint issue={target} project={projectNames.get(target.projectId)} label="차단되는 업무"
             disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
+          <button type="button" className="btn gantt-team-blockers-review" aria-haspopup="dialog"
+            aria-label={`${source.key} → ${target.key} 프로젝트 간 일정 검토`} disabled={disabled || refreshing}
+            data-gantt-focus-control="" onPointerDown={onPointerDown}
+            onClick={event => onReviewSchedule(relation, source, target, event.currentTarget)}>
+            <CalendarDays size={15} aria-hidden="true" />프로젝트 간 일정 검토
+          </button>
         </li>)}
       </ul>
       {lastPage > 0 && <nav className="gantt-team-blockers-actions gantt-team-blockers-pages" aria-label="차단 관계 페이지">

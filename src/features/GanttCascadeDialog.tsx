@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertCircle, ArrowRight, Check, RefreshCw } from 'lucide-react';
-import type { AutomaticSchedulePreview } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, Project, TeamScheduleBlocker } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import { errorMessage } from './schedule-utils';
@@ -14,19 +14,28 @@ export type CascadeAnchorChange = {
   endDate: string | null;
 };
 
+export type TeamFollowUpSelection = {
+  relation: TeamScheduleBlocker;
+  source: Pick<Issue, 'id' | 'key'>;
+  target: Pick<Issue, 'id' | 'key'>;
+};
+
+type Props = {
+  onClose: () => void;
+  onApplied: (result: ScheduleApplyResult) => Promise<void> | void;
+  onBusyChange: (value: boolean) => void;
+} & (
+  | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never }
+  | { teamFollowUp: TeamFollowUpSelection; projects: readonly Project[]; projectId?: never; anchorChange?: never }
+);
+
 type Operation = 'preview' | 'apply' | 'recover' | 'refresh';
 
 function isApplyResult(value: ScheduleApplyResult | { applied: false }): value is ScheduleApplyResult {
   return Boolean(value && 'undoId' in value && typeof value.undoId === 'string' && Array.isArray(value.updated));
 }
 
-export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied, onBusyChange }: {
-  projectId: string;
-  anchorChange: CascadeAnchorChange;
-  onClose: () => void;
-  onApplied: (result: ScheduleApplyResult) => Promise<void> | void;
-  onBusyChange: (value: boolean) => void;
-}) {
+export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, projects, onClose, onApplied, onBusyChange }: Props) {
   const headingId = useId();
   const dialog = useRef<HTMLElement>(null);
   const request = useRef<AbortController | null>(null);
@@ -37,6 +46,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   const [freshPreviewNeeded, setFreshPreviewNeeded] = useState(false);
   const [applied, setApplied] = useState<ScheduleApplyResult | null>(null);
+  const route = teamFollowUp ? '/schedule/team-follow-up' : '/schedule/auto';
 
   const begin = useCallback((operation: Operation) => {
     if (request.current) return null;
@@ -61,8 +71,9 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
     if (!controller) return;
     setFreshPreviewNeeded(true);
     try {
-      const result = await api<AutomaticSchedulePreview>('/schedule/auto-preview', {
-        method: 'POST', signal: controller.signal, body: JSON.stringify({ projectId, anchorChange }),
+      const input = teamFollowUp ? { relationId: teamFollowUp.relation.id, expectedVersion: teamFollowUp.relation.version } : { projectId, anchorChange };
+      const result = await api<AutomaticSchedulePreview>(`${route}-preview`, {
+        method: 'POST', signal: controller.signal, body: JSON.stringify(input),
       });
       if (controller.signal.aborted) return;
       setPreview(result);
@@ -70,7 +81,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
     } catch (cause) {
       if (!controller.signal.aborted) setError(errorMessage(cause));
     } finally { finish(controller); }
-  }, [anchorChange, begin, finish, projectId]);
+  }, [anchorChange, begin, finish, projectId, route, teamFollowUp]);
 
   useLayoutEffect(() => {
     const active = document.activeElement;
@@ -106,8 +117,8 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
     if (!controller) return;
     try {
       const result = recovering
-        ? await api<ScheduleApplyResult | { applied: false }>(`/schedule/auto-result/${encodeURIComponent(preview.previewId)}`, { signal: controller.signal })
-        : await api<ScheduleApplyResult>('/schedule/auto-apply', { method: 'POST', signal: controller.signal, body: JSON.stringify({ previewId: preview.previewId }) });
+        ? await api<ScheduleApplyResult | { applied: false }>(`${route}-result/${encodeURIComponent(preview.previewId)}`, { signal: controller.signal, cache: 'no-store' })
+        : await api<ScheduleApplyResult>(`${route}-apply`, { method: 'POST', signal: controller.signal, body: JSON.stringify({ previewId: preview.previewId }) });
       if (controller.signal.aborted) return;
       if (!isApplyResult(result)) {
         if (!recovering || result?.applied !== false) throw new Error('적용 결과를 확인하지 못했습니다.');
@@ -136,7 +147,8 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
 
   function close() {
     if (request.current) return;
-    if (outcomeUnknown && !window.confirm('일정 적용 여부를 확인하지 못했습니다. 입력으로 돌아갈까요?')) return;
+    const returnTarget = teamFollowUp ? '차단 관계 목록' : '입력';
+    if (outcomeUnknown && !window.confirm(`일정 적용 여부를 확인하지 못했습니다. ${returnTarget}으로 돌아갈까요?`)) return;
     onClose();
   }
 
@@ -157,11 +169,19 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
   }
 
   const canApply = preview && preview.changes.length > 0 && !preview.blocking.length && !freshPreviewNeeded;
-  const anchorListed = preview?.changes.some(change => change.id === anchorChange.id);
-  return <div className="issue-modal-overlay"><section className="gantt-preview-modal" role="dialog" aria-modal="true"
+  const anchorListed = preview?.changes.some(change => change.id === anchorChange?.id);
+  const projectNames = new Map(projects?.map(project => [project.id, project.name]));
+  return <div className="issue-modal-overlay"><section className={`gantt-preview-modal${teamFollowUp ? ' gantt-team-follow-up-modal' : ''}`} role="dialog" aria-modal="true"
       aria-labelledby={headingId} tabIndex={-1} ref={dialog} onKeyDown={handleKey}>
-    <header><div><h2 id={headingId}>후행 일정 미리보기</h2><p>선후행 조건을 맞추는 데 필요한 만큼 후행 일정을 미룹니다.</p>
-      {!anchorListed && <p>입력한 일정 {anchorChange.startDate ?? '미정'} ~ {anchorChange.endDate ?? '미정'}</p>}</div></header>
+    <header><div><h2 id={headingId}>{teamFollowUp ? '프로젝트 간 후행 일정 검토' : '후행 일정 미리보기'}</h2>
+      {teamFollowUp ? <>
+        <p><strong>{teamFollowUp.source.key} → {teamFollowUp.target.key}</strong></p>
+        {preview?.teamFollowUp && <p>기준 업무 종료일 <strong>{preview.teamFollowUp.sourceEndDate ?? '미정'}</strong></p>}
+        <p>차단하는 업무의 날짜를 유지하고, 후행 업무의 프로젝트 달력에 맞춰 필요한 만큼 일정을 미룹니다.</p>
+      </> : <>
+        <p>선후행 조건을 맞추는 데 필요한 만큼 후행 일정을 미룹니다.</p>
+        {!anchorListed && anchorChange && <p>입력한 일정 {anchorChange.startDate ?? '미정'} ~ {anchorChange.endDate ?? '미정'}</p>}
+      </>}</div></header>
     {pending === 'preview' && <p className="muted" role="status">선후행 일정을 계산하는 중입니다.</p>}
     {preview?.blocking.length ? <div className="gantt-preview-warnings" role="alert"><AlertCircle size={17} aria-hidden="true" />
       <div><strong>함께 적용하기 전에 해결할 항목</strong>{preview.blocking.map(text => <p key={text}>{text}</p>)}</div></div> : null}
@@ -172,7 +192,9 @@ export function GanttCascadeDialog({ projectId, anchorChange, onClose, onApplied
     {preview && <div className="gantt-preview-table"><table aria-label="검토할 업무 일정">
       <thead><tr><th scope="col">업무</th><th scope="col">이전 일정</th><th aria-hidden="true" /><th scope="col">검토 일정</th></tr></thead>
       <tbody>{preview.changes.map(change => <tr key={change.id}>
-        <td><span className="issue-key">{change.key}</span><strong>{change.title}</strong><small>{change.id === anchorChange.id ? '입력한 업무' : '후행 업무'}</small></td>
+        <td><span className="issue-key">{change.key}</span><strong>{change.title}</strong>
+          {teamFollowUp && change.projectId && <small data-schedule-project={change.projectId}>{projectNames.get(change.projectId) ?? '프로젝트 정보 없음'}</small>}
+          <small>{change.id === anchorChange?.id ? '입력한 업무' : change.id === teamFollowUp?.target.id ? '차단되는 업무' : '후행 업무'}</small></td>
         <td>{change.fromStart ?? '미정'}<br />{change.fromEnd ?? '미정'}</td><td><ArrowRight aria-hidden="true" size={16} /></td>
         <td className="gantt-new-dates">{change.toStart ?? '미정'}<br />{change.toEnd ?? '미정'}</td>
       </tr>)}</tbody></table>

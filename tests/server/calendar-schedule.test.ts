@@ -10,7 +10,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
 import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWorkCalendar, isWorkingDate, shiftWorkingDate,
   countWorkingDays, createCalendarMath, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
-import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, ScheduleChange } from '../../shared/types.js';
+import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, IssueRelation, ScheduleChange, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
   const service=createApp({dataDir:dir}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
@@ -24,6 +24,150 @@ async function dep(f:Fixture,a:Issue,b:Issue,lagDays=0,type?:DependencyType){con
 async function preview(f:Fixture,issueIds:string[],extra:Record<string,unknown>={}){const r=await f.request('/schedule/auto-preview','POST',{projectId:f.projectId,issueIds,...extra});assert.equal(r.status,200,JSON.stringify(r.data));return r.data;}
 async function getIssue(f:Fixture,id:string){return(await f.request('/workspace')).data.issues.find((i:Issue)=>i.id===id) as Issue;}
 function editProposal(f:Fixture,id:string,update:(p:any)=>any){const store=new Store(f.dir);try{const value=store.get('automatic_schedule_previews',id);store.put('automatic_schedule_previews',update(value));}finally{store.db.close();}}
+
+const teamReview = '/schedule/team-follow-up-preview';
+const teamApply = '/schedule/team-follow-up-apply';
+const teamResult = (id: string) => `/schedule/team-follow-up-result/${id}`;
+
+async function blocks(f: Fixture, source: Issue, target: Issue): Promise<IssueRelation> {
+  const result = await f.request(`/issues/${source.id}/relations`, 'POST', { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' });
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  return result.data;
+}
+
+async function handoffCalendar(f: Fixture, projectId: string, exceptions: WorkCalendar['exceptions']) {
+  const path = `/projects/${projectId}/calendar`;
+  const current = (await f.request(path)).data as WorkCalendar;
+  const result = await f.request(path, 'PATCH', { ...current, expectedVersion: current.version, workingWeekdays: [1, 2, 3, 4, 5], exceptions });
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  return result.data as WorkCalendar;
+}
+
+const scheduleState = async (f: Fixture) => (await f.request('/workspace')).data as WorkspaceSnapshot;
+
+async function handoff(f: Fixture, relation: IssueRelation): Promise<AutomaticSchedulePreview> {
+  assert.ok(relation.version);
+  const result = await f.request(teamReview, 'POST', { relationId: relation.id, expectedVersion: relation.version });
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  return result.data;
+}
+
+test('cross-project handoff fences a mixed graph, uses each receiving calendar, and applies and undoes as one batch', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const secondProjectId = 'project-team', thirdProjectId = 'project-neo';
+  const secondCalendar = await handoffCalendar(f, secondProjectId, [
+    { date: '2026-11-21', isWorking: true, label: '둘째 프로젝트 토요일 근무' },
+    { date: '2026-11-23', isWorking: false, label: '둘째 프로젝트 월요일 휴무' },
+  ]);
+  let thirdCalendar = await handoffCalendar(f, thirdProjectId, [
+    { date: '2026-11-26', isWorking: false, label: '셋째 프로젝트 목요일 휴무' },
+    { date: '2026-11-28', isWorking: true, label: '셋째 프로젝트 토요일 근무' },
+  ]);
+  const source = await makeIssue(f, '첫 프로젝트 고정 출발', '2026-11-19', '2026-11-20', { dueDate: '2026-11-24' });
+  const target = await makeIssue(f, '둘째 프로젝트 변경 대상', '2026-11-16', '2026-11-17', { projectId: secondProjectId, dueDate: '2026-11-30' });
+  const native = await makeIssue(f, '둘째 프로젝트 선후행 업무', '2026-11-16', '2026-11-16', { projectId: secondProjectId, dueDate: '2026-11-27' });
+  const tail = await makeIssue(f, '셋째 프로젝트 간접 후행 업무', '2026-11-16', '2026-11-17', { projectId: thirdProjectId, dueDate: '2026-12-02' });
+  const incoming = await makeIssue(f, '셋째 프로젝트 고정 선행 업무', '2026-11-27', '2026-11-27', { projectId: thirdProjectId });
+  const stable = await makeIssue(f, '이미 충분히 늦은 열린 후행 업무', '2026-12-03', '2026-12-04', { projectId: thirdProjectId });
+  const terminal = await makeIssue(f, '조건을 만족하는 완료 후행 업무', '2026-12-03', '2026-12-04', { projectId: thirdProjectId, status: 'done' });
+  const relation = await blocks(f, source, target);
+  const downstream = await blocks(f, native, tail);
+  const local = await dep(f, target, native);
+  await dep(f, incoming, tail);
+  await dep(f, tail, stable);
+  await dep(f, tail, terminal);
+
+  const original = await scheduleState(f);
+  const preview = await handoff(f, relation);
+  assert.deepEqual(preview.blocking, []);
+  assert.deepEqual(preview.teamFollowUp, { relationId: relation.id, expectedVersion: relation.version,
+    sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: source.endDate });
+  assert.equal(preview.calendarVersions?.[secondProjectId], secondCalendar.version);
+  assert.equal(preview.calendarVersions?.[thirdProjectId], thirdCalendar.version);
+  const expected = [[target.id, '2026-11-21', '2026-11-24'], [native.id, '2026-11-25', '2026-11-25'], [tail.id, '2026-11-28', '2026-11-30']];
+  const planned = (proposal: AutomaticSchedulePreview) => proposal.changes.map(change => [change.id, change.toStart, change.toEnd]).sort();
+  assert.deepEqual(planned(preview), [...expected].sort());
+  assert.deepEqual(await scheduleState(f), original);
+  assert.deepEqual(await f.request(teamResult(preview.previewId)), { status: 200, data: { applied: false } });
+  for (const [path, method, body] of [[teamResult(preview.previewId), 'GET', undefined], [teamApply, 'POST', { previewId: preview.previewId }]] as const) {
+    assert.equal((await f.request(path, method, body, { 'X-Actor-Id': 'user-seo' })).status, 409);
+  }
+
+  const relationPath = `/issues/${native.id}/relations/${downstream.id}`;
+  const removed = await f.request(relationPath, 'PATCH', { expectedVersion: downstream.version, type: 'related', direction: 'outgoing' });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  const afterRelation = await scheduleState(f);
+  assert.equal((await f.request(teamApply, 'POST', { previewId: preview.previewId })).status, 409);
+  assert.deepEqual(await scheduleState(f), afterRelation);
+  assert.deepEqual(await f.request(teamResult(preview.previewId)), { status: 200, data: { applied: false } });
+  assert.equal((await f.request(relationPath, 'PATCH', { expectedVersion: removed.data.version, type: 'blocks', direction: 'outgoing' })).status, 200);
+
+  const beforeCalendar = await handoff(f, relation);
+  assert.deepEqual(planned(beforeCalendar), [...expected].sort());
+  thirdCalendar = await handoffCalendar(f, thirdProjectId, [
+    ...thirdCalendar.exceptions, { date: '2026-12-15', isWorking: false, label: '달력 버전 검증용 휴무' },
+  ]);
+  const afterCalendar = await scheduleState(f);
+  assert.equal((await f.request(teamApply, 'POST', { previewId: beforeCalendar.previewId })).status, 409);
+  assert.deepEqual(await scheduleState(f), afterCalendar);
+
+  const rechecked = await handoff(f, relation);
+  assert.notEqual(rechecked.previewId, beforeCalendar.previewId);
+  assert.equal(rechecked.calendarVersions?.[thirdProjectId], thirdCalendar.version);
+  assert.deepEqual(planned(rechecked), [...expected].sort());
+  const applied = await f.request(teamApply, 'POST', { previewId: rechecked.previewId });
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  const updated = applied.data.updated as Issue[];
+  assert.deepEqual(updated.map(issue => [issue.id, issue.startDate, issue.endDate]).sort(), [...expected].sort());
+  const previous = new Map(original.issues.map(issue => [issue.id, issue]));
+  for (const issue of updated) {
+    assert.equal(issue.dueDate, previous.get(issue.id)?.dueDate);
+    assert.equal(issue.version, previous.get(issue.id)!.version + 1);
+  }
+  const committed = await scheduleState(f);
+  for (const reference of [source, incoming, stable, terminal]) assert.deepEqual(committed.issues.find(issue => issue.id === reference.id), reference);
+  assert.deepEqual(await f.request(teamResult(rechecked.previewId)), applied);
+  assert.deepEqual(await f.request(teamApply, 'POST', { previewId: rechecked.previewId }), applied);
+  assert.deepEqual(await scheduleState(f), committed);
+
+  const undo = await f.request('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+  assert.equal(undo.status, 200, JSON.stringify(undo.data));
+  const restored = await scheduleState(f);
+  for (const reference of [target, native, tail]) {
+    const value = restored.issues.find(issue => issue.id === reference.id)!;
+    assert.deepEqual([value.startDate, value.endDate, value.dueDate, value.version],
+      [reference.startDate, reference.endDate, reference.dueDate, reference.version + 2]);
+  }
+  assert.deepEqual(restored.dependencies.find(dependency => dependency.id === local.id), local);
+  assert.deepEqual(restored.dependencies, original.dependencies);
+});
+
+test('cross-project handoff refuses to retime incomplete or terminal work and rejects a cycle with the fixed source', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const source = await makeIssue(f, '변경하지 않는 선행', '2026-11-19', '2026-11-20');
+  const target = await makeIssue(f, '변경할 수 있는 대상', '2026-11-16', '2026-11-16', { projectId: 'project-team' });
+  const partial = await makeIssue(f, '종료일이 없는 업무', '2026-11-16', null, { projectId: 'project-team' });
+  const terminal = await makeIssue(f, '이미 완료된 업무', '2026-11-16', '2026-11-16', { projectId: 'project-team', status: 'done' });
+  const relation = await blocks(f, source, target);
+  await dep(f, target, partial);
+  await dep(f, target, terminal);
+  const original = await scheduleState(f);
+  const blocked = await handoff(f, relation);
+  assert.ok(blocked.blocking.some(item => item.includes(partial.key)));
+  assert.ok(blocked.blocking.some(item => item.includes(terminal.key)));
+  assert.ok(blocked.changes.every(change => change.id !== partial.id && change.id !== terminal.id && change.id !== source.id));
+  assert.equal((await f.request(teamApply, 'POST', { previewId: blocked.previewId })).status, 422);
+  assert.deepEqual(await scheduleState(f), original);
+
+  await blocks(f, target, source);
+  const beforeCycle = await scheduleState(f);
+  const cycle = await handoff(f, relation);
+  assert.ok(cycle.blocking.some(item => item.includes('순환')));
+  assert.equal((await f.request(teamApply, 'POST', { previewId: cycle.previewId })).status, 422);
+  assert.deepEqual(await scheduleState(f), beforeCycle);
+});
 
 test('working-calendar math honors exceptions, working weekends and full four-digit ISO bounds without day scans',()=>{
   const c=defaultCalendar('p');assert.equal(countWorkingDays(c,'2026-11-16','2026-11-20'),5);assert.equal(shiftWorkingDate('2026-11-20',1,c),'2026-11-23');

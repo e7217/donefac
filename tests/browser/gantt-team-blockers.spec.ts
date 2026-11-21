@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { Dependency, Issue, IssueRelation, Project, TeamScheduleBlocker, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const title = '프로젝트 간 차단';
 const blockersPath = '/api/schedule/team-blockers';
@@ -30,7 +30,7 @@ async function fixture(request: APIRequestContext) {
   const issueIds = new Set<string>();
   return {
     first, second, actor, prefix,
-    async issue(project: Project, label: string, fields: Partial<Pick<Issue, 'startDate' | 'endDate' | 'status'>> = {}) {
+    async issue(project: Project, label: string, fields: Partial<Pick<Issue, 'startDate' | 'endDate' | 'dueDate' | 'status'>> = {}) {
       const issue = await json<Issue>(await request.post('/api/issues', {
         headers, data: { projectId: project.id, title: `${prefix} ${label}`, startDate: '2026-11-23', endDate: '2026-11-26', ...fields },
       }), 201);
@@ -223,5 +223,128 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
     expect(await f.schedule()).toEqual(before);
   } finally {
     await f.close();
+  }
+});
+
+test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업무를 검토하고 한 번에 되돌린다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request);
+  const headers = { 'X-Actor-Id': f.actor.id };
+  const calendarPath = `/api/projects/${f.second.id}/calendar`;
+  const originalCalendar = await json<WorkCalendar>(await request.get(calendarPath));
+  let calendar: WorkCalendar | undefined;
+  try {
+    calendar = await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
+      ...originalCalendar, expectedVersion: originalCalendar.version, workingWeekdays: [1, 2, 3, 4, 5], exceptions: [
+        { date: '2026-11-21', isWorking: true, label: '토요일 작업' },
+        { date: '2026-11-23', isWorking: false, label: '월요일 휴무' },
+      ],
+    } }));
+    const source = await f.issue(f.first, '고정 승인 업무', { startDate: '2026-11-19', endDate: '2026-11-20', dueDate: '2026-11-26' });
+    const target = await f.issue(f.second, '다른 프로젝트가 차단한 업무', { startDate: '2026-11-16', endDate: '2026-11-17', dueDate: '2026-11-30' });
+    const downstream = await f.issue(f.second, '같은 프로젝트 후행 업무', { startDate: '2026-11-16', endDate: '2026-11-16', dueDate: '2026-11-27' });
+    const handoff = await f.relation(source, target);
+    const native = await f.dependency(target, downstream);
+    const before = await f.schedule();
+    const hash = `${gantt(f.first)}&ganttProject=${f.second.id}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/${hash}`);
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    await search.fill(f.prefix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-16');
+    await expect(row(page, source)).toHaveCount(0);
+    const panel = await openBlockers(page);
+    const pair = panel.locator(`[data-team-blocker-id="${handoff.id}"]`);
+    await expect(pair).toContainText(f.first.name);
+    await expect(pair).toContainText(f.second.name);
+    const reviewAction = button(pair, `${source.key} → ${target.key} 프로젝트 간 일정 검토`);
+    const dialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const previewPath = '/api/schedule/team-follow-up-preview';
+    const applyPath = '/api/schedule/team-follow-up-apply';
+    const issued: string[] = [];
+    page.on('request', sent => {
+      const path = new URL(sent.url()).pathname;
+      if (sent.method() === 'POST' && path.startsWith('/api/schedule/')) issued.push(path);
+    });
+
+    const initialStart = row(page, target).getByLabel(`${target.key} 시작일`, { exact: true });
+    await initialStart.fill('2026-11-13');
+    await reviewAction.click();
+    await expect(page.getByText('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', { exact: true })).toBeVisible();
+    await expect(dialog).toHaveCount(0);
+    await expect(initialStart).toBeFocused();
+    await expect(initialStart).toHaveValue('2026-11-13');
+    expect(issued).toEqual([]);
+    expect(await f.schedule()).toEqual(before);
+    await initialStart.press('Escape');
+    await expect(initialStart).toHaveValue(target.startDate!);
+
+    const started = waitMutation(page, previewPath);
+    await reviewAction.click();
+    const response = await started;
+    expect(response.request().postDataJSON()).toEqual({ relationId: handoff.id, expectedVersion: handoff.version });
+    const proposed = await json<AutomaticSchedulePreview>(response);
+    expect(proposed.blocking).toEqual([]);
+    expect(proposed.teamFollowUp).toEqual({ relationId: handoff.id, expectedVersion: handoff.version, sourceIssueId: source.id, targetIssueId: target.id,
+      sourceEndDate: source.endDate });
+    expect(proposed.calendarVersions?.[f.second.id]).toBe(calendar.version);
+    expect(proposed.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([
+      [target.id, '2026-11-21', '2026-11-24'], [downstream.id, '2026-11-25', '2026-11-25'],
+    ]);
+    const dates = dialog.getByRole('table', { name: '검토할 업무 일정', exact: true });
+    for (const issue of [target, downstream]) {
+      const planned = dates.getByRole('row').filter({ hasText: issue.title });
+      await expect(planned.locator(`[data-schedule-project="${f.second.id}"]`)).toHaveText(f.second.name);
+    }
+    await expect(dates.getByText(source.title, { exact: true })).toHaveCount(0);
+    await expect(dialog).toContainText(`${source.key} → ${target.key}`);
+    await expect(dialog).toContainText('기준 업무 종료일');
+    await expect(dialog).toContainText(source.endDate!);
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    expect(await f.schedule()).toEqual(before);
+
+    let result: SchedulePasteApplyResult | undefined;
+    await page.route(url => url.pathname === applyPath, async intercepted => {
+      expect(intercepted.request().postDataJSON()).toEqual({ previewId: proposed.previewId });
+      result = await json<SchedulePasteApplyResult>(await intercepted.fetch());
+      await intercepted.abort('failed');
+    }, { times: 1 });
+    await button(dialog, '함께 적용').click();
+    const retry = button(dialog, '적용 결과 다시 확인');
+    await expect(retry).toBeVisible();
+    const verified = waitMutation(page, `/api/schedule/team-follow-up-result/${proposed.previewId}`, 'GET');
+    await retry.click();
+    expect(await json<SchedulePasteApplyResult>(await verified)).toEqual(result);
+    expect(issued).toEqual([previewPath, applyPath]);
+    await expect(dialog).toHaveCount(0);
+    await expect(reviewAction).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(search).toHaveValue(f.prefix);
+    const committed = await f.schedule();
+    expect(committed).toEqual({ dates: { ...before.dates,
+      [target.id]: { startDate: '2026-11-21', endDate: '2026-11-24', dueDate: target.dueDate },
+      [downstream.id]: { startDate: '2026-11-25', endDate: '2026-11-25', dueDate: downstream.dueDate },
+    }, dependencies: [native] });
+    await expect(row(page, target).getByLabel(`${target.key} 종료일`, { exact: true })).toHaveValue('2026-11-24');
+    await expect(row(page, downstream).getByLabel(`${downstream.key} 시작일`, { exact: true })).toHaveValue('2026-11-25');
+
+    const undo = waitMutation(page, '/api/schedule/undo');
+    await button(page, '되돌리기').click();
+    const restored = await undo;
+    expect(restored.request().postDataJSON()).toEqual({ undoId: result?.undoId });
+    await json<{ updated: Issue[] }>(restored);
+    expect(await f.schedule()).toEqual(before);
+    expect((await teamBlockers(request)).find(value => value.id === handoff.id)).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id });
+    await expect(page.getByRole('combobox', { name: '프로젝트 필터', exact: true })).toHaveValue(f.second.id);
+    await expect(initialStart).toHaveValue(target.startDate!);
+  } finally {
+    try { await f.close(); }
+    finally {
+      if (calendar) await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: { ...originalCalendar, expectedVersion: calendar.version } }));
+    }
   }
 });

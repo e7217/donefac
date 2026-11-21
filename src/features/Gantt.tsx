@@ -27,7 +27,7 @@ import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { dayNumber, dependencyLabel, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
-import { GanttCascadeDialog, type CascadeAnchorChange } from './GanttCascadeDialog';
+import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { bulkDateResultMessage, SchedulePasteDialog } from './SchedulePasteDialog';
@@ -83,6 +83,7 @@ type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolea
 type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
+type TeamFollowUpReview = TeamFollowUpSelection & { opener: HTMLButtonElement };
 type RowScheduleEdit = { issue: Issue; opener: HTMLButtonElement };
 type DependencyFocus = {
   issueId: string;
@@ -110,6 +111,7 @@ const CREATE_ISSUE_DRAFT = 'create';
 const CASCADE_DRAFT = 'successor-schedule';
 const BULK_DATES_DRAFT = 'schedule-bulk-dates';
 const TEAM_BLOCKER_DRAFT = 'team-blocker';
+const TEAM_FOLLOW_UP_DRAFT = 'team-follow-up';
 const REFRESH_FEEDBACK = {
   updated: '간트를 새로고침했습니다.', skipped: '간트 새로고침을 건너뛰었습니다.', failed: '간트를 새로고침하지 못했습니다. 다시 시도해 주세요.',
 } as const;
@@ -195,6 +197,7 @@ function ProjectGantt(props: GanttProps) {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [findingsOpen, setFindingsOpen] = useState(false);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
+  const [teamFollowUp, setTeamFollowUp] = useState<TeamFollowUpReview | null>(null);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
   const [previousFocusRequest, setPreviousFocusRequest] = useState(focusRequest);
@@ -255,8 +258,9 @@ function ProjectGantt(props: GanttProps) {
   const [refreshCount, setRefreshCount] = useState(0);
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
-  const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || drag || datePicker || linkPicker || preview || cascade ||
+  const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
     shiftOpen || autoOpen || pasteOpen || bulkDateSelection || rowScheduleEdit || createOpen || schedulePredecessor || linkEditor || planAssignment || planShift);
+  const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   // Synchronize before the refresh hook rechecks whether it can resume.
   useLayoutEffect(() => {
     draggingRef.current = Boolean(drag);
@@ -337,6 +341,7 @@ function ProjectGantt(props: GanttProps) {
             draftsRef.current.clear();
             setHasDraft(false);
             setPreview(null); setPreviewError(''); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
+            setTeamFollowUp(null);
             if (discardPaste) setPasteOpen(false);
             if (discardPlanShift) setPlanShift(null);
             if (discardBulkDates) setBulkDateSelection(null);
@@ -348,7 +353,11 @@ function ProjectGantt(props: GanttProps) {
       } else afterAcceptedNavigation(event, () => setRowScheduleEdit(null));
     };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
-    const importReset = () => { setRowScheduleEdit(null); setDependencyFocus(null); setSelected(new Set()); };
+    const importReset = () => {
+      trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
+      setTeamFollowUp(null);
+      setRowScheduleEdit(null); setDependencyFocus(null); setSelected(new Set());
+    };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
     window.addEventListener('teamspace:workspace-imported', importReset);
     return () => {
@@ -356,12 +365,37 @@ function ProjectGantt(props: GanttProps) {
       window.removeEventListener('beforeunload', unload);
       window.removeEventListener('teamspace:workspace-imported', importReset);
     };
-  }, [notify, refresh]);
+  }, [notify, refresh, trackDraft]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
     if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
     setTeamBlockersOpen(false);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
+  }
+  function openTeamFollowUp(relation: TeamFollowUpSelection['relation'], source: Issue, target: Issue, opener: HTMLButtonElement) {
+    if (busyRef.current || scheduleEditorOpen || issueOverlayOpen || draftsRef.current.size) {
+      notify('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', 'error');
+      return;
+    }
+    trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
+    setTeamFollowUp({ relation, source: { id: source.id, key: source.key }, target: { id: target.id, key: target.key }, opener });
+  }
+  function closeTeamFollowUp() {
+    const opener = teamFollowUp?.opener;
+    trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
+    setTeamFollowUp(null);
+    requestAnimationFrame(() => {
+      const target = [opener, teamBlockersTrigger.current, scrollRef.current].find(element =>
+        element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
+      target?.focus({ preventScroll: true });
+    });
+  }
+  async function applyTeamFollowUp(result: ApplyResult) {
+    setUndoId(result.undoId);
+    setScheduleWarnings(result.warnings ?? []);
+    await refresh();
+    closeTeamFollowUp();
+    notify(`${result.updated.length}개 후행 업무의 일정을 변경했습니다.`);
   }
   function finishCreating() {
     restoreCreateFocus.current = true;
@@ -1115,7 +1149,7 @@ function ProjectGantt(props: GanttProps) {
   }
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
-  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor || teamFollowUp)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -1255,6 +1289,7 @@ function ProjectGantt(props: GanttProps) {
     {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
       busy={busy || Boolean(issueOverlayOpen)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
+      onReviewSchedule={openTeamFollowUp}
       onPointerDown={keepInlineDateFocus} refresh={refresh} notify={notify} onClose={closeTeamBlockers}
       onDraftChange={trackTeamBlockerDraft} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
@@ -1535,6 +1570,8 @@ function ProjectGantt(props: GanttProps) {
       }} />}
   </div>
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor} onClose={closeSuccessorCreation} />}
+    {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
+      onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}
   </>;
 }
 

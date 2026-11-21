@@ -1,8 +1,9 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomaticSchedulePreview, Dependency, Issue, ProjectWorkflow, ProjectWorkloadCapacity, ScheduleChange,
-  TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
+  TeamFollowUpScheduleInput, TeamScheduleBlocker, TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
+import { isRelationId } from '../shared/issue-relations.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isTerminalStatus } from '../shared/workflow-helpers.js';
 import { MAX_TEAM_WORKLOAD_PROJECTS, validateWorkloadRange } from '../shared/project-workload.js';
@@ -10,6 +11,7 @@ import { levelProjectWorkload, levelTeamWorkload, MAX_WORKLOAD_LEVEL_CELLS, MAX_
   MAX_WORKLOAD_LEVEL_DEPENDENCIES, MAX_WORKLOAD_LEVEL_ISSUES } from '../shared/workload-leveling.js';
 import { CalendarService } from './calendars.js';
 import { Store } from './store.js';
+import { calculateTeamFollowUpSchedule, teamFollowUpScope, TeamFollowUpScheduleError } from './team-follow-up-schedule.js';
 
 export class AutomaticScheduleError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomaticScheduleError(status,message,details);}
@@ -21,6 +23,7 @@ type Hooks={actor:(request:Request)=>string;commitChanges:(request:Request,chang
 type WorkloadHooks = {
   capacity(projectId: string): ProjectWorkloadCapacity;
   teamCapacity(): TeamWorkloadCapacity;
+  teamBlockers(): TeamScheduleBlocker[];
   workflow(projectId: string): ProjectWorkflow;
   validateChange(issue: Issue, change: AutomaticScheduleMutation): string | null;
 };
@@ -49,9 +52,31 @@ interface TeamProposal extends ProposalReceipt {
   teamVersions: ProjectScheduleVersions[];
   teamCapacityVersion: number;
 }
-type ProposalScope = 'automatic' | 'project-workload' | 'team-workload';
+type TeamFollowUpRelation = NonNullable<AutomaticSchedulePreview['teamFollowUp']>;
+interface TeamFollowUpProposal extends Omit<ProposalReceipt, 'issueVersions'> {
+  teamFollowUp: TeamFollowUpRelation;
+  issueVersions: [string, number, string][];
+  projectVersions: ProjectScheduleVersions[];
+}
+type StoredProposal = Proposal | TeamProposal | TeamFollowUpProposal;
+type ProposalScope = 'automatic' | 'project-workload' | 'team-workload' | 'team-follow-up';
 function date(value:unknown,label:string):string|null{if(value===null)return null;if(!isCalendarDate(value))fail(`${label}은(는) YYYY-MM-DD 형식이어야 합니다.`);return value;}
 const readset=(issues:Issue[]):[string,number][]=>issues.map(issue=>[issue.id,issue.version] as [string,number]).sort((a,b)=>a[0].localeCompare(b[0]));
+const followUpReadset = (issues: Issue[]): [string, number, string][] => issues
+  .map(({ id, version, projectId }): [string, number, string] => [id, version, projectId]).sort((a, b) => a[0].localeCompare(b[0]));
+
+function parseTeamFollowUpInput(value: unknown): TeamFollowUpScheduleInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2) {
+    fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
+  }
+  const { relationId, expectedVersion } = value as Record<string, unknown>;
+  if (!isRelationId(relationId) ||
+      typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
+  }
+  return { relationId, expectedVersion };
+}
+
 function dependencyHash(dependencies: Dependency[]) {
   const fields = dependencies.map(dependencyGuardFields).sort((a, b) => a[0].localeCompare(b[0]));
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
@@ -272,6 +297,76 @@ export class AutomaticScheduleService{
     return rows.map(row => JSON.parse(row.json) as Dependency);
   }
 
+  private followUpContext(input: TeamFollowUpScheduleInput, hooks: WorkloadHooks, applying: boolean) {
+    const issues = this.teamIssues(), dependencies = this.teamDependencies();
+    const limit = () => fail('프로젝트 간 후속 일정은 전체 업무 10,000개와 연결 50,000개 이하에서 계산할 수 있습니다.', applying ? 409 : 422);
+    if (issues.length > MAX_WORKLOAD_LEVEL_ISSUES || dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) limit();
+    const byId = new Map(issues.map(issue => [issue.id, issue]));
+    const workflows = new Map<string, ProjectWorkflow>();
+    const workflow = (projectId: string) => {
+      let value = workflows.get(projectId);
+      if (!value) {
+        value = hooks.workflow(projectId);
+        workflows.set(projectId, value);
+      }
+      return value;
+    };
+    const terminal = (issue: Issue) => isTerminalStatus({ workflows: [workflow(issue.projectId)] }, issue.projectId, issue.status);
+    const blockers = hooks.teamBlockers();
+    const chosen = blockers.find(relation => relation.id === input.relationId);
+    const source = chosen && byId.get(chosen.sourceIssueId);
+    const target = chosen && byId.get(chosen.targetIssueId);
+    if (!chosen || !source || !target || source.projectId === target.projectId) {
+      fail('프로젝트 간 차단 관계를 찾을 수 없습니다. 차단 목록을 다시 확인해 주세요.', applying ? 409 : 404);
+    }
+    if (chosen.version !== input.expectedVersion || terminal(source) || terminal(target)) {
+      fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
+    }
+    for (const { id, sourceIssueId, targetIssueId, version } of blockers) {
+      const predecessor = byId.get(sourceIssueId), successor = byId.get(targetIssueId);
+      if (!predecessor || !successor || predecessor.projectId === successor.projectId || terminal(predecessor) || terminal(successor)) continue;
+      dependencies.push({ id: `team-blocker:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId, type: 'FS', lagDays: 0, version });
+      if (dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) limit();
+    }
+    try {
+      const scope = teamFollowUpScope(source.id, target.id, issues, dependencies);
+      const teamFollowUp: TeamFollowUpRelation = { ...input, sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: source.endDate };
+      return { scope, teamFollowUp, workflow, terminal };
+    } catch (error) {
+      if (!(error instanceof TeamFollowUpScheduleError)) throw error;
+      return fail(error.message, applying ? 409 : error.status);
+    }
+  }
+
+  private buildTeamFollowUpPreview(value: unknown, actorId: string, hooks: WorkloadHooks): AutomaticSchedulePreview {
+    const input = parseTeamFollowUpInput(value);
+    return this.store.transaction(() => {
+      this.prune();
+      const { scope, teamFollowUp, workflow, terminal } = this.followUpContext(input, hooks, false);
+      const projectIds = [...new Set(scope.issues.map(issue => issue.projectId))].sort();
+      const calendars = new Map(projectIds.map(id => [id, this.calendars.get(id)]));
+      const calendarMath = new Map(projectIds.map(id => [id, createCalendarMath(calendars.get(id)!)]));
+      const projectVersions = projectIds.map(projectId => ({ projectId, calendar: calendars.get(projectId)!.version,
+        workflow: workflow(projectId).version, schema: this.issueSchemaVersion(projectId) }));
+      const planned = calculateTeamFollowUpSchedule(scope, id => calendarMath.get(id)!, terminal);
+      const issuesById = new Map(scope.issues.map(issue => [issue.id, issue]));
+      const blockers = [...planned.blocking];
+      for (const change of planned.changes) {
+        const reason = hooks.validateChange(issuesById.get(change.id)!, toMutation(change));
+        if (reason) blockers.push(`${change.key}: ${reason}`);
+      }
+      const timestamp = Date.now(), createdAt = new Date(timestamp).toISOString();
+      const previewId = randomUUID(), expiresAt = new Date(timestamp + AUTO_PREVIEW_TTL_MS).toISOString();
+      const preview: AutomaticSchedulePreview = { ...planned, previewId, expiresAt, teamFollowUp,
+        calendarVersions: Object.fromEntries(projectVersions.map(({ projectId, calendar }) => [projectId, calendar])),
+        blocking: [...new Set(blockers)] };
+      const proposal: TeamFollowUpProposal = { id: previewId, actorId, createdAt, expiresAt, preview, used: false, teamFollowUp, projectVersions,
+        issueVersions: followUpReadset(scope.issues), dependencyHash: dependencyHash(scope.dependencies) };
+      this.store.put('automatic_schedule_previews', proposal);
+      return preview;
+    });
+  }
+
   private buildTeamWorkloadPreview(value: unknown, actorId: string, hooks: WorkloadHooks): TeamWorkloadLevelPreview {
     return this.store.transaction(() => {
       this.prune();
@@ -311,11 +406,12 @@ export class AutomaticScheduleService{
     });
   }
 
-  private proposal(previewId: unknown, actorId: string, scope: ProposalScope): Proposal | TeamProposal {
+  private proposal(previewId: unknown, actorId: string, scope: ProposalScope): StoredProposal {
     if (typeof previewId !== 'string' || !previewId) fail('미리보기 ID가 필요합니다.');
-    const proposal = this.store.get<Proposal | TeamProposal>('automatic_schedule_previews', previewId);
+    const proposal = this.store.get<StoredProposal>('automatic_schedule_previews', previewId);
     if (!proposal) fail('미리보기가 없거나 만료·복원으로 초기화되었습니다.', 404);
-    const actualScope = 'teamVersions' in proposal ? 'team-workload' : proposal.capacityVersion === undefined ? 'automatic' : 'project-workload';
+    const actualScope = 'teamFollowUp' in proposal ? 'team-follow-up' : 'teamVersions' in proposal ? 'team-workload'
+      : proposal.capacityVersion === undefined ? 'automatic' : 'project-workload';
     if (scope !== actualScope) fail('미리보기가 없거나 만료·복원으로 초기화되었습니다.', 404);
     if (proposal.actorId !== actorId) fail(scope === 'automatic' ? '다른 작업자의 미리보기를 적용할 수 없습니다.' : '다른 작업자의 미리보기를 확인하거나 적용할 수 없습니다.', 409);
     return proposal;
@@ -333,7 +429,17 @@ export class AutomaticScheduleService{
     if (this.issueSchemaVersion(expected.projectId) !== expected.schema) fail('업무 유형·사용자 정의 필드가 변경되었습니다. 다시 미리 확인해 주세요.', 409);
   }
 
-  private checkProposal(proposal: Proposal | TeamProposal, hooks: WorkloadHooks) {
+  private checkProposal(proposal: StoredProposal, hooks: WorkloadHooks) {
+    if ('teamFollowUp' in proposal) {
+      const { scope, teamFollowUp } = this.followUpContext(proposal.teamFollowUp, hooks, true);
+      if (teamFollowUp.sourceIssueId !== proposal.teamFollowUp.sourceIssueId || teamFollowUp.targetIssueId !== proposal.teamFollowUp.targetIssueId ||
+          JSON.stringify(followUpReadset(scope.issues)) !== JSON.stringify(proposal.issueVersions)) {
+        fail('업무 또는 고정 선행 일정이 변경되었습니다. 다시 미리 확인해 주세요.', 409);
+      }
+      if (dependencyHash(scope.dependencies) !== proposal.dependencyHash) fail('업무 의존성이 변경되었습니다. 다시 미리 확인해 주세요.', 409);
+      for (const versions of proposal.projectVersions) this.checkProjectVersions(versions, hooks);
+      return;
+    }
     let dependencies: Dependency[];
     if ('teamVersions' in proposal) {
       const projectIds = this.teamProjectIds();
@@ -363,12 +469,14 @@ export class AutomaticScheduleService{
       if (proposal.used && proposal.result) return proposal.result;
       if (!Number.isFinite(Date.parse(proposal.expiresAt)) || Date.parse(proposal.expiresAt) <= Date.now()) fail('미리보기가 만료되었습니다. 다시 계산해 주세요.', 409);
       if (proposal.preview.blocking.length) {
-        const label = scope === 'automatic' ? '자동 일정을 적용' : '과부하 일정을 조정';
+        const label = scope === 'automatic' ? '자동 일정을 적용' : scope === 'team-follow-up' ? '프로젝트 간 후속 일정을 적용' : '과부하 일정을 조정';
         fail(`${label}하기 전에 막힌 항목을 해결해 주세요.`, 422, { blocking: proposal.preview.blocking });
       }
       this.checkProposal(proposal, workload);
       if (!proposal.preview.changes.length) fail('적용할 일정 변경이 없습니다.');
-      const result = hooks.commitChanges(request, proposal.preview.changes.map(toMutation));
+      const committed = hooks.commitChanges(request, proposal.preview.changes.map(toMutation));
+      const result = scope === 'team-follow-up' ? { ...committed,
+        warnings: [...new Set([...proposal.preview.warnings, ...(committed.warnings ?? [])])] } : committed;
       this.store.put('automatic_schedule_previews', { ...proposal, used: true, appliedAt: new Date().toISOString(), result });
       return result;
     });
@@ -378,8 +486,16 @@ export class AutomaticScheduleService{
     app.post('/api/schedule/auto-preview', (req, res) => res.set('Cache-Control', 'no-store').json(this.preview(req.body, hooks.actor(req), workload.validateChange)));
     app.post('/api/schedule/workload-preview', (req, res) => res.json(this.buildWorkloadPreview(req.body, hooks.actor(req), workload)));
     app.post('/api/schedule/team-workload-preview', (req, res) => res.json(this.buildTeamWorkloadPreview(req.body, hooks.actor(req), workload)));
-    for (const [path, scope] of [['auto', 'automatic'], ['workload', 'project-workload'], ['team-workload', 'team-workload']] as const) {
-      app.post(`/api/schedule/${path}-apply`, (req, res) => res.json(this.apply(req, req.body.previewId, scope, hooks, workload)));
+    app.post('/api/schedule/team-follow-up-preview', (req, res) =>
+      res.set('Cache-Control', 'no-store').json(this.buildTeamFollowUpPreview(req.body, hooks.actor(req), workload)));
+    for (const [path, scope] of [['auto', 'automatic'], ['workload', 'project-workload'], ['team-workload', 'team-workload'], ['team-follow-up', 'team-follow-up']] as const) {
+      app.post(`/api/schedule/${path}-apply`, (req, res) => {
+        if (scope === 'team-follow-up') {
+          if (!req.body || Object.keys(req.body).length !== 1) fail('적용할 미리보기 ID를 확인해 주세요.');
+          res.set('Cache-Control', 'no-store');
+        }
+        res.json(this.apply(req, req.body.previewId, scope, hooks, workload));
+      });
       app.get(`/api/schedule/${path}-result/:previewId`, (req, res) => {
         res.set('Cache-Control', 'no-store');
         const proposal = this.proposal(req.params.previewId, hooks.actor(req), scope);

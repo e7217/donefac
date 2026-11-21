@@ -742,6 +742,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `POST /api/schedule/auto-apply`에 `{previewId}`를 보낸다. 작업자와 미리보기의 업무·연결·달력·워크플로·양식 버전을 확인한다. 정상 적용은 같은 트랜잭션에서 업무 날짜와 되돌리기 기록을 저장하고, 동일 미리보기의 재요청은 저장한 결과를 반환한다. `GET /api/schedule/auto-result/:previewId`에서 같은 작업자가 `{applied:false}` 또는 기존 `{undoId,updated,warnings}`를 읽을 수 있다. 미사용 미리보기의 유효 시간은 30분이며 적용 결과는 7일간 보관된다.
 
+## 프로젝트 간 후행 일정 검토
+
+브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}`을 보낸다. 두 업무가 서로 다른 프로젝트에 있고 현재 진행 대상인 차단 관계를 선택한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 대상에서 이어지는 프로젝트별 선후행 연결과 열린 프로젝트 간 차단을 확인한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
+
+미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 관련 업무의 버전·소속과 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
+
+`POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다.
+
 ## 선택 업무의 날짜 일괄 편집
 
 브라우저의 `POST /api/schedule/bulk-dates/preview`에 업무 ID와 화면에서 확인한 버전을 최대 100개 보낸다. `projectId`가 프로젝트 ID이면 해당 프로젝트에서 선택한 업무를 검사한다. 전체 프로젝트 간트는 `projectId: null`을 명시한다. 이때 서버는 선택 업무의 현재 소속을 조회하고 응답의 `projectIds`에 해당 프로젝트 ID를 표시한다.

@@ -1286,6 +1286,7 @@ export interface WorkspaceSnapshot {
 }
 export interface ScheduleChange {
   id: string;
+  projectId?: string;
   key: string;
   title: string;
   version: number;
@@ -1297,7 +1298,13 @@ export interface ScheduleChange {
   toDue?: string | null;
 }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
-export interface AutomaticSchedulePreview extends SchedulePreview { previewId: string; blocking: string[]; expiresAt: string }
+export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number }
+export interface AutomaticSchedulePreview extends SchedulePreview {
+  previewId: string;
+  blocking: string[];
+  expiresAt: string;
+  teamFollowUp?: TeamFollowUpScheduleInput & { sourceIssueId: string; targetIssueId: string; sourceEndDate: string | null };
+}
 export interface WorkloadLevelSummary { overloadedCells: number; excessMinutes: number; completionDate: string | null }
 export interface WorkloadLevelConflict { userId: string; date: string; excessMinutes: number; issueIds: string[] }
 export interface WorkloadLevelPlan {

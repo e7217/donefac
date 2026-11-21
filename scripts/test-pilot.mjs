@@ -478,6 +478,19 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.equal(replay.updated.length, 2);
   assert.deepEqual(replay.updated.find(value => value.id === issue.id), issue);
   assert.deepEqual(replay.updated.find(value => value.id === otherIssue.id), otherIssue);
+  const handoff = traffic.handoff;
+  const downstream = workspace.issues.find(value => value.id === handoff.issueId && value.projectId === bulk.otherProjectId);
+  const blocker = workspace.issueRelations.find(value => value.id === handoff.relationId);
+  const otherCalendar = workspace.calendars.find(value => value.projectId === bulk.otherProjectId);
+  assert.ok(downstream && blocker && otherCalendar);
+  assert.deepEqual([downstream.startDate, downstream.endDate], [handoff.date, handoff.date]);
+  assert.deepEqual([blocker.sourceIssueId, blocker.targetIssueId, blocker.type], [issue.id, downstream.id, 'blocks']);
+  assert.ok(otherCalendar.exceptions.some(value => value.date === handoff.dayOff && value.isWorking === false));
+  const handoffReceipt = await api(`/schedule/team-follow-up-result/${handoff.previewId}`, {
+    headers: { 'X-Actor-Id': fixture.actorIds[0] },
+  });
+  assert.equal(handoffReceipt.undoId, handoff.undoId);
+  assert.deepEqual(handoffReceipt.updated, [downstream]);
   const listNode = issueList.content.content?.find(node => node.type === 'issueList' && node.attrs?.projectId === fixture.projectId);
   const view = workspace.savedViews?.find(value => value.id === listNode?.attrs.savedViewId && value.projectId === fixture.projectId);
   assert.ok(listNode && view, 'The issue list must retain its project and same-project saved view.');
@@ -493,7 +506,8 @@ async function teamSnapshot(api, fixture, evidence) {
   return {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
-    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, successor, dependency, issueList, view })).digest('hex'),
+    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
+      otherCalendar, successor, dependency, issueList, view })).digest('hex'),
   };
 }
 
@@ -591,7 +605,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
   await stop(copy);
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project due dates and their apply receipt, schedules, dependency and issue list.`);
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project due dates and schedule handoff receipts, schedules, dependency and issue list.`);
 }
 
 async function runStandardPilot() {

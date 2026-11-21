@@ -136,6 +136,21 @@
   color: #53685e;
 }
 
+.gantt-team-blockers-review {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.gantt-team-follow-up-modal > header p,
+.gantt-team-follow-up-modal .gantt-preview-table td:first-child > small {
+  color: #53685e;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-follow-up-modal .gantt-preview-table td:first-child > small {
+  display: block;
+}
+
 .gantt-team-blockers-pages {
   justify-content: flex-end;
   margin-top: 6px;
