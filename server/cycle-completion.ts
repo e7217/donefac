@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import type {
-  CycleCompletionCounts, CycleCompletionIssue, CycleCompletionPlan, CycleCompletionPreview, CycleCompletionResult,
-  Issue, PlanningItem, ProjectWorkflow,
+  CycleCompletionCounts, CycleCompletionIssue, CycleCompletionPlan, CycleCompletionPreview, CycleCompletionRecord, CycleCompletionResult,
+  Issue, PlanningItem, ProjectWorkflow, User,
 } from '../shared/types.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
+import type { CycleCompletionRecords } from './cycle-completion-records.js';
 import type { Store } from './store.js';
 
 export class CycleCompletionError extends Error {
@@ -84,7 +85,7 @@ function membership(members: Issue[]): string {
 }
 
 export class CycleCompletionService {
-  constructor(private readonly store: Store) {
+  constructor(private readonly store: Store, private readonly records: CycleCompletionRecords) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS ${TABLE} (id TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS cycle_completion_remove_after ON ${TABLE}(json_extract(json,'$.removeAfter'));`);
     this.prune();
@@ -131,6 +132,23 @@ export class CycleCompletionService {
       }
     }
     return { counts, issues, updates };
+  }
+
+  private completionRecord(completed: PlanningItem, destination: CycleCompletionPlan | null, actorId: string,
+    { carry, done, cancelled }: CycleCompletionCounts, issues: CycleCompletionIssue[], members: Issue[]): CycleCompletionRecord {
+    const names = new Map(this.store.all<User>('users').map(user => [user.id, user.name]));
+    const assignees = new Map(members.map(issue => [issue.id, issue.assigneeId]));
+    return {
+      id: randomUUID(), projectId: completed.projectId,
+      cycle: { ...summary(completed), startDate: completed.startDate, endDate: completed.endDate, targetDate: completed.targetDate },
+      destination, actorId, actorName: names.get(actorId) ?? actorId, completedAt: completed.updatedAt,
+      counts: { carry, done, cancelled },
+      issues: issues.map(({ id, key, title, statusId, statusLabel, disposition }) => {
+        const assigneeId = assignees.get(id) ?? null;
+        return { id, key, title, statusId, statusLabel, disposition, assigneeId,
+          assigneeName: assigneeId === null ? null : names.get(assigneeId) ?? null };
+      }),
+    };
   }
 
   private preview<T extends { issue: Issue }>(cycleId: string, request: Request, hooks: Hooks<T>): CycleCompletionPreview {
@@ -183,7 +201,7 @@ export class CycleCompletionService {
       if (destination !== null && (!canReceive(cycle, destination) || destination.version !== proposal.destinationVersion)) fail(409, STALE);
       const members = this.members(cycle);
       if (membership(members) !== proposal.membership) fail(409, STALE);
-      const { counts, updates } = this.review(cycle, destination, members, hooks);
+      const { counts, issues, updates } = this.review(cycle, destination, members, hooks);
       if (counts.blocked) fail(409, STALE);
 
       const targetName = destination?.name ?? '미지정';
@@ -192,7 +210,10 @@ export class CycleCompletionService {
       }
       const completed = hooks.closeCycle(cycle.id, cycle.version, after(0));
       hooks.activity(request, 'planning', cycle.id, '사이클 완료', `${cycle.name} · ${targetName}에 ${counts.carry}개 이월`);
-      const result: CycleCompletionResult = { cycle: completed, destination: destination ? summary(destination) : null, counts };
+      const target = destination ? summary(destination) : null;
+      const record = this.completionRecord(completed, target, actorId, counts, issues, members);
+      this.records.insert(record);
+      const result: CycleCompletionResult = { cycle: completed, destination: target, counts, recordId: record.id };
       this.store.put(TABLE, { ...proposal, result, removeAfter: after(AUTO_RESULT_RETENTION_MS) });
       return result;
     });

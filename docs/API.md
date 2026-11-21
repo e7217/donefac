@@ -730,7 +730,13 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 미리보기의 `cycle`과 `destination`은 ID·이름·버전을 담으며 백로그의 `destination`은 `null`이다. `issues`의 각 업무는 상태 라벨과 `disposition`을 담는다. 프로젝트 워크플로의 완료(`done`)·취소(`cancelled`) 업무는 유지하고 나머지 업무는 이월(`carry`)한다. `counts.blocked`는 `carry` 중 필수 속성 등의 검증을 통과하지 못한 건수다. 차단 사유는 업무의 `blockedReason`에 포함되며 적용 ID는 `null`이다. 적용 가능한 `previewId`는 30분간 유효하다.
 
-`POST /api/planning-items/:id/complete`에 `{previewId}`를 보낸다. 작업자·사이클과 미리보기 이후의 연결 업무·계획 버전·업무 설정을 확인한다. 업무의 사이클 연결과 이력, 이전 사이클의 완료 상태와 적용 결과를 한 번에 저장한다. 응답은 완료된 `cycle`, 검토한 `destination`, `counts`다. 같은 작업자가 같은 ID의 결과를 7일간 다시 받을 수 있다. 자체 JSON 복원은 미리보기와 재확인 기록을 초기화한다.
+`POST /api/planning-items/:id/complete`에 `{previewId}`를 보낸다. 작업자·사이클과 미리보기 이후의 연결 업무·계획 버전·업무 설정을 확인한다. 업무의 사이클 연결과 이력, 이전 사이클의 완료 상태, 당시 업무 기록과 적용 결과를 한 번에 저장한다. 새 응답은 `cycle`, `destination`, `counts`, `recordId`를 담는다. 같은 작업자가 같은 ID의 결과를 7일간 다시 받을 수 있으며, 이전 버전에서 발급한 결과에는 `recordId`가 없을 수 있다. 자체 JSON 복원은 미리보기와 재확인 기록을 초기화한다.
+
+### 사이클 완료 기록
+
+`GET /api/projects/:projectId/cycle-completion-records`는 `{items, nextCursor}`를 반환한다. `cycleId`를 보내면 그 사이클, 생략하면 프로젝트의 모든 완료 기록을 최신순으로 읽는다. 페이지의 `limit`은 기본 20이고 1~50을 지원한다. 다음 페이지 요청에는 같은 `cycleId` 조건과 응답의 `nextCursor`를 `cursor`로 보낸다. 마지막 페이지의 `nextCursor`는 `null`이다.
+
+`GET /api/projects/:projectId/cycle-completion-records/:recordId`는 해당 기록의 `issues`를 포함한다. 기록에는 당시 사이클 이름·버전·기간, `destination`의 ID·이름·버전 또는 백로그를 뜻하는 `null`, 완료한 작업자와 시각, 분류별 건수를 저장한다. 각 업무에는 당시 업무 키·제목·상태·담당자와 `done`, `cancelled`, `carry` 중 하나의 결과를 저장한다. 해당 프로젝트에서 보관한 기록은 원래 사이클이나 업무가 사라진 뒤에도 조회할 수 있다. `/api/v1`의 같은 경로는 해당 프로젝트의 읽기 또는 쓰기 키를 사용한다. 자체 백업 형식 80의 `cycleCompletionRecords`가 이 기록을 보존한다.
 
 ## 계획과 연결 업무 일정 이동
 

@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import type {
-  ApiKeyCreated, CycleCompletionPreview, CycleCompletionResult, Issue, PlanningItem, ProjectIssueOrder, ProjectWorkflow, WorkspaceSnapshot,
+  ApiKeyCreated, CycleCompletionPreview, CycleCompletionRecord, CycleCompletionRecordsPage, CycleCompletionResult, Issue,
+  PlanningItem, ProjectIssueOrder, ProjectWorkflow, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -229,6 +230,150 @@ test('a failed cycle write rolls back earlier ticket and audit changes and the s
       const after = await workspace(app);
       assert.equal(findIssue(after, first.id).cycleId, null);
       assert.equal(findIssue(after, second.id).cycleId, null);
+    } finally { db.close(); }
+  });
+});
+
+const recordsPath = `/projects/${projectId}/cycle-completion-records`;
+
+test('completed cycles archive the reviewed outcomes and preserve independent completion records after reopening and restart', async () => {
+  await withFixture(async (app, dir) => {
+    const { users } = await workspace(app);
+    const actor = users.find(user => user.id === 'user-min')!;
+    const assignee = users.find(user => user.id === 'user-seo')!;
+    const actorHeader = { 'X-Actor-Id': actor.id };
+    const source = await plan(app, '원래 사이클', { startDate: '2026-11-02', endDate: '2026-11-13', targetDate: '2026-11-14' });
+    const destination = await plan(app, '원래 이월 대상', { status: 'planned' });
+    const legacy = await plan(app, '기록 기능 이전 완료', { status: 'completed' });
+    const done = await issue(app, '완료된 업무', { cycleId: source.id, status: 'done' });
+    const cancelled = await issue(app, '취소된 업무', { cycleId: source.id, status: 'cancelled' });
+    const carried = await issue(app, '이월된 업무', { cycleId: source.id, assigneeId: assignee.id });
+    const outside = await issue(app, '이전 사이클 밖 업무', { cycleId: destination.id });
+    const trashed = await issue(app, '완료 전 휴지통 업무', { cycleId: source.id });
+    assert.equal((await app.call(`/issues/${trashed.id}`, 'DELETE', { expectedVersion: trashed.version })).status, 200);
+
+    const prepare = async (cycle: PlanningItem, target: PlanningItem | null) => {
+      const response = await app.call<CycleCompletionPreview>(`${completion(cycle)}/preview`, 'POST', {
+        expectedVersion: cycle.version, destinationId: target?.id ?? null,
+      }, actorHeader);
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      assert.ok(response.data.previewId);
+      return response.data.previewId;
+    };
+    const getRecord = (activeApp: Fixture, id: string) => activeApp.call<CycleCompletionRecord>(`${recordsPath}/${id}`);
+    const listRecords = (activeApp: Fixture, cycleId: string) =>
+      activeApp.call<CycleCompletionRecordsPage>(`${recordsPath}?cycleId=${encodeURIComponent(cycleId)}`);
+    const previewId = await prepare(source, destination);
+    assert.deepEqual(await listRecords(app, source.id), { status: 200, data: { items: [], nextCursor: null } });
+    const apply = () => app.call<CycleCompletionResult>(completion(source), 'POST', { previewId }, actorHeader);
+    const [first, replay] = await Promise.all([apply(), apply()]);
+    assert.equal(first.status, 200, JSON.stringify(first.data));
+    assert.deepEqual(replay, first);
+    assert.ok(first.data.recordId);
+
+    const firstRead = await getRecord(app, first.data.recordId);
+    assert.equal(firstRead.status, 200, JSON.stringify(firstRead.data));
+    const captured = firstRead.data;
+    assert.deepEqual(captured, {
+      id: first.data.recordId, projectId, actorId: actor.id, actorName: actor.name, completedAt: first.data.cycle.updatedAt,
+      cycle: { id: source.id, name: source.name, version: first.data.cycle.version,
+        startDate: source.startDate, endDate: source.endDate, targetDate: source.targetDate },
+      destination: { id: destination.id, name: destination.name, version: destination.version },
+      counts: { carry: 1, done: 1, cancelled: 1 },
+      issues: [
+        { id: done.id, key: done.key, title: done.title, statusId: 'done', statusLabel: '완료', disposition: 'done', assigneeId: null, assigneeName: null },
+        { id: cancelled.id, key: cancelled.key, title: cancelled.title, statusId: 'cancelled', statusLabel: '취소', disposition: 'cancelled', assigneeId: null, assigneeName: null },
+        { id: carried.id, key: carried.key, title: carried.title, statusId: 'todo', statusLabel: '할 일', disposition: 'carry',
+          assigneeId: assignee.id, assigneeName: assignee.name },
+      ],
+    });
+
+    const nextCycle = await app.call<PlanningItem>(`/planning-items/${source.id}`, 'PATCH', {
+      expectedVersion: first.data.cycle.version, status: 'active', name: '다시 진행할 사이클', startDate: '2026-11-03',
+    });
+    assert.equal(nextCycle.status, 200);
+    assert.equal((await app.call(`/users/${actor.id}`, 'PATCH', { name: '다시 완료한 팀원' })).status, 200);
+    assert.equal((await app.call(`/users/${assignee.id}`, 'PATCH', { name: '바뀐 담당자 이름' })).status, 200);
+    const workflowPath = `/projects/${projectId}/workflow`;
+    const workflow = (await app.call<ProjectWorkflow>(workflowPath)).data;
+    const renamedStatus = await app.call(workflowPath, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+      statuses: workflow.statuses.map(status => status.id === 'done' ? { ...status, label: '출시 완료' } : status),
+    });
+    assert.equal(renamedStatus.status, 200);
+    const carriedVersion = findIssue(await workspace(app), carried.id).version;
+    const edited = await app.call<Issue>(`/issues/${carried.id}`, 'PATCH', { expectedVersion: carriedVersion, title: '이월 후 새 제목' });
+    assert.equal(edited.status, 200);
+    for (const item of [edited.data, outside]) {
+      assert.equal((await app.call(`/issues/${item.id}`, 'DELETE', { expectedVersion: item.version })).status, 200);
+    }
+    assert.equal((await app.call(`/planning-items/${destination.id}?expectedVersion=${destination.version}`, 'DELETE')).status, 200);
+    assert.deepEqual((await getRecord(app, captured.id)).data, captured);
+
+    const newcomer = await issue(app, '두 번째 완료에서 새로 이월', { cycleId: source.id });
+    const secondPreviewId = await prepare(nextCycle.data, null);
+    const second = await app.call<CycleCompletionResult>(completion(source), 'POST', { previewId: secondPreviewId }, actorHeader);
+    assert.equal(second.status, 200, JSON.stringify(second.data));
+    assert.ok(second.data.recordId);
+    assert.notEqual(second.data.recordId, captured.id);
+    const nextRecord = await getRecord(app, second.data.recordId);
+    assert.equal(nextRecord.status, 200);
+    assert.deepEqual(nextRecord.data.cycle, { ...captured.cycle, name: nextCycle.data.name, startDate: nextCycle.data.startDate,
+      version: second.data.cycle.version });
+    assert.equal(nextRecord.data.actorName, '다시 완료한 팀원');
+    assert.equal(nextRecord.data.destination, null);
+    assert.deepEqual(nextRecord.data.issues.map(item => item.id), [done.id, cancelled.id, newcomer.id]);
+    assert.equal(nextRecord.data.issues.find(item => item.id === done.id)?.statusLabel, '출시 완료');
+    const otherProjectRead = await app.call(`/projects/project-team/cycle-completion-records/${captured.id}`);
+    assert.equal(otherProjectRead.status, 404);
+    assert.deepEqual(await listRecords(app, legacy.id), { status: 200, data: { items: [], nextCursor: null } });
+
+    for (const id of [done.id, cancelled.id]) {
+      const version = findIssue(await workspace(app), id).version;
+      assert.equal((await app.call(`/issues/${id}`, 'DELETE', { expectedVersion: version })).status, 200);
+    }
+    assert.equal((await app.call(`/planning-items/${source.id}?expectedVersion=${second.data.cycle.version}`, 'DELETE')).status, 200);
+
+    await app.close();
+    const restarted = await open(dir);
+    try {
+      assert.deepEqual(await getRecord(restarted, captured.id), firstRead);
+      assert.deepEqual(await getRecord(restarted, nextRecord.data.id), nextRecord);
+      const archived = await listRecords(restarted, source.id);
+      assert.equal(archived.status, 200);
+      assert.deepEqual(archived.data.items.map(row => row.id), [nextRecord.data.id, captured.id]);
+      assert.deepEqual(await restarted.call(completion(source), 'POST', { previewId }, actorHeader), first);
+    } finally { await restarted.close(); }
+  });
+});
+
+test('a failure saving the retry receipt also rolls back the cycle history and ticket changes', async () => {
+  await withFixture(async (app, dir) => {
+    const source = await plan(app, '기록과 영수증 롤백');
+    await issue(app, '이월 롤백 업무', { cycleId: source.id });
+    const preview = await review(app, source, null);
+    const before = await workspace(app);
+    const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+    const apply = () => app.call<CycleCompletionResult>(completion(source), 'POST', { previewId: preview.previewId });
+    try {
+      db.exec(`CREATE TRIGGER synthetic_cycle_receipt_error BEFORE UPDATE ON cycle_completion_previews
+        WHEN json_type(NEW.json, '$.result.recordId') = 'text'
+        BEGIN SELECT RAISE(ABORT, 'synthetic cycle completion receipt failure'); END`);
+      assert.equal((await apply()).status, 500);
+      const after = await workspace(app);
+      assert.deepEqual(after.issues, before.issues);
+      assert.deepEqual(after.planningItems, before.planningItems);
+      assert.deepEqual(after.activities, before.activities);
+      const { count: rolledBack } = db.prepare('SELECT count(*) AS count FROM cycle_completion_records').get() as { count: number };
+      assert.equal(rolledBack, 0);
+      db.exec('DROP TRIGGER synthetic_cycle_receipt_error');
+
+      const saved = await apply();
+      assert.equal(saved.status, 200, JSON.stringify(saved.data));
+      assert.ok(saved.data.recordId);
+      assert.equal((await app.call(`${recordsPath}/${saved.data.recordId}`)).status, 200);
+      assert.deepEqual(await apply(), saved);
+      const { count: total } = db.prepare('SELECT count(*) AS count FROM cycle_completion_records').get() as { count: number };
+      assert.equal(total, 1);
     } finally { db.close(); }
   });
 });

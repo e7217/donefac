@@ -11,6 +11,7 @@ import { SavedViewService, SavedViewError } from './saved-views.js';
 import { CollaborationService, CollaborationError, type CollaborationUpgradeGuard } from './collaboration.js';
 import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
+import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-completion-records.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
@@ -210,7 +211,8 @@ export function createApp(options: {
   const atlassian=new AtlassianReader(options.atlassianEnv);
   const documentPublication=new DocumentPublicationService(store,notifications,documentSubscribers);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
-  const cycleCompletion = new CycleCompletionService(store);
+  const cycleCompletionRecords = new CycleCompletionRecords(store);
+  const cycleCompletion = new CycleCompletionService(store, cycleCompletionRecords);
   const issueOrders = new IssueOrderService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
@@ -1052,6 +1054,26 @@ export function createApp(options: {
     commit: commitIssueUpdate,
     closeCycle: (id, version, timestamp) => planning.completeCycle(id, version, timestamp),
   });
+  const cycleCompletionRecordsPath = '/api/projects/:projectId/cycle-completion-records';
+  app.get(cycleCompletionRecordsPath, (req, res) => {
+    const { id } = get<Project>('projects', req.params.projectId);
+    const { cycleId, cursor, limit = '20' } = req.query;
+    const isId = (value: unknown): value is string =>
+      typeof value === 'string' && value.length <= 200 && Boolean(value.trim()) && !/[\u0000-\u001f\u007f]/u.test(value);
+    if (Object.keys(req.query).some(key => !['cycleId', 'cursor', 'limit'].includes(key)) ||
+      (cycleId !== undefined && !isId(cycleId)) || (cursor !== undefined && !isId(cursor)) ||
+      typeof limit !== 'string' || !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(limit)) {
+      return fail('사이클 완료 기록의 조회 조건을 확인해 주세요.');
+    }
+    res.set('Cache-Control', 'no-store').json(cycleCompletionRecords.list(id, { cycleId, cursor, limit: Number(limit) }));
+  });
+  app.get(`${cycleCompletionRecordsPath}/:recordId`, (req, res) => {
+    if (Object.keys(req.query).length) return fail('사이클 완료 기록 상세에는 조회 조건을 사용할 수 없습니다.');
+    const { id } = get<Project>('projects', req.params.projectId);
+    const record = cycleCompletionRecords.get(id, req.params.recordId);
+    if (!record) return fail('사이클 완료 기록을 찾을 수 없습니다.', 404);
+    res.set('Cache-Control', 'no-store').json(record);
+  });
   issueBulkEdit.registerRoutes(app,{
     actor,
     configurationToken:issueEditConfiguration,
@@ -1884,7 +1906,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2071,6 +2093,10 @@ export function createApp(options: {
       issues:data.issues,archivedIssues,users:data.users,
     },data.exportedAt):[];
     const allImportedIssues=[...(data.issues as Issue[]),...archivedIssues];
+    const importedCycleCompletionRecords = cycleCompletionRecords.validateRestore(data.cycleCompletionRecords, {
+      schemaVersion: data.schemaVersion, exportedAt: data.exportedAt, projects: data.projects,
+      planningItems: importedPlanning.items, issues: allImportedIssues,
+    });
     if(data.schemaVersion<18){
       const capacities:unknown=data.workloadCapacities;
       const hasCustomCapacity=capacities!==undefined&&(!Array.isArray(capacities)||capacities.some(entry=>
@@ -2279,6 +2305,7 @@ export function createApp(options: {
       restoreAutomationRunHistory(store,importedAutomationRuns);
       issueAssignments.replaceImported(importedAssignments,previousAssignments);
       planning.replaceImported(importedPlanning.items,previousPlanning);
+      cycleCompletionRecords.restore(importedCycleCompletionRecords);
       calendars.replaceImported(importedCalendars,previousCalendars);
       workload.replaceImported(importedCapacity,previousCapacities);
       teamCapacity.replaceImported(importedTeamCapacity,previousTeamCapacityVersion);
@@ -2314,6 +2341,7 @@ export function createApp(options: {
       };
       for(const issue of data.issues as Issue[])reserve(issue.projectId,issue.key);
       for(const entry of importedTrash)if(entry.resourceType==='issue')reserve(entry.resource.projectId,entry.resource.key);
+      for (const record of importedCycleCompletionRecords) for (const issue of record.issues) reserve(record.projectId, issue.key);
       for(const event of importedReportLedger.events){const state=event.after??event.before;if(state)reserve(state.projectId,state.key);}
       for(const project of data.projects)store.db.prepare('INSERT INTO issue_sequences VALUES(?,?)').run(project.id,nextNumbers.get(project.id)||1);
       collaboration.replaceImported(importedCollaboration);
@@ -2356,6 +2384,7 @@ export function createApp(options: {
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabDeploymentError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CycleCompletionRecordsError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});

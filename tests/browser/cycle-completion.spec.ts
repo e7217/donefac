@@ -226,3 +226,96 @@ test('360px에서 변경된 미리보기를 다시 검토하고 유실된 응답
       version: carry.version + 1, status: carry.status, startDate: carry.startDate, endDate: carry.endDate, dueDate: carry.dueDate });
   } finally { await fixture.clean(); }
 });
+
+test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당시 기록을 확인한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const fixture = cycleFixture(request);
+  try {
+    const { projects: [project] } = await workspace(request);
+    const cycle = await fixture.plan(project.id, '기록을 남길 사이클', 'active');
+    const destination = await fixture.plan(project.id, '이월 당시 사이클', 'planned');
+    const olderCycle = await fixture.plan(project.id, '기록 추가 이전의 완료 사이클', 'completed');
+    const carried = await fixture.issue(cycle, '이월 당시 업무 제목', 'in_progress');
+    const done = await fixture.issue(cycle, '첫 완료에 남긴 업무', 'done');
+    const cancelled = await fixture.issue(cycle, '취소 당시 업무 제목', 'cancelled');
+
+    const modal = await openCompletion(page, cycle);
+    await modal.destination.selectOption({ label: `${destination.name} (계획)` });
+    const previewed = completionResponse(page, cycle, true);
+    await modal.preview.click();
+    const draft = await (await previewed).json() as CycleCompletionPreview;
+    const committed = completionResponse(page, cycle);
+    await modal.apply.click();
+    const first = await (await committed).json() as CycleCompletionResult;
+    expect(first.recordId).toBeTruthy();
+    await modal.dialog.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(modal.dialog).toHaveCount(0);
+
+    const currentTitle = `${carried.title} 현재 이름`;
+    const currentDestination = `${destination.name} 이름 변경`;
+    await read<Issue>(await request.patch(`/api/issues/${carried.id}`, { data: {
+      expectedVersion: carried.version + 1, title: currentTitle, status: 'done',
+    } }));
+    await read<PlanningItem>(await request.patch(`/api/planning-items/${destination.id}`, { data: {
+      expectedVersion: destination.version, name: currentDestination,
+    } }));
+    const removed = await read<{ trashEntryId: string }>(await request.delete(`/api/issues/${cancelled.id}`));
+    expect((await request.delete(`/api/trash/${removed.trashEntryId}`)).ok()).toBe(true);
+
+    const reopenedName = `${cycle.name} 재개`;
+    const reopened = await read<PlanningItem>(await request.patch(`/api/planning-items/${cycle.id}`, { data: {
+      expectedVersion: first.cycle.version, status: 'active', name: reopenedName,
+    } }));
+    const recentIssue = await fixture.issue(reopened, '두 번째 완료에서 이월한 업무', 'todo');
+    const fresh = await read<CycleCompletionPreview>(await request.post(`/api/planning-items/${cycle.id}/complete/preview`, {
+      data: { expectedVersion: reopened.version, destinationId: null },
+    }));
+    const second = await read<CycleCompletionResult>(await request.post(`/api/planning-items/${cycle.id}/complete`, {
+      data: { previewId: fresh.previewId },
+    }));
+    expect(second.recordId).toBeTruthy();
+    expect(second.recordId).not.toBe(first.recordId);
+
+    await page.reload();
+    const history = page.getByRole('region', { name: '사이클 완료 기록', exact: true });
+    const record = history.getByRole('article', { name: '선택한 사이클 완료 기록', exact: true });
+    const records = history.getByRole('combobox', { name: '완료 기록 선택', exact: true });
+    await history.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
+    await expect(records).toHaveValue(second.recordId!);
+    await expect(record.getByRole('heading', { name: reopenedName, exact: true })).toBeVisible();
+    await expect(record.getByText('백로그 (사이클 미지정)', { exact: true })).toBeVisible();
+    await expect(record.getByRole('region', { name: '이월 업무', exact: true }).getByText(recentIssue.title, { exact: true })).toBeVisible();
+
+    await records.selectOption(first.recordId!);
+    await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
+    await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
+    await expect(record.getByText(currentDestination, { exact: true })).toHaveCount(0);
+    const previousCarry = record.getByRole('region', { name: '이월 업무', exact: true });
+    await expect(previousCarry.getByText(draft.issues.find(issue => issue.id === carried.id)!.statusLabel, { exact: true })).toBeVisible();
+    await expect(record.getByRole('region', { name: '완료 업무', exact: true }).getByText(done.title, { exact: true })).toBeVisible();
+    const previousCancelled = record.getByRole('region', { name: '취소 업무', exact: true });
+    await expect(previousCancelled.getByText(cancelled.title, { exact: true })).toBeVisible();
+    await expect(previousCancelled.getByText('현재 업무 없음', { exact: true })).toBeVisible();
+    await expect(previousCancelled.getByRole('button')).toHaveCount(0);
+    expect(await history.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+
+    await previousCarry.getByRole('button', { name: `${carried.key} ${carried.title}`, exact: true }).click();
+    const issueDrawer = page.getByRole('dialog', { name: currentTitle, exact: true });
+    await expect(issueDrawer).toBeVisible();
+    await issueDrawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(records).toHaveValue(first.recordId!);
+
+    const currentDone = (await workspace(request)).issues.find(issue => issue.id === done.id)!;
+    await read<Issue>(await request.patch(`/api/issues/${done.id}`, { data: { expectedVersion: currentDone.version, cycleId: null } }));
+    expect((await request.delete(`/api/planning-items/${cycle.id}?expectedVersion=${second.cycle.version}`)).ok()).toBe(true);
+    await page.goto(`/#/${project.id}/planning/${olderCycle.id}`);
+    await page.reload();
+    await history.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
+    await expect(history.getByText('이 사이클에 저장된 완료 기록이 없습니다.', { exact: true })).toBeVisible();
+    await history.getByRole('combobox', { name: '완료 기록 범위', exact: true }).selectOption('project');
+    await records.selectOption(first.recordId!);
+    await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
+    await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
+  } finally { await fixture.clean(); }
+});

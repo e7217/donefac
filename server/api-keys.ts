@@ -262,6 +262,14 @@ export class ApiKeyService {
       this.used(key);
       return next();
     }
+    const cycleCompletionRecords = /^\/api\/projects\/([^/]+)\/cycle-completion-records(?:\/([^/]+))?$/.exec(path);
+    if (request.method === 'GET' && cycleCompletionRecords) {
+      this.query(request, cycleCompletionRecords[2] ? [] : ['cycleId', 'cursor', 'limit']);
+      this.allowedProject(key, this.decode(cycleCompletionRecords[1]));
+      if (cycleCompletionRecords[2]) this.decode(cycleCompletionRecords[2]);
+      this.used(key);
+      return next();
+    }
     if (request.method === 'POST' && path === '/api/issues/query') {
       this.query(request, []);
       if (typeof request.body.projectId !== 'string' || !request.body.projectId) fail(400, '필터를 적용할 프로젝트가 필요합니다.');

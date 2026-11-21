@@ -475,6 +475,28 @@ export interface CycleCompletionPreview {
 }
 export interface CycleCompletionResult {
   cycle: PlanningItem; destination: CycleCompletionPlan | null; counts: CycleCompletionCounts;
+  recordId?: string;
+}
+export interface CycleCompletionRecordSummary {
+  id: string;
+  projectId: string;
+  cycle: CycleCompletionPlan & Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
+  destination: CycleCompletionPlan | null;
+  actorId: string;
+  actorName: string;
+  completedAt: string;
+  counts: Pick<CycleCompletionCounts, 'carry' | 'done' | 'cancelled'>;
+}
+export type CycleCompletionRecordedIssue = Omit<CycleCompletionIssue, 'blockedReason'> & {
+  assigneeId: string | null;
+  assigneeName: string | null;
+};
+export interface CycleCompletionRecord extends CycleCompletionRecordSummary {
+  issues: CycleCompletionRecordedIssue[];
+}
+export interface CycleCompletionRecordsPage {
+  items: CycleCompletionRecordSummary[];
+  nextCursor: string | null;
 }
 export type ApiKeyAccess = 'read' | 'write';
 export interface ApiKeyRecord {

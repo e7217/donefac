@@ -5,6 +5,7 @@ import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, Layers3, Loade
 import type { FeatureProps, Issue, PlanningItem, PlanningKind, PlanningStatus } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, dateLabel, patch, post, remove } from '../lib/api';
+import { CycleCompletionHistory } from './CycleCompletionHistory';
 import { CycleCompletionPanel } from './CycleCompletionPanel';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
 import { errorMessage } from './schedule-utils';
@@ -52,7 +53,10 @@ function ProjectPlanning(props: PlanningProps) {
           onOpenGantt(current.id);
         }}><SquareChartGantt size={15} />간트에서 열기</a>}
         <PlanningEditor key={`${creating ? `new:${kind}` : currentId}:${props.actorId}`} {...props} kind={kind} item={current} existingId={creating ? null : currentId || null} onCreated={item => { setCreating(false); setSelectedId(item.id); }} onDeleted={() => { setSelectedId(null); setCreating(false); }} />
-      </div> : <div className="planning-welcome"><Icon size={35} /><h2>함께 실행할 계획을 세워보세요</h2><p>{KIND_DESCRIPTIONS[kind]}</p><button className="btn btn-primary" onClick={create}><Plus size={15} />{PLAN_LABELS[kind]} 만들기</button></div>}
+      </div> : <div className="planning-detail-column">
+        {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={props.actorId} issues={data.issues} openIssue={props.openIssue} />}
+        <div className="planning-welcome"><Icon size={35} /><h2>함께 실행할 계획을 세워보세요</h2><p>{KIND_DESCRIPTIONS[kind]}</p><button className="btn btn-primary" onClick={create}><Plus size={15} />{PLAN_LABELS[kind]} 만들기</button></div>
+      </div>}
     </div></div>;
 }
 
@@ -146,6 +150,8 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
     </div>}
     {completionCycle && <CycleCompletionPanel cycle={completionCycle} plans={data.planningItems ?? []} actorId={actorId}
       refresh={refresh} notify={notify} onClose={closeCompletion} onSaved={acceptCycle} restoreFocus={restoreCompletionFocus} />}
+    {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={actorId} issues={data.issues} openIssue={openIssue}
+      cycle={item && { id: item.id, version: Math.max(item.version, version) }} />}
     <form onSubmit={save} aria-label="계획 정보 편집"><fieldset disabled={busy || selectedAssignments.length > 0}><label className="issue-form-label">이름<input className="field planning-name-input" aria-label="계획 이름" value={draft.name} onChange={event => update('name', event.target.value)} placeholder={`${PLAN_LABELS[kind]} 이름`} required maxLength={120} /></label><label className="issue-form-label">설명<textarea className="field" aria-label="계획 설명" value={draft.description} onChange={event => update('description', event.target.value)} rows={3} placeholder="목표와 범위를 간단히 적어주세요." /></label><div className="planning-form-grid"><label className="issue-form-label">상태<select className="field" aria-label="계획 상태" value={draft.status} onChange={event => {
       const value = event.target.value as PlanningStatus;
       if (value !== 'completed' || !requiresCycleCompletion) update('status', value);
