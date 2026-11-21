@@ -854,8 +854,10 @@ export interface TrashItemSummary {
 export interface TrashItemPage { items: TrashItemSummary[]; total: number; offset: number; limit: number }
 export interface Activity { id: string; resourceType: string; resourceId: string; actorId: string; action: string; detail: string; createdAt: string }
 export const ISSUE_RISK_NOTIFICATION_KINDS = ['issue-block-added', 'issue-block-resolved', 'issue-deadline-postponed'] as const;
+export const ISSUE_DEADLINE_REMINDER_KINDS = ['issue-deadline-upcoming', 'issue-deadline-today', 'issue-deadline-overdue'] as const;
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', ...ISSUE_RISK_NOTIFICATION_KINDS,
+  ...ISSUE_DEADLINE_REMINDER_KINDS,
   'document-created', 'document-comment', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn',
 ] as const;
@@ -864,7 +866,7 @@ export type TeamNotificationFilter = 'all' | 'unread';
 export interface TeamNotification {
   id: string;
   recipientId: string;
-  actorId: string;
+  actorId: string | null;
   kind: TeamNotificationKind;
   projectId: string | null;
   targetId: string;
@@ -878,6 +880,14 @@ export interface TeamNotificationPage {
   nextCursor: string | null;
   unreadCount: number;
 }
+export const MAX_DEADLINE_REMINDER_DAYS = 14;
+export interface DeadlineReminderPreferences {
+  daysBefore: number;
+  onDueDate: boolean;
+  overdue: boolean;
+  version: string | null;
+}
+export type DeadlineReminderPreferenceRecord = DeadlineReminderPreferences & { userId: string; version: string };
 export type NotificationSubscriptionTarget = 'issue' | 'document' | 'project' | 'space';
 export const COMMON_DOCUMENT_NOTIFICATION_SPACE_ID = 'common';
 export const PROJECT_DOCUMENT_NOTIFICATION_SPACE_PREFIX = 'project:';

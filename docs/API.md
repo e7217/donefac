@@ -800,6 +800,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `targetId`는 URL 경로 한 구간으로 인코딩한다. 공동 편집의 저장 알림은 버전 기록을 만들 때 발송한다. 개별 구독과 프로젝트·공간 구독이 겹치면 같은 변경에 알림 한 건을 저장한다. 자체 백업 형식 29는 범위 구독과 `issue-created`·`document-created`를 보존한다.
 
+## 담당 업무 마감 알림
+
+`GET /api/notifications/deadline-reminders`는 `X-Actor-Id`로 선택한 팀원의 `daysBefore`, `onDueDate`, `overdue`, `version`을 반환한다. 저장 전 기본값은 `0`, `false`, `false`, `null`이다. 같은 경로로 `PUT`할 때 `daysBefore`에 0~14의 정수, `onDueDate`와 `overdue`에 불리언, `expectedVersion`에 직전에 읽은 버전을 보낸다. 최초 저장의 `expectedVersion`은 `null`이다. 성공하면 새 버전을 반환하고 이전 버전으로 저장하면 `409`를 반환한다. 두 경로는 브라우저 API로 제공하며 응답을 캐시에 저장하지 않는다.
+
+앱 알림함은 마감 전·당일·초과를 각각 `issue-deadline-upcoming`, `issue-deadline-today`, `issue-deadline-overdue`로 반환한다. 이 세 종류의 `actorId`는 `null`이며 `detail`은 목표 마감일 또는 계획 종료일과 `YYYY-MM-DD` 날짜를 담는다. 자체 백업 형식 70은 `deadlineReminderPreferences`, 발송 기록과 읽음 시각을 보존한다. 자체 백업을 복원하면 설정의 편집 버전이 갱신된다.
+
 ## 팀원 시간 배정
 
 시간 배정 경로는 브라우저용 `/api`에서 제공한다. 시작·종료는 `2026-11-20T00:30:00.000Z`처럼 분 단위 UTC 시각이다. 배정 기간은 최대 24시간이다. 시작은 포함하고 종료는 제외한다. 같은 팀원의 다른 프로젝트 배정과 겹치면 `409`로 응답한다.

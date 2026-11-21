@@ -20,6 +20,9 @@ const EVENT_LABELS: Record<TeamNotificationKind, string> = {
   'issue-block-added': '업무 차단 추가',
   'issue-block-resolved': '업무 차단 원인 해소',
   'issue-deadline-postponed': '업무 마감 연기',
+  'issue-deadline-upcoming': '업무 마감 임박',
+  'issue-deadline-today': '업무 마감 당일',
+  'issue-deadline-overdue': '업무 마감 초과',
   'document-created': '새 문서',
   'document-comment': '문서 댓글',
   'document-updated': '문서 변경',
@@ -108,6 +111,7 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     window.addEventListener('focus', refresh);
+    window.addEventListener('teamspace:notifications-updated', refresh);
     window.addEventListener('teamspace:workspace-imported', imported);
     document.addEventListener('visibilitychange', refresh);
     return () => {
@@ -115,6 +119,7 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
       readRequest.current = null;
       window.clearInterval(timer);
       window.removeEventListener('focus', refresh);
+      window.removeEventListener('teamspace:notifications-updated', refresh);
       window.removeEventListener('teamspace:workspace-imported', imported);
       document.removeEventListener('visibilitychange', refresh);
     };
@@ -261,7 +266,7 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
               <button className="team-notifications-target" type="button" aria-disabled={busy} onClick={() => void markRead(item, true)}
                 aria-describedby={item.readAt ? undefined : unreadId}>
                 <strong>{item.targetLabel}</strong>
-                <span>{EVENT_LABELS[item.kind]} · {users.find(user => user.id === item.actorId)?.name ?? '팀원'}</span>
+                <span>{EVENT_LABELS[item.kind]} · {item.actorId === null ? '자동 알림' : users.find(user => user.id === item.actorId)?.name ?? '팀원'}</span>
                 <time dateTime={item.createdAt} title={new Date(item.createdAt).toLocaleString('ko-KR')}>{relativeTime(item.createdAt)}</time>
                 {item.detail && <span className="team-notifications-detail">{item.detail}</span>}
               </button>

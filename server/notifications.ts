@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { isCalendarDate } from '../shared/calendar.js';
+import { ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
 import type { TeamNotification, TeamNotificationFilter, TeamNotificationPage } from '../shared/types.js';
 import type { Store } from './store.js';
 
@@ -7,25 +8,50 @@ const PAGE_SIZE = 50;
 const LABEL_LIMIT = 500;
 export const MAX_NOTIFICATION_DETAIL_LENGTH = 500;
 const KINDS: ReadonlySet<string> = new Set(TEAM_NOTIFICATION_KINDS);
-const DETAIL_KINDS: ReadonlySet<string> = new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+const DEADLINE_KINDS: ReadonlySet<string> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
+const DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
 const COLUMNS = `id,recipient_id AS recipientId,actor_id AS actorId,kind,project_id AS projectId,
   target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail`;
 const INSERT = `INSERT INTO team_notifications
   (id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail) VALUES(?,?,?,?,?,?,?,?,?,?)`;
+const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS team_notifications (
+  seq INTEGER PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE,
+  recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  actor_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  project_id TEXT,
+  target_id TEXT NOT NULL,
+  target_label TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  read_at TEXT,
+  detail TEXT
+)`;
 const RESTORE_FIELDS = new Set(['id', 'recipientId', 'actorId', 'kind', 'projectId', 'targetId', 'targetLabel', 'createdAt', 'readAt', 'detail']);
 
 export class TeamNotificationError extends Error {
   readonly status = 400;
 }
 
-type NewNotification = Omit<TeamNotification, 'id' | 'recipientId' | 'readAt'> & {
+type NewNotification = Omit<TeamNotification, 'actorId' | 'id' | 'recipientId' | 'readAt'> & {
+  actorId: string;
   recipientIds: (string | null | undefined)[];
+};
+type DeadlineKind = typeof ISSUE_DEADLINE_REMINDER_KINDS[number];
+type NewDeadlineReminder = Pick<TeamNotification, 'recipientId' | 'targetId' | 'targetLabel' | 'createdAt'> & {
+  kind: DeadlineKind;
+  projectId: string;
+  deadline: { value: string; source: 'dueDate' | 'endDate' };
 };
 type StoredNotification = Omit<TeamNotification, 'detail'> & { detail: string | null };
 
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 const timestamp = (value: unknown): value is string => typeof value === 'string' && value.length === 24 &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+
+function reminderId(kind: string, recipientId: string, targetId: string, date: string): string {
+  return createHash('sha256').update(JSON.stringify([kind, recipientId, targetId, date])).digest('hex');
+}
 
 function validateDetail(kind: string, detail: unknown, present: boolean): string | null {
   if (DETAIL_KINDS.has(kind)) {
@@ -43,49 +69,58 @@ function publicNotification({ detail, ...row }: StoredNotification): TeamNotific
 function restoreRow(value: unknown, users: Set<string>): TeamNotification {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TeamNotificationError('알림 데이터 형식을 확인해 주세요.');
   const row = value as Record<string, unknown>;
+  const deadlineReminder = typeof row.kind === 'string' && DEADLINE_KINDS.has(row.kind);
+  const validActor = deadlineReminder ? row.actorId === null :
+    nonempty(row.actorId) && users.has(row.actorId) && row.recipientId !== row.actorId;
   if (Object.keys(row).some(field => !RESTORE_FIELDS.has(field)) ||
     !nonempty(row.id) || row.id.length > 200 || row.id.trim() !== row.id || !nonempty(row.recipientId) || !users.has(row.recipientId) ||
-    !nonempty(row.actorId) || !users.has(row.actorId) || row.recipientId === row.actorId ||
+    !validActor ||
     typeof row.kind !== 'string' || !KINDS.has(row.kind) ||
     (row.projectId !== null && !nonempty(row.projectId)) || (row.kind.startsWith('issue-') && row.projectId === null) ||
     !nonempty(row.targetId) || !nonempty(row.targetLabel) || row.targetLabel.length > LABEL_LIMIT ||
     !timestamp(row.createdAt) || (row.readAt !== null && (!timestamp(row.readAt) || row.readAt < row.createdAt))) {
     throw new TeamNotificationError('알림 종류·팀원·대상·시간을 확인해 주세요.');
   }
-  validateDetail(row.kind, row.detail, Object.hasOwn(row, 'detail'));
+  const detail = validateDetail(row.kind, row.detail, Object.hasOwn(row, 'detail'));
+  if (deadlineReminder) {
+    const date = /^(?:목표 마감일|계획 종료일) (\d{4}-\d{2}-\d{2})$/u.exec(detail ?? '')?.[1];
+    if (!isCalendarDate(date) || row.id !== reminderId(row.kind, row.recipientId, row.targetId, date)) {
+      throw new TeamNotificationError('기한 알림의 날짜와 식별자를 확인해 주세요.');
+    }
+  }
   return row as unknown as TeamNotification;
 }
 
 export class NotificationsService {
   constructor(private readonly store: Store) {
     store.transaction(() => {
-      store.db.exec(`
-        CREATE TABLE IF NOT EXISTS team_notifications (
-          seq INTEGER PRIMARY KEY,
-          id TEXT NOT NULL UNIQUE,
-          recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          kind TEXT NOT NULL,
-          project_id TEXT,
-          target_id TEXT NOT NULL,
-          target_label TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          read_at TEXT,
-          detail TEXT
-        );
-        CREATE INDEX IF NOT EXISTS team_notifications_recipient ON team_notifications(recipient_id,seq);
-        CREATE INDEX IF NOT EXISTS team_notifications_unread ON team_notifications(recipient_id,seq) WHERE read_at IS NULL;
-        CREATE INDEX IF NOT EXISTS team_notifications_actor ON team_notifications(actor_id);
-      `);
+      store.db.exec(CREATE_TABLE);
       const columns = store.db.prepare('PRAGMA table_info(team_notifications)').all();
       if (!columns.some(column => column.name === 'detail')) {
         store.db.exec('ALTER TABLE team_notifications ADD COLUMN detail TEXT');
       }
+      if (columns.find(column => column.name === 'actor_id')?.notnull === 1) {
+        const fields = 'seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail';
+        store.db.exec(`
+          ALTER TABLE team_notifications RENAME TO previous_team_notifications;
+          ${CREATE_TABLE};
+          INSERT INTO team_notifications(${fields}) SELECT ${fields} FROM previous_team_notifications;
+          DROP TABLE previous_team_notifications;
+        `);
+      }
+      store.db.exec(`
+        CREATE INDEX IF NOT EXISTS team_notifications_recipient ON team_notifications(recipient_id,seq);
+        CREATE INDEX IF NOT EXISTS team_notifications_unread ON team_notifications(recipient_id,seq) WHERE read_at IS NULL;
+        CREATE INDEX IF NOT EXISTS team_notifications_actor ON team_notifications(actor_id);
+      `);
     });
   }
 
   /** The caller commits notifications in the same transaction as the action. */
   notify(input: NewNotification): void {
+    if (!nonempty(input.actorId) || DEADLINE_KINDS.has(input.kind)) {
+      throw new TeamNotificationError('알림에 실제 작업자가 필요합니다.');
+    }
     const recipients = new Set(input.recipientIds.filter((id): id is string => nonempty(id) && id !== input.actorId));
     if (!recipients.size) return;
     const insert = this.store.db.prepare(INSERT);
@@ -94,6 +129,19 @@ export class NotificationsService {
     for (const id of recipients) {
       insert.run(randomUUID(), id, input.actorId, input.kind, input.projectId, input.targetId, targetLabel, input.createdAt, null, detail);
     }
+  }
+
+  /** A delivered reminder is also its persisted receipt, including in native backups. */
+  notifyDeadline(input: NewDeadlineReminder): void {
+    const { kind, recipientId, projectId, targetId, targetLabel, deadline, createdAt } = input;
+    if (!DEADLINE_KINDS.has(kind) || !isCalendarDate(deadline.value)) {
+      throw new TeamNotificationError('업무 기한 알림의 종류와 날짜를 확인해 주세요.');
+    }
+    const detail = `${deadline.source === 'dueDate' ? '목표 마감일' : '계획 종료일'} ${deadline.value}`;
+    this.store.db.prepare(`${INSERT} ON CONFLICT(id) DO NOTHING`).run(
+      reminderId(kind, recipientId, targetId, deadline.value), recipientId, null, kind, projectId, targetId,
+      targetLabel.slice(0, LABEL_LIMIT), createdAt, null, detail,
+    );
   }
 
   list(recipientId: string, filter: TeamNotificationFilter, before?: string): TeamNotificationPage {

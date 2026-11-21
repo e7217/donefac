@@ -60,6 +60,7 @@ import { registerDeliveryBlockerRoutes } from './delivery-blocker-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
+import { DeadlineReminderError, DeadlineRemindersService } from './deadline-reminders.js';
 import { documentNotificationSpaceProject, NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
 import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
@@ -84,7 +85,7 @@ import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlann
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -143,7 +144,16 @@ function shiftDate(value: string, days: number, working: boolean): string {
   return d.toISOString().slice(0,10);
 }
 
-export function createApp(options: {dataDir?: string; seed?: boolean; outboundWorker?: boolean; atlassianEnv?: NodeJS.ProcessEnv; gitlabWebhookPublicOrigin?: string} = {}) {
+export function createApp(options: {
+  dataDir?: string;
+  seed?: boolean;
+  outboundWorker?: boolean;
+  deadlineReminderWorker?: boolean;
+  deadlineReminderClock?: () => Date;
+  deadlineReminderIntervalMs?: number;
+  atlassianEnv?: NodeJS.ProcessEnv;
+  gitlabWebhookPublicOrigin?: string;
+} = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
   const dependencyVersionFloor=()=>{
@@ -169,6 +179,11 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const templateDraftFiles = new AttachmentAppend(dataDir);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
+  const deadlineReminders = new DeadlineRemindersService(
+    store, notifications,
+    issue => isTerminalStatus({ workflows: [workflows.get(issue.projectId)] }, issue.projectId, issue.status),
+    options.deadlineReminderClock,
+  );
   const subscriptions=new NotificationSubscriptionsService(store);
   const projectSubscribers=(issue: Issue)=>subscriptions.recipients('project',issue.projectId);
   const issueSubscribers=(issue: Issue)=>[...subscriptions.recipients('issue',issue.id),...projectSubscribers(issue)];
@@ -918,6 +933,14 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if (Object.keys(req.query).some(key=>key!=='filter'&&key!=='before') || (filter!=='all'&&filter!=='unread') ||
       (before!==undefined&&(typeof before!=='string'||!before))) return fail('알림 조회 조건을 확인해 주세요.');
     res.set('Cache-Control','no-store').json(notifications.list(notificationRecipient(req),filter,before));
+  });
+  app.get('/api/notifications/deadline-reminders', (req, res) => {
+    if (Object.keys(req.query).length) return fail('마감 알림의 조회 조건을 확인해 주세요.');
+    res.set('Cache-Control', 'no-store').json(deadlineReminders.get(notificationRecipient(req)));
+  });
+  app.put('/api/notifications/deadline-reminders', (req, res) => {
+    if (Object.keys(req.query).length) return fail('마감 알림의 변경 조건을 확인해 주세요.');
+    res.set('Cache-Control', 'no-store').json(deadlineReminders.update(notificationRecipient(req), req.body));
   });
   function subscriptionTarget(req: Request) {
     const {targetType,targetId}=req.params;
@@ -1740,7 +1763,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot(),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2003,6 +2026,12 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       fail('업무·문서 생성 알림을 포함한 백업은 schemaVersion 29가 필요합니다.');
     }
     const issueRiskKinds:ReadonlySet<unknown>=new Set(ISSUE_RISK_NOTIFICATION_KINDS);
+    const deadlineReminderKinds: ReadonlySet<unknown> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
+    if (data.schemaVersion < 70 && (
+      (data.deadlineReminderPreferences !== undefined && (!Array.isArray(data.deadlineReminderPreferences) || data.deadlineReminderPreferences.length > 0)) ||
+      (Array.isArray(data.teamNotifications) && data.teamNotifications.some((row: { kind?: unknown; actorId?: unknown } | null) =>
+        deadlineReminderKinds.has(row?.kind) || row?.actorId === null))
+    )) fail('업무 마감 알림을 포함한 백업은 schemaVersion 70이 필요합니다.');
     if(data.schemaVersion<62&&Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row:{kind?:unknown;detail?:unknown}|null)=>
       row?.detail!==undefined||issueRiskKinds.has(row?.kind))){
       fail('업무 차단·마감 연기 알림을 포함한 백업은 schemaVersion 62가 필요합니다.');
@@ -2065,6 +2094,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       documentTemplates.restore(importedTemplates);
       documentTemplateAssets.restore(importedTemplateAssets);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[],subscriptionRefs.users);
+      deadlineReminders.restore(data.schemaVersion >= 70 ? data.deadlineReminderPreferences : [], subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
@@ -2145,6 +2175,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
@@ -2152,5 +2183,19 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(String(error?.code).startsWith('SQLITE_CONSTRAINT')||/UNIQUE constraint|FOREIGN KEY constraint|NOT NULL constraint/.test(String(error?.message)))return res.status(409).json({error:'이미 사용 중인 키·이메일·관계이거나 참조가 올바르지 않습니다.'});
     console.error('[teamspace API]',error?.message||error);return res.status(500).json({error:'요청을 처리하지 못했습니다.'});
   });
-  return {app,attachWebSocket:(server:import('node:http').Server,authorize?:CollaborationUpgradeGuard)=>collaboration.attachWebSocket(server,authorize),close:()=>{migrations.close();legacyImport.close();outbound.close();collaboration.close();reportLedger.close();stopIssueWatch();store.db.close();}};
+  function sweepDeadlineReminders() {
+    try { deadlineReminders.sweep(); }
+    catch (error) { console.error('[teamspace deadlines]', error instanceof Error ? error.message : error); }
+  }
+  const deadlineReminderTimer = options.deadlineReminderWorker === false ? undefined
+    : setInterval(sweepDeadlineReminders, options.deadlineReminderIntervalMs ?? 60_000).unref();
+  if (deadlineReminderTimer) sweepDeadlineReminders();
+  return {
+    app,
+    attachWebSocket: (server: import('node:http').Server, authorize?: CollaborationUpgradeGuard) => collaboration.attachWebSocket(server, authorize),
+    close: () => {
+      if (deadlineReminderTimer) clearInterval(deadlineReminderTimer);
+      migrations.close(); legacyImport.close(); outbound.close(); collaboration.close(); reportLedger.close(); stopIssueWatch(); store.db.close();
+    },
+  };
 }

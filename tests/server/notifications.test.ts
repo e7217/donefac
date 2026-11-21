@@ -100,7 +100,19 @@ test('notification restore preserves read state and deleted target references wh
 
 test('upgrades the previous SQLite notification table in place and omits detail for existing rows', t => {
   const { store, dir } = fixture(t);
-  store.db.exec('ALTER TABLE team_notifications DROP COLUMN detail');
+  store.db.exec(`
+    DROP TABLE team_notifications;
+    CREATE TABLE team_notifications (
+      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
+      recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, project_id TEXT, target_id TEXT NOT NULL, target_label TEXT NOT NULL,
+      created_at TEXT NOT NULL, read_at TEXT
+    );
+    CREATE INDEX team_notifications_recipient ON team_notifications(recipient_id,seq);
+    CREATE INDEX team_notifications_unread ON team_notifications(recipient_id,seq) WHERE read_at IS NULL;
+    CREATE INDEX team_notifications_actor ON team_notifications(actor_id);
+  `);
   const legacy: TeamNotification = { ...event, id: 'existing-notice', recipientId: 'recipient', readAt: event.createdAt };
   store.db.prepare(`INSERT INTO team_notifications
     (seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at) VALUES(?,?,?,?,?,?,?,?,?,?)`)
@@ -111,6 +123,7 @@ test('upgrades the previous SQLite notification table in place and omits detail 
   assert.deepEqual(upgraded.all(), [legacy]);
   assert.equal(Object.hasOwn(upgraded.list('recipient', 'all').items[0], 'detail'), false);
   assert.deepEqual({ ...store.db.prepare('SELECT seq,detail FROM team_notifications WHERE id=?').get(legacy.id) }, { seq: 27, detail: null });
+  assert.equal(store.db.prepare('PRAGMA table_info(team_notifications)').all().find(column => column.name === 'actor_id')?.notnull, 0);
 
   const reopenedStore = new Store(dir);
   try {
