@@ -773,6 +773,21 @@ export interface DocumentTreeMovePreview {
   archivedCount: number;
   changed: boolean;
 }
+export interface DocumentTreeCopyOptions {
+  title: string;
+  projectId: string | null;
+  parentId: string | null;
+  includeDescendants: boolean;
+  expectedSourceVersion: number;
+}
+export interface DocumentTreeCopyPreview extends DocumentTreeCopyOptions {
+  sourceDocumentId: string;
+  token: string;
+  documents: Pick<DocPage, 'id' | 'title' | 'version'>[];
+  attachmentCount: number;
+  attachmentBytes: number;
+  warnings: string[];
+}
 export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string; confluenceSourceVersion?: number }
 export interface DocumentReview {
   revisionId: string;

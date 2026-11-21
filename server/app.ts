@@ -23,6 +23,8 @@ import { registerDocumentIncludeRevisionRoutes } from './document-include-revisi
 import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
 import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent } from './document-templates.js';
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
+import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
+import { DocumentTreeCopyError, DocumentTreeCopyService } from './document-tree-copy.js';
 import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
@@ -194,7 +196,7 @@ export function createApp(options: {
   const documentCreation = new DocumentCreationService(store);
   const documentTemplateAssets = new DocumentTemplateAssetsService(store, files);
   const documentTemplates = new DocumentTemplatesService(store, documentTemplateAssets);
-  const templateDraftFiles = new AttachmentAppend(dataDir);
+  const documentDraftFiles = new AttachmentAppend(dataDir);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
   const deadlineReminders = new DeadlineRemindersService(
@@ -237,6 +239,7 @@ export function createApp(options: {
     Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
+  const documentTreeCopy = new DocumentTreeCopyService(store, new DocumentCopyAssets(store, files, attachmentVersions));
   const app = express(); app.disable('x-powered-by');
   apiKeys.installAuthentication(app);
   app.use('/api/attachments',(req,res,next)=>{if(req.method!=='POST')return next();if(!req.is('application/octet-stream'))return res.status(415).json({error:'첨부파일은 application/octet-stream 형식으로 전송해 주세요.'});express.raw({type:'application/octet-stream',limit:MAX_FILE_BYTES})(req,res,next);});
@@ -1343,7 +1346,7 @@ export function createApp(options: {
         bindImportedDocumentSections(d);
         store.put('documents',d);
         if(draft?.files.length){
-          staged=templateDraftFiles.stage(id,draft.files.map(({attachment,bytes})=>({id:attachment.id,size:attachment.size,sha256:attachment.sha256,bytes})));
+          staged=documentDraftFiles.stage(id,draft.files.map(({attachment,bytes})=>({id:attachment.id,size:attachment.size,sha256:attachment.sha256,bytes})));
           for(const {attachment} of draft.files){
             store.put('attachments',attachment);
             activity(req,'document',d.id,'파일 첨부',attachment.filename);
@@ -1361,6 +1364,48 @@ export function createApp(options: {
     }
     try{staged?.commit();}catch{console.error('[teamspace attachments] 템플릿 첨부 복구 기록 정리가 필요합니다.');}
     res.status(result.duplicate ? 200 : 201).json(result.document);
+  });
+  app.post('/api/documents/:id/copy-preview', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(documentTreeCopy.preview(req.params.id, actor(req), req.body, templateOrigins(req)));
+  });
+  app.post('/api/documents/:id/copy', (req, res) => {
+    const authorId = actor(req);
+    const sourceId = req.params.id;
+    let staged: ReturnType<AttachmentAppend['stage']> | undefined;
+    let result: ReturnType<DocumentCreationService['create']>;
+    try {
+      result = documentCreation.create(authorId, req.body, () => {
+        const { documents, originals, files: copiedFiles } = documentTreeCopy.prepareCopy(sourceId, authorId, req.body, templateOrigins(req), now());
+        const [root] = documents;
+        const edits = documents.map((document, index) => {
+          const original = originals[index];
+          validateDocument(document, original, { skipReferences: true });
+          store.put('documents', document);
+          return { id: document.id, content: document.content, previousContent: original.content };
+        });
+        documentContent.validateBatch(edits);
+        if (copiedFiles.length) {
+          staged = documentDraftFiles.stage(root.id, copiedFiles.map(({ attachment, bytes }) => ({
+            id: attachment.id, size: attachment.size, sha256: attachment.sha256, bytes,
+          })));
+          for (const { attachment } of copiedFiles) store.put('attachments', attachment);
+          staged.install();
+        }
+        for (const [index, document] of documents.entries()) {
+          revision(document, authorId, '복제본 최초 작성');
+          activity(req, 'document', document.id, '문서 복제', originals[index].title);
+          notifyDocumentCreated(document);
+        }
+        return root;
+      }, `document-tree-copy:${sourceId}`);
+    } catch (error) {
+      try { staged?.rollback(); }
+      catch { console.error('[teamspace attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
+      throw error;
+    }
+    try { staged?.commit(); }
+    catch { console.error('[teamspace attachments] 문서 복제 첨부 복구 기록 정리가 필요합니다.'); }
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.document);
   });
   app.post('/api/documents/:id/move-preview',(req,res)=>{
     res.set('Cache-Control','no-store').json(documentTreeMove.preview(req.params.id,actor(req),req.body));
@@ -2377,7 +2422,8 @@ export function createApp(options: {
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof DecisionFollowUpError)return res.status(error.status).json({error:error.message});
-    if(error instanceof DocumentTreeMoveError)return res.status(error.status).json({error:error.message});
+    if(error instanceof DocumentTreeMoveError||error instanceof DocumentCopyAssetError)return res.status(error.status).json({error:error.message});
+    if(error instanceof DocumentTreeCopyError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -7,7 +7,7 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, Columns2, Columns3, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   RotateCcw, Table2, TableOfContents, Tag, Trash2, Unlink, X,
@@ -29,6 +29,7 @@ import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMa
 import { DocumentOfflineExport, type DocumentOfflineExportScope } from './DocumentOfflineExport';
 import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
 import { DocumentTreeMove } from './DocumentTreeMove';
+import { DocumentTreeCopy } from './DocumentTreeCopy';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
@@ -124,6 +125,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
   const [moveDocumentId, setMoveDocumentId] = useState<string | null>(null);
   const closeMove = useCallback(() => setMoveDocumentId(null), []);
+  const [copyDocumentId, setCopyDocumentId] = useState<string | null>(null);
+  const closeCopy = useCallback(() => setCopyDocumentId(null), []);
   const publicationOpener = useRef<HTMLButtonElement>(null);
   const closePublication = useCallback(() => {
     setPublicationDocumentId(null);
@@ -268,6 +271,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
   const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
+  const copyOpen = Boolean(selectedPage && selectedPage.id === copyDocumentId);
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
@@ -626,13 +630,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (issueDrawerOpen || newOpen || templateManager || offlineExport) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        if (!publicationOpen && !moveOpen) void saveDraft();
+        if (!publicationOpen && !moveOpen && !copyOpen) void saveDraft();
       }
       if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setIssueBlockSelection(null); setExportOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
+  }, [saveDraft, publicationOpen, moveOpen, copyOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -756,18 +760,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [documentId, draft?.expectedVersion, sideTab, publicationOpen]);
 
   function selectDocument(id: string) {
-    if (id === selectedDocumentId) return;
+    if (id === selectedDocumentId) return true;
     if (documentAction) {
-      if (window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) onSelectDocument(id);
-      return;
+      if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return false;
+      onSelectDocument(id);
+      return true;
     }
-    if (savingRef.current || isReplySending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return; }
+    if (savingRef.current || isReplySending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
     if ((draftRef.current?.dirty || listDrafts.current.size || commentDraftRef.current.body.trim() || liveStateRef.current?.pending
       || hasReplyDraft(actorRef.current, draftRef.current?.id)) &&
-      !window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return;
+      !window.confirm(listDrafts.current.size ? LIST_DRAFT_DISCARD_MESSAGE : '저장하지 않은 편집, 전송 중인 공동 편집 또는 보내지 않은 댓글이 있습니다. 이 브라우저에 임시 보관하고 다른 문서로 이동할까요?')) return false;
     rememberDraft(draftRef.current);
     rememberComment();
     onSelectDocument(id);
+    return true;
   }
 
   function openNew(parentId = '', template = 'blank') {
@@ -1457,6 +1463,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 setExportOpen(false);
                 setMoveDocumentId(selectedPage.id);
               }}><FolderInput size={16} aria-hidden="true" /></button>
+              <button type="button" className="btn btn-ghost docs-icon-button" title="문서 복제" aria-label="문서 복제"
+                disabled={saving || restoring} onClick={() => { setExportOpen(false); setCopyDocumentId(selectedPage.id); }}>
+                <Copy size={16} aria-hidden="true" />
+              </button>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
               <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
             </div>
@@ -1674,6 +1684,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {moveOpen && selectedPage && <DocumentTreeMove key={selectedPage.id} document={selectedPage} documents={data.documents}
       projects={data.projects} beforeApply={moveBlocker} refreshWorkspace={refresh}
       onClose={closeMove} onMoved={moveSaved} />}
+    {copyOpen && latestPage && <DocumentTreeCopy key={latestPage.id} source={latestPage} documents={data.documents}
+      projects={data.projects} actorId={actorId} refreshWorkspace={refresh} onClose={closeCopy} onOpenCopy={selectDocument} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}

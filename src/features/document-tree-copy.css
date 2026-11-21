@@ -1,0 +1,43 @@
+.docs-copy-fields .docs-copy-title {
+  grid-column: 1 / -1;
+}
+
+.docs-copy-fields .docs-modal-label {
+  min-width: 0;
+}
+
+.docs-copy-fields .field {
+  width: 100%;
+  min-width: 0;
+}
+
+.docs-copy-include {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 7px;
+  min-height: 34px;
+  color: #40516a;
+}
+
+.docs-copy-include input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #4c6dcc;
+}
+
+.docs-copy-warnings {
+  margin-top: 8px;
+  color: #6d542a;
+}
+
+.docs-copy-dialog .docs-move-list small {
+  color: #53637b;
+}
+
+.docs-copy-result h3 {
+  width: fit-content;
+  margin: 0 0 6px;
+  font-size: 15px;
+}

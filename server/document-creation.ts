@@ -41,7 +41,7 @@ export class DocumentCreationService {
   }
 
   create(actorId: string, input: Record<string, unknown>, persist: () => DocPage,
-    operation?: 'delivery-blocker-draft' | 'document-template-draft'): { document: DocPage; duplicate: boolean } {
+    operation?: 'delivery-blocker-draft' | 'document-template-draft' | `document-tree-copy:${string}`): { document: DocPage; duplicate: boolean } {
     if (!Object.hasOwn(input, 'requestId')) return { document: this.store.transaction(persist), duplicate: false };
     const requestId = input.requestId;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {

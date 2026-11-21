@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { documentNodes } from '../shared/document-references.js';
 import type { Attachment, DocumentTemplate, RichContent } from '../shared/types.js';
 import { attachmentId, hash, MAX_EXPORT_BYTES, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, safeFilename, sniffMime, type AttachmentFiles } from './attachments.js';
 import { creationRequestId } from './creation-request.js';
 import { MAX_DOCUMENT_BYTES } from './document-content.js';
+import { attachmentContentPath, contentOriginPlaceholder, decodedContentPath, documentUrlReferences, isRelativeContentUrl, parseContentUrl,
+  workspaceContentOrigins, workspaceContentUrl, type DocumentUrlReference } from './document-content-urls.js';
 import { DocumentTemplateError } from './document-templates.js';
 import type { Store } from './store.js';
 
@@ -11,13 +12,10 @@ export type TemplateAsset = Pick<Attachment, 'id' | 'filename' | 'mimeType' | 's
 type AssetBackup = Omit<TemplateAsset, 'bytes'> & { templateId: string; data: string };
 type TemplateAssetSet = { templateId: string; assets: TemplateAsset[] };
 type StoredAsset = Omit<TemplateAsset, 'bytes'> & { templateId: string; bytes: Uint8Array };
-type ContentReference = { attrs: Record<string, unknown>; key: 'href' | 'src'; value: string };
 
 const markerBase = '/api/document-template-assets';
 const markerPath = /^\/api\/document-template-assets(?:\/|$)/iu;
 const markerUrl = /^\/api\/document-template-assets\/([a-f\d-]+)(\?inline=1)?$/u;
-const sourcePath = /^\/api\/(?:attachments\/([\s\S]*)\/content|attachment-versions\/([\s\S]*)\/download)\/?$/iu;
-const originPlaceholder = 'https://teamspace.invalid';
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const backupFields = new Set(['id', 'templateId', 'filename', 'mimeType', 'size', 'sha256', 'data']);
 const digest = /^[a-f\d]{64}$/u;
@@ -49,48 +47,13 @@ function attachmentHref(path: string, inline: boolean) {
   return `${path}${inline ? '?inline=1' : ''}`;
 }
 
-function* references(content: RichContent): Generator<ContentReference> {
-  for (const node of documentNodes(content)) {
-    if (node.type === 'image' && typeof node.attrs?.src === 'string') {
-      yield { attrs: node.attrs, key: 'src', value: node.attrs.src };
-    }
-    for (const mark of node.marks ?? []) {
-      if (mark.type === 'link' && typeof mark.attrs?.href === 'string') {
-        yield { attrs: mark.attrs, key: 'href', value: mark.attrs.href };
-      }
-    }
-  }
-}
-
-function isRelative(value: string) {
-  return !/^(?:[a-z][a-z\d+.-]*:|[/\\]{2})/iu.test(value.trim());
-}
-
-function parseUrl(value: string, origin?: string): URL | undefined {
-  try {
-    const url = new URL(value, origin);
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined;
-  } catch { return undefined; }
-}
-
-function routePath(url: URL) {
-  try { return decodeURIComponent(url.pathname); }
-  catch { return url.pathname; }
-}
-
-function workspaceUrl(value: string, origins: ReadonlySet<string>): URL | undefined {
-  const base = origins.values().next().value ?? originPlaceholder;
-  const url = parseUrl(value, base);
-  return url && ((isRelative(value) && url.origin === base) || origins.has(url.origin)) ? url : undefined;
-}
-
-function decodeMarker(reference: ContentReference, fail: () => never) {
+function decodeMarker(reference: DocumentUrlReference, fail: () => never) {
   // Absolute and protocol-relative external URLs can use the same path on their own server.
-  if (!isRelative(reference.value)) return;
-  const url = parseUrl(reference.value, originPlaceholder);
-  if (!url || url.origin !== originPlaceholder) return;
-  const path = routePath(url);
-  if (sourcePath.test(path)) return fail();
+  if (!isRelativeContentUrl(reference.value)) return;
+  const url = parseContentUrl(reference.value, contentOriginPlaceholder);
+  if (!url || url.origin !== contentOriginPlaceholder) return;
+  const path = decodedContentPath(url);
+  if (attachmentContentPath.test(path)) return fail();
   if (!markerPath.test(path)) return;
   const marker = markerUrl.exec(reference.value);
   if (!marker || !assetId(marker[1]) || (reference.key === 'src' && !marker[2])) return fail();
@@ -100,8 +63,8 @@ function decodeMarker(reference: ContentReference, fail: () => never) {
 function validateRefs(content: RichContent, assets: readonly TemplateAsset[], fail: () => never) {
   const byId = new Map(assets.map(asset => [asset.id, asset]));
   const used = new Set<string>();
-  const resolved: { reference: ContentReference; id: string; inline: boolean }[] = [];
-  for (const reference of references(content)) {
+  const resolved: { reference: DocumentUrlReference; id: string; inline: boolean }[] = [];
+  for (const reference of documentUrlReferences(content)) {
     const marker = decodeMarker(reference, fail);
     if (!marker) continue;
     const asset = byId.get(marker.id);
@@ -150,19 +113,16 @@ export class DocumentTemplateAssetsService {
   }
 
   capture(content: RichContent, sourceDocumentId: string, origins: readonly string[]): { content: RichContent; assets: TemplateAsset[] } {
-    const workspaceOrigins = new Set(origins.flatMap(origin => {
-      const url = parseUrl(origin);
-      return url && !url.username && !url.password ? [url.origin] : [];
-    }));
+    const workspaceOrigins = workspaceContentOrigins(origins);
     const rewritten = structuredClone(content);
     const byFile = new Map<string, TemplateAsset>();
     let total = 0;
-    for (const reference of references(rewritten)) {
-      const url = workspaceUrl(reference.value, workspaceOrigins);
+    for (const reference of documentUrlReferences(rewritten)) {
+      const url = workspaceContentUrl(reference.value, workspaceOrigins);
       if (!url) continue;
-      const path = routePath(url);
+      const path = decodedContentPath(url);
       if (markerPath.test(path)) assetError('문서에 첨부된 원본 파일 주소를 사용해 주세요.');
-      const match = sourcePath.exec(path);
+      const match = attachmentContentPath.exec(path);
       if (!match) continue;
       let id: string;
       try { id = attachmentId(match[1] ?? match[2]); }

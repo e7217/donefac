@@ -239,6 +239,14 @@ curl --fail-with-body \
 
 문서 화면의 Markdown 가져오기는 브라우저에서 파일이나 입력 내용을 미리보기로 변환한다. 저장은 새 문서와 같은 API에 검토한 `content`를 보낸다. 미리보기 입력을 바꾸면 다시 검토한 뒤 저장한다. 첫 저장 응답을 확인할 수 없으면 같은 요청을 다시 보내고, 응답을 받은 뒤 목록이 갱신되지 않았으면 문서 열기만 다시 시도한다.
 
+## 문서 트리 복제
+
+브라우저의 `POST /api/documents/:id/copy-preview`에 `{title,projectId,parentId,includeDescendants,expectedSourceVersion}`을 보낸다. `projectId: null`은 팀 공통 공간이고 `parentId: null`은 최상위다. 미리보기에는 선택한 문서와 버전, 복제할 파일 수와 바이트, 확인이 필요한 첨부 주소, `token`을 담는다. 활성 문서 최대 100개, 본문 합계 64MiB와 복제할 첨부 합계 64MiB·1,500개를 지원한다.
+
+`POST /api/documents/:id/copy`에 같은 옵션과 `token`, 새 UUID v4 `requestId`를 보낸다. 서버는 작업자·원본 버전·하위 트리 구성·대상 위치와 첨부 목록을 검증한다. 변경이 생기면 `409` 및 `details.reason: "copy_preview_stale"`로 새 미리보기를 요청한다. 성공하면 새 루트 `DocPage`를 `201`로 반환한다. 이후 같은 작업자와 요청 입력으로 다시 보내면 저장한 루트 문서를 `200`으로 돌려준다.
+
+각 복제본은 새 ID, 현재 작업자, 버전 1과 새 첫 저장본을 갖는다. 복제 대상 문서의 최신 첨부와 그 문서들이 소유한 파일 중 복제할 본문이 직접 가리키는 버전을 새 첨부로 저장한다. 함께 복제한 페이지와 절의 현재 링크는 새 ID를 사용한다. 고정 저장본의 링크는 원래 저장본을 가리킨다. 본문·버전·활동·알림·파일과 재시도 기록을 함께 저장한다. 물리 백업은 재시도 기록을 보관하며, 자체 JSON 백업으로 작업 공간을 교체하면 이전 생성 요청을 무효화한다.
+
 ## 문서 트리 Markdown ZIP 내보내기
 
 브라우저의 `GET /api/document-exports/markdown.zip`에 `source=saved` 또는 `source=published`와 범위를 지정한다. `scope=subtree&documentId=<ID>`는 문서와 하위 트리, `scope=space&projectId=<ID>`는 해당 프로젝트, `scope=space`는 팀 공통 공간이다. `source=published`는 승인된 최신 발행본을 사용한다.
