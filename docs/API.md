@@ -213,6 +213,10 @@ curl --fail-with-body \
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
+## 전체 프로젝트 보드의 상태 변경
+
+브라우저의 `PATCH /api/issues/:id`에 `{expectedVersion, expectedWorkflowVersion, status}`를 보내 상태를 바꾼다. `status`는 해당 업무 프로젝트의 실제 상태 ID다. 선택 속성인 `expectedWorkflowVersion`을 보낼 때는 `status`를 함께 지정하고, 조회한 워크플로의 양의 정수 버전을 사용한다. 업무 버전과 별도로 워크플로 버전이 달라지면 `409`와 `details.reason`의 `workflow_changed`, `currentWorkflowVersion`을 반환한다. 일반 상태 전이의 필수 입력·차단 검사를 적용하며 프로젝트 내 상대 순서를 보존한다.
+
 ## 보드 상태별 업무 한도
 
 브라우저의 `GET /api/projects/:projectId/workflow`에서 설정된 상태의 `statuses[].wipLimit`을 읽을 수 있다. 기존 `PATCH /api/projects/:projectId/workflow` 요청의 `expectedVersion`과 상태 목록에 `wipLimit`을 1~10,000의 정수로 전달한다. `null`은 한도를 해제한다. 속성을 생략하면 같은 ID의 기존 한도를 유지한다. 자체 백업의 형식 56에 설정을 보존한다.

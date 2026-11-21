@@ -73,3 +73,43 @@ test('360px 간트의 날짜 입력은 업무 상세를 열지 않고 행에서 
     for (const issue of created) await request.delete(`/api/issues/${issue.id}`);
   }
 });
+
+test('간트 날짜 초안을 저장하지 않고 유지하거나 확인 후 전체 프로젝트 보드로 이동한다', async ({ page, request }) => {
+  const { projects: [project] } = await workspace(request);
+  const title = `팀 보드 이동 전 간트 날짜 입력 ${Date.now()}`;
+  const response = await request.post('/api/issues', { data: { projectId: project.id, title } });
+  expect(response.ok()).toBeTruthy();
+  const issue = await response.json() as Issue;
+  const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+  try {
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(title);
+    await page.locator('.gantt-unscheduled-row').getByRole('button', { name: `${issue.key} 날짜 입력`, exact: true }).click();
+    const date = page.getByRole('region', { name: '간트 차트' }).getByLabel(`${issue.key} 시작일`, { exact: true });
+    await date.fill('2026-11-23');
+    const teamBoard = page.getByRole('button', { name: '전체 프로젝트 보드', exact: true });
+    async function navigate(accept: boolean) {
+      const handled = page.waitForEvent('dialog', { timeout: 5_000 }).then(async dialog => {
+        const message = dialog.message();
+        if (accept) await dialog.accept();
+        else await dialog.dismiss();
+        expect(message).toContain('저장하지 않은 간트 입력');
+      });
+      await Promise.all([handled, teamBoard.click()]);
+    }
+    await navigate(false);
+    await expect(date).toHaveValue('2026-11-23');
+    await expect(date).toBeFocused();
+    expect(await stored()).toMatchObject({ startDate: null, version: issue.version });
+
+    await navigate(true);
+    await expect(page.getByRole('heading', { name: '전체 프로젝트 보드', exact: true })).toBeVisible();
+    expect(await stored()).toMatchObject({ startDate: null, version: issue.version });
+  } finally {
+    const removed = await request.delete(`/api/issues/${issue.id}`);
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`);
+    }
+  }
+});

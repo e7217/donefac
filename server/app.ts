@@ -1293,6 +1293,17 @@ export function createApp(options: {
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);
+      if (Object.hasOwn(req.body, 'expectedWorkflowVersion')) {
+        const { expectedWorkflowVersion } = req.body;
+        if (!Object.hasOwn(req.body, 'status') || !Number.isSafeInteger(expectedWorkflowVersion) || expectedWorkflowVersion < 1) {
+          fail('변경할 상태와 확인한 워크플로 버전을 보내 주세요.');
+        }
+        const { version } = workflows.get(old.projectId);
+        if (version !== expectedWorkflowVersion) {
+          fail('업무의 워크플로가 변경되었습니다. 최신 상태를 확인한 뒤 다시 변경해 주세요.', 409,
+            { reason: 'workflow_changed', currentWorkflowVersion: version });
+        }
+      }
       return updateIssue(req,old,req.body);
     });res.json(updated);
   });

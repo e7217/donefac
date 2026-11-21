@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Issue, IssueRelation, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Issue, IssueOrderMoveResult, IssueRelation, ProjectIssueOrder, ProjectWorkflow, ReportingLedgerData, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dataDir?: string, seed = true) {
   const dir = dataDir || mkdtempSync(join(tmpdir(), 'teamspace-workflows-'));
@@ -44,6 +44,75 @@ test('default workflows retain old transitions; configured edges, issue types an
     assert.equal((await f.request('/schedule/apply', 'POST', { changes: [{ id: issue.id, expectedVersion: issue.version, startDate: '2026-11-16', endDate: '2026-11-18' }] })).status, 200);
     issue = (await f.request<WorkspaceSnapshot>('/workspace')).data.issues.find(value => value.id === issue.id)!;
     const done = await f.request<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, status: 'shipped_custom' }); assert.equal(done.status, 200); assert.ok(done.data.completedAt);
+  } finally { await f.close(); f.remove(); }
+});
+
+test('status PATCH can compare the actual project workflow version without rearranging project ranks', async () => {
+  const f = await fixture();
+  const projectId = 'project-team';
+  const workflowPath = `/projects/${projectId}/workflow`, orderPath = `/projects/${projectId}/issue-order`;
+  try {
+    const created = await f.request<Issue>('/issues', 'POST', { projectId, title: '팀 보드에서 상태를 바꿀 업무' });
+    const sibling = await f.request<Issue>('/issues', 'POST', { projectId, title: '수동 순서에 남는 업무' });
+    assert.equal(created.status, 201);
+    assert.equal(sibling.status, 201);
+    const issue = created.data;
+    const issuePath = `/issues/${issue.id}`;
+    const initialOrder = (await f.request<ProjectIssueOrder>(orderPath)).data;
+    const ranked = await f.request<IssueOrderMoveResult>(orderPath, 'PATCH', {
+      issueId: issue.id, expectedIssueVersion: issue.version, expectedVersion: initialOrder.version,
+      anchorId: sibling.data.id, position: 'after',
+    });
+    assert.equal(ranked.status, 200);
+    assert.deepEqual(ranked.data.issue, issue);
+    assert.notDeepEqual(ranked.data.order.issueIds, initialOrder.issueIds);
+
+    const original = (await f.request<ProjectWorkflow>(workflowPath)).data;
+    const changed = await f.request<ProjectWorkflow>(workflowPath, 'PATCH', {
+      ...original, expectedVersion: original.version,
+      statuses: original.statuses.map(state => state.id === 'review' ? { ...state, label: '내부 검토', category: 'in_progress' } : state),
+      transitions: original.transitions.map(edge => edge.from === 'todo' && edge.to === 'review' ? { ...edge, requiredFields: ['description'] } : edge),
+    });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.data.version, original.version + 1);
+    const current = async () => (await f.request<WorkspaceSnapshot>('/workspace')).data.issues.find(value => value.id === issue.id);
+    assert.deepEqual(await current(), issue);
+
+    const stale = { details: { reason: 'workflow_changed', currentWorkflowVersion: changed.data.version } };
+    for (const status of ['review', 'todo']) {
+      const rejected = await f.request<typeof stale>(issuePath, 'PATCH', {
+        expectedVersion: issue.version, expectedWorkflowVersion: original.version, status,
+      });
+      assert.equal(rejected.status, 409);
+      assert.deepEqual(rejected.data.details, stale.details);
+    }
+    for (const expectedWorkflowVersion of [0, null, String(changed.data.version), Number.MAX_SAFE_INTEGER + 1]) {
+      assert.equal((await f.request(issuePath, 'PATCH', { expectedVersion: issue.version, expectedWorkflowVersion, status: 'review' })).status, 400);
+    }
+    assert.equal((await f.request(issuePath, 'PATCH', {
+      expectedVersion: issue.version, expectedWorkflowVersion: changed.data.version, title: '상태 없는 조건',
+    })).status, 400);
+    const validMove = { expectedVersion: issue.version, expectedWorkflowVersion: changed.data.version, status: 'review' };
+    assert.equal((await f.request(issuePath, 'PATCH', validMove)).status, 422);
+    assert.deepEqual(await current(), issue);
+    assert.deepEqual((await f.request<ProjectIssueOrder>(orderPath)).data, ranked.data.order);
+
+    const moved = await f.request<Issue>(issuePath, 'PATCH', { ...validMove, description: '실제 프로젝트의 상태 전이' });
+    assert.equal(moved.status, 200);
+    assert.equal(moved.data.status, 'review');
+    assert.equal(moved.data.projectId, projectId);
+    assert.equal(moved.data.version, issue.version + 1);
+    const afterMove = (await f.request<ProjectIssueOrder>(orderPath)).data;
+    assert.deepEqual(afterMove.issueIds, ranked.data.order.issueIds);
+    assert.notEqual(afterMove.version, ranked.data.order.version);
+    const sameStatus = await f.request<Issue>(issuePath, 'PATCH', {
+      expectedVersion: moved.data.version, expectedWorkflowVersion: changed.data.version, status: 'review', title: '상태를 유지한 업무 편집',
+    });
+    assert.equal(sameStatus.status, 200);
+    assert.equal(sameStatus.data.title, '상태를 유지한 업무 편집');
+    const ordinary = await f.request<Issue>(issuePath, 'PATCH', { expectedVersion: sameStatus.data.version, status: 'todo' });
+    assert.equal(ordinary.status, 200);
+    assert.equal(ordinary.data.status, 'todo');
   } finally { await f.close(); f.remove(); }
 });
 

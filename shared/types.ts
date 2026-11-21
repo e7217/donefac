@@ -685,6 +685,11 @@ export interface TeamOverviewFilters {
   issueMetric?: TeamOverviewIssueMetric;
   issueOffset?: number;
 }
+export interface TeamBoardFilters {
+  projectId?: string;
+  memberId?: string | null;
+  query?: string;
+}
 export type TeamOverviewCounts = Record<TeamOverviewIssueMetric, number>;
 export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }
 export interface TeamOverviewDeadline {

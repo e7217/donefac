@@ -1,0 +1,275 @@
+.team-board-page {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.team-board-heading {
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.team-board-heading h1 {
+  margin: 0;
+}
+
+.team-board-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 190px)) minmax(0, 340px);
+  align-items: end;
+  gap: 10px;
+}
+
+.team-board-filters label,
+.team-board-share-fallback,
+.team-board-status-body label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #435a50;
+  font-size: 12px;
+}
+
+.team-board-filters .field,
+.team-board-share-fallback .field,
+.team-board-status-body .field {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.team-board-query > span {
+  position: relative;
+}
+
+.team-board-query svg {
+  position: absolute;
+  inset-inline-start: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.team-board-query .field {
+  padding-inline-start: 33px;
+}
+
+.team-board-share-fallback {
+  max-width: 540px;
+  margin-top: 10px;
+}
+
+.team-board-count,
+.team-board-empty {
+  color: #546b60;
+  font-size: 12px;
+}
+
+.team-board-count {
+  margin: 10px 0;
+}
+
+.team-board-columns {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(190px, 1fr));
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 2px 12px;
+  overflow-x: auto;
+}
+
+.team-board-column {
+  min-width: 0;
+  min-height: 150px;
+  padding: 9px;
+  border: 1px solid #e0e9e3;
+  border-radius: 8px;
+  background: #f5f8f6;
+}
+
+.team-board-column[data-drop-target] {
+  border-color: #298166;
+  background: #e8f2ed;
+}
+
+.team-board-column > header {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 24px;
+  margin: 0 1px 8px;
+  color: #334f43;
+}
+
+.team-board-column h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+}
+
+.team-board-column > header > span:last-child {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.team-board-column ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-board-empty {
+  margin: 6px 0;
+  padding: 8px;
+  text-align: center;
+}
+
+.team-board-card {
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid #e0e9e3;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.team-board-card-open {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 3px;
+  border: 0;
+  background: none;
+  color: #314d40;
+  text-align: start;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.team-board-card-open:hover > strong {
+  text-decoration: underline;
+}
+
+.team-board-key,
+.team-board-card-labels > span,
+.team-board-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #496457;
+  font-size: 11px;
+}
+
+.team-board-card-labels {
+  display: grid;
+  gap: 3px;
+}
+
+.team-board-card-footer {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 3px 0;
+}
+
+.team-board-card-footer > span {
+  overflow-wrap: anywhere;
+}
+
+.team-board-card-footer .btn {
+  min-height: 34px;
+  padding-inline: 4px;
+  font-size: 11px;
+}
+
+.team-board-page :focus-visible,
+.team-board-status-dialog :focus-visible {
+  outline: 2px solid #288069;
+  outline-offset: 2px;
+}
+
+.team-board-status-dialog {
+  width: min(450px, calc(100% - 24px));
+  max-height: 88dvh;
+  padding: 0;
+  border: 1px solid #dce7df;
+  border-radius: 12px;
+  background: #fff;
+  color: #314d40;
+  box-shadow: 0 16px 46px #243b302f;
+}
+
+.team-board-status-dialog::backdrop {
+  background: #19372b66;
+}
+
+.team-board-status-dialog header,
+.team-board-status-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px clamp(12px, 4vw, 18px);
+}
+
+.team-board-status-dialog header {
+  justify-content: space-between;
+  border-bottom: 1px solid #e7eee9;
+}
+
+.team-board-status-dialog footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e7eee9;
+}
+
+.team-board-status-dialog h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.team-board-status-body {
+  display: grid;
+  gap: 10px;
+  padding: 12px clamp(12px, 4vw, 18px);
+  font-size: 13px;
+}
+
+.team-board-status-body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.team-board-status-body p > .issue-status-dot {
+  display: inline-block;
+  margin-inline: 4px;
+}
+
+.team-board-status-details {
+  justify-self: start;
+}
+
+@media (max-width: 560px) {
+  .team-board-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .team-board-query {
+    grid-column: 1 / -1;
+  }
+
+  .team-board-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .team-board-column {
+    min-height: 66px;
+  }
+
+  .team-board-card-footer .btn {
+    min-height: 44px;
+  }
+}
