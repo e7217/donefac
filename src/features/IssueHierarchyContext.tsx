@@ -1,5 +1,6 @@
 'use client';
 
+import type { PointerEventHandler } from 'react';
 import type { Issue } from '../../shared/types';
 import './issue-hierarchy-context.css';
 
@@ -16,11 +17,17 @@ export function buildIssueHierarchy(issues: readonly Issue[]) {
   return { parents, childCounts };
 }
 
-export function IssueHierarchyContext({ issueId, hierarchy, openIssue, disabled = false }: {
+export function IssueHierarchyContext({ issueId, hierarchy, openIssue, disabled = false, childSchedule }: {
   issueId: string;
   hierarchy: ReturnType<typeof buildIssueHierarchy>;
   openIssue: (id: string) => void;
   disabled?: boolean;
+  childSchedule?: {
+    label: string;
+    disabled: boolean;
+    onOpen: (opener: HTMLButtonElement) => void;
+    onPointerDown: PointerEventHandler<HTMLButtonElement>;
+  };
 }) {
   const parent = hierarchy.parents.get(issueId);
   const childCount = hierarchy.childCounts.get(issueId) ?? 0;
@@ -30,6 +37,10 @@ export function IssueHierarchyContext({ issueId, hierarchy, openIssue, disabled 
     {parent && <button type="button" className="issue-hierarchy-parent" disabled={disabled}
       aria-label={`상위 업무 열기 ${parent.key} ${parent.title}`} title={`${parent.key} · ${parent.title}`}
       onClick={() => openIssue(parent.id)}>상위 {parent.key}</button>}
-    {childCount > 0 && <span className="issue-child-mark issue-hierarchy-children">하위 업무 {childCount}개</span>}
+    {childCount > 0 && (childSchedule ? <button type="button" className="issue-hierarchy-parent issue-hierarchy-children"
+      aria-label={childSchedule.label} title={childSchedule.label} disabled={disabled || childSchedule.disabled}
+      data-gantt-focus-control="" onPointerDown={childSchedule.onPointerDown}
+      onClick={event => childSchedule.onOpen(event.currentTarget)}>하위 업무 {childCount}개</button>
+      : <span className="issue-child-mark issue-hierarchy-children">하위 업무 {childCount}개</span>)}
   </div>;
 }

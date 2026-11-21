@@ -1,0 +1,106 @@
+.gantt-hierarchy-focus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  min-width: 0;
+  margin-block: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.gantt-hierarchy-focus-summary {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.gantt-hierarchy-focus-summary h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--accent-hover);
+  font-size: 14px;
+}
+
+.gantt-hierarchy-focus-work {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.gantt-hierarchy-focus-counts,
+.gantt-hierarchy-focus-actions,
+.gantt-hierarchy-focus-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 7px;
+}
+
+.gantt-hierarchy-focus-counts,
+.gantt-hierarchy-focus-range {
+  margin: 5px 0 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-hierarchy-focus-counts > span {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.gantt-hierarchy-focus-counts > .gantt-hierarchy-focus-extra {
+  background: #fff0d6;
+  color: #754710;
+}
+
+.gantt-hierarchy-focus-range dt {
+  font-weight: 600;
+}
+
+.gantt-hierarchy-focus-range dd {
+  margin: 0;
+}
+
+.gantt-hierarchy-focus-label {
+  display: inline-block;
+  margin-inline-start: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.gantt-hierarchy-focus-label[data-tier='anchor'] {
+  background: var(--accent-hover);
+  color: var(--surface);
+}
+
+.gantt-feature .gantt-row[data-hierarchy-focus-row='anchor'] > .gantt-left {
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.gantt-hierarchy-span {
+  position: absolute;
+  bottom: 3px;
+  z-index: 2;
+  height: 4px;
+  border-top: 2px dashed var(--accent-hover);
+  pointer-events: none;
+}
+
+.gantt-hierarchy-span-key {
+  width: 20px;
+  border-top: 2px dashed var(--accent-hover);
+}

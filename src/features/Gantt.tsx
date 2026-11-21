@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
-import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
 import { MAX_SCHEDULE_BULK_DATE_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
@@ -12,6 +12,7 @@ import { renderGanttExport } from '../../shared/gantt-export';
 import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { buildGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
+import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { ApiError, patch, post, remove } from '../lib/api';
 import { downloadText } from '../lib/download';
@@ -46,6 +47,7 @@ import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDep
 import { GanttDeadlines } from './GanttDeadlines';
 import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from './gantt-deadline';
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
+import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
@@ -92,8 +94,11 @@ type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonE
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
 type TeamFollowUpReview = TeamFollowUpSelection & { opener: HTMLButtonElement };
 type RowScheduleEdit = { issue: Issue; opener: HTMLButtonElement; focusDate?: 'dueDate' };
-type DependencyFocus = {
+type ScheduleFocus = {
+  kind: 'dependencies' | 'hierarchy';
   issueId: string;
+  opener: HTMLButtonElement;
+  teamScope: string | null;
   previousSelection: Set<string>;
   previousWindowStart: string | null;
   scrollTop: number;
@@ -167,6 +172,7 @@ function ProjectGantt(props: GanttProps) {
   const teamAssigneeId = allProjects ? teamScheduleFilters?.assigneeId : undefined;
   const teamUnscheduledOnly = allProjects && teamScheduleFilters?.unscheduledOnly === true;
   const teamScheduleFilterActive = teamAssigneeId !== undefined || teamUnscheduledOnly;
+  const teamFocusScope = allProjects ? JSON.stringify([teamProjectFilter, teamAssigneeId !== undefined, teamAssigneeId, teamUnscheduledOnly]) : null;
   const focusedIssue = focusIssueId ? data.issues.find(issue => issue.id === focusIssueId && (allProjects || issue.projectId === projectId)) : undefined;
   const focusedDate = (focusDateEndpoint && focusedIssue?.[focusDateEndpoint]) || focusedIssue?.startDate || focusedIssue?.endDate;
   const focusRequest = focusIssueId ? JSON.stringify([focusIssueId, focusDateEndpoint ?? null, issueFocusActivation]) : null;
@@ -181,7 +187,7 @@ function ProjectGantt(props: GanttProps) {
   const [query, setQuery] = useState('');
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dependencyFocus, setDependencyFocus] = useState<DependencyFocus | null>(null);
+  const [scheduleFocus, setScheduleFocus] = useState<ScheduleFocus | null>(null);
   const [selectionViewId, setSelectionViewId] = useState(ganttViewId);
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
   const [previewError, setPreviewError] = useState('');
@@ -220,10 +226,10 @@ function ProjectGantt(props: GanttProps) {
   });
   if (previousFocusRequest !== focusRequest) {
     setPreviousFocusRequest(focusRequest);
-    if (dependencyFocus) {
-      setDependencyFocus(null);
-      setSelected(dependencyFocus.previousSelection);
-      setWindowStart(dependencyFocus.previousWindowStart);
+    if (scheduleFocus) {
+      setScheduleFocus(null);
+      setSelected(scheduleFocus.previousSelection);
+      setWindowStart(scheduleFocus.previousWindowStart);
     }
     if (focusedIssue) {
       if (!focusDateEndpoint) {
@@ -239,15 +245,20 @@ function ProjectGantt(props: GanttProps) {
   }
   if (selectionViewId !== ganttViewId) {
     setSelectionViewId(ganttViewId);
-    if (dependencyFocus) {
-      setDependencyFocus(null);
-      setWindowStart(dependencyFocus.previousWindowStart);
+    if (scheduleFocus) {
+      setScheduleFocus(null);
+      setWindowStart(scheduleFocus.previousWindowStart);
     }
     if (selected.size) setSelected(new Set());
     if (shiftOpen) setShiftOpen(false);
     if (autoOpen) setAutoOpen(false);
     if (bulkDateSelection) setBulkDateSelection(null);
     if (rowScheduleEdit) setRowScheduleEdit(null);
+  }
+  if (scheduleFocus && scheduleFocus.teamScope !== teamFocusScope) {
+    setScheduleFocus(null);
+    setSelected(scheduleFocus.previousSelection);
+    setWindowStart(scheduleFocus.previousWindowStart);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
   const teamUnscheduledFilter = useRef<HTMLInputElement>(null);
@@ -263,6 +274,8 @@ function ProjectGantt(props: GanttProps) {
   const teamBlockersTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const dependencyFocusTrigger = useRef<HTMLButtonElement>(null);
+  const hierarchyFocusTrigger = useRef<HTMLButtonElement>(null);
+  const restoringScheduleFocus = useRef<ScheduleFocus | null>(null);
   const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
   const pasteTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
@@ -279,6 +292,16 @@ function ProjectGantt(props: GanttProps) {
   const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
     shiftOpen || autoOpen || pasteProject || bulkDateSelection || rowScheduleEdit || createOpen || schedulePredecessor || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
+  useLayoutEffect(() => {
+    const previous = restoringScheduleFocus.current;
+    if (scheduleFocus || !previous) return;
+    restoringScheduleFocus.current = null;
+    const scroll = scrollRef.current;
+    const toolbar = previous.kind === 'hierarchy' ? hierarchyFocusTrigger.current : dependencyFocusTrigger.current;
+    const target = previous.opener.isConnected && !previous.opener.disabled ? previous.opener : toolbar ?? scroll;
+    scroll?.scrollTo(previous.scrollLeft, previous.scrollTop);
+    target?.focus({ preventScroll: true });
+  }, [scheduleFocus]);
   useLayoutEffect(() => {
     // Wait for the dialog to close and its background controls to become interactive.
     if (busy || issueOverlayOpen || scheduleEditorOpen || !pendingScheduleFocus.current) return;
@@ -384,7 +407,7 @@ function ProjectGantt(props: GanttProps) {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
       setPasteProject(null);
-      setRowScheduleEdit(null); setDependencyFocus(null); setSelected(new Set());
+      setRowScheduleEdit(null); setScheduleFocus(null); setSelected(new Set());
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
     window.addEventListener('teamspace:workspace-imported', importReset);
@@ -466,8 +489,12 @@ function ProjectGantt(props: GanttProps) {
     [chartProjectFilter, projectIssues]);
   const calendarsByProject = useMemo(() => new Map((data.calendars ?? []).map(calendar => [calendar.projectId, calendar])), [data.calendars]);
   const calendarFor = useCallback((id: string) => calendarsByProject.get(id) ?? defaultWorkCalendar(id), [calendarsByProject]);
-  const dependencyTrace = useMemo(() => dependencyFocus ? traceGanttDependencies(dependencyFocus.issueId, projectIssues, data.dependencies) : null,
-    [dependencyFocus, projectIssues, data.dependencies]);
+  const dependencyTrace = useMemo(() => scheduleFocus?.kind === 'dependencies' ? traceGanttDependencies(scheduleFocus.issueId, projectIssues, data.dependencies) : null,
+    [scheduleFocus, projectIssues, data.dependencies]);
+  const hierarchyTrace = useMemo(() => scheduleFocus?.kind === 'hierarchy'
+    ? traceGanttHierarchy(scheduleFocus.issueId, projectIssues, issue => statusMeta({ workflows: data.workflows }, issue.projectId, issue.status).category)
+    : null, [scheduleFocus, projectIssues, data.workflows]);
+  const focusedTrace = dependencyTrace ?? hierarchyTrace;
   const rowEditProjectId = rowScheduleEdit?.issue.projectId;
   const rowEditIssues = useMemo(() => rowEditProjectId ? projectIssues.filter(issue => issue.projectId === rowEditProjectId) : [],
     [projectIssues, rowEditProjectId]);
@@ -500,7 +527,7 @@ function ProjectGantt(props: GanttProps) {
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
   const shiftPlan = planShift && (projectPlans.find(item => item.id === planShift.id) ?? planShift);
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
-  const planningRows = planningExpanded && !dependencyFocus ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
+  const planningRows = planningExpanded && !scheduleFocus ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
   const planStats = useMemo(() => planMembershipStats(projectPlans, projectIssues), [projectPlans, projectIssues]);
   function matchesTeamScheduleFilters(issue: Issue, filters = allProjects ? teamScheduleFilters : undefined) {
     return (filters?.assigneeId === undefined || (issue.assigneeId ?? null) === filters.assigneeId) &&
@@ -524,18 +551,18 @@ function ProjectGantt(props: GanttProps) {
     return { rows: pinnedIssue ? [pinnedIssue, ...rows] : rows, pinnedIssue };
   }
   const { rows: ordinaryIssues, pinnedIssue } = chartRows(query, hideDone, planningScope);
-  const issues = dependencyFocus ? dependencyTrace?.issues ?? [] : ordinaryIssues;
-  const ordinaryIssueIds = dependencyTrace ? new Set(ordinaryIssues.map(issue => issue.id)) : null;
-  const outsideFilterCount = dependencyTrace && ordinaryIssueIds ? dependencyTrace.issues.filter(issue => !ordinaryIssueIds.has(issue.id)).length : 0;
+  const issues = scheduleFocus ? focusedTrace?.issues ?? [] : ordinaryIssues;
+  const ordinaryIssueIds = focusedTrace ? new Set(ordinaryIssues.map(issue => issue.id)) : null;
+  const outsideFilterCount = ordinaryIssueIds ? issues.filter(issue => !ordinaryIssueIds.has(issue.id) && issue.id !== hierarchyTrace?.anchor.id).length : 0;
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
-  const milestones = useMemo(() => allProjects || dependencyFocus ? [] : (data.milestones || []).filter(value => value.projectId === projectId),
-    [allProjects, data.milestones, projectId, dependencyFocus]);
-  const historicalIssues = dependencyFocus || planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
-  const historicalMilestones = dependencyFocus ? [] : baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
+  const milestones = useMemo(() => allProjects || scheduleFocus ? [] : (data.milestones || []).filter(value => value.projectId === projectId),
+    [allProjects, data.milestones, projectId, scheduleFocus]);
+  const historicalIssues = scheduleFocus || planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
+  const historicalMilestones = scheduleFocus ? [] : baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
   const onlyTeamProjectId = data.projects.length === 1 ? data.projects[0].id : null;
   const chartProjectId = allProjects ? chartProjectFilter ?? onlyTeamProjectId : projectId;
-  const timelineProjectId = dependencyTrace?.anchor.projectId ?? (pinnedIssue && pinnedIssue.projectId !== chartProjectId ? null : chartProjectId);
-  const findingsProjectId = dependencyTrace?.anchor.projectId ?? chartProjectFilter;
+  const timelineProjectId = focusedTrace?.anchor.projectId ?? (pinnedIssue && pinnedIssue.projectId !== chartProjectId ? null : chartProjectId);
+  const findingsProjectId = focusedTrace?.anchor.projectId ?? chartProjectFilter;
   const calendar = useMemo(() => timelineProjectId ? calendarFor(timelineProjectId) : undefined, [calendarFor, timelineProjectId]);
   const calendarMath = useMemo(() => calendar && createCalendarMath(calendar), [calendar]);
   const { projectDependencyCount, findings, conflictingIds, outgoingIssueIds } = useMemo(() => {
@@ -586,7 +613,7 @@ function ProjectGantt(props: GanttProps) {
   }, [analysisOpen, hasProject, projectId, projectIssues, data.dependencies, calendar, data.workflows]);
   const extent = (() => {
     const today = dayNumber(todayDate());
-    const extentIssues = allProjects && dependencyTrace ? dependencyTrace.issues : scopedIssues;
+    const extentIssues = hierarchyTrace?.issues ?? (allProjects && dependencyTrace ? dependencyTrace.issues : scopedIssues);
     const dates = [...extentIssues.flatMap(value => [value.startDate, value.endDate, value.dueDate]), ...planningRows.flatMap(value => [value.startDate, value.endDate, value.targetDate]), ...milestones.map(value => value.date), ...(baseline?.issues.flatMap(value => [value.startDate, value.endDate]) || []), ...(baseline?.milestones.map(value => value.date) || [])];
     let first = today - 7;
     let last = today + 35;
@@ -611,7 +638,7 @@ function ProjectGantt(props: GanttProps) {
   const dayWidth = chartZoom === 'day' ? 32 : chartZoom === 'week' ? 15 : 6;
   const timelineWidth = range.days * dayWidth;
   const viewportContext = JSON.stringify([projectId, allProjects, chartProjectFilter, teamAssigneeId, teamUnscheduledOnly, ganttViewId, focusRequest, windowStart, chartZoom,
-    selectedPlanningId, planningExpanded, linkedOnly, selectedBaselineId, dependencyFocus?.issueId]);
+    selectedPlanningId, planningExpanded, linkedOnly, selectedBaselineId, scheduleFocus?.kind, scheduleFocus?.issueId]);
   useLayoutEffect(() => {
     viewport.current = { data, context: viewportContext, start: rangeStart, dayWidth };
     const anchor = restoreViewport.current;
@@ -659,11 +686,11 @@ function ProjectGantt(props: GanttProps) {
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
   const linkAnchor = selectedAnchor && projectIssues.some(issue => issue.projectId === selectedAnchor.projectId && issue.id !== selectedAnchor.id)
     ? selectedAnchor : null;
-  const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope && !dependencyFocus ? issues : [];
+  const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope && !scheduleFocus ? issues : [];
   const automaticProjectId = allProjects ? selectedProjectId ?? (!selectedIssues.length ? chartProjectFilter : null) : projectId;
   const automaticNeedsSelection = teamScheduleFilterActive && !selectedIssues.length;
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
-  const activeFindings = dependencyFocus ? findings.filter(({ predecessor, successor }) => issueRows.has(predecessor.id) && issueRows.has(successor.id)) : findings;
+  const activeFindings = scheduleFocus ? findings.filter(({ predecessor, successor }) => issueRows.has(predecessor.id) && issueRows.has(successor.id)) : findings;
   const activeConflictCount = activeFindings.filter(finding => finding.check.kind === 'conflict').length;
   const canShowFindings = hasProject || (allProjects && data.projects.length > 0);
   const canShowTeamBlockers = allProjects && data.projects.length > 1;
@@ -716,12 +743,13 @@ function ProjectGantt(props: GanttProps) {
   const nonworkingTicks = ticks.filter(tick => tick.nonworking);
   const todayPosition = (dayNumber(todayDate()) - range.start) * dayWidth;
   const chartRowCount = planningRows.length + issues.length + historicalIssues.length + milestones.length + historicalMilestones.length;
-  const exportDisabled = (!dependencyTrace && sharedViewUnavailable) || chartRowCount === 0;
+  const exportDisabled = (!focusedTrace && sharedViewUnavailable) || chartRowCount === 0;
   function downloadGantt() {
     if (exportDisabled) return;
     const filters: string[] = [];
-    if (dependencyTrace) {
-      filters.push(`선후행 흐름 · ${dependencyTrace.anchor.key} ${dependencyTrace.anchor.title}`);
+    if (focusedTrace) {
+      filters.push(`${hierarchyTrace ? '하위 업무 일정' : '선후행 흐름'} · ${focusedTrace.anchor.key} ${focusedTrace.anchor.title}`);
+      if (hierarchyTrace?.span) filters.push(`하위 업무 범위 · ${hierarchyTrace.span.startDate} ~ ${hierarchyTrace.span.endDate}`);
       if (outsideFilterCount) filters.push(`기존 보기 밖 업무 ${outsideFilterCount}개 포함`);
     } else if (sharedView) {
       const { query: savedQuery, status, type, assigneeId, fieldFilter } = sharedView.filters;
@@ -745,7 +773,7 @@ function ProjectGantt(props: GanttProps) {
       filters.push(...sharedPlanningLabels);
       if (sharedGitlabFilter) filters.push(ISSUE_GITLAB_FILTER_LABELS[sharedGitlabFilter]);
     }
-    if (!dependencyTrace) {
+    if (!focusedTrace) {
       if (filteredProject) filters.push(`프로젝트 · ${filteredProject.key} ${filteredProject.name}`);
       if (teamAssigneeId !== undefined) filters.push(`담당자 · ${teamAssigneeId === null ? '미배정'
         : data.users.find(user => user.id === teamAssigneeId)?.name ?? '현재 팀원 없음'}`);
@@ -808,7 +836,7 @@ function ProjectGantt(props: GanttProps) {
     if (!accepted && origin?.isConnected) origin.focus({ preventScroll: true });
   }
   function focusAfterCompletingMissingRows(updated: readonly Issue[], origin = document.activeElement) {
-    if (!teamUnscheduledOnly || dependencyFocus) return false;
+    if (!teamUnscheduledOnly || scheduleFocus) return false;
     const completed = new Set(updated.filter(issue => issue.startDate && issue.endDate).map(issue => issue.id));
     const removedIndex = issues.findIndex(issue => completed.has(issue.id) && issue.id !== focusIssueId && (!issue.startDate || !issue.endDate));
     if (removedIndex < 0) return false;
@@ -843,11 +871,12 @@ function ProjectGantt(props: GanttProps) {
     setWindowStart(start);
     scrollToDate(dayNumber(date), dayNumber(start));
   }
-  function locateDependencyAnchor(issue: Issue, { endpoint, showIssueNames = false }: {
+  function locateScheduleFocusRow(issue: Issue, { endpoint, preferredDate, showIssueNames = false }: {
     endpoint?: ScheduleDependencyEndpoint;
+    preferredDate?: string;
     showIssueNames?: boolean;
   } = {}) {
-    const date = (endpoint && issue[endpoint]) || issue.startDate || issue.endDate;
+    const date = (endpoint && issue[endpoint]) || preferredDate || issue.startDate || issue.endDate;
     if (date && showIssueNames) setWindowStart(windowForDate(date));
     else if (date) showDate(date);
     requestAnimationFrame(() => {
@@ -861,43 +890,43 @@ function ProjectGantt(props: GanttProps) {
       else scroll.focus({ preventScroll: true });
     });
   }
-  function openDependencyFocus(issue: Issue) {
-    if (!canLeave()) return;
-    const next: DependencyFocus = {
-      issueId: issue.id, previousSelection: selected, previousWindowStart: windowStart,
+  function openScheduleFocus(kind: ScheduleFocus['kind'], issue: Issue, opener: HTMLButtonElement) {
+    if (scheduleFocus || !canLeave()) return;
+    const next: ScheduleFocus = {
+      kind, opener, teamScope: teamFocusScope, issueId: issue.id, previousSelection: selected, previousWindowStart: windowStart,
       scrollLeft: scrollRef.current?.scrollLeft ?? 0, scrollTop: scrollRef.current?.scrollTop ?? 0,
     };
+    const preferredDate = kind === 'hierarchy'
+      ? traceGanttHierarchy(issue.id, projectIssues, child => statusMeta(data, child.projectId, child.status).category)?.span?.startDate
+      : undefined;
     queueMicrotask(() => {
-      setDependencyFocus(next);
+      setScheduleFocus(next);
       setSelected(new Set([issue.id]));
       setLinkPicker(null);
       setDatePicker(null);
       setDrag(null);
       setShiftOpen(false);
-      locateDependencyAnchor(issue, { showIssueNames: true });
+      locateScheduleFocusRow(issue, { showIssueNames: true, preferredDate });
     });
   }
-  function closeDependencyFocus() {
-    if (!dependencyFocus || !canLeave()) return;
+  function closeScheduleFocus() {
+    if (!scheduleFocus || !canLeave()) return;
     queueMicrotask(() => {
-      setDependencyFocus(null);
-      setSelected(dependencyFocus.previousSelection);
-      setWindowStart(dependencyFocus.previousWindowStart);
+      restoringScheduleFocus.current = scheduleFocus;
+      setScheduleFocus(null);
+      setSelected(scheduleFocus.previousSelection);
+      setWindowStart(scheduleFocus.previousWindowStart);
       setLinkPicker(null);
       setDatePicker(null);
       setDrag(null);
       setShiftOpen(false);
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo(dependencyFocus.scrollLeft, dependencyFocus.scrollTop);
-        (dependencyFocusTrigger.current ?? scrollRef.current)?.focus({ preventScroll: true });
-      });
     });
   }
   function locateFindingDate(issueId: string, endpoint: ScheduleDependencyEndpoint) {
-    const row = dependencyTrace && issueRows.get(issueId);
+    const row = focusedTrace && issueRows.get(issueId);
     if (!row) return onLocateIssueDate(issueId, endpoint);
     if (!canLeave()) return false;
-    locateDependencyAnchor(row.issue, { endpoint });
+    locateScheduleFocusRow(row.issue, { endpoint });
     return true;
   }
   function locateTimelineDate(date: string, rowIndex?: number, preserveRange = false) {
@@ -1045,7 +1074,7 @@ function ProjectGantt(props: GanttProps) {
     notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);
   }
   async function undo() {
-    if (!undoId || busyRef.current || (dependencyFocus && !canLeave())) return;
+    if (!undoId || busyRef.current || (scheduleFocus && !canLeave())) return;
     markBusy(true);
     try {
       const result = await post<{ updated: Issue[]; warnings?: string[]; plan?:PlanningItem; dependencyChanges?:number }>('/schedule/undo', { undoId });
@@ -1159,7 +1188,7 @@ function ProjectGantt(props: GanttProps) {
     }
   }
   async function unlink(dependency: Dependency) {
-    if (busyRef.current || (dependencyFocus && !canLeave())) return;
+    if (busyRef.current || (scheduleFocus && !canLeave())) return;
     markBusy(true);
     try {
       await remove(`/dependencies/${encodeURIComponent(dependency.id)}?expectedVersion=${dependency.version ?? 1}`);
@@ -1319,7 +1348,7 @@ function ProjectGantt(props: GanttProps) {
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={openSchedulePaste}>
         <ClipboardPaste size={15} aria-hidden="true" />일정 붙여넣기
       </button>}
-      {automaticProjectId && <button className="btn" disabled={busy || sharedViewUnavailable || automaticNeedsSelection || Boolean((planningScope || dependencyFocus) && !automaticScheduleIssues.length)}
+      {automaticProjectId && <button className="btn" disabled={busy || sharedViewUnavailable || automaticNeedsSelection || Boolean((planningScope || scheduleFocus) && !automaticScheduleIssues.length)}
         title={automaticNeedsSelection ? '현재 보기에서 자동 일정을 검토할 업무를 선택하세요.' : undefined}
         onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button>}
       <button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button>
@@ -1333,7 +1362,7 @@ function ProjectGantt(props: GanttProps) {
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{scopedIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{scopedIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{projectDependencyCount}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     {allProjects && <div className="gantt-team-scope">
       <label>프로젝트 필터
-        <select className="field" value={chartProjectFilter ?? ''} disabled={busy || Boolean(dependencyFocus || pasteProject)}
+        <select className="field" value={chartProjectFilter ?? ''} disabled={busy || Boolean(scheduleFocus || pasteProject)}
           data-gantt-focus-control="" onChange={event => changeTeamProjectFilter(event.target.value || null)}>
           <option value="">전체 프로젝트</option>
           {data.projects.map(item => <option key={item.id} value={item.id}>{item.key} · {item.name}</option>)}
@@ -1342,7 +1371,7 @@ function ProjectGantt(props: GanttProps) {
       {onChangeTeamScheduleFilters && <>
         <label>담당자 필터
           <select className="field" value={teamAssigneeId === null ? 'unassigned' : teamAssigneeId === undefined ? '' : `member:${teamAssigneeId}`}
-            disabled={busy || Boolean(dependencyFocus)} data-gantt-focus-control="" onPointerDown={focusTeamFilterSelect}
+            disabled={busy || Boolean(scheduleFocus)} data-gantt-focus-control="" onPointerDown={focusTeamFilterSelect}
             onBlur={() => { teamFilterOrigin.current = null; }} onChange={event => {
               const value = event.currentTarget.value;
               const assigneeId = value === 'unassigned' ? null : value ? value.slice('member:'.length) : undefined;
@@ -1356,7 +1385,7 @@ function ProjectGantt(props: GanttProps) {
           </select>
         </label>
         <label className="gantt-checkbox-label gantt-team-unscheduled" onPointerDown={keepInlineDateFocus}>
-          <input ref={teamUnscheduledFilter} type="checkbox" checked={teamUnscheduledOnly} disabled={busy || Boolean(dependencyFocus)}
+          <input ref={teamUnscheduledFilter} type="checkbox" checked={teamUnscheduledOnly} disabled={busy || Boolean(scheduleFocus)}
             data-gantt-focus-control="" onChange={event => changeTeamScheduleFilters({ assigneeId: teamAssigneeId, unscheduledOnly: event.currentTarget.checked || undefined })} />일정 미정만
         </label>
       </>}
@@ -1367,7 +1396,7 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     {hasProject && onChangeGanttView && (sharedViews.length > 0 || sharedViewUnavailable) && <div className="gantt-shared-view">
       <label className="gantt-shared-view-select">간트 공유 보기
-        <select className="field" value={ganttViewId ?? ''} disabled={busy || Boolean(dependencyFocus)} onChange={event => onChangeGanttView(event.target.value || null)}>
+        <select className="field" value={ganttViewId ?? ''} disabled={busy || Boolean(scheduleFocus)} onChange={event => onChangeGanttView(event.target.value || null)}>
           <option value="">공유 보기 없이 표시</option>
           {sharedViewUnavailable && <option value={ganttViewId ?? ''}>열 수 없는 공유 보기</option>}
           {sharedViews.map(view => <option key={view.id} value={view.id}>{view.name}</option>)}
@@ -1400,7 +1429,7 @@ function ProjectGantt(props: GanttProps) {
         if (onClearIssueFocus()) scrollRef.current?.focus({ preventScroll: true });
       }}>업무 위치 해제</button>}
     </div>}
-    <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(dependencyFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(dependencyFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={dependencyFocus ? '' : undefined} onPointerDown={dependencyFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
+    <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       {canEditBulkDates && <button ref={bulkDatesTrigger} className="btn" type="button" onClick={openBulkDates}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
         disabled={!selectedIssues.length || bulkDatesOverLimit || busy || Boolean(activeDatePicker)}>
@@ -1440,23 +1469,30 @@ function ProjectGantt(props: GanttProps) {
         { anchor: { issueId: linkAnchor.id, otherRole: 'successor' } })}>
         <Link2 size={15} aria-hidden="true" />선택 업무에서 연결
       </button>}
-      {selectedAnchor && !dependencyFocus && <button ref={dependencyFocusTrigger} className="btn" type="button" disabled={busy}
-        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={() => openDependencyFocus(selectedAnchor)}>
+      {selectedAnchor && !scheduleFocus && <button ref={dependencyFocusTrigger} className="btn" type="button" disabled={busy}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={event => openScheduleFocus('dependencies', selectedAnchor, event.currentTarget)}>
         <Network size={15} aria-hidden="true" />선후행 흐름 보기
+      </button>}
+      {selectedAnchor && hierarchy.childCounts.has(selectedAnchor.id) && !scheduleFocus && <button ref={hierarchyFocusTrigger} className="btn" type="button" disabled={busy}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={event => openScheduleFocus('hierarchy', selectedAnchor, event.currentTarget)}>
+        <ListTree size={15} aria-hidden="true" />하위 업무 일정 보기
       </button>}
       {selectedAnchor && <button ref={successorTrigger} className="btn" type="button" disabled={busy} onClick={() => {
         if (canLeave()) setSchedulePredecessor(selectedAnchor);
       }}><Plus size={15} aria-hidden="true" />새 후행 업무 추가</button>}
     </div>
-    {dependencyFocus && <GanttDependencyFocusPanel trace={dependencyTrace} outsideFilterCount={outsideFilterCount} disabled={busy}
-      onClose={closeDependencyFocus} onLocate={() => { if (dependencyTrace) locateDependencyAnchor(dependencyTrace.anchor); }}
+    {scheduleFocus?.kind === 'dependencies' && <GanttDependencyFocusPanel trace={dependencyTrace} outsideFilterCount={outsideFilterCount} disabled={busy}
+      onClose={closeScheduleFocus} onLocate={() => { if (dependencyTrace) locateScheduleFocusRow(dependencyTrace.anchor); }}
+      onPointerDown={keepInlineDateFocus} />}
+    {scheduleFocus?.kind === 'hierarchy' && <GanttHierarchyFocusPanel trace={hierarchyTrace} outsideFilterCount={outsideFilterCount} disabled={busy}
+      onClose={closeScheduleFocus} onLocate={() => { if (hierarchyTrace) locateScheduleFocusRow(hierarchyTrace.anchor, { preferredDate: hierarchyTrace.span?.startDate }); }}
       onPointerDown={keepInlineDateFocus} />}
     {linkPicker && <GanttLinkPrompt source={sourceRow && pickedSource ? { key: sourceRow.issue.key, endpoint: pickedSource.endpoint } : null}
       canPick={hasVisibleLinkPair} onReset={() => {
         setLinkPicker({ source: null });
         linkPickerTrigger.current?.focus({ preventScroll: true });
       }} onCancel={cancelLinkPicking} />}
-    {findingsOpen && canShowFindings && <GanttDependencyFindings id={FINDINGS_PANEL_ID} findings={activeFindings} focused={Boolean(dependencyFocus)}
+    {findingsOpen && canShowFindings && <GanttDependencyFindings id={FINDINGS_PANEL_ID} findings={activeFindings} focused={Boolean(scheduleFocus)}
       allProjects={allProjects && !chartProjectFilter}
       disabled={busy || Boolean(issueOverlayOpen)} onLocateDate={locateFindingDate}
       onEditLink={(dependency, opener) => showLinkEditor(opener, { dependency })}
@@ -1477,8 +1513,11 @@ function ProjectGantt(props: GanttProps) {
     {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={filteredProject?.id ?? projectId} chooseProject={allProjects} actorId={props.actorId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={closeCreateForm} onCreated={async issue => {
       await refresh();
       finishCreating();
-      if (dependencyFocus) {
-        notify(`${issue.key} 업무를 추가했습니다. 새 업무는 현재 선후행 흐름의 범위 밖에 있습니다.`);
+      if (scheduleFocus) {
+        const label = scheduleFocus.kind === 'hierarchy' ? '하위 업무 일정' : '선후행 흐름';
+        const isDescendant = hierarchyTrace && issue.projectId === hierarchyTrace.anchor.projectId && issue.parentId &&
+          (issue.parentId === hierarchyTrace.anchor.id || hierarchyTrace.depths.has(issue.parentId));
+        notify(`${issue.key} 업무를 추가했습니다.${isDescendant ? '' : ` 새 업무는 현재 ${label}의 범위 밖에 있습니다.`}`);
       } else if (sharedViewUnavailable || matchSharedView && !matchSharedView(issue)) {
         notify(`${issue.key} 업무를 간트에 추가했습니다. 새 업무는 현재 공유 보기의 범위 밖에 있습니다.`);
       } else if (chartProjectFilter && issue.projectId !== chartProjectFilter) {
@@ -1491,7 +1530,7 @@ function ProjectGantt(props: GanttProps) {
         notify(`${issue.key} 업무를 간트에 추가했습니다.`);
       }
     }} />}
-    {hasProject && <div hidden={Boolean(dependencyFocus)}><GanttPlanningControls {...props} expanded={planningExpanded} onExpandedChange={expanded => {
+    {hasProject && <div hidden={Boolean(scheduleFocus)}><GanttPlanningControls {...props} expanded={planningExpanded} onExpandedChange={expanded => {
       setPlanningExpanded(expanded);
       if (!expanded) setLinkedOnly(false);
     }} selectedPlanningId={selectedPlanningId} onSelectPlanning={choosePlan} onDraftChange={trackDraft} draftEpoch={draftEpoch} />
@@ -1595,12 +1634,14 @@ function ProjectGantt(props: GanttProps) {
         const isTraceSuccessor = dependencyTrace?.successorDepths.has(issue.id);
         const traceRole = issue.id === dependencyTrace?.anchor.id ? 'anchor'
           : isTracePredecessor && isTraceSuccessor ? 'both' : isTracePredecessor ? 'predecessor' : isTraceSuccessor ? 'successor' : undefined;
+        const hierarchyRole = hierarchyTrace ? issue.id === hierarchyTrace.anchor.id ? 'anchor' : 'descendant' : undefined;
+        const hierarchySpan = hierarchyRole === 'anchor' ? hierarchyTrace?.span : null;
         const rowDatePicker = activeDatePicker?.issue.id === issue.id ? activeDatePicker : null;
         const fixedOrFirst = rowDatePicker && (rowDatePicker.firstDate ?? rowDatePicker.fixedEdge?.date);
         const deadline = issueDeadlines.get(issue.id);
         const deadlineX = deadline && !outside(deadline.dueDate) ? (dayNumber(deadline.dueDate) - range.start + .5) * dayWidth : null;
         const deadlineLabel = deadline && `${issue.key} 목표 마감일 ${deadline.dueDate}`;
-        return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} data-dependency-focus-row={traceRole}
+        return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} data-dependency-focus-row={traceRole} data-hierarchy-focus-row={hierarchyRole}
           className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
             <label><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected.has(issue.id)} onChange={() => toggleSelected(issue.id)} /></label>
@@ -1616,7 +1657,8 @@ function ProjectGantt(props: GanttProps) {
                 aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
                 onClick={() => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssue(issue.id)}>
                 <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
-                <span><small>{rowProject && <><span className="gantt-row-project" title={rowProject.name}>{rowProject.key}</span> · </>}{issue.key} · <IssueTypeName data={data} issue={issue} /></small><strong title={issue.title}>{issue.title}</strong>
+                <span><small>{rowProject && <><span className="gantt-row-project" title={rowProject.name}>{rowProject.key}</span> · </>}{issue.key} · <IssueTypeName data={data} issue={issue} />
+                  {hierarchyTrace && <GanttHierarchyFocusLabel trace={hierarchyTrace} issueId={issue.id} />}</small><strong title={issue.title}>{issue.title}</strong>
                   {dependencyTrace && <GanttDependencyFocusLabel trace={dependencyTrace} issueId={issue.id} />}
                   {endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>
                 {user && <span className="issue-avatar" style={{ background: user.color }} title={user.name}>{user.name.slice(0, 1)}</span>}
@@ -1627,7 +1669,9 @@ function ProjectGantt(props: GanttProps) {
                 onClick={event => openRowScheduleEdit(issue, event.currentTarget, 'dueDate')}>
                 <span>{deadline.dueDate.slice(5)}</span><span>{deadline.kind === 'late' ? '초과' : deadline.kind === 'missing' ? '종료 미정' : '마감'}</span>
               </button>}
-              <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} disabled={busy || Boolean(linkPicker)} />
+              <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} disabled={busy || Boolean(linkPicker)}
+                childSchedule={{ label: `${issue.key} 하위 업무 일정 보기`, disabled: Boolean(scheduleFocus),
+                  onOpen: opener => openScheduleFocus('hierarchy', issue, opener), onPointerDown: keepInlineDateFocus }} />
             </div>
             <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy || Boolean(cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
@@ -1635,6 +1679,7 @@ function ProjectGantt(props: GanttProps) {
           </div>
           <div className="gantt-row-timeline" style={{ width: timelineWidth }}>
           {captured?.startDate && captured.endDate && <div className="gantt-baseline-bar" role="img" aria-label={`${captured.key} 기준선 ${captured.startDate} ~ ${captured.endDate}`} title={`${baseline!.name}: ${captured.title} · ${captured.startDate} ~ ${captured.endDate}`} style={capturedStyle(captured.startDate, captured.endDate)} />}
+          {hierarchySpan && <GanttHierarchySpan anchorKey={issue.key} {...hierarchySpan} style={capturedStyle(hierarchySpan.startDate, hierarchySpan.endDate)} />}
           {rowDatePicker ? <GanttDateRangeLane issueKey={issue.key} rangeStart={range.start} rangeEnd={range.end}
             minDay={rowDatePicker.fixedEdge?.kind === 'start' ? dayNumber(rowDatePicker.fixedEdge.date) : range.start}
             maxDay={rowDatePicker.fixedEdge?.kind === 'end' ? dayNumber(rowDatePicker.fixedEdge.date) : range.end}
@@ -1665,7 +1710,7 @@ function ProjectGantt(props: GanttProps) {
     </div></div>
     {baseline && <details className="gantt-baseline-records"><summary>기준선 업무 기록 {baseline.issues.length}개 · 캡처된 이름과 날짜 확인</summary><div><table><thead><tr><th>기준선 업무</th><th>시작일</th><th>종료일</th><th>현재 상태</th></tr></thead><tbody>{baseline.issues.map(captured => <tr key={captured.issueId}><td><small>{captured.key}</small><strong>{captured.title}</strong></td><td><button disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button></td><td><button disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></td><td>{projectIssues.some(issue => issue.id === captured.issueId) ? '현재 업무 있음' : '삭제된 업무 기록'}</td></tr>)}</tbody></table></div></details>}
     {scheduleWarnings.length > 0 && <div className="gantt-current-warnings" role="status"><AlertCircle size={16} /><div><strong>일정 의존성 확인</strong>{scheduleWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="issue-icon-button" onClick={() => setScheduleWarnings([])} aria-label="경고 닫기"><X size={14} /></button></div>}
-    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span><span><span className="gantt-legend-line" />선행 → 후행</span>{conflictingIds.size > 0 && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span>{hasProject && <span><Diamond size={12} />마일스톤</span>}{calendarMath && <span><span className="gantt-nonworking-key" />비근무일</span>}{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
+    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span>{hierarchyTrace?.span && <span><span className="gantt-hierarchy-span-key" />하위 업무 범위</span>}<span><span className="gantt-legend-line" />선행 → 후행</span>{conflictingIds.size > 0 && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span>{hasProject && <span><Diamond size={12} />마일스톤</span>}{calendarMath && <span><span className="gantt-nonworking-key" />비근무일</span>}{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row">
       <button type="button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
@@ -1689,7 +1734,7 @@ function ProjectGantt(props: GanttProps) {
             <div className="gantt-dependency-actions">
               <button className="issue-icon-button" type="button" onClick={event => showLinkEditor(event.currentTarget, { dependency })} disabled={busy} aria-label={`${predecessor.key}와 ${successor.key} 연결 수정`} title="연결 수정"><Pencil size={14} /></button>
               <button className="issue-icon-button" type="button" onClick={() => unlink(dependency)} disabled={busy}
-                data-gantt-focus-control={dependencyFocus ? '' : undefined} onPointerDown={dependencyFocus ? keepInlineDateFocus : undefined}
+                data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined}
                 aria-label={`${predecessor.key}와 ${successor.key} 연결 해제`} title="연결 해제"><X size={14} /></button>
             </div>
           </div>
