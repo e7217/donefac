@@ -1,4 +1,4 @@
-import { PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type PlanningItem, type Priority, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type WorkspaceSnapshot } from './types.js';
+import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type PlanningItem, type Priority, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
@@ -24,17 +24,8 @@ const issueViewPriorities = Object.keys(PRIORITY) as Priority[];
 type IssuePriorityLabelCriteria = Pick<SavedViewState['filters'], 'priorities' | 'labels'>;
 
 export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilter | undefined {
-  switch (value) {
-    case undefined:
-    case 'open_merge_request':
-    case 'merge_blocked':
-    case 'failed_pipeline':
-    case 'running_pipeline':
-    case 'no_activity':
-      return value;
-    default:
-      throw new IssueViewGitlabFilterError('GitLab 활동 필터를 확인해 주세요.');
-  }
+  if (value === undefined || isIssueViewGitlabFilter(value)) return value;
+  throw new IssueViewGitlabFilterError('GitLab 활동 필터를 확인해 주세요.');
 }
 
 const planSelectors = Object.entries(PLANNING_FIELDS);
@@ -184,7 +175,7 @@ function matchesDateFilter(issue: Issue, filter: IssueViewDateFilter): boolean {
   return filter.mode === 'overlap' && complete && (!filter.from || endDate >= filter.from) && (!filter.to || startDate <= filter.to);
 }
 
-function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: IssueGitlabSummary | undefined): boolean {
+export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: IssueGitlabSummary | undefined): boolean {
   switch (filter) {
     case 'open_merge_request': return Boolean(summary?.openMergeRequests);
     case 'merge_blocked': return Boolean(summary?.blockedMergeRequests);

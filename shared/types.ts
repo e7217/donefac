@@ -690,6 +690,7 @@ export interface TeamBoardFilters {
   projectId?: string;
   memberId?: string | null;
   query?: string;
+  gitlab?: IssueViewGitlabFilter;
 }
 export type TeamOverviewCounts = Record<TeamOverviewIssueMetric, number>;
 export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }
@@ -1191,7 +1192,11 @@ export interface IssueViewPlanningFilter {
   releaseId?: string | null;
   dates?: IssueViewDateFilter;
 }
-export type IssueViewGitlabFilter = 'open_merge_request' | 'merge_blocked' | 'failed_pipeline' | 'running_pipeline' | 'no_activity';
+export const ISSUE_VIEW_GITLAB_FILTERS = ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'no_activity'] as const;
+export type IssueViewGitlabFilter = typeof ISSUE_VIEW_GITLAB_FILTERS[number];
+export function isIssueViewGitlabFilter(value: unknown): value is IssueViewGitlabFilter {
+  return ISSUE_VIEW_GITLAB_FILTERS.some(filter => filter === value);
+}
 
 export interface IssueViewLabelFilter {
   include?: string[];

@@ -2,16 +2,16 @@
 
 import { ArrowRightLeft, Link2, RefreshCw, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
-import { STATUS, type FeatureProps, type Issue, type StatusCategory, type TeamBoardFilters, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
+import { isIssueViewGitlabFilter, STATUS, type FeatureProps, type Issue, type StatusCategory, type TeamBoardFilters, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
 import { issueSearchText } from '../../shared/issue-schema';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
-import { orderProjectIssues } from '../../shared/issue-view';
+import { matchesGitlabFilter, orderProjectIssues } from '../../shared/issue-view';
 import { allowedNextStatuses, projectWorkflow, statusMeta, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { api, ApiError, dateLabel, patch } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { IssueTypeIcon, StatusDot } from './Issues';
-import { IssueGitlabSummary } from './IssueGitlabSummary';
+import { ISSUE_GITLAB_FILTER_LABELS, IssueGitlabSummary } from './IssueGitlabSummary';
 import { errorMessage } from './schedule-utils';
 import './team-board.css';
 
@@ -52,6 +52,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
   const [dragging, setDragging] = useState(false);
   const [editing, setEditing] = useState<StatusEdit | null>(null);
   const [copyFallback, setCopyFallback] = useState<{ filterKey: string; url: string } | null>(null);
+  const filterKey = JSON.stringify([filters.projectId, filters.memberId === null, filters.memberId, filters.query, filters.gitlab]);
   const refreshPaused = issueOverlayOpen || Boolean(editing) || dragging;
   const hasLocalInteraction = useCallback(() => Boolean(chooserOpen.current || drag.current), []);
   const { requestMode, feedback, manualRefresh } = useWorkspaceRefresh(refreshBoard, refreshPaused, hasLocalInteraction);
@@ -65,8 +66,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
     focusedCard.current = null;
     target?.focus({ preventScroll: true });
     if (target && target !== board.current) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [data, refreshPaused]);
-  const filterKey = JSON.stringify([filters.projectId, filters.memberId === null, filters.memberId, filters.query]);
+  }, [data, filterKey, refreshPaused]);
   const shareUrl = copyFallback?.filterKey === filterKey ? copyFallback.url : null;
   const members = useMemo(() => new Map(data.users.map(user => [user.id, user])), [data.users]);
   const links = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
@@ -75,6 +75,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
     const scoped = new Map<string, Issue[]>();
     for (const issue of data.issues) {
       if (filters.projectId && issue.projectId !== filters.projectId || filters.memberId !== undefined && issue.assigneeId !== filters.memberId) continue;
+      if (filters.gitlab && !matchesGitlabFilter(filters.gitlab, links.get(issue.id))) continue;
       const projectIssues = scoped.get(issue.projectId);
       if (projectIssues) projectIssues.push(issue);
       else scoped.set(issue.projectId, [issue]);
@@ -97,7 +98,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
       }
     }
     return { columns: groups, visible };
-  }, [data, filters.projectId, filters.memberId, filters.query]);
+  }, [data, filters.projectId, filters.memberId, filters.query, filters.gitlab, links]);
 
   function openStatus(entry: BoardEntry, opener: HTMLElement, category?: StatusCategory) {
     const choices = destinations(data, entry.issue, category);
@@ -200,6 +201,16 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
           <option value="">전체 담당자</option>
           <option value="unassigned">미지정</option>
           {data.users.map(user => <option key={user.id} value={`member:${user.id}`}>{user.name}</option>)}
+        </select>
+      </label>
+      <label className="team-board-gitlab">GitLab 조건
+        <select className="field" aria-label="GitLab 조건" value={filters.gitlab ?? ''}
+          onChange={event => {
+            const value = event.currentTarget.value;
+            onFiltersChange({ ...filters, gitlab: isIssueViewGitlabFilter(value) ? value : undefined });
+          }}>
+          <option value="">GitLab 전체</option>
+          {Object.entries(ISSUE_GITLAB_FILTER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
       </label>
       <label className="team-board-query">업무 검색

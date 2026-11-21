@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { AutomationRule, AutomationRun, Dependency, DocPage, GitlabSettings, Issue, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule, AutomationRun, Dependency, DocPage, GitlabSettings, Issue, IssueViewGitlabFilter, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
 const board = (page: Page) => page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
@@ -313,6 +313,153 @@ test('업무 상세를 여는 동안 도착한 이전 보드 응답이 저장 �
     release.resolve();
     if (archivedId) expect((await request.delete(`/api/trash/${archivedId}`, { headers })).ok()).toBeTruthy();
     else await purge(request, path, headers);
+  }
+});
+
+test('360px 팀 보드의 GitLab 조건은 프로젝트·담당자·검색과 함께 공유되고 최신 파이프라인으로 갱신된다', async ({ page, request, context }) => {
+  test.setTimeout(95_000);
+  const { projects: [base, other], users: [actor, peer] } = await snapshot(request);
+  const headers = { 'X-Actor-Id': actor.id };
+  const suffix = randomUUID().slice(0, 8);
+  const query = `팀 GitLab 검토 ${suffix}`;
+  const url = 'https://gitlab.example.test';
+  const secret = `synthetic-team-board-filter-${randomUUID()}`;
+  const repositories = [42, 43] as const;
+  const original = await json<GitlabSettings>(await request.get(settingsPath));
+  expect(original.baseUrl).toBe('');
+  const dates = { startDate: '2031-11-03', endDate: '2031-11-04' };
+  const created: Issue[] = [];
+  const create = async (projectId: string, title: string, assigneeId = actor.id) => {
+    const issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
+      projectId, title, assigneeId, status: 'in_progress', ...dates,
+    } }), 201);
+    created.push(issue);
+    return issue;
+  };
+  const branch = (issue: Issue) => `feature/${issue.key}`;
+  const start = Date.now() - 60_000;
+  const at = (seconds: number) => new Date(start + seconds * 1000).toISOString();
+  const send = async (repository: number, object_kind: 'pipeline' | 'merge_request', object_attributes: object) => {
+    const response = await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() }, data: {
+        object_kind, project: { id: repository, web_url: `${url}/team/repository-${repository}` }, object_attributes,
+      },
+    });
+    expect(await json<{ linked: number; duplicate: boolean }>(response)).toMatchObject({ linked: 1, duplicate: false });
+  };
+  const pipeline = (repository: number, issue: Issue, id: number, status: string, elapsed: number) =>
+    send(repository, 'pipeline', { id, ref: branch(issue), status, updated_at: at(elapsed) });
+  const mergeRequest = (repository: number, issue: Issue, id: number, detailed_merge_status: string) =>
+    send(repository, 'merge_request', {
+      id, iid: id, action: 'open', state: 'opened', title: `${issue.key} 합성 검토`, sha: 'a'.repeat(40),
+      source_branch: branch(issue), detailed_merge_status, url: `${url}/team/repository-${repository}/-/merge_requests/${id}`, updated_at: at(8),
+    });
+  const boardPath = `#/${base.id}/teamboard`;
+  const filters = () => Object.fromEntries(new URLSearchParams(new URL(page.url()).hash.split('?')[1]));
+  const gitlab = page.getByRole('combobox', { name: 'GitLab 조건', exact: true });
+  const project = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+  const member = page.getByRole('combobox', { name: '담당자 필터', exact: true });
+  async function rows(expected: Issue[]) {
+    await expect(board(page).locator('[data-issue-id]')).toHaveCount(expected.length);
+    for (const issue of expected) await expect(card(page, issue)).toBeVisible();
+  }
+
+  try {
+    await json<GitlabSettings>(await request.patch(settingsPath, { headers, data: {
+      expectedVersion: original.version, baseUrl: url, projectIds: repositories, webhookSecret: secret,
+    } }));
+    const west = await create(base.id, `${query} 첫 프로젝트 병합과 실패`);
+    const failed = await create(other.id, `${query} 선택한 파이프라인 실패`);
+    const blocked = await create(other.id, `${query} 병합 충돌`);
+    const running = await create(base.id, `${query} 실행 중`);
+    const unlinked = await create(other.id, `${query} 개발 활동 없음`);
+    const assignedElsewhere = await create(other.id, `${query} 다른 담당자 실패`, peer.id);
+    const offQuery = await create(other.id, `검색 제외 ${suffix} 실패`);
+    await mergeRequest(42, west, 601, 'mergeable');
+    await mergeRequest(43, blocked, 602, 'conflict');
+    await pipeline(42, west, 701, 'failed', 10);
+    await pipeline(43, failed, 702, 'failed', 11);
+    await pipeline(42, running, 703, 'running', 12);
+    await pipeline(43, assignedElsewhere, 704, 'failed', 13);
+    await pipeline(43, offQuery, 705, 'failed', 14);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const queryString = new URLSearchParams({ boardQuery: query, boardGitlab: 'invalid-filter' });
+    await openBoard(page, `${boardPath}?${queryString}`, actor.id);
+    await expect.poll(filters).toEqual({ boardQuery: query });
+    await expect(gitlab).toHaveValue('');
+    await rows([west, failed, blocked, running, unlinked, assignedElsewhere]);
+    const cases: [IssueViewGitlabFilter, Issue[]][] = [
+      ['open_merge_request', [west, blocked]], ['merge_blocked', [blocked]], ['running_pipeline', [running]],
+      ['no_activity', [unlinked]], ['failed_pipeline', [west, failed, assignedElsewhere]],
+    ];
+    for (const [filter, expected] of cases) {
+      await gitlab.selectOption(filter);
+      await expect.poll(filters).toEqual({ boardQuery: query, boardGitlab: filter });
+      await rows(expected);
+    }
+    await project.selectOption(other.id);
+    await rows([failed, assignedElsewhere]);
+    await member.selectOption({ label: actor.name });
+    await rows([failed]);
+    const shared = { boardProject: other.id, boardMember: actor.id, boardQuery: query, boardGitlab: 'failed_pipeline' };
+    await expect.poll(filters).toEqual(shared);
+
+    await button(page, '보드 링크 복사').click();
+    await expect(page.getByText('보드 링크를 복사했습니다.', { exact: true })).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const clipboard = new URL(copied);
+    expect(clipboard.hash.split('?')[0]).toBe(boardPath);
+    expect(Object.fromEntries(new URLSearchParams(clipboard.hash.split('?')[1]))).toEqual(shared);
+    await page.goto(`/#/${base.id}/overview`);
+    await page.goto(copied);
+    await page.reload();
+    await expect.poll(filters).toEqual(shared);
+    await expect(gitlab).toHaveValue('failed_pipeline');
+    await expect(project).toHaveValue(other.id);
+    await expect(member.locator('option:checked')).toHaveText(actor.name);
+    await expect(search(page)).toHaveValue(query);
+    await rows([failed]);
+
+    const open = button(card(page, failed), `${failed.key} 업무 열기`);
+    await open.click();
+    const detail = page.getByRole('dialog', { name: failed.title, exact: true });
+    await expect(detail.locator('.gitlab-activity-row[data-gitlab-kind="pipeline"][data-gitlab-state="failed"]')).toHaveCount(1);
+    await expect.poll(filters).toEqual({ ...shared, issue: failed.id });
+    await button(detail, '간트에서 일정 보기').click();
+    await expect(page).toHaveURL(value => value.hash === `#/${other.id}/gantt?focusIssue=${failed.id}`);
+    const gantt = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(gantt.getByLabel(`${failed.key} 시작일`, { exact: true })).toHaveValue(dates.startDate);
+    await page.goBack();
+    await expect(detail).toBeVisible();
+    await expect.poll(filters).toEqual({ ...shared, issue: failed.id });
+    const settled = page.waitForResponse(response => condition(response, 204));
+    await closeDetails(detail).click();
+    await settled;
+    await expect.poll(filters).toEqual(shared);
+    await open.focus();
+    await expect(open).toBeFocused();
+
+    const live = page.waitForResponse(response => condition(response, 200));
+    // The newest pipeline by GitLab object ID may have an older update timestamp than a failed run.
+    await pipeline(43, failed, 706, 'success', 9);
+    await page.clock.runFor(15_100);
+    await live;
+    await rows([]);
+    await expect(board(page)).toBeFocused();
+    await expect.poll(filters).toEqual(shared);
+    await expect(gitlab).toHaveValue('failed_pipeline');
+    const current = await snapshot(request);
+    expect(current.gitlabLinks.filter(link => link.issueId === failed.id && link.kind === 'pipeline')
+      .map(link => [link.iid, link.state]).sort()).toEqual([[702, 'failed'], [706, 'success']]);
+    expect(current.issues.find(issue => issue.id === failed.id)).toEqual(failed);
+  } finally {
+    for (const issue of created) await purge(request, `/api/issues/${issue.id}`, headers);
+    const active = await json<GitlabSettings>(await request.get(settingsPath));
+    if (active.baseUrl === url) await json<GitlabSettings>(await request.patch(settingsPath, { headers, data: {
+      expectedVersion: active.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+    } }));
   }
 });
 

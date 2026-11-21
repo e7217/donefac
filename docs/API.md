@@ -233,6 +233,8 @@ curl --fail-with-body \
 
 브라우저의 `GET /api/workspace`는 `X-Teamspace-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
 
+팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.
+
 ## 보드 상태별 업무 한도
 
 브라우저의 `GET /api/projects/:projectId/workflow`에서 설정된 상태의 `statuses[].wipLimit`을 읽을 수 있다. 기존 `PATCH /api/projects/:projectId/workflow` 요청의 `expectedVersion`과 상태 목록에 `wipLimit`을 1~10,000의 정수로 전달한다. `null`은 한도를 해제한다. 속성을 생략하면 같은 ID의 기존 한도를 유지한다. 자체 백업의 형식 56에 설정을 보존한다.

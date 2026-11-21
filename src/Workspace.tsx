@@ -3,7 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
-import { DELIVERY_BLOCKER_REASONS, isTeamOverviewIssueMetric } from '../shared/types';
+import { DELIVERY_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -133,10 +133,11 @@ function routeHash(route: WorkspaceRoute) {
     }
   }
   if (route.view === 'teamboard' && route.teamBoardFilters) {
-    const { projectId, memberId, query: search } = route.teamBoardFilters;
+    const { projectId, memberId, query: search, gitlab } = route.teamBoardFilters;
     if (projectId) query.set('boardProject', projectId);
     if (memberId !== undefined) query.set('boardMember', memberId ?? '');
     if (search) query.set('boardQuery', search);
+    if (gitlab) query.set('boardGitlab', gitlab);
   }
   if (route.issueId && route.documentPreviewId) query.set('documentPreview', route.documentPreviewId);
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
@@ -158,7 +159,7 @@ function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): b
     sameDecisionFollowUpScope(previous.decisionFollowUpScope, next.decisionFollowUpScope);
 }
 function sameTeamBoardFilters(a?: TeamBoardFilters, b?: TeamBoardFilters): boolean {
-  return a?.projectId === b?.projectId && a?.memberId === b?.memberId && a?.query === b?.query;
+  return a?.projectId === b?.projectId && a?.memberId === b?.memberId && a?.query === b?.query && a?.gitlab === b?.gitlab;
 }
 function hasSameTeamBoardContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'teamboard' && next.view === 'teamboard' && previous.projectId === next.projectId &&
@@ -273,10 +274,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const boardProject = parameters.get('boardProject');
   const boardMember = parameters.get('boardMember');
   const boardQuery = parameters.get('boardQuery')?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  const boardGitlab = parameters.get('boardGitlab');
   const teamBoardFilters: TeamBoardFilters | undefined = view === 'teamboard' ? {
     projectId: snapshot.projects.some(project => project.id === boardProject) ? boardProject ?? undefined : undefined,
     memberId: boardMember === '' ? null : snapshot.users.some(user => user.id === boardMember) ? boardMember : undefined,
     query: boardQuery || undefined,
+    gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters, teamBoardFilters };
@@ -528,7 +531,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const changeTeamBoardFilters = (filters: TeamBoardFilters) => {
     const current = acceptedRouteRef.current;
     if (current?.view !== 'teamboard' || current.issueId) return;
-    const changesScope = current.teamBoardFilters?.projectId !== filters.projectId || current.teamBoardFilters?.memberId !== filters.memberId;
+    const changesScope = current.teamBoardFilters?.projectId !== filters.projectId || current.teamBoardFilters?.memberId !== filters.memberId ||
+      current.teamBoardFilters?.gitlab !== filters.gitlab;
     requestRoute({ ...current, teamBoardFilters: filters }, changesScope ? 'push' : 'replace');
   };
   const openTeamGantt = () => {

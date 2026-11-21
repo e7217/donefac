@@ -298,6 +298,16 @@ async function verifyBrowser(origin) {
     await rejectSocket(socketUrl, { Cookie: sessionCookie }, 403);
 
     await verifyIntegrations(session.request, anonymous, origin);
+    const boardPage = await session.newPage();
+    try {
+      const boardUrl = `${origin}/#/project-neo/teamboard?boardGitlab=open_merge_request`;
+      await boardPage.goto(boardUrl);
+      const board = boardPage.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
+      await expectSoon(boardPage.getByRole('combobox', { name: 'GitLab 조건', exact: true })).toHaveValue('open_merge_request');
+      await expectSoon(board.getByRole('button', { name: 'NEO-2 업무 열기', exact: true })).toBeVisible();
+      await expectSoon(board.getByRole('button', { name: 'NEO-1 업무 열기', exact: true })).toHaveCount(0);
+      await expectSoon(boardPage).toHaveURL(boardUrl);
+    } finally { await boardPage.close(); }
     for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab', '/api/integrations/gitlab/webhook-status']) {
       const response = await call(session.request, 'GET', path, 200);
       checkCredentials(await response.body(), path);
@@ -346,7 +356,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, scoped integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();
