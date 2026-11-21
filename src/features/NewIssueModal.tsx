@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type IssueTemplate, type Priority, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
-import { hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
+import { fieldApplies, hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { CalendarError, createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyScheduleWarning, isDependencyLag, isDependencyType, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
@@ -16,6 +16,8 @@ import { CustomFields, initialIssueType, IssueTypeSelect } from './CustomFields'
 import { PlanningSelect } from './PlanningSelectors';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { IssueReporterSelect } from './IssueReporterSelect';
+import { IssueTemplatePicker } from './IssueTemplatePicker';
+import { isAvailableTemplateFieldValue } from './issue-template-fields';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
@@ -68,6 +70,19 @@ function cloneCustomFields(data: WorkspaceSnapshot, source: Issue, type: string,
   return Object.fromEntries(copied.filter(([id]) => targetVisible.has(id)));
 }
 
+function templateDraftFields(data: WorkspaceSnapshot, projectId: string, type: string, status: IssueStatus,
+  values: Record<string, CustomFieldValue>, copiedIds: string[]) {
+  const schema = projectIssueSchema(data, projectId);
+  const copied = new Set(copiedIds);
+  const available = Object.entries(values).filter(([id, value]) => {
+    const field = schema.fields.find(candidate => candidate.id === id);
+    return field && !field.archived && fieldApplies(field, type)
+      && (!copied.has(id) || isAvailableTemplateFieldValue(field, value, data.users));
+  });
+  const visible = visibleIssueFieldIds(schema, { type, status, customFields: Object.fromEntries(available) });
+  return Object.fromEntries(available.filter(([id]) => !copied.has(id) || visible.has(id)));
+}
+
 function calendarFor(data: WorkspaceSnapshot, projectId: string) {
   return data.calendars?.find(calendar => calendar.projectId === projectId) ?? defaultWorkCalendar(projectId);
 }
@@ -107,6 +122,12 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [description, setDescription] = useState(cloneIssue?.description ?? '');
+  const [priority, setPriority] = useState<Priority>(cloneIssue?.priority ?? 'medium');
+  const [appliedTemplate, setAppliedTemplate] = useState<IssueTemplate | null>(null);
+  const [templateError, setTemplateError] = useState('');
+  const [templateNotice, setTemplateNotice] = useState('');
+  const [templateLabels, setTemplateLabels] = useState<{ text: string; labels: string[] }>();
+  const [templateFieldIdsByProject, setTemplateFieldIdsByProject] = useState<Record<string, string[]>>({});
   const [reporterId, setReporterId] = useState<Issue['reporterId']>();
   const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
@@ -147,9 +168,12 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const pendingRef = useRef(false);
   const dialog = useRef<HTMLElement>(null);
   const titleInput = useRef<HTMLInputElement>(null);
+  const labelInput = useRef<HTMLInputElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const submitButton = useRef<HTMLButtonElement>(null);
   const values = valuesByProject[selectedProject] || {};
+  const templateFieldIds = templateFieldIdsByProject[selectedProject];
+  const formValues = templateFieldIds ? templateDraftFields(data, selectedProject, selectedType, selectedStatus, values, templateFieldIds) : values;
   const states = projectStatuses(data, selectedProject);
   const required = requiredFieldsFor(data, selectedProject, selectedType, selectedStatus);
   const currentDocument = sourceDocument && data.documents.find(page => page.id === sourceDocument.id);
@@ -251,13 +275,60 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     if (recovering && !busy && retry && !retry.disabled) retry.focus();
   }, [recovering, busy]);
 
+  function applyTemplate(template: IssueTemplate) {
+    const defaults = template.defaults;
+    const title = titleInput.current;
+    const labels = labelInput.current;
+    if (template.projectId !== selectedProject || !title || !labels) return;
+    if (!projectIssueTypes(data, selectedProject).some(type => type.id === defaults.type)) {
+      setTemplateError('이 템플릿의 업무 유형을 사용할 수 없습니다. 설정에서 템플릿을 수정해 주세요.');
+      return;
+    }
+    const schema = projectIssueSchema(data, selectedProject);
+    const customEntries = Object.entries(defaults.customFields).filter(([, value]) => hasCustomValue(value));
+    const availableEntries = customEntries.filter(([id, value]) => {
+      const field = schema.fields.find(candidate => candidate.id === id && !candidate.archived);
+      return field && isAvailableTemplateFieldValue(field, value, data.users);
+    });
+    const draftValues = { ...values, ...Object.fromEntries(availableEntries) };
+    const visible = visibleIssueFieldIds(schema, { type: defaults.type, status: selectedStatus, customFields: draftValues });
+    const customDefaults = availableEntries.filter(([id]) => visible.has(id));
+    const labelText = defaults.labels.join(', ');
+    const replacesInput = (defaults.title && title.value.trim() && title.value !== defaults.title)
+      || (description.trim() && (description !== defaults.description || descriptionFormat !== defaults.descriptionFormat))
+      || (labels.value.trim() && labels.value !== labelText)
+      || (selectedType !== initialIssueType(data, selectedProject) && selectedType !== defaults.type)
+      || (priority !== 'medium' && priority !== defaults.priority)
+      || customDefaults.some(([id, value]) => Object.hasOwn(values, id) && JSON.stringify(values[id]) !== JSON.stringify(value));
+    if (replacesInput && !window.confirm('템플릿의 기본값으로 일부 입력을 바꿀까요?')) return;
+    if (defaults.title) title.value = defaults.title;
+    labels.value = labelText;
+    setDescription(defaults.description);
+    setDescriptionFormat(defaults.descriptionFormat);
+    setSelectedType(defaults.type);
+    setPriority(defaults.priority);
+    setValuesByProject(previous => ({ ...previous, [selectedProject]: { ...values, ...Object.fromEntries(customDefaults) } }));
+    setTemplateFieldIdsByProject(previous => ({ ...previous, [selectedProject]: [
+      ...new Set([...(previous[selectedProject] ?? []), ...customDefaults.map(([id]) => id)]),
+    ] }));
+    setTemplateLabels({ text: labels.value, labels: defaults.labels });
+    setAppliedTemplate(template);
+    setTemplateError('');
+    const skipped = customEntries.length - customDefaults.length;
+    setTemplateNotice(skipped
+      ? `현재 업무 양식에서 사용할 수 없는 사용자 정의 기본값 ${skipped}개를 제외했습니다. 유형·상태와 선택 항목을 확인해 주세요.` : '');
+    dirtyRef.current = true;
+  }
+
   function issuePayload(form: FormData) {
-    const labelInput = String(form.get('labels') || '');
-    const labels = cloneIssue && labelInput.replace(/\r\n?/g, '\n') === cloneLabels ? cloneIssue.labels
-      : labelInput.split(cloneMode ? /\r?\n/ : ',').map(value => value.trim()).filter(Boolean);
+    const labelText = String(form.get('labels') || '');
+    const labels = cloneIssue && labelText.replace(/\r\n?/g, '\n') === cloneLabels ? cloneIssue.labels
+      : templateLabels && labelText === templateLabels.text ? templateLabels.labels
+      : labelText.split(cloneMode ? /\r?\n/ : ',').map(value => value.trim()).filter(Boolean);
     return {
       projectId: selectedProject, title: String(form.get('title') || '').trim(), description,
-      ...(descriptionFormat === 'markdown' || cloneIssue?.descriptionFormat === 'markdown' ? { descriptionFormat } : {}),
+      ...(appliedTemplate || descriptionFormat === 'markdown' || cloneIssue?.descriptionFormat === 'markdown' ? { descriptionFormat } : {}),
+      ...(appliedTemplate ? { templateId: appliedTemplate.id, expectedTemplateVersion: appliedTemplate.version } : {}),
       type: selectedType, status: selectedStatus, priority: form.get('priority'), assigneeId: form.get('assigneeId') || null,
       ...(reporterId !== undefined ? { reporterId } : {}),
       startDate: form.get('startDate') || null, endDate: form.get('endDate') || null, dueDate: form.get('dueDate') || null,
@@ -266,7 +337,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       labels,
       parentId: reviewedParent?.id ?? (form.get('parentId') || null), collaboratorIds: form.getAll('collaboratorIds'),
       cycleId: form.get('cycleId') || null, moduleId: form.get('moduleId') || null, releaseId: form.get('releaseId') || null,
-      customFields: values,
+      customFields: formValues,
     };
   }
 
@@ -494,7 +565,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
             : '업무 생성 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.');
         }
       } else {
-        if (!replay || linkedCreation) attempt.current = null;
+        const templateRejected = typeof details?.reason === 'string' && details.reason.startsWith('issue-template-');
+        if (!replay || linkedCreation || templateRejected) attempt.current = null;
         setRecovering(false);
         if (reviewedSchedule && status === 409 && (details?.reason === 'predecessor_changed' || details?.reason === 'calendar_changed')) {
           setError(errorMessage(cause));
@@ -505,6 +577,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         } else if (reviewedClone && ((status === 409 && details?.reason === 'source_version_changed') ||
           (status === 404 && details?.reason === 'source_missing'))) {
           await readCloneReview(reviewedClone);
+        } else if (templateRejected) {
+          setTemplateError(errorMessage(cause));
         } else if (replay) {
           setReplayRejected(true);
           setError(linkedCreation ? `${errorMessage(cause)} ${confirmationLocation}을 확인해 주세요.` : errorMessage(cause));
@@ -588,11 +662,21 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
                 setSelectedProject(next);
                 setSelectedType(initialIssueType(data, next));
                 setSelectedStatus(projectWorkflow(data, next).initialStatusId);
+                setAppliedTemplate(null);
+                setTemplateError('');
+                setTemplateNotice('');
               }} required>
                 {sourceDocument && !sourceDocument.projectId && <option value="" disabled>프로젝트를 선택하세요</option>}
                 {data.projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}
               </select>
             </label>
+            {!linkedCreation && selectedProject && <IssueTemplatePicker key={`${selectedProject}:${actorId}`}
+              projectId={selectedProject} applied={appliedTemplate} error={templateError} notice={templateNotice}
+              onApply={applyTemplate} onDetach={() => {
+                setAppliedTemplate(null);
+                setTemplateError('');
+                setTemplateNotice('');
+              }} />}
             <label className="issue-form-label">업무 제목<input ref={titleInput} autoFocus className="field issue-title-input" name="title" placeholder="무엇을 해야 하나요?" maxLength={300} defaultValue={cloneIssue?.title} required /></label>
             {successorMode && <section className="issue-successor-schedule" aria-label="선행 일정 연결">
               <div className="issue-form-grid">
@@ -622,7 +706,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
             <div className="issue-form-grid">
               <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={selectedType} onChange={setSelectedType} name="type" /></label>
               <label className="issue-form-label">상태<select name="status" aria-label="새 업무 상태" className="field" value={selectedStatus} onChange={event => setSelectedStatus(event.target.value)}>{states.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></label>
-              <label className="issue-form-label">우선순위<select name="priority" className="field" defaultValue={cloneIssue?.priority ?? 'medium'}>{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
+              <label className="issue-form-label">우선순위<select name="priority" className="field" value={priority} onChange={event => setPriority(event.target.value as Priority)}>{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
               <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
               {!successorMode && dateFields}
               <label className="issue-form-label">요청자<IssueReporterSelect value={reporterId === undefined ? actorId || undefined : reporterId}
@@ -631,9 +715,16 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
             {!successorMode && dateRangePicker}
             {reviewedClone && <div><button type="button" className="btn" disabled={needsCloneReview || !(reviewedClone.startDate || reviewedClone.endDate || reviewedClone.dueDate)}
               onClick={copyCloneDates}>원본 일정 복사</button></div>}
-            <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={values} onChange={next => {
+            <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={formValues} onChange={next => {
               dirtyRef.current = true;
-              setValuesByProject(previous => ({ ...previous, [selectedProject]: next }));
+              if (templateFieldIds) {
+                const staged = Object.fromEntries(Object.entries(values).filter(([id]) => !Object.hasOwn(formValues, id)));
+                setValuesByProject(previous => ({ ...previous, [selectedProject]: { ...staged, ...next } }));
+                setTemplateFieldIdsByProject(previous => ({ ...previous, [selectedProject]: templateFieldIds
+                  .filter(id => next[id] === formValues[id]) }));
+              } else {
+                setValuesByProject(previous => ({ ...previous, [selectedProject]: next }));
+              }
             }} disabled={fieldsLocked} requiredFields={required} />
             {required.length > 0 && <p className="issue-section-empty">필수 속성: {requiredFieldLabels(data, selectedProject, required).join(', ')}</p>}
             <details open={cloneMode || required.some(field => ['dueDate', 'estimate', 'labels', 'collaboratorIds', 'cycle', 'module', 'release'].includes(field) || (field === 'parentId' && !childMode))}>
@@ -648,7 +739,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
                 <label className="issue-form-label">계획 작업 시간 (분)<input className="field" type="number" name="plannedEffortMinutes" min={0} max={MAX_PLANNED_EFFORT_MINUTES} step={1} defaultValue={cloneIssue?.plannedEffortMinutes ?? undefined} /></label>
                 <label className="issue-form-label">라벨{cloneMode
                   ? <textarea className="field" name="labels" rows={2} placeholder="한 줄에 하나" defaultValue={cloneLabels} />
-                  : <input className="field" name="labels" placeholder="쉼표로 구분" />}</label>
+                  : <input ref={labelInput} className="field" name="labels" placeholder="쉼표로 구분" />}</label>
                 {!childMode && <label className="issue-form-label">상위 업무<select className="field" name="parentId" key={selectedProject}><option value="">없음</option>{data.issues.filter(issue => issue.projectId === selectedProject).map(issue => <option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select></label>}
                 {(['cycle', 'module', 'release'] as const).map(field => <label className="issue-form-label" key={field}>{REQUIRED_FIELD_LABELS[field]}<PlanningSelect data={data} projectId={selectedProject} kind={field} name={`${field}Id`} /></label>)}
                 <label className="issue-form-label">참여자<select className="field" name="collaboratorIds" multiple defaultValue={cloneIssue?.collaboratorIds}>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>

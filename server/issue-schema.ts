@@ -119,7 +119,8 @@ function normalizeValue(field:CustomFieldDefinition,value:unknown,previous:Custo
     case'multi_select':{if(!Array.isArray(value)||value.length>200||value.some(id=>typeof id!=='string')||new Set(value).size!==value.length)fail(`${field.name}: 중복되지 않은 선택지 ID 목록이 필요합니다.`);const before=new Set(Array.isArray(previous)?previous:[]);for(const optionId of value){const option=field.options.find(option=>option.id===optionId);if(!option)fail(`${field.name}: 알 수 없는 선택지입니다.`);if(option.archived&&!allowArchived&&!before.has(optionId))fail(`${field.name}: 보관된 선택지를 새로 지정할 수 없습니다.`,422);}return[...value];}
   }
 }
-function validateValues(schema:ProjectIssueSchema,next:Issue,previous:Issue|undefined,options:{checkFields?:boolean;allowArchived?:boolean;users?:User[]}):void{
+type IssueSchemaValues = Pick<Issue, 'projectId' | 'type' | 'status' | 'customFields'>;
+function validateValues(schema:ProjectIssueSchema,next:IssueSchemaValues,previous:Issue|undefined,options:{checkFields?:boolean;allowArchived?:boolean;users?:User[]}):void{
   const type=schema.issueTypes.find(type=>type.id===next.type);if(!type)fail('프로젝트에 없는 업무 유형입니다.');if(type.archived&&!options.allowArchived&&previous?.type!==next.type)fail('보관된 업무 유형은 새로 지정할 수 없습니다.',422);
   const source=next.customFields===undefined?{}:object(next.customFields,'사용자 정의 필드 값'),normalized:Record<string,CustomFieldValue>={};
   for(const[fieldId,raw]of Object.entries(source)){const field=schema.fields.find(field=>field.id===fieldId);if(!field)fail(`알 수 없는 사용자 정의 필드입니다: ${fieldId}`);const before=ownValue(previous?.customFields,fieldId),value=normalizeValue(field,raw,before,options.users,!!options.allowArchived);
@@ -152,7 +153,7 @@ export class IssueSchemaService{
   constructor(private readonly store:Store){store.db.exec('CREATE TABLE IF NOT EXISTS issue_schemas(id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,json TEXT NOT NULL)');}
   get(projectId:string):ProjectIssueSchema{const project=this.store.get<Project>('projects',projectId);if(!project)fail('프로젝트를 찾을 수 없습니다.',404);return this.store.get<ProjectIssueSchema>('issue_schemas',projectId)||defaultIssueSchema(projectId,project.createdAt);}
   snapshot():ProjectIssueSchema[]{return this.store.all<Project>('projects').map(project=>this.get(project.id));}
-  validateIssue(next:Issue,previous?:Issue,options:{checkFields?:boolean;allowArchived?:boolean}={}):void{validateValues(this.get(next.projectId),next,previous,{...options,users:this.store.all<User>('users')});}
+  validateIssue(next:IssueSchemaValues,previous?:Issue,options:{checkFields?:boolean;allowArchived?:boolean}={}):void{validateValues(this.get(next.projectId),next,previous,{...options,users:this.store.all<User>('users')});}
   private rows<T>(table:string):T[]{return this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)?this.store.all<T>(table):[];}
   save(projectId:string,input:unknown,expectedVersion:unknown,afterSave?:(schema:ProjectIssueSchema)=>void):ProjectIssueSchema{
     return this.store.transaction(()=>{const old=this.get(projectId);if(!Number.isSafeInteger(expectedVersion)||Number(expectedVersion)<1)fail('expectedVersion이 필요합니다.');if(expectedVersion!==old.version)fail('업무 유형·필드 설정이 변경되었습니다. 최신 설정을 확인해 주세요.',409,{currentVersion:old.version});const next=parseSchema(projectId,input,old.version+1,new Date().toISOString());

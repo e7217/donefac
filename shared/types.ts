@@ -604,6 +604,26 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export interface IssueTemplateDefaults {
+  title: string;
+  description: string;
+  descriptionFormat: IssueDescriptionFormat;
+  type: string;
+  priority: Priority;
+  labels: string[];
+  customFields: Record<string, CustomFieldValue>;
+}
+export interface IssueTemplate {
+  id: string;
+  projectId: string;
+  name: string;
+  defaults: IssueTemplateDefaults;
+  archived: boolean;
+  version: number;
+  authorId: string;
+  createdAt: string;
+  updatedAt: string;
+}
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export interface IssueCloneResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
 export interface IssuePasteDiagnostic { line: number | null; message: string }

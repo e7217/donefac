@@ -367,6 +367,12 @@ export class ApiKeyService {
       }
       const workflow = /^\/api\/projects\/([^/]+)\/(workflow|issue-schema)$/.exec(path);
       if (workflow) { this.query(request, []); this.allowedProject(key, this.decode(workflow[1])); this.used(key); return next(); }
+      const issueTemplates = /^\/api\/projects\/([^/]+)\/issue-templates$/.exec(path);
+      if (issueTemplates) {
+        this.query(request, []);
+        this.allowedProject(key, this.decode(issueTemplates[1]));
+        this.used(key); return next();
+      }
       if (['/api/issues', '/api/documents', '/api/planning-items'].includes(path)) {
         const query = this.query(request, path === '/api/planning-items' ? ['projectId', 'kind'] :
           path === '/api/issues' ? ['projectId', 'reporterId'] : ['projectId']);

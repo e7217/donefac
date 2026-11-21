@@ -20,6 +20,7 @@ curl --fail-with-body \
 | `GET /projects` | 키 범위의 프로젝트 목록 |
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
+| `GET /projects/:id/issue-templates` | 프로젝트의 활성 업무 템플릿과 적용할 버전 조회 |
 | `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
@@ -197,6 +198,14 @@ curl --fail-with-body \
 일반 업무 생성·수정과 복제·하위 업무 양식에서 `description`은 최대 200,000자의 원문 문자열이다. `descriptionFormat`을 `markdown`으로 지정하면 저장된 설명을 Markdown으로 표시한다. `plain`을 보내면 원문 문자열을 유지하면서 서식 설정을 해제한다. 생성 시 생략하면 평문이며, 수정 시 생략하면 현재 설정을 유지한다. 응답은 Markdown일 때 `descriptionFormat`을 포함한다. `/api/v1/issues`의 프로젝트 범위 읽기·쓰기에도 같은 규칙을 적용한다.
 
 본래 업무의 버전 검사와 생성 요청 재확인 규칙은 설명 서식에도 적용된다. 백업 형식 78은 활성·휴지통 업무의 설명과 Markdown 설정을 보존한다. 이전 형식에서 읽은 설명은 평문으로 표시한다. 발신 웹훅은 변경한 필드 이름으로 `descriptionFormat`을 표시할 수 있다.
+
+## 프로젝트 업무 템플릿
+
+`GET /api/v1/projects/:id/issue-templates`는 키 범위 안 프로젝트의 활성 업무 템플릿 배열을 반환한다. 각 항목의 `id`와 `version`을 사용해 쓰기 키의 `POST /api/v1/issues`에 `projectId`, `templateId`, `expectedTemplateVersion`을 보낸다. 일반 업무 생성과 같은 `requestId`를 보내면 응답이 끊긴 뒤에도 생성 결과를 다시 확인할 수 있다. 이미 성공한 요청은 이후 템플릿이 변경되거나 보관돼도 같은 업무를 반환한다.
+
+`defaults`에는 `title`, `description`, `descriptionFormat`, `type`, `priority`, `labels`, `customFields`가 있다. 생략한 업무 입력에 기본값을 적용하며 명시한 `customFields` 객체는 전체를 교체한다. 물려받는 사용자 정의 기본값은 현재 유형·상태에서 표시되는 필드에 반영한다. 상태와 담당자, 일정 등은 일반 생성의 기본값과 입력을 따른다. 최종 업무는 현재 워크플로와 필수 입력을 검사한다. 템플릿 버전이 바뀌거나 보관된 경우 최신 목록을 확인한다. 저장된 유형·필드·선택지에 문제가 있는 경우 현재 값을 다시 지정하거나 설정에서 템플릿을 편집한다.
+
+브라우저의 `GET /api/projects/:id/issue-templates?includeArchived=1`은 보관된 템플릿도 조회한다. 같은 경로에 `POST {name,defaults}`로 새 템플릿을 저장하거나 `{name,sourceIssueId,expectedIssueVersion}`으로 같은 프로젝트의 티켓 저장본에서 기본값을 가져온다. `PATCH /api/projects/:id/issue-templates/:templateId`는 `expectedVersion`과 바꿀 `name`, `defaults` 또는 `archived`를 받는다. 관리 요청은 브라우저 경로를 사용한다. 자체 백업 형식 87에 템플릿과 보관 상태를 포함한다.
 
 ## 업무 복제
 

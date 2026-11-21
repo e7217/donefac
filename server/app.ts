@@ -36,6 +36,7 @@ import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersion
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
 import { IssuePasteError, IssuePasteService } from './issue-paste.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
 import { IssueBlockerNotifications } from './issue-blocker-notifications.js';
@@ -97,7 +98,7 @@ import { issueDeadline } from '../shared/my-work.js';
 import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
-import { fieldApplies, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
+import { fieldApplies, hasCustomValue, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
@@ -198,6 +199,27 @@ export function createApp(options: {
   const documentCommentReplies=new DocumentCommentReplyService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
+  const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
+    let customFields = defaults.customFields;
+    if (source) {
+      const schema = issueSchemas.get(projectId);
+      const visible = visibleIssueFieldIds(schema, source);
+      customFields = Object.fromEntries(schema.fields.flatMap(field => {
+        const value = defaults.customFields[field.id];
+        if (!visible.has(field.id) || !hasCustomValue(value)) return [];
+        const activeOption = (id: unknown) => field.options.some(option => option.id === id && !option.archived);
+        if (field.kind === 'select' && !activeOption(value)) return [];
+        if (field.kind === 'user' && (typeof value !== 'string' || !store.get<User>('users', value))) return [];
+        if (field.kind === 'multi_select') {
+          return Array.isArray(value) ? [[field.id, value.filter(activeOption)]] : [];
+        }
+        return [[field.id, value]];
+      }));
+    }
+    const candidate = { projectId, type: defaults.type, status: workflows.get(projectId).initialStatusId, customFields };
+    issueSchemas.validateIssue(candidate, undefined, { checkFields: false });
+    return { ...defaults, customFields: candidate.customFields };
+  });
   const documentCreation = new DocumentCreationService(store);
   const documentTemplateAssets = new DocumentTemplateAssetsService(store, files);
   const documentTemplates = new DocumentTemplatesService(store, documentTemplateAssets);
@@ -1268,6 +1290,58 @@ export function createApp(options: {
   const createIssueInTransaction=(req:Request,input:Record<string,unknown>):Issue=>
     commitIssueCreation(req,prepareIssueCreation(input));
 
+  const issueTemplatesPath = '/api/projects/:projectId/issue-templates';
+  app.get(issueTemplatesPath, (req, res) => {
+    const includeArchived = req.query.includeArchived;
+    if (includeArchived !== undefined && includeArchived !== '1') fail('보관된 양식을 보려면 includeArchived=1을 사용해 주세요.');
+    res.set('Cache-Control', 'no-store').json(issueTemplates.list(req.params.projectId, includeArchived === '1'));
+  });
+  app.post(issueTemplatesPath, (req, res) => {
+    const template = store.transaction(() => {
+      const created = issueTemplates.create(req.params.projectId, req.body, actor(req));
+      activity(req, 'project', created.projectId, '업무 템플릿 생성', created.name);
+      return created;
+    });
+    res.status(201).json(template);
+  });
+  app.patch(`${issueTemplatesPath}/:templateId`, (req, res) => {
+    const template = store.transaction(() => {
+      const updated = issueTemplates.patch(req.params.projectId, req.params.templateId, req.body, actor(req));
+      if (updated.version !== req.body.expectedVersion) {
+        activity(req, 'project', updated.projectId, '업무 템플릿 변경', updated.name);
+      }
+      return updated;
+    });
+    res.json(template);
+  });
+
+  const issueCreationInput = (input: Record<string, unknown>): Record<string, unknown> => {
+    if (!Object.hasOwn(input, 'templateId') && !Object.hasOwn(input, 'expectedTemplateVersion')) return input;
+    const projectId = text(input.projectId, '프로젝트', 200);
+    const { defaults } = issueTemplates.forCreation(projectId, input.templateId, input.expectedTemplateVersion);
+    const merged = { ...defaults, ...input };
+    const inheritsFields = !Object.hasOwn(input, 'customFields');
+    if (inheritsFields || !Object.hasOwn(input, 'type')) {
+      const candidate = {
+        projectId,
+        type: merged.type,
+        status: typeof input.status === 'string' ? input.status : workflows.get(projectId).initialStatusId,
+        customFields: inheritsFields ? defaults.customFields : {},
+      };
+      try {
+        issueSchemas.validateIssue(candidate, undefined, { checkFields: false });
+      } catch (error) {
+        if (error instanceof IssueSchemaError) fail(`업무 템플릿의 기본값을 확인해 주세요. ${error.message}`, 422, { reason: 'issue-template-defaults-invalid' });
+        throw error;
+      }
+      if (inheritsFields) {
+        const visible = visibleIssueFieldIds(issueSchemas.get(projectId), candidate);
+        merged.customFields = Object.fromEntries(Object.entries(candidate.customFields).filter(([id]) => visible.has(id)));
+      }
+    }
+    return merged;
+  };
+
   const issuePaste = new IssuePasteService(store, {
     schema: projectId => issueSchemas.get(projectId),
     workflow: projectId => workflows.get(projectId),
@@ -1287,7 +1361,7 @@ export function createApp(options: {
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.post('/api/issues',(req,res)=>{
-    const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,req.body));
+    const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,issueCreationInput(req.body)));
     res.status(result.duplicate?200:201).json(result.issue);
   });
   app.post('/api/issues/:id/schedule-successors', (req, res) => {
@@ -2084,7 +2158,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2097,6 +2171,11 @@ export function createApp(options: {
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
+    if (data.schemaVersion < 87 && data.issueTemplates !== undefined && (!Array.isArray(data.issueTemplates) || data.issueTemplates.length)) {
+      fail('업무 템플릿을 포함한 백업은 schemaVersion 87이 필요합니다.');
+    }
+    const importedIssueTemplates = data.schemaVersion >= 87
+      ? issueTemplates.validateRestore(data.issueTemplates, data.projects, data.users, data.exportedAt) : [];
     if(data.schemaVersion<63&&data.documentTemplates!==undefined&&(!Array.isArray(data.documentTemplates)||data.documentTemplates.length)){
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
@@ -2496,6 +2575,7 @@ export function createApp(options: {
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
+      issueTemplates.restore(importedIssueTemplates);
       documentTemplates.restore(importedTemplates);
       documentTemplateAssets.restore(importedTemplateAssets);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[], subscriptionRefs.users,
@@ -2583,7 +2663,7 @@ export function createApp(options: {
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});

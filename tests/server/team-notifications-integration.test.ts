@@ -183,7 +183,7 @@ test('native notification backups preserve transition details, exact archived co
   await expectStatus(f.call(`/comments/${received.id}`, 'DELETE', undefined, reviewer));
   const before = await inbox(f, editor);
   const data = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(data.schemaVersion, 86);
+  assert.equal(data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
 
   const wrongAnchor = structuredClone(data);
   wrongAnchor.teamNotifications.find(item => item.id === delivered.id)!.commentId = wrong.id;
