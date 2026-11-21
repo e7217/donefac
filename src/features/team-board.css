@@ -13,6 +13,27 @@
   margin: 0;
 }
 
+.team-board-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.team-board-heading-actions [aria-disabled='true'] {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.team-board-refresh-feedback {
+  margin: 10px 0;
+  color: #435a50;
+  font-size: 12px;
+}
+
+.team-board-refresh-feedback.issue-form-error {
+  color: #8a3930;
+}
+
 .team-board-filters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 190px)) minmax(0, 340px);

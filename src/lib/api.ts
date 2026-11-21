@@ -1,7 +1,7 @@
 let actorId = '';
 export function setActor(id: string) { actorId = id; }
 export class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
-export async function api<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+export async function apiResponse(path: string, options: RequestInit = {}): Promise<Response> {
   const response = await fetch(`/api${path}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(actorId ? {'X-Actor-Id': actorId} : {}), ...options.headers },
@@ -11,6 +11,10 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
     const message = typeof error.error === 'string' ? error.error : typeof error.message === 'string' ? error.message : '요청을 처리하지 못했습니다.';
     throw new ApiError(response.status, message, error.details);
   }
+  return response;
+}
+export async function api<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await apiResponse(path, options);
   if (response.status === 204) return undefined as T;
   return response.json();
 }

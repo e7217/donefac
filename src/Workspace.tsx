@@ -14,7 +14,7 @@ import { countIssueDocumentReferences } from '../shared/document-references';
 import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
-import { api, patch, post, relativeTime, setActor } from './lib/api';
+import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
 import { decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import { Issues } from './features/Issues';
@@ -22,6 +22,7 @@ import { Gantt } from './features/Gantt';
 import { IssuePanel } from './features/IssuePanel';
 import { MyWork } from './features/MyWork';
 import type { PrepareMigration } from './features/MigrationApplySettings';
+import type { RefreshTeamBoard } from './features/TeamBoard';
 import TeamNotifications from './features/TeamNotifications';
 const WorkflowSettings = lazy(() => import('./features/WorkflowSettings').then(module => ({default: module.WorkflowSettings})));
 const IssueAssignmentRules = lazy(() => import('./features/IssueAssignmentRules').then(module => ({default: module.IssueAssignmentRules})));
@@ -75,6 +76,7 @@ type WorkspaceCommentFocus = {
   commentId: string;
   activation: number;
 };
+type WorkspaceRead = { request: number; snapshot: WorkspaceSnapshot | null; boardRevision: string | null };
 const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview','teamboard'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
@@ -298,6 +300,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const acceptedRouteRef = useRef<WorkspaceRoute | null>(null);
+  const workspaceReadSequence = useRef(0);
+  const lastAppliedWorkspaceRead = useRef(0);
+  const teamBoardRevision = useRef<string | null>(null);
+  const boardContextEpoch = useRef(0);
   const publicationOpenRequest = useRef(0);
   const notificationOpenRequest = useRef(0);
   const commentFocusActivation = useRef(0);
@@ -309,8 +315,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind }), []);
-  const refresh = useCallback(async () => {
-    const snapshot = await api<WorkspaceSnapshot>('/workspace');
+  const readWorkspace = useCallback(async (signal?: AbortSignal, since?: string): Promise<WorkspaceRead> => {
+    const request = ++workspaceReadSequence.current;
+    const params = since ? `?${new URLSearchParams({ teamBoardSince: since })}` : '';
+    const response = await apiResponse(`/workspace${params}`, { signal, cache: 'no-store' });
+    const boardRevision = response.headers.get('X-Teamspace-Board-Revision');
+    const snapshot = response.status === 204 ? null : await response.json() as WorkspaceSnapshot;
+    return { request, snapshot, boardRevision };
+  }, []);
+  const applyWorkspace = useCallback(({ request, snapshot, boardRevision }: WorkspaceRead) => {
+    if (!snapshot || request < lastAppliedWorkspaceRead.current) return false;
+    lastAppliedWorkspaceRead.current = request;
+    teamBoardRevision.current = boardRevision;
     dataRef.current = snapshot;
     setData(snapshot);
     setFailure('');
@@ -321,7 +337,24 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       setActor(selected);
       return selected;
     });
+    return true;
   }, []);
+  const refresh = useCallback(async () => { applyWorkspace(await readWorkspace()); }, [applyWorkspace, readWorkspace]);
+  const refreshBoard = useCallback<RefreshTeamBoard>(async (signal, mode, canApply) => {
+    const epoch = boardContextEpoch.current;
+    const isCurrent = () => {
+      const route = acceptedRouteRef.current;
+      return !signal.aborted && boardContextEpoch.current === epoch && route?.view === 'teamboard' && !route.issueId &&
+        (mode === 'manual' || document.visibilityState === 'visible') &&
+        !document.querySelector('dialog:modal, .modal-backdrop') && canApply();
+    };
+    const since = teamBoardRevision.current;
+    if (!isCurrent() || (mode === 'automatic' && !since)) return 'skipped';
+    const result = await readWorkspace(signal, mode === 'automatic' ? since ?? undefined : undefined);
+    if (!isCurrent()) return 'skipped';
+    if (!result.snapshot) return 'unchanged';
+    return applyWorkspace(result) ? 'updated' : 'skipped';
+  }, [applyWorkspace, readWorkspace]);
   useEffect(() => { refresh().catch(e => setFailure(e.message)); }, [refresh]);
   useEffect(() => {
     if (!toast) return;
@@ -345,6 +378,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, []);
   const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace') => {
     const previous = acceptedRouteRef.current;
+    if (previous?.view === 'teamboard' && (route.view !== 'teamboard' || route.projectId !== previous.projectId || route.issueId !== previous.issueId)) {
+      boardContextEpoch.current++;
+    }
     const { documentId, documentCommentId } = route;
     const linkedComment: WorkspaceCommentFocus | null = documentId && documentCommentId &&
       (previous?.documentId !== documentId || previous.documentCommentId !== documentCommentId)
@@ -717,7 +753,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}/>
         </Suspense>}
         {teamBoard && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>전체 프로젝트 보드를 불러오는 중입니다.</p></div>}>
-          <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenBoardIssue={openIssue}/>
+          <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenBoardIssue={openIssue}
+            refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}

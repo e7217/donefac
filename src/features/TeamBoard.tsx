@@ -1,7 +1,7 @@
 'use client';
 
-import { ArrowRightLeft, Link2, Search, X } from 'lucide-react';
-import { useEffect, useId, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
+import { ArrowRightLeft, Link2, RefreshCw, Search, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { STATUS, type FeatureProps, type Issue, type StatusCategory, type TeamBoardFilters, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
 import { issueSearchText } from '../../shared/issue-schema';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
@@ -14,10 +14,15 @@ import { IssueGitlabSummary } from './IssueGitlabSummary';
 import { errorMessage } from './schedule-utils';
 import './team-board.css';
 
+type RefreshMode = 'automatic' | 'manual';
+export type RefreshTeamBoard = (signal: AbortSignal, mode: RefreshMode, canApply: () => boolean) => Promise<'updated' | 'unchanged' | 'skipped'>;
+
 type Props = FeatureProps & {
   filters: TeamBoardFilters;
   onFiltersChange: (filters: TeamBoardFilters) => void;
   onOpenBoardIssue: (id: string, trigger: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
+  refreshBoard: RefreshTeamBoard;
+  issueOverlayOpen: boolean;
 };
 type StatusEdit = { issue: Issue; current: WorkflowStatus; choices: WorkflowStatus[]; workflowVersion: number; opener: HTMLElement };
 type BoardEntry = { issue: Issue; status: WorkflowStatus; projectKey: string; projectName: string };
@@ -29,18 +34,130 @@ const HEADING = '전체 프로젝트 보드';
 const STALE = '업무 또는 프로젝트 워크플로가 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
 const UNKNOWN = '상태 변경 결과를 확인하지 못했습니다. 최신 상태를 확인해 주세요.';
 const REFRESH = '상태를 저장했습니다. 보드에 반영하려면 최신 업무를 불러와 주세요.';
+const REFRESH_INTERVAL_MS = 15_000;
+const REFRESH_REQUEST_TIMEOUT_MS = 12_000;
+const MAX_AUTOMATIC_REFRESH_WAIT_MS = 60_000;
+const refreshMessages = {
+  updated: '팀 보드를 새로고침했습니다.',
+  skipped: '팀 보드 새로고침을 건너뛰었습니다.',
+  failed: '팀 보드를 새로고침하지 못했습니다. 다시 시도해 주세요.',
+} as const;
+
+function useTeamBoardRefresh(refreshBoard: RefreshTeamBoard, paused: boolean, hasLocalInteraction: () => boolean) {
+  const [requestMode, setRequestMode] = useState<RefreshMode | null>(null);
+  const [feedback, setFeedback] = useState<keyof typeof refreshMessages | null>(null);
+  const pausedRef = useRef(paused);
+  const controls = useRef<{ reconsider: () => void; manual: () => void }>(null);
+
+  useLayoutEffect(() => {
+    pausedRef.current = paused;
+    controls.current?.reconsider();
+  }, [paused]);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight: AbortController | null = null;
+    let retryDelay = REFRESH_INTERVAL_MS;
+    let resumeAfterAbort = false;
+    const clearTimer = () => clearTimeout(timer);
+    const visible = () => active && !pausedRef.current && document.visibilityState === 'visible';
+    const available = () => visible() && !hasLocalInteraction() && !document.querySelector('dialog:modal, [role="dialog"][aria-modal="true"]');
+
+    function schedule(delay: number) {
+      clearTimer();
+      if (visible()) timer = setTimeout(() => void check('automatic'), delay);
+    }
+
+    async function check(mode: RefreshMode) {
+      if (inFlight || !available()) {
+        if (mode === 'automatic' && !inFlight) schedule(retryDelay);
+        return;
+      }
+      clearTimer();
+      const controller = new AbortController();
+      inFlight = controller;
+      const canApply = () => !controller.signal.aborted && available();
+      let timedOut = false;
+      const deadline = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, REFRESH_REQUEST_TIMEOUT_MS);
+      setRequestMode(mode);
+      if (mode === 'manual') setFeedback(null);
+      try {
+        const outcome = await refreshBoard(controller.signal, mode, canApply);
+        if (!canApply()) return;
+        if (outcome !== 'skipped') retryDelay = REFRESH_INTERVAL_MS;
+        if (mode === 'manual') setFeedback(outcome === 'skipped' ? 'skipped' : 'updated');
+        else if (outcome !== 'skipped') setFeedback(previous => previous === 'failed' ? null : previous);
+      } catch {
+        if (!available() || (controller.signal.aborted && !timedOut)) return;
+        if (mode === 'automatic') retryDelay = Math.min(retryDelay * 2, MAX_AUTOMATIC_REFRESH_WAIT_MS);
+        setFeedback('failed');
+      } finally {
+        clearTimeout(deadline);
+        inFlight = null;
+        if (active) {
+          setRequestMode(null);
+          schedule(resumeAfterAbort ? 0 : retryDelay);
+        }
+        resumeAfterAbort = false;
+      }
+    }
+
+    function reconsider() {
+      clearTimer();
+      if (!visible() || hasLocalInteraction()) {
+        resumeAfterAbort = false;
+        inFlight?.abort();
+      } else if (inFlight) resumeAfterAbort = inFlight.signal.aborted;
+      else schedule(0);
+    }
+
+    controls.current = { reconsider, manual: () => void check('manual') };
+    document.addEventListener('visibilitychange', reconsider);
+    reconsider();
+    return () => {
+      active = false;
+      clearTimer();
+      inFlight?.abort();
+      controls.current = null;
+      document.removeEventListener('visibilitychange', reconsider);
+    };
+  }, [refreshBoard, hasLocalInteraction]);
+
+  return { requestMode, feedback, manualRefresh: () => controls.current?.manual() };
+}
 
 function destinations(data: WorkspaceSnapshot, issue: Issue, category?: StatusCategory) {
   return allowedNextStatuses(data, issue).filter(status => status.id !== issue.status && (category === undefined || status.category === category));
 }
 
-export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardIssue, refresh, notify }: Props) {
+export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardIssue, refresh, notify, refreshBoard, issueOverlayOpen }: Props) {
   const heading = useId();
   const board = useRef<HTMLDivElement>(null);
+  const focusedCard = useRef<{ control: HTMLElement; issueId: string; selector: string } | null>(null);
   const drag = useRef<{ entry: BoardEntry; opener: HTMLElement } | null>(null);
+  const chooserOpen = useRef(false);
   const [dropTarget, setDropTarget] = useState<StatusCategory | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [editing, setEditing] = useState<StatusEdit | null>(null);
   const [copyFallback, setCopyFallback] = useState<{ filterKey: string; url: string } | null>(null);
+  const refreshPaused = issueOverlayOpen || Boolean(editing) || dragging;
+  const hasLocalInteraction = useCallback(() => Boolean(chooserOpen.current || drag.current), []);
+  const { requestMode, feedback, manualRefresh } = useTeamBoardRefresh(refreshBoard, refreshPaused, hasLocalInteraction);
+  useLayoutEffect(() => {
+    const focused = focusedCard.current;
+    if (!focused || focused.control.isConnected || refreshPaused || document.activeElement !== document.body) return;
+    const card = board.current?.querySelector(`[data-issue-id="${CSS.escape(focused.issueId)}"]`);
+    const control = card?.querySelector<HTMLButtonElement>(focused.selector);
+    const open = card?.querySelector<HTMLButtonElement>('[data-team-board-open-action]');
+    const target = control && !control.disabled ? control : open ?? board.current;
+    focusedCard.current = null;
+    target?.focus({ preventScroll: true });
+    if (target && target !== board.current) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [data, refreshPaused]);
   const filterKey = JSON.stringify([filters.projectId, filters.memberId === null, filters.memberId, filters.query]);
   const shareUrl = copyFallback?.filterKey === filterKey ? copyFallback.url : null;
   const members = useMemo(() => new Map(data.users.map(user => [user.id, user])), [data.users]);
@@ -77,12 +194,14 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
   function openStatus(entry: BoardEntry, opener: HTMLElement, category?: StatusCategory) {
     const choices = destinations(data, entry.issue, category);
     if (!choices.length || editing) return;
+    chooserOpen.current = true;
     setEditing({ issue: entry.issue, current: entry.status, choices, workflowVersion: projectWorkflow(data, entry.issue.projectId).version, opener });
   }
 
   function closeStatus() {
     if (!editing) return;
     const { issue, opener } = editing;
+    chooserOpen.current = false;
     setEditing(null);
     requestAnimationFrame(() => {
       const card = board.current?.querySelector(`[data-issue-id="${CSS.escape(issue.id)}"]`);
@@ -108,12 +227,14 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
     }
     const opener = event.currentTarget.querySelector<HTMLButtonElement>('[data-team-board-status-action]') ?? event.currentTarget;
     drag.current = { entry, opener };
+    setDragging(true);
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData(DRAG_TYPE, entry.issue.id);
   }
 
   function endDrag() {
     drag.current = null;
+    setDragging(false);
     setDropTarget(null);
   }
 
@@ -147,7 +268,12 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
   return <div className="team-board-page">
     <header className="feature-heading team-board-heading">
       <h1 id={heading}>{HEADING}</h1>
-      <button type="button" className="btn" onClick={() => void copyLink()}><Link2 size={16} aria-hidden="true" />보드 링크 복사</button>
+      <div className="team-board-heading-actions">
+        <button type="button" className="btn" aria-disabled={refreshPaused || requestMode !== null} aria-busy={requestMode === 'manual'} onClick={manualRefresh}>
+          <RefreshCw size={16} className={requestMode === 'manual' ? 'spin' : undefined} aria-hidden="true" />팀 보드 새로고침
+        </button>
+        <button type="button" className="btn" onClick={() => void copyLink()}><Link2 size={16} aria-hidden="true" />보드 링크 복사</button>
+      </div>
     </header>
     <div className="team-board-filters">
       <label>프로젝트
@@ -178,8 +304,18 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
     {shareUrl && <label className="team-board-share-fallback">보드 공유 링크
       <input className="field" readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} />
     </label>}
+    {feedback && <p className={`team-board-refresh-feedback${feedback === 'failed' ? ' issue-form-error' : ''}`}
+      role={feedback === 'failed' ? 'alert' : 'status'}>{refreshMessages[feedback]}</p>}
     <p className="team-board-count" role="status">표시된 업무 {visible.toLocaleString('ko-KR')}개</p>
-    <div ref={board} className="team-board-columns" role="region" aria-labelledby={heading} tabIndex={0}>
+    <div ref={board} className="team-board-columns" role="region" aria-labelledby={heading} tabIndex={0}
+      onFocusCapture={event => {
+        const control = event.target;
+        const issueId = control.closest<HTMLElement>('[data-issue-id]')?.dataset.issueId;
+        focusedCard.current = issueId ? { control, issueId, selector: control.hasAttribute('data-team-board-status-action')
+          ? '[data-team-board-status-action]' : '[data-team-board-open-action]' } : null;
+      }} onBlurCapture={event => {
+        if (!event.currentTarget.contains(event.relatedTarget) && (event.relatedTarget || event.target.isConnected)) focusedCard.current = null;
+      }}>
       {CATEGORIES.map(category => {
         const entries = columns.get(category) ?? [];
         return <section key={category} className="team-board-column" aria-label={STATUS_CATEGORY_LABELS[category]}

@@ -5,6 +5,7 @@ import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, a
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
 import { AttachmentAppend } from './attachment-append.js';
 import { Store } from './store.js';
+import { TeamBoardRevision } from './team-board-revision.js';
 import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
@@ -217,6 +218,7 @@ export function createApp(options: {
   const cycleCompletionRecords = new CycleCompletionRecords(store);
   const cycleCompletion = new CycleCompletionService(store, cycleCompletionRecords);
   const issueOrders = new IssueOrderService(store);
+  const teamBoardRevision = new TeamBoardRevision(store);
   const documentOrders = new DocumentOrderService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
@@ -925,7 +927,16 @@ export function createApp(options: {
   scheduleArtifacts.registerRoutes(app,{actor,activity,getCalendar:projectId=>calendars.get(projectId)});
 
   app.get('/api/health',(_req,res)=>res.json({ok:true,storage:'sqlite',version:'0.1.0'}));
-  app.get('/api/workspace',(_req,res)=>res.json(snapshot()));
+  app.get('/api/workspace',(req,res)=>{
+    const since = req.query.teamBoardSince;
+    if (since !== undefined && (typeof since !== 'string' || !/^[a-f0-9]{32}$/u.test(since))) {
+      return fail('팀 보드에서 확인한 버전을 보내 주세요.');
+    }
+    const { revision, data } = teamBoardRevision.read(since, snapshot);
+    res.set({ 'X-Teamspace-Board-Revision': revision, 'Cache-Control': 'no-store' });
+    if (data === null) return res.status(204).end();
+    res.json(data);
+  });
   registerTeamOverviewRoutes(app,{
     store,timeReservations,
     snapshot:()=>({projects:store.all('projects'),issues:store.all('issues'),workflows:workflows.snapshot(),gitlabLinks:store.all('gitlab_links')}),

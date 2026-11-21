@@ -131,12 +131,28 @@ async function verifyIntegrations(session, anonymous, origin) {
     id: 102, iid: 8, title: 'NEO-2 파일럿 웹훅', state: 'opened', url: 'https://gitlab.example.test/mr/8',
   } };
   const webhookPath = `${gitlabPath}/webhook`;
+  const workspace = await call(session, 'GET', '/api/workspace', 200);
+  const beforeBoard = workspace.headers()['x-teamspace-board-revision'];
+  assert.match(beforeBoard, /^[a-f0-9]{32}$/u);
+  const boardCheck = `/api/workspace?teamBoardSince=${beforeBoard}`;
+  const unchanged = await call(session, 'GET', boardCheck, 204);
+  assert.equal(unchanged.headers()['cache-control'], 'no-store');
+  assert.equal(unchanged.headers()['x-teamspace-board-revision'], beforeBoard);
+  assert.equal((await unchanged.body()).length, 0);
+  assert.equal((await call(anonymous, 'GET', boardCheck, 401)).headers()['x-teamspace-board-revision'], undefined);
   await call(anonymous, 'POST', webhookPath, 401, { data: webhook });
   await call(session, 'POST', webhookPath, 401, { headers: { Origin: origin }, data: webhook });
   const incoming = await call(anonymous, 'POST', webhookPath, 200, {
     headers: { 'X-Gitlab-Token': gitlabSecret }, data: webhook,
   });
   assert.equal((await incoming.json()).linked, 1);
+  const changedBoard = await call(session, 'GET', boardCheck, 200);
+  const afterBoard = changedBoard.headers()['x-teamspace-board-revision'];
+  assert.match(afterBoard, /^[a-f0-9]{32}$/u);
+  assert.notEqual(afterBoard, beforeBoard);
+  assert.ok((await changedBoard.json()).gitlabLinks.some(link => link.issueId === 'issue-2' &&
+    link.kind === 'merge_request' && link.title === webhook.object_attributes.title));
+  await call(session, 'GET', `/api/workspace?teamBoardSince=${afterBoard}`, 204);
   await call(anonymous, 'GET', gitlabPath, 401);
   await call(anonymous, 'GET', webhookStatusPath, 401, { headers: { 'X-Gitlab-Token': gitlabSecret } });
   const inbound = await call(session, 'GET', webhookStatusPath, 200);
@@ -312,7 +328,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, scoped integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board refresh, scoped integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();
