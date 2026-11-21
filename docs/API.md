@@ -658,7 +658,7 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 날짜는 YYYY-MM-DD, 숫자는 JSON 숫자, 확인 여부는 `true`·`false`, 선택지와 팀원은 각각 ID를 사용한다. 값 유무 연산자에는 `value`를 넣지 않는다. 비교의 대소문자는 전체 값 비교에서 그대로 적용하고 부분 문자열 검색에서는 구분하지 않는다. 값이 없으면 값 비교와 포함·제외 조건에 일치하지 않는다. 그 업무 유형에 적용되는 필드만 비교한다. 값 유무 검사에서 숫자 0과 `false`는 값이 있는 것으로 센다.
 
-`POST /api/v1/issues/query`는 읽기 키로 호출할 수 있다. 브라우저의 같은 경로는 `/api/issues/query`다. `projectId`를 지정하고 `fieldFilter.match`에 `all` 또는 `any`와 1~8개 조건을 보낸다. 응답은 조건에 맞는 업무 배열이다.
+`POST /api/v1/issues/query`는 읽기 키로 호출할 수 있다. 브라우저의 같은 경로는 `/api/issues/query`다. `fieldFilter`로 조회할 때는 `projectId`와 함께 `fieldFilter.match`에 `all` 또는 `any`와 1~8개 조건을 보낸다. 응답은 조건에 맞는 업무 배열이다.
 
 ```json
 {
@@ -674,6 +674,29 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 ```
 
 사용 중인 필드·선택지는 이름 변경과 보관 후에도 같은 ID로 조회할 수 있다. 필드나 선택지를 삭제하려면 이를 사용하는 공유 보기를 먼저 수정한다. 보기 저장·수정의 필터 객체에서 필드 그룹을 생략하거나 `null`로 보내면 해당 조건을 제거한다. 필드 그룹이 저장된 보기는 schema13 백업에서 복원한다. 조건 없이 저장한 기존 보기와 이전 백업도 계속 사용할 수 있다.
+
+## 업무 우선순위와 라벨 조건
+
+`POST /api/v1/issues/query`와 브라우저용 `/api/issues/query`는 `projectId`와 함께 `priorities`, `labels`, `fieldFilter` 중 유효한 조건을 하나 이상 받는다. 요청에서 지정한 조건에 모두 일치하는 업무를 반환한다.
+
+```json
+{
+  "projectId": "project-id",
+  "priorities": ["urgent", "high"],
+  "labels": {
+    "include": ["배포", "검증"],
+    "match": "all",
+    "exclude": ["보류"]
+  }
+}
+```
+
+- `priorities`는 `urgent`, `high`, `medium`, `low` 중에서 선택한 값과 일치하는 업무를 고른다.
+- `labels.include`는 지정한 라벨 중 하나 이상(`match: "any"`, 기본값) 또는 모두(`"all"`) 있어야 일치한다.
+- `labels.exclude`는 지정한 라벨이 하나라도 있는 업무를 제외한다. 라벨이 없는 업무도 제외하려면 `presence: "set"`을 함께 보낸다. `presence: "empty"`는 빈 문자열을 제외한 라벨이 없는 업무를 고른다.
+- 포함·제외 목록은 각각 최대 20개이며 값의 길이는 1~60 UTF-16 코드 단위다. 저장된 라벨의 대소문자와 공백까지 일치해야 한다.
+
+브라우저의 `POST /api/views`와 `PATCH /api/views/:id`에서는 같은 필드를 `filters` 안에 보낸다. 수정 요청에서 각 필드를 생략하면 해당 조건을 유지한다. 우선순위 조건은 `priorities: []`, 라벨 조건은 `labels: {}`로 지운다. 자체 백업 형식 68부터 보기와 함께 두 조건을 보존한다.
 
 ## 공유 보기의 계획·일정 조건
 

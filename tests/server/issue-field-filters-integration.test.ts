@@ -79,6 +79,53 @@ test('typed HTTP conditions preserve zero and false, combine all/any, and distin
   } finally { await f.close(); }
 });
 
+test('typed issue query combines exact labels, priorities and custom fields under project-scoped read access', async () => {
+  const f = await fixture();
+  try {
+    const fixtures: [Issue, Issue['priority'], string[]][] = [
+      [f.a, 'urgent', ['Ops', 'ready']],
+      [f.b, 'urgent', ['ops', 'ready', 'blocked']],
+      [f.c, 'low', ['Ops']],
+      [f.d, 'urgent', []],
+    ];
+    for (const [issue, priority, labels] of fixtures) {
+      const updated = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, priority, labels });
+      assert.equal(updated.status, 200, JSON.stringify(updated.data));
+    }
+    const outside = await f.call<Issue>('/issues', 'POST', {
+      projectId: 'project-team', title: '합성 외부 프로젝트 일치 업무', priority: 'urgent', labels: ['Ops', 'ready'],
+    });
+    assert.equal(outside.status, 201, JSON.stringify(outside.data));
+    const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '합성 업무 조건 조회 키', access: 'read', projectIds: [f.project.id], expiresAt: null });
+    assert.equal(key.status, 201);
+    const body = { projectId: f.project.id };
+    const path = '/v1/issues/query';
+    const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const condition = filter({ fieldId: 'score', operator: 'gte', value: 0 });
+    const cases: [Record<string, unknown>, Issue[]][] = [
+      [{ priorities: ['urgent'] }, [f.a, f.b, f.d]],
+      [{ labels: { include: ['Ops'] } }, [f.a, f.c]],
+      [{ labels: { include: ['Ops', 'ready'], match: 'all' } }, [f.a]],
+      [{ labels: { include: ['Ops', 'ready'] } }, [f.a, f.b, f.c]],
+      [{ labels: { exclude: ['blocked'] } }, [f.a, f.c, f.d]],
+      [{ labels: { exclude: ['blocked'], presence: 'set' } }, [f.a, f.c]],
+      [{ labels: { presence: 'empty' } }, [f.d]],
+      [{ priorities: ['urgent'], labels: { include: ['Ops'] }, fieldFilter: condition }, [f.a]],
+    ];
+    for (const [criteria, expected] of cases) {
+      const response = await f.call<Issue[]>(path, 'POST', { ...body, ...criteria }, key.data.token);
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      assert.deepEqual(response.data.map(issue => issue.id), expected.map(issue => issue.id), JSON.stringify(criteria));
+    }
+    for (const criteria of [
+      {}, { priorities: [], labels: {} }, { labels: { match: 'all' } }, { priorities: [null] }, { labels: { include: [123] } },
+      { priorities: ['urgent'], fieldFilter: null },
+    ]) assert.equal((await f.call(path, 'POST', { ...body, ...criteria }, key.data.token)).status, 400);
+    assert.equal((await f.call(path, 'POST', { projectId: 'project-team', labels: { include: ['Ops'] } }, key.data.token)).status, 403);
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before);
+  } finally { await f.close(); }
+});
+
 test('shared views retain typed conditions, reject bad values atomically, enforce CAS and canonically clear null or omitted conditions', async () => {
   const f = await fixture();
   try {

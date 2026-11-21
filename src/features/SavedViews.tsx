@@ -3,6 +3,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Bookmark, Check, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import type { PlanningItem, SavedView, SavedViewState } from '../../shared/types';
+import { issuePriorityLabelFilterLabels } from '../../shared/issue-view';
 import { api, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
@@ -163,6 +164,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
         ? await patch<SavedView>(`/views/${encodeURIComponent(editing.target.id)}`, {
           name, ...editing.state, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
+            priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
           }, expectedVersion: editing.target.version,
         })
         : await post<SavedView>('/views', {projectId, name, ...editing.state});
@@ -281,6 +283,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
       <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span><span>{editorState.filters.status === 'all' ? '모든 상태' : `상태: ${editorState.filters.status}`}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
+        {issuePriorityLabelFilterLabels(editorState.filters).map(label => <span key={label}>{label}</span>)}
       </div>
       {dialogError && <p className="error-text" role="alert">{dialogError}</p>}
       {conflicted && <button type="button" className="btn" disabled={busy} onClick={() => void reloadConflicted()}>최신 보기 불러오기</button>}

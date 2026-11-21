@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { GitlabLink, PlanningItem, PlanningKind, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
+import type { GitlabLink, PlanningItem, PlanningKind, Priority, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
   const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-views-'));
@@ -62,6 +62,76 @@ test('saved view validation rejects invalid filters and duplicate project names 
     assert.equal((await f.request('/views','POST',{...definition,projectId:'missing'})).status,404);
     assert.equal((await f.request('/views?projectId=project-neo')).data.length,1);
   }finally{await f.close();rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('saved views preserve exact priority and label criteria across legacy edits and clear explicit empty values', async () => {
+  const f = await fixture();
+  try {
+    const raw = { priorities: ['medium', 'urgent', 'medium'], labels: { include: ['ops', 'Ops', 'Ops'], match: 'any', exclude: [' Retired '] } };
+    const expected = { priorities: ['urgent', 'medium'], labels: { include: ['Ops', 'ops'], exclude: [' Retired '] } };
+    const created = await f.request('/views', 'POST', { ...definition, filters: { ...definition.filters, ...raw } });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.deepEqual(created.data.filters, { ...definition.filters, ...expected });
+    const path = `/views/${created.data.id}`;
+
+    for (const invalid of [
+      { priorities: ['highest'] }, { priorities: null }, { priorities: 'high' },
+      { labels: null }, { labels: ['ops'] }, { labels: { include: [''] } },
+      { labels: { exclude: ['x'.repeat(61)] } }, { labels: { include: Array.from({ length: 21 }, (_, i) => `label-${i}`) } },
+      { labels: { presence: 'all' } }, { labels: { match: 'some', include: ['ops'] } }, { labels: { other: true } },
+    ]) {
+      const filters = { ...definition.filters, ...invalid };
+      assert.equal((await f.request('/views', 'POST', { ...definition, name: '거절할 보기', filters })).status, 400);
+      assert.equal((await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters })).status, 400);
+    }
+    const oldClientFilters = { ...definition.filters, query: '장기 업무' };
+    const edited = await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters: oldClientFilters });
+    assert.equal(edited.status, 200);
+    assert.deepEqual(edited.data.filters, { ...oldClientFilters, ...expected });
+    const clearedPriority = await f.request(path, 'PATCH', { expectedVersion: edited.data.version, filters: { ...oldClientFilters, priorities: [] } });
+    assert.equal(clearedPriority.status, 200);
+    assert.deepEqual(clearedPriority.data.filters, { ...oldClientFilters, labels: expected.labels });
+    const clearedLabel = await f.request(path, 'PATCH', { expectedVersion: clearedPriority.data.version, filters: { ...oldClientFilters, labels: {} } });
+    assert.equal(clearedLabel.status, 200);
+    assert.deepEqual(clearedLabel.data.filters, oldClientFilters);
+    assert.deepEqual((await f.request('/views?projectId=project-neo')).data, [clearedLabel.data]);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('native backup preserves saved priority and label criteria and rejects loss at the version boundary', async () => {
+  const f = await fixture();
+  try {
+    const filters = { ...definition.filters, priorities: ['high'], labels: { include: ['Retired'], match: 'all', presence: 'set' } };
+    const created = await f.request('/views', 'POST', { ...definition, filters });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const { data: backup } = await f.request('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    assert.deepEqual(backup.savedViews[0].filters, filters);
+    const edited = await f.request(`/views/${created.data.id}`, 'PATCH', { expectedVersion: created.data.version, name: '복원 전 보기' });
+    assert.equal(edited.status, 200);
+
+    const malformed = structuredClone(backup);
+    malformed.savedViews[0].filters.labels = { include: [null] };
+    assert.equal((await f.request('/import', 'POST', { data: malformed })).status, 400);
+    const older = { ...structuredClone(backup), schemaVersion: 67 };
+    const original = older.savedViews[0].filters;
+    for (const criteria of [{ priorities: original.priorities }, { labels: original.labels }]) {
+      older.savedViews[0].filters = { ...definition.filters, ...criteria };
+      const rejected = await f.request('/import', 'POST', { data: older });
+      assert.equal(rejected.status, 400);
+      assert.match(rejected.data.error, /schemaVersion 68/);
+    }
+    assert.deepEqual((await f.request('/views?projectId=project-neo')).data, [edited.data]);
+
+    assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);
+    const restored = (await f.request('/views?projectId=project-neo')).data[0] as SavedView;
+    assert.deepEqual(restored.filters, filters);
+    assert.ok(restored.version > edited.data.version);
+
+    older.savedViews[0].filters = definition.filters;
+    assert.equal((await f.request('/import', 'POST', { data: older })).status, 200);
+    assert.deepEqual((await f.request('/views?projectId=project-neo')).data[0].filters, definition.filters);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
 test('native backup preserves saved view definitions and rejects bad restore atomically',async()=>{
@@ -157,7 +227,7 @@ test('native restore validates planning views against the imported workspace and
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
 
-test('custom field reporting uses saved planning membership and date overlap for its issue population', async () => {
+test('custom field reporting combines saved planning, date overlap, priority and exact label criteria', async () => {
   const f = await fixture();
   try {
     const cycle = await addPlanningItem(f, 'cycle', '집계할 사이클');
@@ -168,16 +238,19 @@ test('custom field reporting uses saved planning membership and date overlap for
       archived: false, issueTypes: [], options: [],
     }]});
     assert.equal(saved.status, 200, JSON.stringify(saved.data));
-    const create = async (title: string, startDate: string, endDate: string, cycleId: string | null) => {
-      const issue = await f.request('/issues', 'POST', {projectId: cycle.projectId, title, startDate, endDate, cycleId, customFields: {'planning-report-test': 3}});
+    const create = async (title: string, startDate: string, endDate: string, cycleId: string | null, priority: Priority = 'high', labels = ['Ops']) => {
+      const issue = await f.request('/issues', 'POST', {projectId: cycle.projectId, title, startDate, endDate, cycleId, priority, labels, customFields: {'planning-report-test': 3}});
       assert.equal(issue.status, 201, JSON.stringify(issue.data));
       return issue.data.id as string;
     };
     const included = await create('범위의 시작일을 포함한 업무', '2025-12-30', '2026-01-01', cycle.id);
     await create('같은 계획이지만 범위 밖인 업무', '2026-01-03', '2026-01-04', cycle.id);
     await create('범위에는 들지만 다른 계획의 업무', '2026-01-01', '2026-01-01', null);
+    await create('우선순위가 다른 업무', '2026-01-01', '2026-01-01', cycle.id, 'medium');
+    await create('라벨의 대소문자가 다른 업무', '2026-01-01', '2026-01-01', cycle.id, 'high', ['ops']);
     const view = await f.request('/views', 'POST', {...definition, filters: {
       query: '', type: 'all', status: 'all', assigneeId: 'all', planning: {cycleId: cycle.id, dates: {mode: 'overlap', from: '2026-01-01', to: '2026-01-02'}},
+      priorities: ['high'], labels: {include: ['Ops']},
     }});
     assert.equal(view.status, 201);
     const path = `/projects/${cycle.projectId}/field-breakdown`;

@@ -14,6 +14,7 @@ import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
+import { IssuePriorityLabelFilters } from './IssuePriorityLabelFilters';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { BoardCapacityDetails, BoardCapacityNote, BoardCapacitySummary, type BoardStatusCapacity } from './IssueBoardCapacity';
@@ -32,7 +33,7 @@ type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
 type BoardDrop = IssuePlacement & { status: IssueStatus };
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
-type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab'>;
+type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 
 function IssueOrderControls({ issue, previous, next, busy, move }: {
@@ -97,12 +98,13 @@ export function Issues(props: FeatureProps & {
   const [type, setType] = useState('all');
   const [projectFilters, setProjectFilters] = useState(() => new Map<string, ProjectFilters>());
   const [filterEditorEpoch, setFilterEditorEpoch] = useState(0);
-  const { fieldFilter, planning, gitlab } = projectFilters.get(projectId) ?? {};
+  const { fieldFilter, planning, gitlab, priorities, labels } = projectFilters.get(projectId) ?? {};
   const planningItems = data.planningItems ?? [];
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
   const filters = useMemo(() => ({
-    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}), ...(gitlab ? { gitlab } : {}),
-  }), [query, status, assignee, type, fieldFilter, planning, gitlab]);
+    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
+    ...(gitlab ? { gitlab } : {}), ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}),
+  }), [query, status, assignee, type, fieldFilter, planning, gitlab, priorities, labels]);
   const gitlabSummary = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
@@ -156,12 +158,12 @@ export function Issues(props: FeatureProps & {
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     setPasteScope(currentPasteScope);
   }
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab);
+  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels);
   function updateProjectFilters(change: ProjectFilters) {
     setProjectFilters(previous => {
       const next = new Map(previous);
       const filters = { ...previous.get(projectId), ...change };
-      if (filters.fieldFilter || filters.planning || filters.gitlab) next.set(projectId, filters);
+      if (filters.fieldFilter || filters.planning || filters.gitlab || filters.priorities || filters.labels) next.set(projectId, filters);
       else next.delete(projectId);
       return next;
     });
@@ -172,7 +174,8 @@ export function Issues(props: FeatureProps & {
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
     setType(value.filters.type);
-    updateProjectFilters({ fieldFilter: value.filters.fieldFilter, planning: value.filters.planning, gitlab: value.filters.gitlab });
+    const { fieldFilter, planning, gitlab, priorities, labels } = value.filters;
+    updateProjectFilters({ fieldFilter, planning, gitlab, priorities, labels });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
@@ -182,7 +185,11 @@ export function Issues(props: FeatureProps & {
   function clearFilters() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setQuery(''); setStatus('all'); setAssignee('all'); setType('all');
-    updateProjectFilters({ fieldFilter: undefined, planning: undefined, gitlab: undefined });
+    setProjectFilters(previous => {
+      const next = new Map(previous);
+      next.delete(projectId);
+      return next;
+    });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   function closeBulkEdit() {
@@ -354,6 +361,8 @@ export function Issues(props: FeatureProps & {
       {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
     {projectSelected && <fieldset className="issue-bulk-filter-controls" disabled={bulk.locked}>
+      <IssuePriorityLabelFilters key={`priority-label:${projectId}:${filterEditorEpoch}`} issues={projectIssues}
+        value={{ priorities, labels }} onApply={updateProjectFilters} />
       {(schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters
         key={`fields:${projectId}:${filterEditorEpoch}`} schema={schema} users={data.users} value={fieldFilter}
         onApply={value => updateProjectFilters({ fieldFilter: value })} notify={notify} />}

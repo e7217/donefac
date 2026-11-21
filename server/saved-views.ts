@@ -3,7 +3,10 @@ import type { Express, Request, Response, NextFunction } from 'express';
 import type { PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewState, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { IssueViewGitlabFilterError, IssueViewPlanningFilterError, parseIssueViewGitlabFilter, parseIssueViewPlanningFilter } from '../shared/issue-view.js';
+import {
+  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError,
+  parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter, parseIssueViewPriorities,
+} from '../shared/issue-view.js';
 import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
 import { Store } from './store.js';
@@ -32,11 +35,14 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const planning = parseIssueViewPlanningFilter(Object.hasOwn(filters, 'planning') ? filters.planning : previous?.planning, schema.projectId, planningItems);
     const gitlabInput = Object.hasOwn(filters, 'gitlab') ? filters.gitlab : previous?.gitlab;
     const gitlab = previous && gitlabInput === null ? undefined : parseIssueViewGitlabFilter(gitlabInput);
+    const priorities = Object.hasOwn(filters, 'priorities') ? parseIssueViewPriorities(filters.priorities) : previous?.priorities;
+    const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
     return { layout: v.layout as SavedViewState['layout'], filters: {
       query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
+      ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}),
     } };
   } catch (error) {
-    if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError) return fail(error.message, error.status);
+    if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError || error instanceof IssueViewPriorityLabelFilterError) return fail(error.message, error.status);
     throw error;
   }
 }

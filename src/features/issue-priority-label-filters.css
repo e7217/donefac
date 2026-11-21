@@ -1,0 +1,147 @@
+.issue-priority-label-filters {
+  margin: 8px 0;
+  min-width: 0;
+}
+
+.issue-priority-label-bar,
+.issue-priority-label-summary,
+.issue-label-choice-selection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.issue-priority-label-bar > .btn {
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.issue-priority-label-bar > .is-filtered {
+  border-color: #a8d1bd;
+  color: #176c5c;
+  background: #e9f6ef;
+}
+
+.issue-priority-label-summary,
+.issue-label-choice-selection {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.issue-priority-label-summary li {
+  padding: 3px 7px;
+  border: 1px solid #e1eae2;
+  border-radius: 4px;
+  color: #436256;
+  background: #f3f8f5;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  max-width: 100%;
+}
+
+.issue-priority-label-panel {
+  width: min(660px, 100%);
+  margin-top: 5px;
+  padding: 14px;
+  border: 1px solid #cbded2;
+  border-radius: 8px;
+  background: #fafcfb;
+  color: #254137;
+  font-size: 0.875rem;
+}
+
+.issue-priority-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0 0 12px;
+  border: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.issue-priority-choices legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.issue-priority-choices label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+}
+
+.issue-priority-choices input {
+  accent-color: #176c5c;
+}
+
+.issue-priority-label-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.issue-priority-label-grid > label {
+  min-width: 0;
+}
+
+.issue-priority-label-grid .field {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  font-size: inherit;
+}
+
+.issue-priority-label-grid > label .field,
+.issue-label-choice-controls,
+.issue-label-choice-selection {
+  margin-top: 4px;
+}
+
+.issue-label-choice-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+}
+
+.issue-label-choice-selection li {
+  max-width: 100%;
+}
+
+.issue-label-choice-selection .btn {
+  min-height: 28px;
+  padding: 3px 6px;
+  white-space: normal;
+  text-align: left;
+  font-size: 0.75rem;
+}
+
+.issue-label-choice-selection .btn span {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.issue-label-choice-selection .btn svg {
+  flex-shrink: 0;
+}
+
+.issue-priority-label-panel footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+@media (max-width: 520px) {
+  .issue-priority-label-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 9px;
+  }
+}

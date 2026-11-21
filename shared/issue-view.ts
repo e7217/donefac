@@ -1,4 +1,4 @@
-import type { Issue, IssueViewDateFilter, IssueViewGitlabFilter, IssueViewPlanningFilter, PlanningItem, ProjectIssueOrder, ProjectIssueSchema, SavedViewState, WorkspaceSnapshot } from './types.js';
+import { PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type PlanningItem, type Priority, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
@@ -12,6 +12,16 @@ export class IssueViewPlanningFilterError extends Error {
 export class IssueViewGitlabFilterError extends Error {
   readonly status = 400;
 }
+
+export class IssueViewPriorityLabelFilterError extends Error {
+  readonly status = 400;
+}
+
+export const ISSUE_VIEW_LABEL_FILTER_LIMIT = 20;
+export const ISSUE_VIEW_LABEL_MAX_LENGTH = 60;
+
+const issueViewPriorities = Object.keys(PRIORITY) as Priority[];
+type IssuePriorityLabelCriteria = Pick<SavedViewState['filters'], 'priorities' | 'labels'>;
 
 export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilter | undefined {
   switch (value) {
@@ -30,21 +40,97 @@ export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilte
 const planSelectors = Object.entries(PLANNING_FIELDS);
 const planningFilterKeys = [...planSelectors.map(([, fields]) => fields.idField), 'dates'];
 
-function checkedFilterObject(value: unknown, allowedKeys: readonly string[], label: string): Record<string, unknown> {
+function checkedFilterObject(
+  value: unknown,
+  allowedKeys: readonly string[],
+  label: string,
+  FilterError = IssueViewPlanningFilterError,
+): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new IssueViewPlanningFilterError(`${label}은 객체여야 합니다.`);
+    throw new FilterError(`${label}은 객체여야 합니다.`);
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
-    throw new IssueViewPlanningFilterError(`${label}은 일반 객체여야 합니다.`);
+    throw new FilterError(`${label}은 일반 객체여야 합니다.`);
   }
   for (const key of Reflect.ownKeys(value)) {
     const field = Object.getOwnPropertyDescriptor(value, key);
     if (typeof key !== 'string' || !allowedKeys.includes(key) || !field || !Object.hasOwn(field, 'value')) {
-      throw new IssueViewPlanningFilterError(`${label}에 올바르지 않은 속성이 있습니다.`);
+      throw new FilterError(`${label}에 올바르지 않은 속성이 있습니다.`);
     }
   }
   return value as Record<string, unknown>;
+}
+
+export function parseIssueViewPriorities(value: unknown): Priority[] | undefined {
+  if (!Array.isArray(value)) throw new IssueViewPriorityLabelFilterError('우선순위 조건은 배열이어야 합니다.');
+  const selected = new Set<string>();
+  for (const priority of value) {
+    if (typeof priority !== 'string' || !Object.hasOwn(PRIORITY, priority)) {
+      throw new IssueViewPriorityLabelFilterError('우선순위 값을 확인해 주세요.');
+    }
+    selected.add(priority);
+  }
+  return selected.size ? issueViewPriorities.filter(priority => selected.has(priority)) : undefined;
+}
+
+function parseIssueViewLabelList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > ISSUE_VIEW_LABEL_FILTER_LIMIT) {
+    throw new IssueViewPriorityLabelFilterError(`라벨 조건은 목록마다 최대 ${ISSUE_VIEW_LABEL_FILTER_LIMIT}개까지 지정할 수 있습니다.`);
+  }
+  const labels = new Set<string>();
+  for (const label of value) {
+    if (typeof label !== 'string' || !label.length || label.length > ISSUE_VIEW_LABEL_MAX_LENGTH) {
+      throw new IssueViewPriorityLabelFilterError(`라벨 값은 1~${ISSUE_VIEW_LABEL_MAX_LENGTH}자여야 합니다.`);
+    }
+    labels.add(label);
+  }
+  return labels.size ? [...labels].sort() : undefined;
+}
+
+export function parseIssueViewLabelFilter(value: unknown): IssueViewLabelFilter | undefined {
+  const input = checkedFilterObject(value, ['include', 'exclude', 'match', 'presence'], '라벨 조건', IssueViewPriorityLabelFilterError);
+  const include = Object.hasOwn(input, 'include') ? parseIssueViewLabelList(input.include) : undefined;
+  const exclude = Object.hasOwn(input, 'exclude') ? parseIssueViewLabelList(input.exclude) : undefined;
+  const match = Object.hasOwn(input, 'match') ? input.match : 'any';
+  const presence = Object.hasOwn(input, 'presence') ? input.presence : undefined;
+  if (match !== 'any' && match !== 'all') throw new IssueViewPriorityLabelFilterError('라벨 포함 조건을 확인해 주세요.');
+  if (Object.hasOwn(input, 'presence') && presence !== 'set' && presence !== 'empty') {
+    throw new IssueViewPriorityLabelFilterError('라벨 입력 여부 조건을 확인해 주세요.');
+  }
+  if (!include && !exclude && presence === undefined) return undefined;
+  return {
+    ...(include ? { include } : {}),
+    ...(exclude ? { exclude } : {}),
+    ...(include && match === 'all' ? { match } : {}),
+    ...(presence === 'set' || presence === 'empty' ? { presence } : {}),
+  };
+}
+
+export function createIssuePriorityLabelMatcher({ priorities, labels }: IssuePriorityLabelCriteria) {
+  const selectedPriorities = new Set(priorities);
+  return (issue: Pick<Issue, 'priority' | 'labels'>): boolean => {
+    if (selectedPriorities.size && !selectedPriorities.has(issue.priority)) return false;
+    if (!labels) return true;
+    const hasLabel = (label: string) => issue.labels.includes(label);
+    if (labels.presence && issue.labels.some(Boolean) !== (labels.presence === 'set')) return false;
+    if (labels.exclude?.some(hasLabel)) return false;
+    if (!labels.include?.length) return true;
+    return labels.match === 'all' ? labels.include.every(hasLabel) : labels.include.some(hasLabel);
+  };
+}
+
+export function issueViewLabelName(label: string): string {
+  return label.trim() !== label || /[,\t\r\n]/u.test(label) ? JSON.stringify(label) : label;
+}
+
+export function issuePriorityLabelFilterLabels({ priorities, labels }: IssuePriorityLabelCriteria): string[] {
+  const summaries: string[] = [];
+  if (priorities?.length) summaries.push(`우선순위 · ${priorities.map(priority => PRIORITY[priority]).join(', ')}`);
+  if (labels?.include?.length) summaries.push(`라벨 ${labels.match === 'all' ? '모두' : '하나 이상'} · ${labels.include.map(issueViewLabelName).join(', ')}`);
+  if (labels?.exclude?.length) summaries.push(`라벨 제외 · ${labels.exclude.map(issueViewLabelName).join(', ')}`);
+  if (labels?.presence) summaries.push(labels.presence === 'set' ? '라벨 있음' : '라벨 없음');
+  return summaries;
 }
 
 function parseDateFilter(value: unknown): IssueViewDateFilter {
@@ -117,6 +203,7 @@ export function createIssueViewMatcher(
   const {status,assigneeId,type,planning,gitlab} = filters;
   const search = filters.query.toLowerCase();
   const matchFields = createIssueFieldMatcher(filters.fieldFilter, schema);
+  const matchPriorityLabels = createIssuePriorityLabelMatcher(filters);
   const gitlabSummaries = gitlab ? summarizeIssueGitlabLinks(data.gitlabLinks ?? []) : undefined;
   const planConditions = planning ? planSelectors.flatMap(([, { idField }]) => {
     const selected = planning[idField];
@@ -129,6 +216,7 @@ export function createIssueViewMatcher(
     planConditions.every(({ idField, selected }) => (issue[idField] ?? null) === selected) &&
     (!planning?.dates || matchesDateFilter(issue, planning.dates)) &&
     (!gitlab || matchesGitlabFilter(gitlab, gitlabSummaries?.get(issue.id))) &&
+    matchPriorityLabels(issue) &&
     matchFields(issue) &&
     (!search || issueSearchText(data, issue).toLowerCase().includes(search));
 }

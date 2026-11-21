@@ -54,6 +54,7 @@
   border-radius: 4px;
   background: #edf4ef;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .gantt-shared-view-warning {

@@ -1055,9 +1055,27 @@ export interface IssueViewPlanningFilter {
   dates?: IssueViewDateFilter;
 }
 export type IssueViewGitlabFilter = 'open_merge_request' | 'merge_blocked' | 'failed_pipeline' | 'running_pipeline' | 'no_activity';
+
+export interface IssueViewLabelFilter {
+  include?: string[];
+  exclude?: string[];
+  match?: 'any' | 'all';
+  presence?: 'set' | 'empty';
+}
+
 export interface SavedViewState {
   layout: 'list' | 'board';
-  filters: { query: string; status: string; assigneeId: string; type: string; fieldFilter?: IssueFieldFilter; planning?: IssueViewPlanningFilter; gitlab?: IssueViewGitlabFilter };
+  filters: {
+    query: string;
+    status: string;
+    assigneeId: string;
+    type: string;
+    fieldFilter?: IssueFieldFilter;
+    planning?: IssueViewPlanningFilter;
+    gitlab?: IssueViewGitlabFilter;
+    priorities?: Priority[];
+    labels?: IssueViewLabelFilter;
+  };
 }
 export interface IssueFieldBreakdownBucket {
   id: string;

@@ -83,6 +83,7 @@ import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDUL
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
+import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & { appliedVersion:number };
@@ -1028,14 +1029,21 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     res.set('Cache-Control', 'no-store').json({ links: rows.map(row => JSON.parse(row.json)), total, offset, limit });
   });
   app.post('/api/issues/query',(req,res)=>{
-    const {projectId}=req.body;
+    const input = req.body;
+    const { projectId } = input;
     if(typeof projectId!=='string'||!projectId||projectId.length>200)fail('필터를 적용할 프로젝트가 필요합니다.');
     const result=store.transaction(()=>{
       const schema=issueSchemas.get(projectId);
-      const filter=parseIssueFieldFilter(req.body.fieldFilter,schema,store.all<User>('users'));
-      const matches=createIssueFieldMatcher(filter,schema);
+      const priorities = Object.hasOwn(input, 'priorities') ? parseIssueViewPriorities(input.priorities) : undefined;
+      const labels = Object.hasOwn(input, 'labels') ? parseIssueViewLabelFilter(input.labels) : undefined;
+      const fieldFilter = Object.hasOwn(input, 'fieldFilter')
+        ? parseIssueFieldFilter(input.fieldFilter, schema, store.all<User>('users'))
+        : undefined;
+      if (!fieldFilter && !priorities && !labels) fail('업무 조회 조건을 하나 이상 지정해 주세요.');
+      const matchesFields = createIssueFieldMatcher(fieldFilter, schema);
+      const matchesCriteria = createIssuePriorityLabelMatcher({ priorities, labels });
       const rows=store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as {json:string}[];
-      return rows.map(row=>JSON.parse(row.json) as Issue).filter(matches);
+      return rows.map(row=>JSON.parse(row.json) as Issue).filter(issue => matchesFields(issue) && matchesCriteria(issue));
     });
     res.json(result);
   });
@@ -1778,6 +1786,10 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' &&
       'gitlab' in view.filters && view.filters.gitlab === 'merge_blocked'
     )) fail('GitLab 병합 차단 조건을 포함한 보기는 schemaVersion 57이 필요합니다.');
+    if (data.schemaVersion < 68 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' &&
+      (Object.hasOwn(view.filters, 'priorities') || Object.hasOwn(view.filters, 'labels'))
+    )) fail('우선순위·라벨 조건을 포함한 보기는 schemaVersion 68이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
@@ -2121,6 +2133,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

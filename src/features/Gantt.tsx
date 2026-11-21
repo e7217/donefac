@@ -15,7 +15,7 @@ import { ApiError, patch, post, remove } from '../lib/api';
 import { downloadText } from '../lib/download';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
-import { createIssueViewMatcher } from '../../shared/issue-view';
+import { createIssueViewMatcher, issuePriorityLabelFilterLabels } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
@@ -293,6 +293,7 @@ function ProjectGantt(props: GanttProps) {
   const sharedGitlabFilter = sharedFilters?.gitlab;
   const sharedPlanningFilter = sharedFilters?.planning;
   const sharedPlanningLabels = issuePlanningFilterLabels(sharedPlanningFilter, projectPlans);
+  const sharedPriorityLabelCriteria = sharedFilters ? issuePriorityLabelFilterLabels(sharedFilters) : [];
   const sharedDateFilter = sharedPlanningFilter?.dates;
   const overlapAnchor = sharedDateFilter?.mode === 'overlap' ? sharedDateFilter.from ?? sharedDateFilter.to : undefined;
   const selectedPlan = projectPlans.find(item => item.id === selectedPlanningId);
@@ -463,6 +464,7 @@ function ProjectGantt(props: GanttProps) {
         filters.push(`담당자 · ${name ?? '현재 담당자 없음'}`);
       }
       if (fieldFilter?.rules.length) filters.push(`사용자 정의 필드 조건 ${fieldFilter.rules.length}개`);
+      filters.push(...sharedPriorityLabelCriteria);
       filters.push(...sharedPlanningLabels);
       if (sharedGitlabFilter) filters.push(ISSUE_GITLAB_FILTER_LABELS[sharedGitlabFilter]);
     }
@@ -863,6 +865,9 @@ function ProjectGantt(props: GanttProps) {
       {sharedView && onOpenSavedIssueView && <button type="button" className="btn btn-ghost" disabled={busy}
         onClick={() => onOpenSavedIssueView(sharedView.id)}>업무 보기에서 열기 <ArrowRight size={14} aria-hidden="true" /></button>}
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+      {sharedPriorityLabelCriteria.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 우선순위·라벨 조건">
+        {sharedPriorityLabelCriteria.map(label => <li key={label}>{label}</li>)}
+      </ul>}
       {sharedPlanningLabels.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 계획·일정 조건">
         {sharedPlanningLabels.map(label => <li key={label}>{label}</li>)}
       </ul>}
