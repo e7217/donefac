@@ -92,6 +92,30 @@
   font-size: 0.875rem;
 }
 
+.gantt-row-edit-drafts[data-multiple='true'] {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.gantt-row-edit-drafts[data-multiple='true'] > .gantt-row-edit-draft {
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #dce7e1;
+  border-radius: 7px;
+}
+
+.gantt-row-edit-draft-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+  color: #38594c;
+  font-size: 0.875rem;
+}
+
+.gantt-row-edit-append { margin-top: 0.55rem; }
+
 .gantt-row-edit-existing li span,
 .gantt-row-edit-review dl dt,
 .gantt-row-schedule-edit .gantt-row-edit-hint {

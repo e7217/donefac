@@ -718,11 +718,11 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 간트 업무의 날짜와 연결 함께 편집
 
-`POST /api/schedule/row-edit/preview`는 `{projectId,issue:{id,expectedVersion},changes?,dependency?}`를 받는다. `changes`는 `startDate`, `endDate`, `dueDate` 중 바꿀 항목을 보낸다. 날짜는 `YYYY-MM-DD`로 지정하며 `null`로 비운다. `dependency.relatedIssue`도 `{id,expectedVersion}`으로 지정한다. 두 업무는 모두 현재 같은 프로젝트에 있어야 한다.
+`POST /api/schedule/row-edit/preview`는 `{projectId,issue:{id,expectedVersion},changes?,dependencies?}`를 받는다. `changes`는 `startDate`, `endDate`, `dueDate` 중 바꿀 항목을 보낸다. 날짜는 `YYYY-MM-DD`로 지정하며 `null`로 비운다. `dependencies`에는 같은 기준 업무의 연결 작업을 최대 100건까지 보낸다. 기존 단일 작업용 `dependency`도 쓸 수 있으며 두 필드 중 하나를 선택한다. 각 작업의 `relatedIssue`는 `{id,expectedVersion}`으로 지정한다. 모든 업무는 현재 같은 프로젝트에 있어야 한다.
 
-연결을 추가할 때 `dependency`는 `{action:'add',relatedIssue,direction,type,lagDays}`를 사용한다. `direction`이 `predecessor`이면 `relatedIssue`가 기준 업무의 선행 업무이며, `successor`이면 후행 업무다. 기존 연결의 유형·간격 변경은 `{action:'update',id,expectedVersion,relatedIssue,type,lagDays}`를 사용하고, 해제는 `{action:'remove',id,expectedVersion,relatedIssue}`를 사용한다. 유형은 `FS`, `SS`, `FF`, `SF`를 지원하며 간격은 -3,650~3,650의 정수 근무일이다.
+연결 추가는 `{action:'add',relatedIssue,direction,type,lagDays}`를 사용한다. `direction`이 `predecessor`이면 `relatedIssue`가 기준 업무의 선행 업무이며, `successor`이면 후행 업무다. 기존 연결의 유형·간격 변경은 `{action:'update',id,expectedVersion,relatedIssue,type,lagDays}`를 사용하고, 해제는 `{action:'remove',id,expectedVersion,relatedIssue}`를 사용한다. 유형은 `FS`, `SS`, `FF`, `SF`를 지원하며 간격은 -3,650~3,650의 정수 근무일이다. 같은 연결이나 같은 방향의 업무 쌍에 대한 작업은 한 건만 지정한다. 순환 검사는 모든 추가·수정·해제를 적용한 상태를 기준으로 한다.
 
-응답은 일정 붙여넣기와 같은 변경 전후·경고·진단 정보를 제공한다. 유효한 변경이 있으면 `previewId`를 발급한다. `POST /api/schedule/row-edit/apply`에 `{previewId}`를 보내 날짜와 연결을 같은 트랜잭션에서 저장한다. 적용 시 두 업무와 연결, 달력·워크플로·업무 양식의 변경을 확인한다. 같은 작업자가 같은 ID를 재전송하면 이미 저장한 결과를 받는다. `POST /api/schedule/undo`에 결과의 `{undoId}`를 보내 날짜와 연결을 함께 되돌릴 수 있다.
+응답은 일정 붙여넣기와 같은 변경 전후·경고·진단 정보를 제공한다. 배열 입력의 연결 요약과 항목별 진단은 1부터 시작하는 위치를 `line`으로 돌려준다. 오류 없이 유효한 변경이 있으면 `previewId`를 발급한다. `POST /api/schedule/row-edit/apply`에 `{previewId}`를 보내 날짜와 연결을 같은 트랜잭션에서 저장한다. 적용 시 기준 업무와 관련 업무·연결, 달력·워크플로·업무 양식의 변경을 확인한다. 같은 작업자가 같은 ID를 재전송하면 이미 저장한 결과를 받는다. `POST /api/schedule/undo`에 결과의 `{undoId}`를 보내 날짜와 연결을 함께 되돌릴 수 있다.
 
 ## 사이클 완료와 업무 이월
 

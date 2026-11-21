@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { isCalendarDate } from '../shared/calendar.js';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput,
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput,
   type ScheduleChange, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput } from '../shared/types.js';
 import { dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -122,15 +122,28 @@ function parseRowDependencyEdit(raw: unknown): ScheduleRowDependencyEdit {
   throw invalid();
 }
 
-function parseRowEditInput(raw: unknown): ScheduleRowEditInput {
-  if (!isRecord(raw) || !isId(raw.projectId) || Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency'].includes(key))) {
+function parseRowEditInput(raw: unknown): Pick<ScheduleRowEditInput, 'projectId' | 'issue' | 'changes'> & {
+  linkEdits: { line: number | null; input: ScheduleRowDependencyEdit }[];
+} {
+  if (!isRecord(raw) || !isId(raw.projectId) ||
+    Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency', 'dependencies'].includes(key)) ||
+    (Object.hasOwn(raw, 'dependency') && Object.hasOwn(raw, 'dependencies'))) {
     throw new SchedulePasteError(400, '프로젝트와 업무 일정 변경 항목을 확인해 주세요.');
+  }
+  let linkEdits: { line: number | null; input: ScheduleRowDependencyEdit }[] = [];
+  if (Object.hasOwn(raw, 'dependencies')) {
+    if (!Array.isArray(raw.dependencies) || raw.dependencies.length > MAX_SCHEDULE_ROW_DEPENDENCY_EDITS) {
+      throw new SchedulePasteError(400, `업무 연결 변경은 배열로 최대 ${MAX_SCHEDULE_ROW_DEPENDENCY_EDITS}개까지 지정해 주세요.`);
+    }
+    linkEdits = raw.dependencies.map((value: unknown, index: number) => ({ line: index + 1, input: parseRowDependencyEdit(value) }));
+  } else if (raw.dependency !== undefined) {
+    linkEdits = [{ line: null, input: parseRowDependencyEdit(raw.dependency) }];
   }
   return {
     projectId: raw.projectId,
     issue: parseScheduleIssue(raw.issue),
     changes: raw.changes === undefined ? {} : parseDateChanges(raw.changes, true),
-    ...(raw.dependency === undefined ? {} : { dependency: parseRowDependencyEdit(raw.dependency) }),
+    linkEdits,
   };
 }
 
@@ -147,29 +160,29 @@ function proposeDateEdit(issue: Issue, requested: ScheduleBulkDateChanges): { ch
   };
 }
 
-function proposeRowDependencyEdit(input: ScheduleRowDependencyEdit, issue: Issue, related: Issue, dependencies: Dependency[]):
-{ mutation: ScheduleDependencyMutation | null } | { error: string } {
+function proposeRowDependencyEdit(input: ScheduleRowDependencyEdit, issue: Issue, related: Issue,
+  byId: ReadonlyMap<string, Dependency>, byPair: ReadonlyMap<string, Dependency>):
+{ pair: string; mutation: ScheduleDependencyMutation | null } | { error: string } {
   if (issue.id === related.id) return { error: '자기 자신에게 의존할 수 없습니다.' };
   if (input.action === 'add') {
     const [predecessorId, successorId] = input.direction === 'predecessor' ? [related.id, issue.id] : [issue.id, related.id];
-    if (dependencies.some(link => link.predecessorId === predecessorId && link.successorId === successorId)) {
+    const pair = dependencyPair(predecessorId, successorId);
+    if (byPair.has(pair)) {
       return { error: '이미 연결된 의존성입니다. 기존 업무 연결을 선택해 주세요.' };
     }
     const after = { id: randomUUID(), predecessorId, successorId, type: input.type, lagDays: input.lagDays };
-    if (hasScheduleDependencyCycle([...dependencies, after])) {
-      return { error: '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.' };
-    }
-    return { mutation: { before: null, after } };
+    return { pair, mutation: { before: null, after } };
   }
-  const before = dependencies.find(link => link.id === input.id);
+  const before = byId.get(input.id);
   if (!before || !((before.predecessorId === issue.id && before.successorId === related.id) ||
       (before.predecessorId === related.id && before.successorId === issue.id))) {
     return { error: '선택한 두 업무 사이의 연결을 찾을 수 없습니다. 연결을 다시 확인해 주세요.' };
   }
   if ((before.version ?? 1) !== input.expectedVersion) return { error: '업무 연결이 변경되었습니다. 최신 연결을 다시 확인해 주세요.' };
-  if (input.action === 'remove') return { mutation: { before, after: null } };
-  if (before.type === input.type && before.lagDays === input.lagDays) return { mutation: null };
-  return { mutation: { before, after: { ...before, type: input.type, lagDays: input.lagDays } } };
+  const pair = dependencyPair(before.predecessorId, before.successorId);
+  if (input.action === 'remove') return { pair, mutation: { before, after: null } };
+  if (before.type === input.type && before.lagDays === input.lagDays) return { pair, mutation: null };
+  return { pair, mutation: { before, after: { ...before, type: input.type, lagDays: input.lagDays } } };
 }
 
 function incidentLinks(dependencies: Dependency[], issueIds: Iterable<string>) {
@@ -391,26 +404,28 @@ export class SchedulePasteService {
   }
 
   private previewRowEdit(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    const { projectId, issue: selected, changes: requested, dependency } = parseRowEditInput(raw);
+    const { projectId, issue: selected, changes: requested, linkEdits } = parseRowEditInput(raw);
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
       const state = this.projectState(projectId);
+      const issuesById = new Map(state.issues.map(issue => [issue.id, issue]));
+      const dependencyChanges: SchedulePasteDependencyChange[] = [];
       const preview: SchedulePastePreview = {
-        projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges: [], warnings: [], errors: [], unchanged: 0,
+        projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges, warnings: [], errors: [], unchanged: 0,
       };
-      const findCurrentIssue = ({ id, expectedVersion }: ScheduleRowEditInput['issue']) => {
-        const issue = state.issues.find(value => value.id === id);
+      const findCurrentIssue = ({ id, expectedVersion }: ScheduleRowEditInput['issue'], line: number | null = null) => {
+        const issue = issuesById.get(id);
         if (!issue) {
-          preview.errors.push({ line: null, issueId: id, message: '선택한 업무가 삭제되었거나 현재 프로젝트에 없습니다. 업무를 다시 선택해 주세요.' });
+          preview.errors.push({ line, issueId: id, message: '선택한 업무가 삭제되었거나 현재 프로젝트에 없습니다. 업무를 다시 선택해 주세요.' });
         } else if (issue.version !== expectedVersion) {
-          preview.errors.push({ line: null, issueId: id, key: issue.key, message: '업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.' });
+          preview.errors.push({ line, issueId: id, key: issue.key, message: '업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.' });
         } else return issue;
         return null;
       };
       const issue = findCurrentIssue(selected);
       if (!issue) return preview;
-      const issueIds = [issue.id];
+      const issueIds = new Set([issue.id]);
       const changes: ScheduleDateMutation[] = [];
       const dates = proposeDateEdit(issue, requested);
       if (dates) {
@@ -423,24 +438,32 @@ export class SchedulePasteService {
       }
 
       const linkChanges: ScheduleDependencyMutation[] = [];
-      if (dependency) {
-        const related = findCurrentIssue(dependency.relatedIssue);
-        if (related) {
-          issueIds.push(related.id);
-          const proposal = proposeRowDependencyEdit(dependency, issue, related, state.dependencies);
-          if ('error' in proposal) {
-            preview.errors.push({ line: null, issueId: issue.id, key: issue.key, message: proposal.error });
-          } else if (proposal.mutation) {
-            const { before, after } = proposal.mutation;
-            const endpoints = after ?? before!;
-            const [predecessor, successor] = endpoints.predecessorId === issue.id ? [issue, related] : [related, issue];
-            linkChanges.push(proposal.mutation);
-            preview.dependencyChanges = [{
-              line: 1, predecessorKey: predecessor.key, predecessorTitle: predecessor.title, successorKey: successor.key, successorTitle: successor.title,
-              before: before && { type: before.type, lagDays: before.lagDays }, after: after && { type: after.type, lagDays: after.lagDays },
-            }];
-          }
+      const seenLinks = new Set<string>(), seenPairs = new Set<string>();
+      const linksById = new Map(state.dependencies.map(link => [link.id, link]));
+      const linksByPair = new Map(state.dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
+      const linkError = (line: number | null, message: string) => preview.errors.push({ line, issueId: issue.id, key: issue.key, message });
+      const duplicate = '같은 방향의 업무 연결을 두 번 변경할 수 없습니다.';
+      for (const { line, input } of linkEdits) {
+        const related = findCurrentIssue(input.relatedIssue, line);
+        if (!related) continue;
+        issueIds.add(related.id);
+        if (input.action !== 'add') {
+          if (seenLinks.has(input.id)) { linkError(line, duplicate); continue; }
+          seenLinks.add(input.id);
         }
+        const proposal = proposeRowDependencyEdit(input, issue, related, linksById, linksByPair);
+        if ('error' in proposal) { linkError(line, proposal.error); continue; }
+        if (seenPairs.has(proposal.pair)) { linkError(line, duplicate); continue; }
+        seenPairs.add(proposal.pair);
+        if (!proposal.mutation) continue;
+        const { before, after } = proposal.mutation;
+        const endpoints = after ?? before!;
+        const [predecessor, successor] = endpoints.predecessorId === issue.id ? [issue, related] : [related, issue];
+        linkChanges.push(proposal.mutation);
+        dependencyChanges.push({
+          line: line ?? 1, predecessorKey: predecessor.key, predecessorTitle: predecessor.title, successorKey: successor.key, successorTitle: successor.title,
+          before: before && { type: before.type, lagDays: before.lagDays }, after: after && { type: after.type, lagDays: after.lagDays },
+        });
       }
       if (!changes.length && !linkChanges.length && !preview.errors.length) preview.unchanged = 1;
       if (changes.length || linkChanges.length) {
@@ -448,9 +471,12 @@ export class SchedulePasteService {
         const projectedIssues = change ? state.issues.map(value => value.id === issue.id
           ? { ...value, startDate: change.startDate, endDate: change.endDate } : value) : state.issues;
         const projectedLinks = projectScheduleDependencies(state.dependencies, linkChanges);
+        if (linkChanges.some(link => !link.before) && hasScheduleDependencyCycle(projectedLinks)) {
+          linkError(null, '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.');
+        }
         preview.warnings = hooks.warnings(projectedIssues, affectedLinks(projectedLinks, changes.map(value => value.id), linkChanges));
       }
-      return this.savePreview(preview, state, { actorId, issueIds, changes, linkChanges, kind: 'row-edit' }, hooks);
+      return this.savePreview(preview, state, { actorId, issueIds: [...issueIds], changes, linkChanges, kind: 'row-edit' }, hooks);
     });
   }
 

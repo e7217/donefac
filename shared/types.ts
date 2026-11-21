@@ -1335,6 +1335,7 @@ export interface ScheduleBulkDateInput {
   changes: ScheduleBulkDateChanges;
 }
 type ScheduleRowIssue = { id: string; expectedVersion: number };
+export const MAX_SCHEDULE_ROW_DEPENDENCY_EDITS = 100;
 export type ScheduleRowDependencyEdit =
   | { action: 'add'; relatedIssue: ScheduleRowIssue; direction: 'predecessor' | 'successor'; type: DependencyType; lagDays: number }
   | { action: 'update'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue; type: DependencyType; lagDays: number }
@@ -1344,6 +1345,7 @@ export interface ScheduleRowEditInput {
   issue: ScheduleRowIssue;
   changes: ScheduleBulkDateChanges;
   dependency?: ScheduleRowDependencyEdit;
+  dependencies?: readonly ScheduleRowDependencyEdit[];
 }
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {

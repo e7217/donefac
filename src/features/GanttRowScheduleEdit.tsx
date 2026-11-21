@@ -1,15 +1,16 @@
 'use client';
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { CalendarRange, Check, Loader2, RefreshCw, X } from 'lucide-react';
+import { CalendarRange, Check, Loader2, Plus, RefreshCw, X } from 'lucide-react';
 import { CalendarError, createCalendarMath, defaultWorkCalendar, isCalendarDate, MAX_CALENDAR_DATE } from '../../shared/calendar';
 import {
   DEPENDENCY_LABELS, DEPENDENCY_TYPES, dependencyBound, dependencyGuardFields, isDependencyLag,
   MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS,
 } from '../../shared/schedule-dependencies';
-import type {
-  Dependency, DependencyType, FeatureProps, Issue, ScheduleBulkDateChanges, SchedulePasteApplyResult, SchedulePastePreview,
-  ScheduleRowDependencyEdit, ScheduleRowEditInput, WorkCalendar,
+import {
+  MAX_SCHEDULE_ROW_DEPENDENCY_EDITS,
+  type Dependency, type DependencyType, type FeatureProps, type Issue, type ScheduleBulkDateChanges,
+  type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type WorkCalendar,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
@@ -29,7 +30,29 @@ type DateField = keyof ScheduleBulkDateChanges;
 type LinkAction = 'none' | 'add' | 'update' | 'remove';
 type Direction = 'predecessor' | 'successor';
 type Pending = 'preview' | 'apply' | 'recover' | 'reload' | 'reflect';
-type Review = { input: string; result: SchedulePastePreview };
+type Review = { input: string; result: SchedulePastePreview; editGroups: number[] };
+type LinkDraft = {
+  id: number;
+  action: LinkAction;
+  direction: Direction;
+  query: string;
+  relatedId: string;
+  dependencyId: string;
+  type: DependencyType;
+  lag: string;
+};
+type LinkDraftChanges = Partial<Omit<LinkDraft, 'id'>>;
+type ExistingLink = { dependency: Dependency; other: Issue; role: Direction };
+type DraftResolution = {
+  selected?: ExistingLink;
+  related?: Issue;
+  edit?: ScheduleRowDependencyEdit;
+  target?: string;
+  predecessor?: Issue;
+  lagDays: number;
+  duplicateExisting: boolean;
+  valid: boolean;
+};
 
 export const GANTT_ROW_SCHEDULE_DRAFT = 'gantt-row-schedule-edit';
 const dates = [
@@ -50,6 +73,41 @@ const ruleText = (rule: Pick<Dependency, 'type' | 'lagDays'> | null) =>
   rule ? `${DEPENDENCY_LABELS[rule.type]} (${rule.type}), ${rule.lagDays}근무일` : '연결 없음';
 const hasChanges = (result: SchedulePastePreview) => Boolean(result.changes.length || result.dependencyChanges?.length);
 const currentTime = () => Date.now();
+const defaultLinkDraft: Omit<LinkDraft, 'id'> = {
+  action: 'none', direction: 'predecessor', query: '', relatedId: '', dependencyId: '', type: 'FS', lag: '0',
+};
+const linkDraft = (id: number): LinkDraft => ({ ...defaultLinkDraft, id });
+
+function resolveDraft(draft: LinkDraft, anchor: Issue, projectIssues: ReadonlyMap<string, Issue>, links: readonly ExistingLink[]): DraftResolution {
+  const { action, direction, relatedId, dependencyId, lag, type } = draft;
+  const selected = links.find(({ dependency }) => dependency.id === dependencyId);
+  const related = projectIssues.get(relatedId);
+  const lagDays = lag.trim() ? Number(lag) : NaN;
+  const duplicateExisting = action === 'add' && links.some(link => link.other.id === relatedId && link.role === direction);
+  const resolution: DraftResolution = { selected, related, lagDays, duplicateExisting, valid: action === 'none' };
+
+  if (action === 'add' && related) {
+    resolution.target = JSON.stringify(direction === 'predecessor' ? [related.id, anchor.id] : [anchor.id, related.id]);
+    resolution.valid = !duplicateExisting && isDependencyLag(lagDays);
+    if (resolution.valid) {
+      resolution.edit = { action, relatedIssue: versionedIssue(related), direction, type, lagDays };
+      if (direction === 'predecessor') resolution.predecessor = related;
+    }
+  } else if (selected && (action === 'update' || action === 'remove')) {
+    const { dependency } = selected;
+    resolution.target = JSON.stringify([dependency.predecessorId, dependency.successorId]);
+    resolution.valid = action === 'remove' || isDependencyLag(lagDays);
+    const existing = { id: dependency.id, expectedVersion: dependency.version ?? 1, relatedIssue: versionedIssue(selected.other) };
+    if (action === 'remove') resolution.edit = { action, ...existing };
+    else if (resolution.valid) {
+      if (selected.role === 'predecessor') resolution.predecessor = selected.other;
+      if (type !== dependency.type || lagDays !== dependency.lagDays) {
+        resolution.edit = { action, ...existing, type, lagDays };
+      }
+    }
+  }
+  return resolution;
+}
 
 function definiteRejection(cause: unknown, recovering: boolean) {
   return cause instanceof ApiError && cause.status >= 400 && cause.status < 500 &&
@@ -62,13 +120,8 @@ export function GanttRowScheduleEdit({
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>({});
-  const [action, setAction] = useState<LinkAction>('none');
-  const [direction, setDirection] = useState<Direction>('predecessor');
-  const [query, setQuery] = useState('');
-  const [relatedId, setRelatedId] = useState('');
-  const [dependencyId, setDependencyId] = useState('');
-  const [type, setType] = useState<DependencyType>('FS');
-  const [lag, setLag] = useState('0');
+  const [drafts, setDrafts] = useState(() => [linkDraft(1)]);
+  const nextDraftId = useRef(2);
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [retryId, setRetryId] = useState<string | null>(null);
@@ -79,9 +132,6 @@ export function GanttRowScheduleEdit({
   const [clock, setClock] = useState(currentTime);
   const modal = useRef<HTMLElement>(null);
   const startInput = useRef<HTMLInputElement>(null);
-  const searchInput = useRef<HTMLInputElement>(null);
-  const directionSelect = useRef<HTMLSelectElement>(null);
-  const resultsList = useRef<HTMLUListElement>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
   const recoverButton = useRef<HTMLButtonElement>(null);
@@ -93,18 +143,14 @@ export function GanttRowScheduleEdit({
     .map(value => [value.id, value])), [issue.projectId, issues]);
   const currentIssue = projectIssues.get(issue.id);
   const anchor = currentIssue ?? issue;
-  const links = useMemo(() => dependencies.flatMap(dependency => {
+  const links = useMemo<ExistingLink[]>(() => dependencies.flatMap(dependency => {
     const role = dependency.predecessorId === issue.id ? 'successor' : dependency.successorId === issue.id ? 'predecessor' : null;
     if (!role) return [];
     const other = projectIssues.get(role === 'successor' ? dependency.successorId : dependency.predecessorId);
     return other ? [{ dependency, other, role }] : [];
   }), [dependencies, issue.id, projectIssues]);
-  const selected = links.find(({ dependency }) => dependency.id === dependencyId);
-  const related = projectIssues.get(relatedId);
-  const lagDays = lag.trim() ? Number(lag) : NaN;
-  const duplicate = action === 'add' && links.some(link => link.other.id === relatedId && link.role === direction);
   const editLocked = Boolean(pending || retryId || applied);
-  const dirty = !applied && Boolean(Object.keys(editedDates).length || action !== 'none' || review || retryId);
+  const dirty = !applied && Boolean(Object.keys(editedDates).length || drafts.some(draft => draft.action !== 'none') || review || retryId);
 
   const changes: ScheduleBulkDateChanges = {};
   const nextDates = { startDate: anchor.startDate, endDate: anchor.endDate, dueDate: anchor.dueDate, ...editedDates };
@@ -113,44 +159,43 @@ export function GanttRowScheduleEdit({
     if (value !== anchor[field]) changes[field] = value;
   }
 
-  let dependency: ScheduleRowDependencyEdit | undefined;
-  if (action === 'add' && related && !duplicate && isDependencyLag(lagDays)) {
-    dependency = { action, relatedIssue: versionedIssue(related), direction, type, lagDays };
-  } else if (selected && (action === 'update' || action === 'remove')) {
-    const existing = { id: selected.dependency.id, expectedVersion: selected.dependency.version ?? 1, relatedIssue: versionedIssue(selected.other) };
-    if (action === 'remove') dependency = { action, ...existing };
-    else if (isDependencyLag(lagDays) && (type !== selected.dependency.type || lagDays !== selected.dependency.lagDays)) {
-      dependency = { action, ...existing, type, lagDays };
-    }
+  const resolvedDrafts = drafts.map(draft => resolveDraft(draft, anchor, projectIssues, links));
+  const targetCounts = new Map<string, number>();
+  const edits: ScheduleRowDependencyEdit[] = [];
+  const editGroups: number[] = [];
+  for (const [index, { edit, target }] of resolvedDrafts.entries()) {
+    if (target) targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
+    if (edit) { edits.push(edit); editGroups.push(index + 1); }
   }
-  const payload: ScheduleRowEditInput = { projectId: issue.projectId, issue: versionedIssue(anchor), changes, ...(dependency && { dependency }) };
+  const duplicateDraft = ({ target }: DraftResolution) => target !== undefined && (targetCounts.get(target) ?? 0) > 1;
+  const payload: ScheduleRowEditInput = { projectId: issue.projectId, issue: versionedIssue(anchor), changes,
+    ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}) };
   const input = JSON.stringify({
-    payload, calendarVersion: calendar?.version ?? 1,
+    payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
   });
-  const linkValid = action === 'none' || (action === 'add'
-    ? Boolean(related) && !duplicate && isDependencyLag(lagDays)
-    : Boolean(selected) && (action === 'remove' || isDependencyLag(lagDays)));
-  const canPreview = Boolean(currentIssue && actorId && linkValid && (Object.keys(changes).length || dependency) &&
+  const linksValid = resolvedDrafts.every(draft => draft.valid && !duplicateDraft(draft));
+  const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length) &&
     Object.values(changes).every(value => value === null || isCalendarDate(value)));
   const result = review?.result;
   const expiry = result?.expiresAt ? Date.parse(result.expiresAt) : NaN;
   const reviewStale = review && (input !== review.input || expiry <= clock);
   const applyId = !editLocked && !reloadNeeded && review && !reviewStale && Number.isFinite(expiry) &&
     !review.result.errors.length && hasChanges(review.result) ? review.result.previewId : null;
+  function reviewGroup(line: number | null) {
+    const group = line === null ? undefined : review?.editGroups[line - 1];
+    return drafts.length > 1 && group !== undefined ? `연결 변경 ${group}` : null;
+  }
 
-  const candidateTerms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
-  const candidates = action === 'add' && !related ? [...projectIssues.values()]
-    .filter(item => item.id !== issue.id && candidateTerms.every(term => issueText(item).toLocaleLowerCase().includes(term)))
-    .sort((left, right) => Number(right.key.toLocaleLowerCase() === query.trim().toLocaleLowerCase()) -
-      Number(left.key.toLocaleLowerCase() === query.trim().toLocaleLowerCase()) || left.key.localeCompare(right.key, 'ko', { numeric: true })) : [];
-  const predecessor = action === 'add' && direction === 'predecessor' && !duplicate ? related
-    : action === 'update' && selected?.role === 'predecessor' ? selected.other : undefined;
-  let earliest: ReturnType<typeof dependencyBound> = null;
-  if (predecessor && isDependencyLag(lagDays)) {
+  const calendarMath = useMemo(() => createCalendarMath(calendar ?? defaultWorkCalendar(issue.projectId)), [calendar, issue.projectId]);
+  const earliestDates: Partial<Record<keyof typeof SCHEDULE_DATE_LABELS, string>> = {};
+  for (const [index, resolved] of resolvedDrafts.entries()) {
+    if (!resolved.predecessor || duplicateDraft(resolved)) continue;
     try {
-      const candidate = dependencyBound({ type, lagDays }, predecessor, createCalendarMath(calendar ?? defaultWorkCalendar(issue.projectId)));
-      if (candidate && (!nextDates[candidate.endpoint] || nextDates[candidate.endpoint]! < candidate.date)) earliest = candidate;
+      const candidate = dependencyBound({ type: drafts[index].type, lagDays: resolved.lagDays }, resolved.predecessor, calendarMath);
+      if (candidate && candidate.date > (nextDates[candidate.endpoint] ?? '') && candidate.date > (earliestDates[candidate.endpoint] ?? '')) {
+        earliestDates[candidate.endpoint] = candidate.date;
+      }
     } catch (cause) {
       if (!(cause instanceof CalendarError)) throw cause;
     }
@@ -224,45 +269,30 @@ export function GanttRowScheduleEdit({
     invalidate();
   }
 
-  function changeAction(value: LinkAction) {
-    setAction(value);
-    setDependencyId('');
-    setRelatedId('');
-    setDirection('predecessor');
-    setQuery('');
-    setType('FS');
-    setLag('0');
+  function changeDraft(id: number, changes: LinkDraftChanges) {
+    setDrafts(previous => previous.map(draft => draft.id === id ? { ...draft, ...changes } : draft));
     invalidate();
   }
 
-  function chooseLink(id: string) {
-    const link = links.find(entry => entry.dependency.id === id);
-    setDependencyId(id);
-    setType(link?.dependency.type ?? 'FS');
-    setLag(String(link?.dependency.lagDays ?? 0));
-    invalidate();
+  function focusDraft(id: number) {
+    requestAnimationFrame(() => modal.current?.querySelector<HTMLElement>(`[data-link-draft="${id}"]`)?.focus());
   }
 
-  function chooseRelated(item: Issue) {
-    setRelatedId(item.id);
+  function appendDraft() {
+    if (drafts.length >= MAX_SCHEDULE_ROW_DEPENDENCY_EDITS) return;
+    const draft = linkDraft(nextDraftId.current++);
+    setDrafts(previous => [...previous, draft]);
     invalidate();
-    requestAnimationFrame(() => directionSelect.current?.focus({ preventScroll: true }));
+    focusDraft(draft.id);
   }
 
-  function handleCandidateKeys(event: KeyboardEvent<HTMLElement>) {
-    if (event.nativeEvent.isComposing) return;
-    const buttons = Array.from(resultsList.current?.querySelectorAll<HTMLButtonElement>('button') ?? []);
-    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === 'ArrowDown' && buttons[index + 1]) {
-      event.preventDefault();
-      buttons[index + 1].focus();
-    } else if (event.key === 'ArrowUp' && index >= 0) {
-      event.preventDefault();
-      (buttons[index - 1] ?? searchInput.current)?.focus();
-    } else if (event.key === 'Enter' && event.target === searchInput.current) {
-      event.preventDefault();
-      if (candidates[0]) chooseRelated(candidates[0]);
-    }
+  function removeDraft(index: number) {
+    const focus = drafts[index + 1] ?? drafts[index - 1];
+    if (!focus) return;
+    const id = drafts[index].id;
+    setDrafts(previous => previous.filter(draft => draft.id !== id));
+    invalidate();
+    focusDraft(focus.id);
   }
 
   function begin(kind: Pending) {
@@ -295,7 +325,7 @@ export function GanttRowScheduleEdit({
         method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify(payload), signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      setReview({ input, result });
+      setReview({ input, result, editGroups });
       setClock(currentTime());
       focusAfter.current = 'review';
     } catch (cause) {
@@ -408,69 +438,26 @@ export function GanttRowScheduleEdit({
               <strong>{issueText(other)}</strong><span>{role === 'predecessor' ? '선행 업무' : '후행 업무'} · {ruleText(dependency)}</span>
             </li>)}</ul>
           </details>}
-          <div className="gantt-row-edit-control">
-            <label htmlFor={`${uid}-action`}>선후행 연결 작업</label>
-            <select id={`${uid}-action`} className="field" value={action} onChange={event => changeAction(event.currentTarget.value as LinkAction)}>
-              <option value="none">변경 없음</option><option value="add">연결 추가</option>
-              <option value="update" disabled={!links.length}>연결 수정</option><option value="remove" disabled={!links.length}>연결 해제</option>
-            </select>
+          <div className="gantt-row-edit-drafts" data-multiple={drafts.length > 1 || undefined}>
+            {drafts.map((draft, index) => <GanttRowDependencyFields key={draft.id} draft={draft} name={`연결 변경 ${index + 1}`}
+              anchorId={anchor.id} projectIssues={projectIssues} links={links} resolved={resolvedDrafts[index]}
+              duplicateDraft={duplicateDraft(resolvedDrafts[index])} onChange={changes => changeDraft(draft.id, changes)}
+              onRemove={drafts.length > 1 ? () => removeDraft(index) : undefined} />)}
           </div>
-          {action === 'add' && (related ? <div className="gantt-row-edit-selection">
-            <span>{issueText(related)}</span>
-            <button className="btn btn-ghost" type="button" onClick={() => {
-              setRelatedId(''); invalidate(); requestAnimationFrame(() => searchInput.current?.focus());
-            }}>다시 검색</button>
-          </div> : <div onKeyDown={handleCandidateKeys}>
-            <div className="gantt-row-edit-control">
-              <label htmlFor={`${uid}-search`}>연결할 업무 검색</label>
-              <input id={`${uid}-search`} className="field" type="text" ref={searchInput} aria-controls={`${uid}-results`}
-                value={query} placeholder="업무 키 또는 제목" onChange={event => setQuery(event.currentTarget.value)} />
-            </div>
-            {relatedId && <p className="gantt-row-edit-hint" role="status">선택한 업무가 목록에서 사라졌습니다. 연결할 업무를 다시 선택하세요.</p>}
-            <ul className="gantt-row-edit-results" id={`${uid}-results`} ref={resultsList} aria-label="연결할 업무 검색 결과">
-              {candidates.slice(0, 12).map(candidate => <li key={candidate.id}>
-                <button type="button" className="btn btn-ghost" onClick={() => chooseRelated(candidate)}>{issueText(candidate)}</button>
-              </li>)}
-            </ul>
-            {!candidates.length && <p className="gantt-row-edit-hint">같은 프로젝트에 일치하는 업무가 없습니다.</p>}
-            {candidates.length > 12 && <p className="gantt-row-edit-hint">검색 조건으로 업무를 더 좁힐 수 있습니다.</p>}
-          </div>)}
-          {action === 'add' && <div className="gantt-row-edit-control">
-            <label htmlFor={`${uid}-direction`}>연결 방향</label>
-            <select id={`${uid}-direction`} className="field" value={direction} ref={directionSelect}
-              onChange={event => { setDirection(event.currentTarget.value as Direction); invalidate(); }}>
-              <option value="predecessor">선택한 업무가 선행</option><option value="successor">선택한 업무가 후행</option>
-            </select>
-          </div>}
-          {duplicate && <p className="gantt-row-edit-hint" role="status">같은 방향의 연결이 있습니다. 연결 수정에서 해당 연결을 선택할 수 있습니다.</p>}
-          {(action === 'update' || action === 'remove') && <div className="gantt-row-edit-control">
-            <label htmlFor={`${uid}-dependency`}>편집할 연결</label>
-            <select id={`${uid}-dependency`} className="field" value={dependencyId} onChange={event => chooseLink(event.currentTarget.value)}>
-              <option value="">연결 선택</option>
-              {dependencyId && !selected && <option value={dependencyId} disabled>현재 목록에서 사라진 연결</option>}
-              {links.map(({ dependency, other, role }) => <option key={dependency.id} value={dependency.id}>
-                {issueText(other)} · {role === 'predecessor' ? '선행' : '후행'}
-              </option>)}
-            </select>
-          </div>}
-          {(action === 'add' || action === 'update' && selected) && <div className="gantt-row-edit-columns">
-            <div className="gantt-row-edit-control">
-              <label htmlFor={`${uid}-type`}>연결 유형</label>
-              <select id={`${uid}-type`} className="field" value={type} onChange={event => { setType(event.currentTarget.value as DependencyType); invalidate(); }}>
-                {DEPENDENCY_TYPES.map(value => <option key={value} value={value}>{DEPENDENCY_LABELS[value]} ({value})</option>)}
-              </select>
-            </div>
-            <div className="gantt-row-edit-control">
-              <label htmlFor={`${uid}-lag`}>간격 (근무일)</label>
-              <input id={`${uid}-lag`} className="field" type="number" step={1} min={-MAX_DEPENDENCY_LAG_DAYS} max={MAX_DEPENDENCY_LAG_DAYS}
-                value={lag} onChange={event => { setLag(event.currentTarget.value); invalidate(); }} />
-            </div>
-          </div>}
-          {earliest && <div className="gantt-row-edit-suggestion">
-            <span>{SCHEDULE_DATE_LABELS[earliest.endpoint]} 제안 <strong>{earliest.date}</strong></span>
-            <button className="btn" type="button"
-              onClick={() => changeDate(earliest.endpoint, earliest.date)}>가장 이른 날짜 사용</button>
-          </div>}
+          <button className="btn gantt-row-edit-append" type="button" onClick={appendDraft} disabled={drafts.length >= MAX_SCHEDULE_ROW_DEPENDENCY_EDITS}>
+            <Plus size={15} aria-hidden="true" />연결 변경 추가
+          </button>
+          {drafts.length >= MAX_SCHEDULE_ROW_DEPENDENCY_EDITS && <p className="gantt-row-edit-hint">한 번에 연결 변경 {MAX_SCHEDULE_ROW_DEPENDENCY_EDITS}개까지 검토할 수 있습니다.</p>}
+          {(['startDate', 'endDate'] as const).map(endpoint => {
+            const date = earliestDates[endpoint];
+            if (!date) return null;
+            return <div key={endpoint} className="gantt-row-edit-suggestion">
+              <span>{SCHEDULE_DATE_LABELS[endpoint]} 제안 <strong>{date}</strong></span>
+              <button className="btn" type="button" onClick={() => changeDate(endpoint, date)}>
+                {drafts.length === 1 ? '가장 이른 날짜 사용' : `가장 이른 ${SCHEDULE_DATE_LABELS[endpoint]} 사용`}
+              </button>
+            </div>;
+          })}
         </fieldset>
         <div className="gantt-row-edit-actions">
           <button className="btn btn-primary" type="submit" disabled={editLocked || !canPreview || reloadNeeded}>변경 미리보기</button>
@@ -486,8 +473,10 @@ export function GanttRowScheduleEdit({
         {applied && <p className="schedule-paste-success" role="status">적용한 일정과 연결은 간트에서 되돌릴 수 있습니다.</p>}
         {result && <section aria-label="일정과 연결 미리보기">
           <h3 tabIndex={-1} ref={reviewHeading}>일정과 연결 미리보기</h3>
-          {result.errors.length > 0 && <ul className="schedule-paste-rejected" role="alert">{result.errors.map((entry, index) =>
-            <li key={index}>{entry.key && `${entry.key} · `}{entry.message}</li>)}</ul>}
+          {result.errors.length > 0 && <ul className="schedule-paste-rejected" role="alert">{result.errors.map((entry, index) => {
+            const group = reviewGroup(entry.line);
+            return <li key={index}>{group && `${group} · `}{entry.key && `${entry.key} · `}{entry.message}</li>;
+          })}</ul>}
           {!result.errors.length && !hasChanges(result) && <p className="schedule-paste-noop" role="status">적용할 변경이 없습니다.</p>}
           {reviewStale && !retryId && !applied && <p className="schedule-paste-stale" role="status">일정 조건이 바뀌었거나 미리보기가 만료되었습니다. 다시 검토해 주세요.</p>}
           {result.changes.map(change => <dl className="gantt-row-edit-diff" key={change.id}>
@@ -495,6 +484,7 @@ export function GanttRowScheduleEdit({
               <div key={field}><dt>{label}</dt><dd>{change[from] ?? '미정'} → <strong>{change[to] ?? '미정'}</strong></dd></div>)}
           </dl>)}
           {result.dependencyChanges?.map(change => <div className="gantt-row-edit-link-diff" key={change.line}>
+            {reviewGroup(change.line) && <small className="gantt-row-edit-hint">{reviewGroup(change.line)}</small>}
             <h4>{change.predecessorKey} → {change.successorKey}</h4>
             <p>{ruleText(change.before)} → <strong>{ruleText(change.after)}</strong></p>
           </div>)}
@@ -513,5 +503,129 @@ export function GanttRowScheduleEdit({
             onClick={() => { if (applyId) void apply(applyId, false); }}><Check size={15} aria-hidden="true" />일정과 연결 적용</button>}
       </footer>
     </section>
+  </div>;
+}
+
+function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links, resolved, duplicateDraft, onChange, onRemove }: {
+  draft: LinkDraft;
+  name: string;
+  anchorId: string;
+  projectIssues: ReadonlyMap<string, Issue>;
+  links: readonly ExistingLink[];
+  resolved: DraftResolution;
+  duplicateDraft: boolean;
+  onChange: (changes: LinkDraftChanges) => void;
+  onRemove?: () => void;
+}) {
+  const uid = useId();
+  const searchInput = useRef<HTMLInputElement>(null);
+  const directionSelect = useRef<HTMLSelectElement>(null);
+  const resultsList = useRef<HTMLUListElement>(null);
+  const { action, direction, query, relatedId, dependencyId, type, lag } = draft;
+  const { related, selected, duplicateExisting } = resolved;
+  const candidates = useMemo(() => {
+    if (action !== 'add' || related) return [];
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    const terms = normalizedQuery.split(/\s+/u).filter(Boolean);
+    return [...projectIssues.values()]
+      .filter(item => item.id !== anchorId && terms.every(term => issueText(item).toLocaleLowerCase().includes(term)))
+      .sort((left, right) => Number(right.key.toLocaleLowerCase() === normalizedQuery) -
+        Number(left.key.toLocaleLowerCase() === normalizedQuery) || left.key.localeCompare(right.key, 'ko', { numeric: true }));
+  }, [action, anchorId, query, projectIssues, related]);
+
+  function chooseLink(id: string) {
+    const link = links.find(entry => entry.dependency.id === id);
+    onChange({ dependencyId: id, type: link?.dependency.type ?? 'FS', lag: String(link?.dependency.lagDays ?? 0) });
+  }
+
+  function chooseRelated(item: Issue) {
+    onChange({ relatedId: item.id });
+    requestAnimationFrame(() => directionSelect.current?.focus({ preventScroll: true }));
+  }
+
+  function handleCandidateKeys(event: KeyboardEvent<HTMLElement>) {
+    if (event.nativeEvent.isComposing) return;
+    const buttons = Array.from(resultsList.current?.querySelectorAll<HTMLButtonElement>('button') ?? []);
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'ArrowDown' && buttons[index + 1]) {
+      event.preventDefault();
+      buttons[index + 1].focus();
+    } else if (event.key === 'ArrowUp' && index >= 0) {
+      event.preventDefault();
+      (buttons[index - 1] ?? searchInput.current)?.focus();
+    } else if (event.key === 'Enter' && event.target === searchInput.current) {
+      event.preventDefault();
+      if (candidates[0]) chooseRelated(candidates[0]);
+    }
+  }
+
+  return <div className="gantt-row-edit-draft" role="group" aria-label={name}>
+    {onRemove && <div className="gantt-row-edit-draft-heading">
+      <strong>{name}</strong>
+      <button className="btn btn-ghost" type="button" aria-label={`${name} 빼기`} onClick={onRemove}>
+        <X size={14} aria-hidden="true" />빼기
+      </button>
+    </div>}
+    <div className="gantt-row-edit-control">
+      <label htmlFor={`${uid}-action`}>선후행 연결 작업</label>
+      <select id={`${uid}-action`} className="field" data-link-draft={draft.id} value={action}
+        onChange={event => onChange({ ...defaultLinkDraft, action: event.currentTarget.value as LinkAction })}>
+        <option value="none">변경 없음</option><option value="add">연결 추가</option>
+        <option value="update" disabled={!links.length}>연결 수정</option><option value="remove" disabled={!links.length}>연결 해제</option>
+      </select>
+    </div>
+    {action === 'add' && (related ? <div className="gantt-row-edit-selection">
+      <span>{issueText(related)}</span>
+      <button className="btn btn-ghost" type="button" onClick={() => {
+        onChange({ relatedId: '' });
+        requestAnimationFrame(() => searchInput.current?.focus());
+      }}>다시 검색</button>
+    </div> : <div onKeyDown={handleCandidateKeys}>
+      <div className="gantt-row-edit-control">
+        <label htmlFor={`${uid}-search`}>연결할 업무 검색</label>
+        <input id={`${uid}-search`} className="field" type="text" ref={searchInput} aria-controls={`${uid}-results`}
+          value={query} placeholder="업무 키 또는 제목" onChange={event => onChange({ query: event.currentTarget.value })} />
+      </div>
+      {relatedId && <p className="gantt-row-edit-hint" role="status">선택한 업무가 목록에서 사라졌습니다. 연결할 업무를 다시 선택하세요.</p>}
+      <ul className="gantt-row-edit-results" id={`${uid}-results`} ref={resultsList} aria-label="연결할 업무 검색 결과">
+        {candidates.slice(0, 12).map(candidate => <li key={candidate.id}>
+          <button type="button" className="btn btn-ghost" onClick={() => chooseRelated(candidate)}>{issueText(candidate)}</button>
+        </li>)}
+      </ul>
+      {!candidates.length && <p className="gantt-row-edit-hint">같은 프로젝트에 일치하는 업무가 없습니다.</p>}
+      {candidates.length > 12 && <p className="gantt-row-edit-hint">검색 조건으로 업무를 더 좁힐 수 있습니다.</p>}
+    </div>)}
+    {action === 'add' && <div className="gantt-row-edit-control">
+      <label htmlFor={`${uid}-direction`}>연결 방향</label>
+      <select id={`${uid}-direction`} className="field" value={direction} ref={directionSelect}
+        onChange={event => onChange({ direction: event.currentTarget.value as Direction })}>
+        <option value="predecessor">선택한 업무가 선행</option><option value="successor">선택한 업무가 후행</option>
+      </select>
+    </div>}
+    {duplicateExisting && <p className="gantt-row-edit-hint" role="status">같은 방향의 연결이 있습니다. 연결 수정에서 해당 연결을 선택할 수 있습니다.</p>}
+    {duplicateDraft && <p className="gantt-row-edit-hint" role="status">같은 연결을 여러 번 변경할 수 없습니다.</p>}
+    {(action === 'update' || action === 'remove') && <div className="gantt-row-edit-control">
+      <label htmlFor={`${uid}-dependency`}>편집할 연결</label>
+      <select id={`${uid}-dependency`} className="field" value={dependencyId} onChange={event => chooseLink(event.currentTarget.value)}>
+        <option value="">연결 선택</option>
+        {dependencyId && !selected && <option value={dependencyId} disabled>현재 목록에서 사라진 연결</option>}
+        {links.map(({ dependency, other, role }) => <option key={dependency.id} value={dependency.id}>
+          {issueText(other)} · {role === 'predecessor' ? '선행' : '후행'}
+        </option>)}
+      </select>
+    </div>}
+    {(action === 'add' || action === 'update' && selected) && <div className="gantt-row-edit-columns">
+      <div className="gantt-row-edit-control">
+        <label htmlFor={`${uid}-type`}>연결 유형</label>
+        <select id={`${uid}-type`} className="field" value={type} onChange={event => onChange({ type: event.currentTarget.value as DependencyType })}>
+          {DEPENDENCY_TYPES.map(value => <option key={value} value={value}>{DEPENDENCY_LABELS[value]} ({value})</option>)}
+        </select>
+      </div>
+      <div className="gantt-row-edit-control">
+        <label htmlFor={`${uid}-lag`}>간격 (근무일)</label>
+        <input id={`${uid}-lag`} className="field" type="number" step={1} min={-MAX_DEPENDENCY_LAG_DAYS} max={MAX_DEPENDENCY_LAG_DAYS}
+          value={lag} onChange={event => onChange({ lag: event.currentTarget.value })} />
+      </div>
+    </div>}
   </div>;
 }
