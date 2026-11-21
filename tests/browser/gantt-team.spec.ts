@@ -189,10 +189,10 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     await button(bulk, '날짜 변경 미리보기').click();
     const bulkResponse = await bulkPreview;
     expect(bulkResponse.request().postDataJSON()).toEqual({
-      projectId: data.second.id, issues: [{ id: second.id, expectedVersion: expect.any(Number) }], changes: { endDate: end },
+      projectId: null, issues: [{ id: second.id, expectedVersion: expect.any(Number) }], changes: { endDate: end },
     });
     const bulkPlan = await json<SchedulePastePreview>(bulkResponse);
-    expect(bulkPlan).toMatchObject({ projectId: data.second.id, errors: [], changes: [{ id: second.id, toEnd: end }] });
+    expect(bulkPlan).toMatchObject({ projectId: null, projectIds: [data.second.id], errors: [], changes: [{ id: second.id, toEnd: end }] });
     const bulkApply = waitPost(page, '/api/schedule/bulk-dates/apply');
     await button(bulk, '검토한 일정 적용').click();
     const appliedBulk = await bulkApply;

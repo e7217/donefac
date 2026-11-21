@@ -3,8 +3,8 @@ import { defaultWorkCalendar, shiftWorkingDate, workingDateOnOrAfter } from '../
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import type {
-  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, ProjectWorkloadResult, RichContent,
-  SavedView, SchedulePreview, TeamWorkloadResult, WorkspaceSnapshot,
+  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, Project, ProjectWorkloadResult, RichContent,
+  SavedView, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, TeamWorkloadResult, WorkspaceSnapshot,
 } from '../../shared/types';
 
 type ScheduleApplyResult = { updated: Issue[]; warnings: string[]; undoId: string };
@@ -86,6 +86,29 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
     version: successor.version + 1 }]);
   expect(corrected.warnings).toEqual([]);
 
+  const otherProject = await json<Project>(requests.post('/api/projects', {
+    headers, data: { key: 'TEAM2', name: '합성 팀 연계 프로젝트' },
+  }), 201);
+  const otherIssue = await json<Issue>(requests.post('/api/issues', {
+    headers, data: { projectId: otherProject.id, title: '다른 프로젝트의 공동 마감 업무' },
+  }), 201);
+  const bulk = await json<SchedulePastePreview>(requests.post('/api/schedule/bulk-dates/preview', {
+    headers, data: { projectId: null, issues: [moved.updated[0], otherIssue].map(({ id, version }) => ({ id, expectedVersion: version })),
+      changes: { dueDate: successorEnd } },
+  }));
+  expect(bulk.errors).toEqual([]);
+  expect(new Set(bulk.projectIds)).toEqual(new Set([projectId, otherProject.id]));
+  expect(bulk.previewId).toBeTruthy();
+  expect(bulk.changes).toHaveLength(2);
+  expect(bulk.changes.every(change => change.toDue === successorEnd)).toBe(true);
+  const batch = await json<SchedulePasteApplyResult>(requests.post('/api/schedule/bulk-dates/apply', {
+    headers, data: { previewId: bulk.previewId },
+  }));
+  const coordinated = batch.updated.find(value => value.id === issueId);
+  const secondary = batch.updated.find(value => value.id === otherIssue.id);
+  expect(coordinated).toMatchObject({ startDate: workingDate, endDate: workingDate, dueDate: successorEnd, version: moved.updated[0].version + 1 });
+  expect(secondary).toMatchObject({ projectId: otherProject.id, dueDate: successorEnd, version: otherIssue.version + 1 });
+
   const dateQuery = new URLSearchParams({ startDate: workingDate, endDate: workingDate });
   const filters = { query: issue.key, status: changes.status, assigneeId: actorId, type: 'all' };
   const [projectWorkload, teamWorkload, view] = await Promise.all([
@@ -114,7 +137,8 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
     json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers })),
     json<DocRevision[]>(requests.get(`/api/documents/${encodeURIComponent(document.id)}/revisions`, { headers })),
   ]);
-  expect(current.issues.find(item => item.id === issueId)).toEqual(moved.updated[0]);
+  expect(current.issues.find(item => item.id === issueId)).toEqual(coordinated);
+  expect(current.issues.find(item => item.id === otherIssue.id)).toEqual(secondary);
   expect(current.issues.find(item => item.id === successor.id)).toEqual(corrected.updated[0]);
   expect(current.dependencies.find(item => item.id === dependency.id)).toEqual(dependency);
   expect(current.documents.find(item => item.id === document.id)).toMatchObject({ authorId: actorId, projectId, content: note });
@@ -127,7 +151,9 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   expect(current.issues.filter(item => item.projectId === projectId && matches(item)).map(item => item.id)).toEqual([issueId]);
 
   return {
-    issueId, issueVersion: moved.updated[0].version, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
+    issueId, issueVersion: moved.updated[0].version + 1, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
+    bulkDates: { previewId: bulk.previewId, undoId: batch.undoId, dueDate: successorEnd,
+      otherProjectId: otherProject.id, otherIssueId: otherIssue.id, otherIssueVersion: otherIssue.version + 1 },
     scheduledSuccessor: { issueId: successor.id, issueVersion: corrected.updated[0].version, startDate: successorStart,
       endDate: successorEnd, dependencyId: dependency.id, lagDays },
   };

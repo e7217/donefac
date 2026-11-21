@@ -378,6 +378,15 @@
   color: #526f62;
 }
 
+.schedule-bulk-project {
+  display: block;
+  margin: 0.12rem 0 0.3rem;
+  color: #526f62;
+  font-weight: 400;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
 .schedule-bulk-date-fields,
 .schedule-bulk-date-actions {
   display: flex;

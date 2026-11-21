@@ -1347,7 +1347,8 @@ export interface SchedulePasteDependencyChange {
   after: Pick<Dependency, 'type' | 'lagDays'> | null;
 }
 export interface SchedulePastePreview {
-  projectId: string;
+  projectId: string | null;
+  projectIds?: string[];
   previewId: string | null;
   expiresAt: string | null;
   changes: ScheduleChange[];
@@ -1360,7 +1361,7 @@ export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; wa
 export const MAX_SCHEDULE_BULK_DATE_ISSUES = 100;
 export type ScheduleBulkDateChanges = Partial<Pick<Issue, 'startDate' | 'endDate' | 'dueDate'>>;
 export interface ScheduleBulkDateInput {
-  projectId: string;
+  projectId: string | null;
   issues: { id: string; expectedVersion: number }[];
   changes: ScheduleBulkDateChanges;
 }

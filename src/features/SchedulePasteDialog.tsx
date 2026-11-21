@@ -4,22 +4,24 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { ArrowDown, CalendarRange, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
 import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
 import type {
-  FeatureProps, Issue, ScheduleBulkDateChanges, ScheduleBulkDateInput, SchedulePasteApplyResult,
+  FeatureProps, Issue, Project, ScheduleBulkDateChanges, ScheduleBulkDateInput, SchedulePasteApplyResult,
   SchedulePasteDependencyChange, SchedulePastePreview,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './schedule-paste.css';
 
-export interface SchedulePasteDialogProps {
-  projectId: string;
+type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
+type ProjectName = Pick<Project, 'id' | 'name'>;
+type IssueProjects = ReadonlyMap<string, ProjectName>;
+
+export type SchedulePasteDialogProps = {
   notify: FeatureProps['notify'];
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
-  bulkDates?: { issues: readonly Issue[]; refresh: () => Promise<void> };
-}
+} & ({ projectId: string; bulkDates?: never } | { projectId: string | null; bulkDates: BulkDates });
 
-type Review = { input: string; targets: string; result: SchedulePastePreview };
+type Review = { input: string; targets: string; projects?: IssueProjects; result: SchedulePastePreview };
 type DateField = 'startDate' | 'endDate' | 'dueDate';
 type DateAction = 'keep' | 'set' | 'clear';
 type DateEntry = { action: DateAction; value: string };
@@ -56,6 +58,12 @@ export function SchedulePasteDialog(props: SchedulePasteDialogProps) {
   return <ProjectScheduleEditDialog key={`${props.projectId}:${Boolean(props.bulkDates)}`} {...props} />;
 }
 
+export function bulkDateResultMessage(updated: readonly Issue[], team: boolean) {
+  if (!team) return `${updated.length}개 업무의 날짜를 변경했습니다.`;
+  const projects = new Set(updated.map(issue => issue.projectId));
+  return `프로젝트 ${projects.size}개에서 업무 ${updated.length}개의 날짜를 변경했습니다.`;
+}
+
 function ProjectScheduleEditDialog({
   projectId,
   notify,
@@ -84,13 +92,19 @@ function ProjectScheduleEditDialog({
   const request = useRef<AbortController | null>(null);
 
   const draftId = bulkDates ? BULK_DRAFT_ID : DRAFT_ID;
+  const team = projectId === null;
   const title = bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
   const input = bulkDates ? JSON.stringify(dates) : text;
-  const issues = bulkDates?.issues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
-  const targets = issues ? JSON.stringify(issues) : '';
+  const issues = bulkDates?.issues.map(issue => ({ id: issue.id, expectedVersion: issue.version })) ?? [];
+  const targets = bulkDates ? JSON.stringify(bulkDates.issues.map(issue => [issue.id, issue.version, issue.projectId])) : '';
+  const projectNames = team ? new Map(bulkDates?.projects.map(project => [project.id, project.name])) : null;
+  const selectedProjects = projectNames && bulkDates ? new Map(bulkDates.issues.map(issue => [issue.id, {
+    id: issue.projectId, name: projectNames.get(issue.projectId) ?? '프로젝트 정보 없음',
+  }])) : undefined;
+  const projectCount = selectedProjects ? new Set([...selectedProjects.values()].map(project => project.id)).size : undefined;
   const canPreview = bulkDates
-    ? Boolean(issues?.length) && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
+    ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
     : Boolean(text.trim());
   const editLocked = Boolean(pending || applied || (bulkDates && retryApply));
   const dirty = !applied && Boolean((bulkDates ? datesEdited : text) || review || latest || error);
@@ -221,6 +235,7 @@ function ProjectScheduleEditDialog({
   function finish(controller: AbortController) {
     busyRef.current = false;
     if (mounted.current && !controller.signal.aborted) {
+      setClock(Date.now());
       setPending(null);
       onDraftChange(draftId, dirtyRef.current, false);
     }
@@ -234,16 +249,16 @@ function ProjectScheduleEditDialog({
     setApproved(false);
     setRetryApply(null);
     setNotice('');
-    const submitted = { input, targets };
-    let payload: { projectId: string; text: string } | ScheduleBulkDateInput = { projectId, text };
-    if (issues) {
+    const submitted = { input, targets, projects: selectedProjects };
+    let payload: { projectId: string; text: string } | ScheduleBulkDateInput;
+    if (bulkDates) {
       const changes: ScheduleBulkDateChanges = {};
       for (const { field } of bulkFields) {
         const { action, value } = dates[field];
         if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
       }
       payload = { projectId, issues, changes };
-    }
+    } else payload = { projectId, text };
     try {
       const result = await api<SchedulePastePreview>(bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview', {
         method: 'POST',
@@ -253,7 +268,6 @@ function ProjectScheduleEditDialog({
       if (!mounted.current || controller.signal.aborted) return;
       const next = { ...submitted, result };
       setLatest(next);
-      setClock(Date.now());
       if (!result.errors.length) {
         setReview(next);
         setApproved(Boolean(result.previewId && hasChanges(result)));
@@ -399,11 +413,12 @@ function ProjectScheduleEditDialog({
             {bulkDates ? (
               <>
                 <details className="schedule-bulk-targets">
-                  <summary>선택한 업무 {bulkDates.issues.length}개</summary>
+                  <summary>선택한 업무 {bulkDates.issues.length}개{projectCount !== undefined && ` · 프로젝트 ${projectCount}개`}</summary>
                   <ul>
                     {bulkDates.issues.map(issue => (
                       <li key={issue.id}>
                         <span>{issue.key}</span> {issue.title}
+                        <BulkDateProject project={selectedProjects?.get(issue.id)} />
                       </li>
                     ))}
                   </ul>
@@ -523,7 +538,7 @@ function ProjectScheduleEditDialog({
           {applied && (
             <p className="schedule-paste-success" role="status">
               {bulkDates
-                ? `${applied.updated.length}개 업무의 날짜를 변경했습니다.`
+                ? bulkDateResultMessage(applied.updated, team)
                 : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
               적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
@@ -545,6 +560,7 @@ function ProjectScheduleEditDialog({
                         ? item.key || bulkDates.issues.find(issue => issue.id === item.issueId)?.key || '선택 업무'
                         : `${item.line === null ? '전체' : `${item.line}행`}${item.key ? ` · ${item.key}` : ''}`}
                     </strong>
+                    {item.issueId && <BulkDateProject project={latest?.projects?.get(item.issueId)} />}
                     <span>{item.message}</span>
                   </li>
                 )}
@@ -563,6 +579,7 @@ function ProjectScheduleEditDialog({
                       ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
                       : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
+                  {result.projectIds && <p>대상 프로젝트 {result.projectIds.length}개</p>}
                   {result.expiresAt && (
                     <p>검토 유효 시간 {new Date(result.expiresAt).toLocaleTimeString('ko-KR')}까지</p>
                   )}
@@ -601,7 +618,7 @@ function ProjectScheduleEditDialog({
               {result.warnings.length > 0 && (
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
-              {result.changes.length > 0 && <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} />}
+              {result.changes.length > 0 && <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} projects={review?.projects} />}
               {dependencyChanges.length > 0 && <DependencyChangeTable changes={dependencyChanges} />}
             </section>
           )}
@@ -665,7 +682,11 @@ function DateResult({ before, after }: { before: string | null; after: string | 
   );
 }
 
-function ChangeTable({ changes, bulk }: { changes: SchedulePastePreview['changes']; bulk: boolean }) {
+function BulkDateProject({ project }: { project?: ProjectName }) {
+  return project ? <small className="schedule-bulk-project" data-schedule-project={project.id}>{project.name}</small> : null;
+}
+
+function ChangeTable({ changes, bulk, projects }: { changes: SchedulePastePreview['changes']; bulk: boolean; projects?: IssueProjects }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
   return (
@@ -691,6 +712,7 @@ function ChangeTable({ changes, bulk }: { changes: SchedulePastePreview['changes
                 <th scope="row">
                   <small>{change.key}</small>
                   <strong>{change.title}</strong>
+                  <BulkDateProject project={projects?.get(change.id)} />
                 </th>
                 {bulk ? (
                   <>

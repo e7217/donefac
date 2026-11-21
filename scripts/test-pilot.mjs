@@ -465,6 +465,19 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.equal(issue.plannedEffortMinutes, traffic.plannedEffortMinutes);
   assert.equal(issue.startDate, traffic.workingDate);
   assert.equal(issue.endDate, traffic.workingDate);
+  const bulk = traffic.bulkDates;
+  const otherIssue = workspace.issues.find(value => value.id === bulk.otherIssueId && value.projectId === bulk.otherProjectId);
+  assert.ok(otherIssue && otherIssue.projectId !== issue.projectId);
+  assert.equal(issue.dueDate, bulk.dueDate);
+  assert.equal(otherIssue.dueDate, bulk.dueDate);
+  assert.equal(otherIssue.version, bulk.otherIssueVersion);
+  const replay = await api('/schedule/bulk-dates/apply', {
+    method: 'POST', headers: { 'X-Actor-Id': fixture.actorIds[0] }, body: { previewId: bulk.previewId },
+  });
+  assert.equal(replay.undoId, bulk.undoId);
+  assert.equal(replay.updated.length, 2);
+  assert.deepEqual(replay.updated.find(value => value.id === issue.id), issue);
+  assert.deepEqual(replay.updated.find(value => value.id === otherIssue.id), otherIssue);
   const listNode = issueList.content.content?.find(node => node.type === 'issueList' && node.attrs?.projectId === fixture.projectId);
   const view = workspace.savedViews?.find(value => value.id === listNode?.attrs.savedViewId && value.projectId === fixture.projectId);
   assert.ok(listNode && view, 'The issue list must retain its project and same-project saved view.');
@@ -480,7 +493,7 @@ async function teamSnapshot(api, fixture, evidence) {
   return {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
-    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, successor, dependency, issueList, view })).digest('hex'),
+    digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, successor, dependency, issueList, view })).digest('hex'),
   };
 }
 
@@ -578,7 +591,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
   await stop(copy);
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched the original document, recovery copy, ticket schedule, dependency and issue list.`);
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project due dates and their apply receipt, schedules, dependency and issue list.`);
 }
 
 async function runStandardPilot() {

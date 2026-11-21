@@ -25,14 +25,15 @@ const date = (day: number) => `2026-06-${String(day).padStart(2, '0')}`;
 const values = ({ id, version, startDate, endDate, dueDate }: Issue) => ({ id, version, startDate, endDate, dueDate });
 
 async function makeFixture(request: APIRequestContext) {
-  const projectId = (await workspace(request)).projects[0].id;
+  const [firstProject, secondProject] = (await workspace(request)).projects;
+  const projectId = firstProject.id;
   const prefix = `한꺼번에 변경 ${randomUUID().slice(0, 8)}`;
   const issues: Issue[] = [];
   const links: Dependency[] = [];
   return {
-    projectId, prefix,
-    async create(title: string, dates: Dates) {
-      const issue = await readJson<Issue>(await request.post('/api/issues', { data: { projectId, title, ...dates } }), 201);
+    projectId, firstProject, secondProject, prefix,
+    async create(title: string, dates: Dates, targetProjectId = projectId) {
+      const issue = await readJson<Issue>(await request.post('/api/issues', { data: { projectId: targetProjectId, title, ...dates } }), 201);
       issues.push(issue);
       return issue;
     },
@@ -59,9 +60,9 @@ async function makeFixture(request: APIRequestContext) {
   };
 }
 
-async function openChart(page: Page, projectId: string, prefix: string) {
+async function openChart(page: Page, projectId: string, prefix: string, team = false) {
   await page.setViewportSize({ width: 360, height: 820 });
-  await page.goto(`/#/${projectId}/gantt`);
+  await page.goto(`/#/${projectId}/gantt${team ? '?scope=team' : ''}`);
   const search = page.getByLabel('간트 업무 검색', { exact: true });
   await expect(search).toBeVisible({ timeout: 35_000 });
   await search.fill(prefix);
@@ -274,5 +275,101 @@ test('선택 업무의 날짜 오류와 검토 이후 충돌은 적용을 막고
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     await readJson<{ updated: Issue[] }>(await undone, 200);
     expect(await fixture.stored()).toEqual([first, changed].map(issue => ({ ...values(issue), version: issue.version + 2 })));
+  } finally { await fixture.close(); }
+});
+
+test('360px 전체 프로젝트 간트에서 두 프로젝트의 선택 날짜를 함께 적용하고 되돌린다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const fixture = await makeFixture(request);
+  const { firstProject, secondProject, prefix } = fixture;
+  try {
+    const first = await fixture.create(`${prefix} 첫 프로젝트`, { startDate: date(1), endDate: date(4), dueDate: date(15) });
+    const second = await fixture.create(`${prefix} 다른 프로젝트`, { startDate: date(3), endDate: date(6), dueDate: date(18) }, secondProject.id);
+    const unselected = await fixture.create(`${prefix} 선택하지 않은 업무`, { startDate: date(2), endDate: date(8), dueDate: date(16) }, secondProject.id);
+    const original = [first, second, unselected].map(values);
+    const originalHash = `#/${firstProject.id}/gantt?scope=team`;
+    const { chart, search, selected, open, dialog } = await openChart(page, firstProject.id, prefix, true);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill(date(1));
+    await expect(open).toBeDisabled();
+    await selected(first).check();
+    await selected(second).check();
+    await expect(selected(unselected)).not.toBeChecked();
+    await open.click();
+    await expect(dialog.getByText('선택한 업무 2개 · 프로젝트 2개', { exact: true })).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await expect(dialog.getByLabel('시작일 변경', { exact: true })).toHaveValue('keep');
+    await dialog.getByLabel('종료일 변경', { exact: true }).selectOption('set');
+    const end = dialog.getByLabel('종료일 값', { exact: true });
+    await end.fill(date(12));
+    const due = dialog.getByLabel('목표 마감일 변경', { exact: true });
+    await due.selectOption('clear');
+    const previewRequest = nextPost(page, previewRoute);
+    await dialog.getByRole('button', { name: previewName, exact: true }).click();
+    const previewResponse = await previewRequest;
+    expect(previewResponse.request().postDataJSON()).toMatchObject({ projectId: null, changes: { endDate: date(12), dueDate: null } });
+    const payload = previewResponse.request().postDataJSON() as ScheduleBulkDateInput;
+    expect(payload.issues.sort((left, right) => left.id.localeCompare(right.id))).toEqual(selection([first, second]));
+    const preview = await readJson<SchedulePastePreview>(previewResponse, 200);
+    expect(preview).toMatchObject({ projectId: null, projectIds: [firstProject.id, secondProject.id].sort(), errors: [], unchanged: 0 });
+    expect(preview.previewId).toBeTruthy();
+    await expect(dialog.getByText('대상 프로젝트 2개', { exact: true })).toBeVisible();
+    const table = dialog.getByRole('table', { name: '선택 업무 날짜 변경 목록', exact: true });
+    for (const [issue, project] of [[first, firstProject], [second, secondProject]] as const) {
+      const row = table.getByRole('row').filter({ has: page.getByText(issue.key, { exact: true }) });
+      await expect(row.locator(`[data-schedule-project="${project.id}"]`)).toHaveText(project.name);
+      await expect(row.getByRole('cell').nth(1)).toContainText(date(12));
+      await expect(row.getByRole('cell').nth(2)).toContainText('삭제');
+    }
+    await expect(table.getByText(unselected.key, { exact: true })).toHaveCount(0);
+    expect(await fixture.stored()).toEqual(original);
+
+    let lostResult: SchedulePasteApplyResult | undefined;
+    const attempts: unknown[] = [];
+    page.on('request', sent => { if (new URL(sent.url()).pathname === applyRoute && sent.method() === 'POST') attempts.push(sent.postDataJSON()); });
+    await page.route(url => url.pathname === applyRoute, async route => {
+      lostResult = await readJson<SchedulePasteApplyResult>(await route.fetch(), 200);
+      await route.abort('failed');
+    }, { times: 1 });
+    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    const recover = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(recover).toBeEnabled();
+    await expect(end).toHaveValue(date(12));
+    await expect(due).toHaveValue('clear');
+    const applied = [
+      ...[first, second].map(issue => ({ ...values(issue), version: issue.version + 1, endDate: date(12), dueDate: null })),
+      values(unselected),
+    ];
+    expect(await fixture.stored()).toEqual(applied);
+    const retried = nextPost(page, applyRoute);
+    await recover.click();
+    expect(await readJson<SchedulePasteApplyResult>(await retried, 200)).toEqual(lostResult);
+    expect(attempts).toEqual([{ previewId: preview.previewId }, { previewId: preview.previewId }]);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText('프로젝트 2개에서 업무 2개의 날짜를 변경했습니다.', { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(url => url.hash === originalHash);
+    await expect(search).toHaveValue(prefix);
+    expect(await fixture.stored()).toEqual(applied);
+    for (const issue of [first, second]) {
+      await expect(chart.getByLabel(`${issue.key} 시작일`, { exact: true })).toHaveValue(issue.startDate!);
+      await expect(chart.getByLabel(`${issue.key} 종료일`, { exact: true })).toHaveValue(date(12));
+    }
+
+    const undo = nextPost(page, undoRoute);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const restored = await undo;
+    expect(restored.request().postDataJSON()).toEqual({ undoId: lostResult?.undoId });
+    await readJson<{ updated: Issue[] }>(restored, 200);
+    expect(await fixture.stored()).toEqual([
+      ...[first, second].map(issue => ({ ...values(issue), version: issue.version + 2 })), values(unselected),
+    ]);
+    await page.getByRole('combobox', { name: '프로젝트 필터', exact: true }).selectOption(secondProject.id);
+    await expect(page).toHaveURL(url => url.hash === `${originalHash}&ganttProject=${secondProject.id}`);
+    await expect(chart.getByLabel(`${first.key} 종료일`, { exact: true })).toHaveCount(0);
+    await expect(chart.getByLabel(`${second.key} 종료일`, { exact: true })).toHaveValue(second.endDate!);
+    await expect(search).toHaveValue(prefix);
   } finally { await fixture.close(); }
 });

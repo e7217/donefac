@@ -30,7 +30,7 @@ import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { GanttCascadeDialog, type CascadeAnchorChange } from './GanttCascadeDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
-import { SchedulePasteDialog } from './SchedulePasteDialog';
+import { bulkDateResultMessage, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import { GanttPlanningControls } from './GanttPlanningControls';
 import { GanttPlanAssignment } from './GanttPlanAssignment';
@@ -576,7 +576,7 @@ function ProjectGantt(props: GanttProps) {
   const selectedIssues = issues.filter(i => selected.has(i.id));
   const firstSelectedProject = selectedIssues[0]?.projectId;
   const selectedProjectId = firstSelectedProject && selectedIssues.every(issue => issue.projectId === firstSelectedProject) ? firstSelectedProject : undefined;
-  const canEditBulkDates = hasProject || Boolean(selectedProjectId);
+  const canEditBulkDates = hasProject || (allProjects && data.projects.length > 0);
   const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
   const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
@@ -1201,6 +1201,7 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(dependencyFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(dependencyFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={dependencyFocus ? '' : undefined} onPointerDown={dependencyFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       {canEditBulkDates && <button ref={bulkDatesTrigger} className="btn" type="button" onClick={openBulkDates}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
         disabled={!selectedIssues.length || bulkDatesOverLimit || busy || Boolean(activeDatePicker)}>
         <CalendarRange size={15} aria-hidden="true" />일정 일괄 편집
       </button>}
@@ -1478,8 +1479,8 @@ function ProjectGantt(props: GanttProps) {
     {autoOpen && automaticProjectId && <AutomaticScheduleDialog {...props} projectId={automaticProjectId} selectedIssueIds={automaticScheduleIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
     {(pasteOpen || bulkDateIssues) && <SchedulePasteDialog
       key={bulkDateIssues ? 'bulk-dates' : 'paste'}
-      projectId={bulkDateIssues?.[0]?.projectId ?? projectId} notify={notify} onDraftChange={trackDraft}
-      bulkDates={bulkDateIssues && { issues: bulkDateIssues, refresh }}
+      {...(bulkDateIssues ? { projectId: allProjects ? null : projectId, bulkDates: { issues: bulkDateIssues, projects: data.projects, refresh } } : { projectId })}
+      notify={notify} onDraftChange={trackDraft}
       onClose={bulkDateIssues ? closeBulkDates : () => setPasteOpen(false)}
       onApplied={async result => {
         setUndoId(result.undoId);
@@ -1487,7 +1488,7 @@ function ProjectGantt(props: GanttProps) {
         await refresh();
         if (bulkDateIssues) {
           closeBulkDates();
-          notify(`${result.updated.length}개 업무의 날짜를 변경했습니다.`);
+          notify(bulkDateResultMessage(result.updated, allProjects));
           return;
         }
         setPasteOpen(false);

@@ -32,8 +32,8 @@ async function fixture() {
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function issue(f: Fixture, title: string, startDate: string | null = '2026-11-19',
-  endDate: string | null = '2026-11-20', dueDate: string | null = null) {
-  const made = await f.call<Issue>('/issues', 'POST', { projectId: f.project.id, title, startDate, endDate, dueDate });
+  endDate: string | null = '2026-11-20', dueDate: string | null = null, projectId = f.project.id) {
+  const made = await f.call<Issue>('/issues', 'POST', { projectId, title, startDate, endDate, dueDate });
   assert.equal(made.status, 201, JSON.stringify(made.data)); return made.data;
 }
 async function workspace(f: Fixture) { return (await f.call<WorkspaceSnapshot>('/workspace')).data; }
@@ -46,7 +46,7 @@ async function validPreview(f: Fixture, target: Issue, endDate = '2026-11-24') {
   const value = await preview(f, sheet([[target.key, '2026-11-23', endDate]]));
   assert.deepEqual(value.errors, []); assert.ok(value.previewId); assert.ok(value.expiresAt); return value;
 }
-async function apply(f: Fixture, value: PastePreview, actorId = 'user-yun') { return f.call<Applied>('/schedule/paste-apply', 'POST', { previewId: value.previewId }, actorId); }
+async function apply(f: Fixture, value: Pick<PastePreview, 'previewId'>, actorId = 'user-yun') { return f.call<Applied>('/schedule/paste-apply', 'POST', { previewId: value.previewId }, actorId); }
 function dates(issues: Pick<Issue, 'id' | 'startDate' | 'endDate'>[]) { return Object.fromEntries(issues.map(value => [value.id, [value.startDate, value.endDate]])); }
 
 const bulkDatePath = '/schedule/bulk-dates';
@@ -204,6 +204,119 @@ test('bulk calendar dates guard linked changes and roll back a failed write acro
       assert.equal((await f.call('/schedule/undo', 'POST', { undoId: applied.data.undoId })).status, 409);
       assert.deepEqual(await workspace(f), beforeUndo);
     } finally { database.close(); }
+  } finally { await f.close(); }
+});
+
+test('team bulk dates set, clear and keep across explicit projects, replay once, and undo the entire batch', async () => {
+  const f = await fixture();
+  try {
+    const otherProjectId = 'project-team';
+    const first = await issue(f, '첫 프로젝트의 일정과 마감', '2026-11-19', '2026-11-23', '2026-11-24');
+    const second = await issue(f, '다른 프로젝트의 마감 미정', '2026-11-18', '2026-11-25', null, otherProjectId);
+    const unchanged = await issue(f, '이미 같은 일정과 마감', null, '2026-11-20', '2026-11-28', otherProjectId);
+    const unselected = await issue(f, '바꾸지 않는 같은 프로젝트 업무', '2026-11-17', '2026-11-24', '2026-11-24', otherProjectId);
+    const input: ScheduleBulkDateInput = {
+      ...bulkDateInput(f, [first, second, unchanged], { startDate: null, dueDate: '2026-11-28' }), projectId: null,
+    };
+    const original = await workspace(f);
+    const preview = await reviewBulkDates(f, input);
+    assert.equal(preview.projectId, null);
+    assert.deepEqual(preview.projectIds, [f.project.id, otherProjectId].sort());
+    assert.ok(preview.previewId);
+    assert.deepEqual(preview.errors, []);
+    assert.equal(preview.unchanged, 1);
+    assert.deepEqual(preview.changes.map(({ id, fromStart, fromEnd, fromDue, toStart, toEnd, toDue }) =>
+      [id, fromStart, fromEnd, fromDue, toStart, toEnd, toDue]), [first, second].map(current =>
+      [current.id, current.startDate, current.endDate, current.dueDate, null, current.endDate, '2026-11-28']));
+    assert.deepEqual(await workspace(f), original);
+
+    const applied = await applyBulkDates(f, preview);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.ok(applied.data.undoId);
+    assert.deepEqual(applied.data.updated.map(current => [current.id, current.projectId, current.version, allDates(current)]),
+      [first, second].map(current => [current.id, current.projectId, current.version + 1,
+        { startDate: null, endDate: current.endDate, dueDate: '2026-11-28' }]));
+    const after = await workspace(f);
+    for (const current of [...applied.data.updated, unchanged, unselected]) {
+      assert.deepEqual(after.issues.find(item => item.id === current.id), current);
+    }
+    assert.deepEqual(await applyBulkDates(f, preview), applied);
+    assert.deepEqual(await workspace(f), after);
+
+    const undo = await f.call<{ updated: Issue[] }>('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+    assert.equal(undo.status, 200, JSON.stringify(undo.data));
+    assert.deepEqual(undo.data.updated.map(current => [current.id, current.projectId, current.version, allDates(current)]),
+      [first, second].map(current => [current.id, current.projectId, current.version + 2, allDates(current)]));
+    const restored = await workspace(f);
+    for (const current of [...undo.data.updated, unchanged, unselected]) {
+      assert.deepEqual(restored.issues.find(item => item.id === current.id), current);
+    }
+    assert.deepEqual(restored.dependencies, original.dependencies);
+  } finally { await f.close(); }
+});
+
+test('team bulk dates fence the other project calendar, linked endpoint and unchanged selection without partial writes', async () => {
+  const f = await fixture();
+  try {
+    const otherProjectId = 'project-team';
+    const first = await issue(f, '첫 프로젝트 대상', '2026-11-17', '2026-11-27', '2026-11-28');
+    const second = await issue(f, '다른 프로젝트 대상', '2026-11-18', '2026-11-26', '2026-11-27', otherProjectId);
+    const unchanged = await issue(f, '다른 프로젝트에서 같은 일정', '2026-11-23', '2026-11-26', null, otherProjectId);
+    const predecessor = await issue(f, '다른 프로젝트의 선택하지 않은 선행 업무', '2026-11-19', '2026-11-20', null, otherProjectId);
+    const link = await f.call<Dependency>('/dependencies', 'POST', { predecessorId: predecessor.id, successorId: second.id, type: 'FS', lagDays: 0 });
+    assert.equal(link.status, 201, JSON.stringify(link.data));
+    const changes = { startDate: '2026-11-23', dueDate: null };
+    const input: ScheduleBulkDateInput = { ...bulkDateInput(f, [first, second, unchanged], changes), projectId: null };
+    const review = await reviewBulkDates(f, input);
+    assert.ok(review.previewId);
+    assert.equal(review.unchanged, 1);
+    assert.ok(!review.warnings.some(warning => warning.includes(`${predecessor.key} → ${second.key}`)));
+
+    const calendarPath = `/projects/${otherProjectId}/calendar`;
+    const calendar = (await f.call<WorkCalendar>(calendarPath)).data;
+    const closed = await f.call<WorkCalendar>(calendarPath, 'PATCH', {
+      ...calendar, expectedVersion: calendar.version,
+      exceptions: [...calendar.exceptions, { date: '2026-11-23', isWorking: false, label: '둘째 프로젝트만 휴무' }],
+    });
+    assert.equal(closed.status, 200, JSON.stringify(closed.data));
+    const afterCalendar = await workspace(f);
+    assert.equal((await applyBulkDates(f, review)).status, 409);
+    assert.deepEqual(await workspace(f), afterCalendar);
+
+    const afterHoliday = await reviewBulkDates(f, input);
+    assert.ok(afterHoliday.previewId);
+    assert.ok(afterHoliday.warnings.some(warning => warning.includes(`${predecessor.key} → ${second.key}`)));
+    const linkedEdit = await f.call<Issue>(`/issues/${predecessor.id}`, 'PATCH', { expectedVersion: predecessor.version, endDate: '2026-11-24' });
+    assert.equal(linkedEdit.status, 200, JSON.stringify(linkedEdit.data));
+    const afterEndpoint = await workspace(f);
+    assert.equal((await applyBulkDates(f, afterHoliday)).status, 409);
+    assert.deepEqual(await workspace(f), afterEndpoint);
+
+    const reviewed = await reviewBulkDates(f, input);
+    assert.ok(reviewed.previewId);
+    const concurrent = await f.call<Issue>(`/issues/${unchanged.id}`, 'PATCH', { expectedVersion: unchanged.version, title: '선택 업무의 새 제목' });
+    assert.equal(concurrent.status, 200, JSON.stringify(concurrent.data));
+    const beforeApply = await workspace(f);
+    assert.equal((await applyBulkDates(f, reviewed)).status, 409);
+    assert.deepEqual(await workspace(f), beforeApply);
+
+    const missing = await reviewBulkDates(f, { ...input, issues: [...input.issues, { id: randomUUID(), expectedVersion: 1 }] });
+    assert.equal(missing.previewId, null);
+    assert.deepEqual(missing.changes.map(current => current.id), [first.id, second.id]);
+    assert.equal(missing.errors.length, 2);
+    assert.deepEqual(await workspace(f), beforeApply);
+
+    const fresh = await reviewBulkDates(f, { ...bulkDateInput(f, [first, second, concurrent.data], changes), projectId: null });
+    assert.equal(fresh.unchanged, 1);
+    const applied = await applyBulkDates(f, fresh);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.deepEqual(applied.data.updated.map(current => current.id), [first.id, second.id]);
+    const secondMoved = applied.data.updated.find(current => current.id === second.id)!;
+    const remote = await f.call<Issue>(`/issues/${second.id}`, 'PATCH', { expectedVersion: secondMoved.version, dueDate: '2026-11-30' });
+    assert.equal(remote.status, 200, JSON.stringify(remote.data));
+    const beforeUndo = await workspace(f);
+    assert.equal((await f.call('/schedule/undo', 'POST', { undoId: applied.data.undoId })).status, 409);
+    assert.deepEqual(await workspace(f), beforeUndo);
   } finally { await f.close(); }
 });
 
