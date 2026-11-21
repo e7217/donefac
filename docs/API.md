@@ -217,6 +217,14 @@ curl --fail-with-body \
 
 문서 화면의 Markdown 가져오기는 브라우저에서 파일이나 입력 내용을 미리보기로 변환한다. 저장은 새 문서와 같은 API에 검토한 `content`를 보낸다. 미리보기 입력을 바꾸면 다시 검토한 뒤 저장한다. 첫 저장 응답을 확인할 수 없으면 같은 요청을 다시 보내고, 응답을 받은 뒤 목록이 갱신되지 않았으면 문서 열기만 다시 시도한다.
 
+## 문서 트리 Markdown ZIP 내보내기
+
+브라우저의 `GET /api/document-exports/markdown.zip`에 `source=saved` 또는 `source=published`와 범위를 지정한다. `scope=subtree&documentId=<ID>`는 문서와 하위 트리, `scope=space&projectId=<ID>`는 해당 프로젝트, `scope=space`는 팀 공통 공간이다. `source=published`는 승인된 최신 발행본을 사용한다.
+
+응답은 `application/zip`이며 `Content-Disposition`에 다운로드 파일명을 제공한다. ZIP의 `README.md`는 문서 트리이고 `manifest.json`의 `format`은 `teamspace-document-markdown`, `schemaVersion`은 `1`이다. `documents`에 상대 파일 경로·저장 버전·`parentId`와 `originalParentId`·발행 정보를 기록한다. 발행본만 내보낼 때 `parentId`는 패키지에 있는 가장 가까운 상위 문서다. `attachments`는 소유 문서와 파일 버전 ID·이름·크기·SHA-256·경로를 기록하고 `diagnostics`는 오프라인으로 연결할 수 없는 참조와 동적 블록을 보여준다.
+
+최신 저장본은 현재 첨부와 본문에서 직접 참조한 과거 파일 버전을 모두 담는다. 승인·발행본은 그 본문이 직접 참조한 파일만 담는다. 같은 서비스 주소의 문서·절·파일 링크는 패키지 상대 경로로 바꾸고, 다른 주소로 저장된 링크는 진단에 기록한다. 문서 500개, 첨부 1,500개, 압축 전후 각각 64MiB까지 처리한다. 조건이 올바르지 않으면 `400`, 해당 문서나 공간 또는 내보낼 저장본이 없으면 `404`, 한도를 넘으면 `413`, 대상 파일을 읽거나 무결성을 확인할 수 없으면 `503`과 JSON 오류를 반환한다.
+
 ## 문서 라벨
 
 브라우저와 `/api/v1`의 문서 생성·수정 경로는 선택 필드 `labels`를 받는다. 문서당 최대 20개, 라벨당 최대 60 UTF-16 코드 단위를 허용한다. 앞뒤 공백을 제거하고 NFC로 정규화하며, 대소문자 차이는 같은 라벨로 취급한다. 같은 라벨이 반복되면 처음 입력한 표기를 유지한다. 수정에서 `labels`를 생략하면 현재 값을 유지하고 `[]`를 보내면 모두 지운다.

@@ -1,0 +1,115 @@
+.document-offline-export {
+  box-sizing: border-box;
+  width: min(460px, calc(100vw - 28px));
+  max-height: calc(100dvh - 28px);
+  margin: auto;
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #e7ebf2;
+  border-radius: 14px;
+  color: #25354c;
+  background: #fff;
+  box-shadow: 0 20px 70px #15254533;
+}
+
+.document-offline-export::backdrop {
+  background: #15254566;
+}
+
+.document-offline-export-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.document-offline-export-heading h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+.document-offline-export .btn {
+  min-height: 38px;
+}
+
+.document-offline-export-heading .btn {
+  flex: none;
+  padding-inline: 8px;
+}
+
+.document-offline-export p {
+  margin: 5px 0 0;
+  color: #54647a;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.document-offline-export-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.document-offline-export-form label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.document-offline-export-form .field {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+}
+
+.document-offline-export .document-offline-export-error,
+.document-offline-export .document-offline-export-status {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #dce6df;
+  border-radius: 7px;
+  background: #f0f7f3;
+  color: #365849;
+}
+
+.document-offline-export .document-offline-export-error {
+  border-color: #efcbcb;
+  background: #fff5f5;
+  color: #9a3240;
+}
+
+.document-offline-export-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.document-offline-export-actions .btn[aria-disabled='true'] {
+  opacity: .65;
+  cursor: wait;
+}
+
+@media (max-width: 480px) {
+  .document-offline-export {
+    padding: 15px;
+  }
+
+  .document-offline-export-heading h2 {
+    font-size: 18px;
+  }
+
+  .document-offline-export .btn,
+  .document-offline-export .field {
+    min-height: 44px;
+  }
+
+  .document-offline-export .field {
+    font-size: 1rem;
+  }
+
+  .document-offline-export-heading .btn {
+    min-width: 44px;
+  }
+}

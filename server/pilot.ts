@@ -31,6 +31,7 @@ const access = createPilotAccess();
 const teamIndex = access ? readFileSync(index, 'utf8').replace('</head>', '<meta name="teamspace-pilot-access" content="enabled"></head>') : null;
 const api = createApp({
   dataDir,
+  browserOrigin: access?.origin,
   gitlabWebhookPublicOrigin: access?.origin,
   seed: process.env.TEAMSPACE_PILOT_DEMO === '1',
   outboundWorker: process.env.TEAMSPACE_PILOT_OUTBOUND !== '0',

@@ -64,6 +64,7 @@ import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
 import { registerDeliveryBlockerRoutes } from './delivery-blocker-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
+import { registerDocumentExportRoutes } from './document-export.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
 import { DeadlineReminderError, DeadlineRemindersService } from './deadline-reminders.js';
 import { documentNotificationSpaceProject, NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
@@ -158,6 +159,7 @@ export function createApp(options: {
   deadlineReminderClock?: () => Date;
   deadlineReminderIntervalMs?: number;
   atlassianEnv?: NodeJS.ProcessEnv;
+  browserOrigin?: string;
   gitlabWebhookPublicOrigin?: string;
 } = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
@@ -1452,6 +1454,7 @@ export function createApp(options: {
   app.get('/api/document-publications',(req,res)=>{
     res.set('Cache-Control','no-store').json(listDocumentPublications(store,actor(req),req.query));
   });
+  registerDocumentExportRoutes(app, { store, files, publications: documentPublication, attachmentVersions }, options.browserOrigin);
   app.get('/api/documents/:id/publication',(req,res)=>{
     res.json(documentPublication.get(req.params.id));
   });

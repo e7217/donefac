@@ -26,6 +26,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
 import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
+import { DocumentOfflineExport, type DocumentOfflineExportScope } from './DocumentOfflineExport';
 import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentPublication } from './DocumentPublication';
@@ -215,6 +216,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => templateManagerOpener.current?.focus({ preventScroll: true }));
   }, []);
   const [exportOpen, setExportOpen] = useState(false);
+  const exportMenuTrigger = useRef<HTMLButtonElement>(null);
+  const offlineExportOpener = useRef<HTMLButtonElement>(null);
+  const [offlineExport, setOfflineExport] = useState<DocumentOfflineExportScope | null>(null);
+  function openOfflineExport(scope: DocumentOfflineExportScope, opener: HTMLButtonElement | null) {
+    offlineExportOpener.current = opener;
+    setExportOpen(false);
+    setOfflineExport(scope);
+  }
+  function closeOfflineExport() {
+    const opener = offlineExportOpener.current;
+    setOfflineExport(null);
+    requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
+  }
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
   const [referenceSelection, setReferenceSelection] = useState<ReferenceSelection | null>(null);
@@ -511,6 +525,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
+      if (offlineExport) afterAcceptedNavigation(event, () => setOfflineExport(null));
       if (isDocumentPreservedByNavigation(event, selectedDocumentId)) {
         if (annotationDialog) {
           event.preventDefault();
@@ -536,7 +551,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('teamspace:navigate', guard);
     return () => window.removeEventListener('teamspace:navigate', guard);
-  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft]);
+  }, [annotationDialog, closeCreateDocument, confirmTemplateDraftDiscard, notify, rememberDraft, rememberComment, selectedDocumentId, isReplySending, hasReplyDraft, offlineExport]);
 
   useEffect(() => {
     if (teamCreation && !creating && !teamCreationRejected) createSubmit.current?.focus({ preventScroll: true });
@@ -607,7 +622,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen || newOpen || templateManager) return;
+      if (issueDrawerOpen || newOpen || templateManager || offlineExport) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen) void saveDraft();
@@ -616,7 +631,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen, templateManager]);
+  }, [saveDraft, publicationOpen, moveOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1365,13 +1380,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
-    <div className="docs-heading" inert={newOpen || Boolean(templateManager)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
+    <div className="docs-heading" inert={newOpen || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
       <div className="document-template-heading-actions">
+        <button className="btn" type="button" onClick={event => openOfflineExport(currentProject ? 'project' : 'common', event.currentTarget)}>
+          <ArrowDownToLine size={15} aria-hidden="true" />Markdown ZIP 내보내기
+        </button>
         <button className="btn" type="button" onClick={event => manageTemplates(event.currentTarget)}><FileStack size={15} aria-hidden="true" />팀 템플릿 관리</button>
         <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button>
       </div>
     </div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || Boolean(issueBlockDialog || documentAction || templateManager)}>
+    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || Boolean(issueBlockDialog || documentAction || templateManager || offlineExport)}>
       <aside className="docs-tree" aria-label="문서 목록">
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         {onChangeDocumentLabel && <div className="docs-label-filters">
@@ -1414,7 +1432,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <button type="button" className="btn btn-ghost docs-icon-button" title="팀 템플릿으로 저장" aria-label="팀 템플릿으로 저장"
                 disabled={saving || restoring} onClick={event => manageTemplates(event.currentTarget, latestPage ?? selectedPage)}><FileStack size={16} aria-hidden="true" /></button>
               {liveMode ? <button className="btn btn-ghost docs-checkpoint-button" disabled={saving || draft.dirty || liveState?.pending || liveState?.phase !== 'connected'} onClick={() => void checkpoint()}><History size={13} /> 버전 기록</button> : activeSession && !activeSession.enabled && <button className="btn btn-ghost docs-enable-collaboration" disabled={saving || draft.dirty} onClick={() => void enableCollaboration()}>공동 편집 시작</button>}
-              <div className="docs-export-container"><button className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기" onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>{exportOpen && <div className="docs-popover docs-export-menu"><button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button><button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button></div>}</div>
+              <div className="docs-export-container">
+                <button ref={exportMenuTrigger} className="btn btn-ghost docs-icon-button" title="문서 내보내기" aria-label="문서 내보내기"
+                  aria-expanded={exportOpen} onClick={() => setExportOpen(value => !value)}><ArrowDownToLine size={16} /></button>
+                {exportOpen && <div className="docs-popover docs-export-menu">
+                  <button onClick={() => { downloadDocument(`${draft.title || 'document'}.md`, `# ${draft.title}\n\n${contentMarkdown(draft.content)}`, 'text/markdown;charset=utf-8'); setExportOpen(false); }}>Markdown 내보내기</button>
+                  <button onClick={() => { downloadDocument(`${draft.title || 'document'}.json`, JSON.stringify({ format: 'teamspace-document', schemaVersion: Math.max(2, documentContentSchemaVersion(draft.content)), document: { ...selectedPage, title: draft.title, content: draft.content, plainText: draft.plainText, status: draft.status, parentId: draft.parentId, labels: draft.labels.length ? draft.labels : undefined } }, null, 2), 'application/json'); setExportOpen(false); }}>문서 JSON 내보내기</button>
+                  <button onClick={() => openOfflineExport('subtree', exportMenuTrigger.current)}>문서 트리 ZIP 내보내기</button>
+                </div>}
+              </div>
               <button type="button" className="btn btn-ghost docs-icon-button" title="문서 이동" aria-label="문서 이동" onClick={() => {
                 const blocker = moveBlocker();
                 if (blocker) { notify(blocker, 'error'); return; }
@@ -1616,6 +1642,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         : <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>팀의 다음 아이디어를 기록하세요</h2><p>업무와 문서를 연결하면, 결정의 맥락이 남습니다.</p><button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 첫 문서 작성하기</button><div className="docs-welcome-templates">{DOCUMENT_TEMPLATES.filter(template => template.id !== 'blank').map(template => <button key={template.id} onClick={() => openNew('', template.id)}><span>{template.icon}</span><strong>{template.name}</strong><p>{template.description}</p></button>)}</div></div>}
     </div>
 
+    {offlineExport && <DocumentOfflineExport document={selectedPage} project={currentProject} initialScope={offlineExport}
+      actorId={actorId} notify={notify} onClose={closeOfflineExport} />}
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
       sourceDocument={documentAction.source} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
