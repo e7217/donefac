@@ -1543,7 +1543,26 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     });
     res.json({ok:true,trashItemId});
   });
-  app.post('/api/resource-links',(req,res)=>{get('issues',req.body.issueId);get('documents',req.body.documentId);const l={id:uid(),issueId:req.body.issueId,documentId:req.body.documentId,kind:nullableText(req.body.kind,'관계',80)||'관련 문서'};store.transaction(()=>{store.put('resource_links',l);activity(req,'issue',l.issueId,'문서 연결');});res.status(201).json(l);});
+  app.post('/api/resource-links',(req,res)=>{
+    const input=req.body;
+    if(!input||typeof input!=='object'||Array.isArray(input)||
+      Object.keys(input).some(key=>!['issueId','documentId','kind','actorId'].includes(key))) return fail('업무와 문서의 연결 정보를 확인해 주세요.');
+    const {issueId,documentId}=input;
+    if(typeof issueId!=='string'||!issueId||typeof documentId!=='string'||!documentId) return fail('연결할 업무와 문서를 확인해 주세요.');
+    const kind=nullableText(input.kind,'관계',80)||'관련 문서';
+    actor(req);
+    const {link,created}=store.transaction(()=>{
+      get('issues',issueId);
+      get('documents',documentId);
+      const existing=store.db.prepare('SELECT json FROM resource_links WHERE issue_id=? AND document_id=?').get(issueId,documentId) as {json:string}|undefined;
+      if(existing) return {link:JSON.parse(existing.json) as ResourceLink,created:false};
+      const link:ResourceLink={id:uid(),issueId,documentId,kind};
+      store.put('resource_links',link);
+      activity(req,'issue',issueId,'문서 연결');
+      return {link,created:true};
+    });
+    res.status(created?201:200).json({id:link.id,issueId:link.issueId,documentId:link.documentId,kind:link.kind});
+  });
   app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
   app.get('/api/projects/:id/dependencies',(req,res)=>{
     const projectId=get<Project>('projects',req.params.id).id;

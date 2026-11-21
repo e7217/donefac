@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, RichContent, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, ResourceLink, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { listIssueRelations } from './issue-relations.js';
@@ -255,6 +255,27 @@ export class ApiKeyService {
       this.used(key); return next();
     }
     if (request.method === 'GET') {
+      const resourceLinks = /^\/api\/(issues|documents)\/([^/]+)\/resource-links$/.exec(path);
+      if (resourceLinks) {
+        this.query(request, []);
+        const table = resourceLinks[1] as 'issues' | 'documents';
+        const id = this.decode(resourceLinks[2]);
+        this.resource(key, table, id);
+        const column = table === 'issues' ? 'issue_id' : 'document_id';
+        const rows = this.store.db.prepare(`SELECT l.id, l.issue_id AS issueId, l.document_id AS documentId,
+          json_extract(l.json, '$.kind') AS kind, i.project_id AS issueProjectId, d.project_id AS documentProjectId
+          FROM resource_links l JOIN issues i ON i.id=l.issue_id JOIN documents d ON d.id=l.document_id
+          WHERE l.${column}=? ORDER BY l.id`).all(id) as (Pick<ResourceLink, 'id' | 'issueId' | 'documentId' | 'kind'> & {
+            issueProjectId: string; documentProjectId: string | null;
+          })[];
+        const projects = key.projectIds;
+        const links = rows.flatMap(({ id, issueId, documentId, kind, issueProjectId, documentProjectId }) =>
+          projects === null || (projects.includes(issueProjectId) && documentProjectId !== null && projects.includes(documentProjectId))
+            ? [{ id, issueId, documentId, kind }] : []);
+        this.used(key);
+        response.set('Cache-Control', 'no-store').json(links);
+        return;
+      }
       if (issueRelations && !issueRelations[2]) {
         this.query(request, []);
         const id = this.decode(issueRelations[1]);
@@ -349,6 +370,7 @@ export class ApiKeyService {
     }
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
+    const resourceLink = /^\/api\/resource-links\/([^/]+)$/.exec(path);
     const dependency = /^\/api\/dependencies\/([^/]+)$/.exec(path);
     const relationDependency = /^\/api\/issues\/([^/]+)\/relations\/([^/]+)\/schedule-dependency$/.exec(path);
     if (request.method === 'POST' && ['/api/issues', '/api/documents'].includes(path)) {
@@ -366,6 +388,17 @@ export class ApiKeyService {
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
       } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+    } else if (request.method === 'POST' && path === '/api/resource-links') {
+      this.query(request, []);
+      this.resource(key, 'issues', request.body?.issueId);
+      this.resource(key, 'documents', request.body?.documentId);
+    } else if (request.method === 'DELETE' && resourceLink) {
+      this.query(request, []);
+      const link = this.store.get<ResourceLink>('resource_links', this.decode(resourceLink[1]));
+      if (!link) return fail(404, '업무와 문서의 연결을 찾을 수 없습니다.');
+      this.resource(key, 'issues', link.issueId);
+      this.resource(key, 'documents', link.documentId);
+      if (link.documentSource !== undefined) fail(409, '결정 근거가 연결된 항목은 자동화 API에서 삭제할 수 없습니다.');
     } else if (request.method === 'POST' && (path === '/api/dependencies' || relationDependency)) {
       this.query(request, []);
       if (relationDependency) {

@@ -23,6 +23,7 @@ import { IssueGitlabActivity } from './IssueGitlabActivity';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
+import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -65,6 +66,25 @@ function IssuePanelContent(props: IssuePanelProps) {
   const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
   const bodyReferences = useMemo(() => new Map(findIssueDocumentReferences(data.documents, issueId)
     .map(reference => [reference.document.id, reference])), [data.documents, issueId]);
+  const { linkedDocuments, linkedDocumentIds, availableDocuments } = useMemo(() => {
+    const linkedDocuments = data.resourceLinks.filter(link => link.issueId === issueId);
+    const linkedDocumentIds = new Set(linkedDocuments.map(link => link.documentId));
+    const documentsById = new Map(data.documents.map(doc => [doc.id, doc]));
+    const availableDocuments = data.documents.filter(doc => !linkedDocumentIds.has(doc.id)).map(doc => {
+      const ancestors: string[] = [];
+      const visited = new Set([doc.id]);
+      let parentId = doc.parentId;
+      while (parentId && !visited.has(parentId)) {
+        const parent = documentsById.get(parentId);
+        if (!parent) break;
+        visited.add(parentId);
+        ancestors.push(parent.title || '제목 없는 문서');
+        parentId = parent.parentId;
+      }
+      return { id: doc.id, title: doc.title || '제목 없는 문서', projectId: doc.projectId, context: ancestors.reverse().join(' / ') };
+    });
+    return { linkedDocuments, linkedDocumentIds, availableDocuments };
+  }, [data.documents, data.resourceLinks, issueId]);
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
@@ -111,8 +131,8 @@ function IssuePanelContent(props: IssuePanelProps) {
     requestAnimationFrame(() => (opener?.isConnected && !opener.disabled ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
   }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
-  const [documentId, setDocumentId] = useState('');
   const [linking, setLinking] = useState(false);
+  const linkingRef = useRef(false);
   const [loadedVersion, setLoadedVersion] = useState(issue?.version);
   const dirty = Boolean(draft && baseDraft && JSON.stringify(editableIssue(draft, labels)) !== JSON.stringify(editableIssue(baseDraft, baseDraft.labels.join(', '))));
   const dirtyRef = useRef(false);
@@ -262,9 +282,6 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
 
   if (!issue || !draft) return <div className="issue-panel-backdrop"><aside className="issue-detail-panel"><button className="issue-icon-button" onClick={closePanel} aria-label="닫기"><X /></button><div className="issue-empty">업무를 찾을 수 없습니다.</div></aside></div>;
-  const linkedDocuments = data.resourceLinks.filter(l => l.issueId === issueId);
-  const linkedDocumentIds = new Set(linkedDocuments.map(link => link.documentId));
-  const availableDocuments = data.documents.filter(doc => !linkedDocumentIds.has(doc.id));
   const bodyOnlyReferences = [...bodyReferences.values()].filter(({ document }) => !linkedDocumentIds.has(document.id));
   const activities = data.activities.filter(a => a.resourceId === issueId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const children = data.issues.filter(i => i.parentId === issueId).map(child => ({
@@ -345,10 +362,24 @@ function IssuePanelContent(props: IssuePanelProps) {
     }
     catch (err) { setCommentError(errorMessage(err)); } finally { setCommenting(false); }
   }
-  async function linkDocument() {
-    if (!documentId) return; setLinking(true);
-    try { await post<ResourceLink>('/resource-links', { issueId, documentId, kind: 'related' }); setDocumentId(''); await refresh(); notify('문서를 연결했습니다.'); }
-    catch (err) { notify(errorMessage(err), 'error'); } finally { setLinking(false); }
+  async function linkDocument(documentId: string) {
+    if (linkingRef.current) return false;
+    linkingRef.current = true;
+    setLinking(true);
+    let linked = false;
+    try {
+      await post('/resource-links', { issueId, documentId, kind: 'related' });
+      linked = true;
+      await refresh();
+      notify('문서를 연결했습니다.');
+      return true;
+    } catch (err) {
+      notify(linked ? '문서를 연결했습니다. 연결 목록을 다시 확인해 주세요.' : errorMessage(err), 'error');
+      return false;
+    } finally {
+      linkingRef.current = false;
+      setLinking(false);
+    }
   }
   async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
   function openDependencyEditor(opener: HTMLButtonElement, otherRole: RelatedIssueDirection, dependency?: Dependency) {
@@ -540,7 +571,7 @@ function IssuePanelContent(props: IssuePanelProps) {
             </section>}
           </div>;
         })}
-        <div className="issue-link-control"><select className="field" value={documentId} onChange={e => setDocumentId(e.target.value)} aria-label="연결할 문서"><option value="">문서를 선택하세요</option>{availableDocuments.map(doc => <option key={doc.id} value={doc.id}>{doc.title}</option>)}</select><button className="btn" disabled={!documentId || linking} onClick={linkDocument}><Link2 size={14} /> 연결</button></div>
+        <ResourceLinkPicker kind="document" items={availableDocuments} projects={data.projects} busy={linking} onLink={linkDocument} />
       </section>
       {bodyOnlyReferences.length > 0 && <section className="issue-related-section issue-linked-documents" aria-label="본문에서 이 업무를 참조한 문서">
         <h3><Link2 size={16} aria-hidden="true" /> 본문에서 이 업무를 참조한 문서 <span>{bodyOnlyReferences.length}</span></h3>

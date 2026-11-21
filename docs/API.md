@@ -31,6 +31,8 @@ curl --fail-with-body \
 | `GET /planning-items/:id` | 계획 항목 조회 |
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
 | `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
+| `GET /issues/:id/resource-links` · `GET /documents/:id/resource-links` | 업무와 문서의 직접 연결 조회 |
+| `POST /resource-links` · `DELETE /resource-links/:id` | 업무와 문서의 직접 연결 추가·일반 연결 해제 |
 | `POST /dependencies` · `PATCH`·`DELETE /dependencies/:id` | 선후행 연결 추가·유형·간격·방향 변경과 해제 |
 | `POST /issues/:id/relations/:relationId/schedule-dependency` | 기존 차단 관계에서 선후행 연결 추가 |
 | `GET /issues/:id/gitlab-links` | 프로젝트 범위 안 업무의 브랜치·커밋·MR·파이프라인 조회 |
@@ -60,6 +62,14 @@ curl --fail-with-body \
 직접 만든 관계에는 `origin: "teamspace"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
 
 `/api/v1`의 동일한 경로에서 양쪽 프로젝트가 키의 허용 범위에 있어야 한다. 조회에는 읽기 키를 사용할 수 있으며, 관계 추가·수정·해제에는 쓰기 키가 필요하다.
+
+## 업무와 문서의 직접 연결
+
+`GET /api/v1/issues/:id/resource-links`와 `GET /api/v1/documents/:id/resource-links`는 `id`, `issueId`, `documentId`, `kind`가 포함된 배열을 반환한다. 활성 상태의 업무와 문서가 모두 키의 프로젝트 범위에 있어야 목록에 표시된다. 팀 공통 문서는 전체 프로젝트 키를 사용한다.
+
+`POST /api/v1/resource-links`에 `{issueId,documentId,kind?}`를 보낸다. `kind`의 기본값은 `관련 문서`이며 최대 80자다. 새 연결은 `201`을 반환한다. 같은 업무와 문서의 연결이 이미 있으면 기존 종류와 연결 ID를 유지하고 `200`을 반환한다. 응답을 받지 못한 경우 같은 대상을 다시 보내 결과를 확인할 수 있다. 브라우저의 `POST /api/resource-links`도 같은 생성 규칙을 사용한다.
+
+`DELETE /api/v1/resource-links/:id`는 양쪽 대상에 접근할 수 있는 쓰기 키를 사용하며 성공하면 `{ok: true}`를 반환한다. 결정 근거가 붙은 연결의 해제를 요청하면 `409`를 반환한다. 해당 근거는 티켓 화면에서 원문과 함께 확인할 수 있다.
 
 ## 선후행 업무 연결
 

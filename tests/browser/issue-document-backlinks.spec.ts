@@ -20,6 +20,147 @@ function paragraph(text: string): RichContent {
   return { type: 'paragraph', content: [{ type: 'text', text }] };
 }
 
+test('360px 티켓에서 같은 제목의 문서를 공간과 상위 경로로 구분하고 응답을 잃어도 한 번만 연결한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const snapshot = () => request.get('/api/workspace').then(response => readJson<WorkspaceSnapshot>(response));
+  const { projects: [issueProject, documentProject] } = await snapshot();
+  const prefix = `제목이 같은 연결 문서 ${randomUUID().slice(0, 8)}`;
+  const docs: DocPage[] = [];
+  const issue = await readJson<Issue>(await request.post('/api/issues', { data: { projectId: issueProject.id, title: `${prefix} 검토 티켓` } }), 201);
+  async function createDoc(projectId: string | null, title: string, parentId?: string) {
+    const doc = await readJson<DocPage>(await request.post('/api/documents', { data: { projectId, title, parentId } }), 201);
+    docs.push(doc);
+    return doc;
+  }
+
+  try {
+    const review = await createDoc(documentProject.id, '설계 검토 상위 문서');
+    const operations = await createDoc(documentProject.id, '운영 안내 상위 문서');
+    const wanted = await createDoc(documentProject.id, prefix, review.id);
+    await createDoc(documentProject.id, prefix, operations.id);
+    await createDoc(issueProject.id, prefix);
+    await createDoc(null, prefix);
+
+    await page.goto(`/#/${issueProject.id}/issues?issue=${issue.id}`);
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    const links = ticket.getByRole('region', { name: '연결된 문서', exact: true });
+    const picker = links.getByRole('region', { name: '연결할 문서 선택', exact: true });
+    const title = ticket.getByRole('textbox', { name: '제목', exact: true });
+    const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const draftTitle = `${prefix} 작성 중인 제목`;
+    const draftComment = '연결하는 동안 보존할 댓글';
+    await title.fill(draftTitle);
+    await comment.fill(draftComment);
+    const search = picker.getByRole('searchbox', { name: '연결할 문서 검색', exact: true });
+    await search.fill(prefix);
+    const results = picker.getByRole('list', { name: '문서 검색 결과', exact: true });
+    const candidates = results.getByRole('button');
+    await expect(candidates).toHaveCount(4);
+    await expect(candidates.filter({ hasText: '팀 공통 문서' })).toHaveCount(1);
+    const space = picker.getByRole('combobox', { name: '문서 공간', exact: true });
+    await space.selectOption('common');
+    await expect(candidates).toHaveCount(1);
+    await space.selectOption(`project:${documentProject.id}`);
+    await expect(candidates).toHaveCount(2);
+    const chosen = candidates.filter({ hasText: review.title });
+    await expect(chosen).toContainText(documentProject.name);
+    await expect(candidates.filter({ hasText: operations.title })).toBeVisible();
+    await chosen.press('Enter');
+    await expect(chosen).toHaveAttribute('aria-pressed', 'true');
+    const submit = picker.getByRole('button', { name: '문서 연결', exact: true });
+
+    const attempts: { issueId: string; documentId: string }[] = [];
+    await page.route('**/api/resource-links', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postDataJSON());
+      if (attempts.length > 1) return route.continue();
+      expect((await route.fetch()).status()).toBe(201);
+      await route.abort('failed');
+    });
+    await submit.click();
+    await expect.poll(async () => (await snapshot()).resourceLinks.filter(link => link.issueId === issue.id)).toEqual([
+      expect.objectContaining({ issueId: issue.id, documentId: wanted.id }),
+    ]);
+    await expect(submit).toBeEnabled();
+    await expect(chosen).toHaveAttribute('aria-pressed', 'true');
+    const replay = page.waitForResponse(response => response.url().endsWith('/api/resource-links') && response.request().method() === 'POST');
+    await submit.click();
+    expect((await replay).status()).toBe(200);
+    await expect(links.getByRole('button', { name: wanted.title, exact: true })).toHaveCount(1);
+    await expect(chosen).toHaveCount(0);
+    await expect(title).toHaveValue(draftTitle);
+    await expect(comment).toHaveValue(draftComment);
+    const after = await snapshot();
+    expect(after.issues.find(value => value.id === issue.id)).toEqual(issue);
+    expect(after.resourceLinks.filter(link => link.issueId === issue.id)).toEqual([expect.objectContaining({ documentId: wanted.id })]);
+    expect(after.activities.filter(item => item.resourceId === issue.id && item.action === '문서 연결')).toHaveLength(1);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ issueId: issue.id, documentId: wanted.id });
+    expect(attempts[1]).toEqual(attempts[0]);
+  } finally {
+    await removeFixture(request, 'issues', issue.id);
+    for (const document of docs.reverse()) await removeFixture(request, 'documents', document.id);
+  }
+});
+
+test('360px 문서에서 다른 프로젝트의 업무를 페이지와 정확한 업무 번호로 찾아 초안을 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const snapshot = () => request.get('/api/workspace').then(response => readJson<WorkspaceSnapshot>(response));
+  const { projects: [documentProject, issueProject] } = await snapshot();
+  const prefix = `검색할 여러 업무 ${randomUUID().slice(0, 8)}`;
+  const document = await readJson<DocPage>(await request.post('/api/documents', {
+    data: { projectId: documentProject.id, title: `${prefix}의 결정`, content: { type: 'doc', content: [paragraph('서버에 저장한 문서 본문')] } },
+  }), 201);
+  const issues: Issue[] = [];
+  try {
+    for (let index = 0; index < 9; index++) {
+      issues.push(await readJson<Issue>(await request.post('/api/issues', {
+        data: { projectId: index === 0 ? documentProject.id : issueProject.id, title: `${prefix} ${index}` },
+      }), 201));
+    }
+    const expected = issues[8];
+    await page.goto(`/#/${documentProject.id}/documents/${document.id}`);
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(title).toHaveValue(document.title);
+    const draftTitle = `${prefix} 저장하지 않은 제목`;
+    await title.fill(draftTitle);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const aside = page.getByLabel('문서 상세 정보', { exact: true });
+    await aside.getByRole('button', { name: '연결', exact: true }).click();
+    const picker = aside.getByRole('region', { name: '연결할 업무 선택', exact: true });
+    const search = picker.getByRole('searchbox', { name: '연결할 업무 검색', exact: true });
+    await search.fill(prefix);
+    await picker.getByRole('combobox', { name: '업무 프로젝트', exact: true }).selectOption(`project:${issueProject.id}`);
+    const results = picker.getByRole('list', { name: '업무 검색 결과', exact: true });
+    await expect(results.getByRole('button')).toHaveCount(5);
+    await expect(results.getByText(issues[0].key, { exact: true })).toHaveCount(0);
+    const next = picker.getByRole('button', { name: '업무 다음 페이지', exact: true });
+    await next.click();
+    await expect(results.getByRole('button')).toHaveCount(3);
+    await expect(results.getByText(expected.key, { exact: true })).toBeVisible();
+    await search.fill(expected.key.toLowerCase());
+    const target = results.getByRole('button').filter({ hasText: expected.key });
+    await expect(target).toHaveCount(1);
+    await expect(target).toContainText(issueProject.name);
+    await target.click();
+    await expect(target).toHaveAttribute('aria-pressed', 'true');
+    await picker.getByRole('button', { name: '업무 연결', exact: true }).click();
+    await expect(aside.locator('.docs-linked-issue').filter({ hasText: expected.key })).toHaveCount(1);
+    await expect(target).toHaveCount(0);
+    await expect(title).toHaveValue(draftTitle);
+    const saved = await snapshot();
+    expect(saved.documents.find(value => value.id === document.id)).toEqual(document);
+    expect(saved.resourceLinks.filter(link => link.documentId === document.id)).toEqual([
+      expect.objectContaining({ issueId: expected.id, documentId: document.id }),
+    ]);
+  } finally {
+    for (const issue of issues) await removeFixture(request, 'issues', issue.id);
+    await removeFixture(request, 'documents', document.id);
+  }
+});
+
 test('360px 티켓에서 본문 참조 문서를 찾아 미리 보고 참조 삭제를 반영한다', async ({ page, context, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
