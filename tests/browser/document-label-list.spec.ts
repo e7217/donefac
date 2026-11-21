@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext } from '@playwright/test';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes';
 import type { DocPage, DocumentPublicationView, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function read<T>(request: APIRequestContext, path: string) {
@@ -76,7 +77,7 @@ test('360px 라벨별 문서 목록은 저장한 범위에서 갱신되고 검�
     await page.locator('.docs-save-button').click();
     const saved = await saving;
     expect(saved.ok(), await saved.text()).toBe(true);
-    expect(saved.request().postDataJSON().contentSchemaVersion).toBe(9);
+    expect(saved.request().postDataJSON().contentSchemaVersion).toBe(DOCUMENT_CONTENT_SCHEMA_VERSION);
     const revision = await saved.json() as DocPage;
     expect(revision.content.content?.find(node => node.type === 'documentLabelList')).toMatchObject({ attrs: {
       projectId: project.id, labels: [labelB, labelA].sort(), match: 'all', sort: 'title', descending: false,

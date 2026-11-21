@@ -4,6 +4,7 @@ import {
   type CalloutVariant, type StatusBadgeTone,
 } from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
+import { MAX_DOCUMENT_CHILD_LIST_DEPTH, MAX_DOCUMENT_CHILD_LIST_FIRST, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
@@ -28,7 +29,9 @@ export interface MigrationContentContext {
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
   legacyDocumentLabelList?: boolean;
+  legacyDocumentChildList?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
+  resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   sectionLinks?: {
     documentId: string;
     resolvePageSection?: (page: MigrationReferenceInput, fragment: string, fromUrl: boolean) => { documentId: string; sectionId: string } | null;
@@ -64,6 +67,38 @@ const codeBlock = (value: string, language = ''): RichContent => ({ type: 'codeB
 class ConversionLimit extends Error {}
 function pageIdentity(node: XmlNode): MigrationPageIdentity {
   return { sourceId: node.attrs['ri:content-id'] || node.attrs['ri:page-id'], title: node.attrs['ri:content-title'], spaceKey: node.attrs['ri:space-key'] };
+}
+const childListSpaceKey = /^(?:[A-Za-z0-9]+|~[^\s:]+)$/;
+function childListPageParameter(parameter: XmlNode | undefined): MigrationPageIdentity | { spaceRoot: string | null } | null | undefined {
+  if (!parameter) return undefined;
+  if (parameter.children.every(part => typeof part === 'string')) {
+    const value = parameter.children.join('').trim();
+    if (!value) return undefined;
+    if (value === '/') return { spaceRoot: null };
+    const separator = value.indexOf(':');
+    if (separator < 0 || !childListSpaceKey.test(value.slice(0, separator))) return { title: value };
+    const spaceKey = value.slice(0, separator), title = value.slice(separator + 1).trim();
+    return title ? { spaceKey, title } : { spaceRoot: spaceKey };
+  }
+  const parts = parameter.children.filter(part => typeof part !== 'string' || part.trim());
+  if (parts.length !== 1 || typeof parts[0] === 'string') return null;
+  let page = parts[0];
+  if (page.name === 'ac:link') {
+    if (Object.keys(page.attrs).length) return null;
+    const children = page.children.filter(child => typeof child !== 'string' || child.trim());
+    if (children.length !== 1 || typeof children[0] === 'string') return null;
+    page = children[0];
+  }
+  if (page.name !== 'ri:page' || page.children.some(child => typeof child !== 'string' || child.trim()) ||
+      Object.keys(page.attrs).some(key => !['ri:content-id', 'ri:page-id', 'ri:content-title', 'ri:space-key'].includes(key))) return null;
+  const identity = pageIdentity(page);
+  if (page.attrs['ri:content-id'] && page.attrs['ri:page-id'] && page.attrs['ri:content-id'] !== page.attrs['ri:page-id']) return null;
+  if (identity.spaceKey && !childListSpaceKey.test(identity.spaceKey)) return null;
+  return identity.sourceId?.trim() || identity.title?.trim() ? identity : null;
+}
+function childListBound(value: string | undefined, limit: number): number | undefined | null {
+  if (!value || value === 'none') return undefined;
+  return /^[1-9]\d{0,2}$/.test(value) && Number(value) <= limit ? Number(value) : null;
 }
 function attachmentIdentity(node: XmlNode): MigrationReferenceInput {
   const reference: MigrationReferenceInput = { kind: 'attachment', sourceId: node.attrs['ri:content-id'], title: node.attrs['ri:filename'] };
@@ -421,6 +456,7 @@ class Converter {
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
     if (name === 'toc' && this.richDocument) return this.tableOfContents(node, params);
     if ((name === 'contentbylabel' || name === 'content-by-label') && this.richDocument) return this.documentLabelList(node, params);
+    if (name === 'children' && this.richDocument) return this.documentChildList(node, params);
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
     if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
     if (this.context.legacyAnnotations) {
@@ -472,6 +508,58 @@ class Converter {
     if (name === 'anchor' && this.context.legacySectionBaseline) this.warn('ANCHOR_DECLARATION_FLATTENED', '이전 앵커 매크로의 원문 표현을 확인했습니다.');
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
+  }
+  private documentChildList(node: XmlNode, params: Record<string, string>): RichContent[] {
+    const preserve = (code: string, message: string): RichContent[] => {
+      this.warn(code, message);
+      return [codeBlock(serializeXml(node))];
+    };
+    if (this.context.legacyDocumentChildList) {
+      return preserve('LEGACY_CHILD_LIST_REPRESENTATION', '이전 이관의 하위 문서 목록 원문 코드 블록을 확인했습니다.');
+    }
+    const unsupported = () => preserve('CHILD_LIST_PARAMETERS_UNSUPPORTED', '현재 하위 문서 목록으로 표현할 수 없는 설정을 원문 코드 블록으로 보존했습니다.');
+    const allowed = ['page', 'all', 'first', 'depth', 'style', 'excerpt', 'sort', 'reverse'];
+    const parameters = node.children.filter(child => typeof child !== 'string');
+    if (Object.keys(node.attrs).some(key => !['ac:name', 'ac:schema-version', 'ac:macro-id', 'ac:local-id', 'xmlns:ac', 'xmlns:ri'].includes(key)) ||
+      parameters.length !== Object.keys(params).length || node.children.some(child => {
+      if (typeof child === 'string') return Boolean(child.trim());
+      const key = child.attrs['ac:name'];
+      return child.name !== 'ac:parameter' || !allowed.includes(key) || Object.keys(child.attrs).length !== 1 ||
+        (key !== 'page' && child.children.some(part => typeof part !== 'string'));
+    })) return unsupported();
+    const setting = (key: string) => params[key]?.trim().toLowerCase() || '';
+    const excerpt = setting('excerpt');
+    if (excerpt && excerpt !== 'none' && excerpt !== 'false') {
+      return preserve('CHILD_LIST_EXCERPT_UNSUPPORTED', '하위 문서 본문 발췌 설정을 원문 코드 블록으로 보존했습니다.');
+    }
+    const all = setting('all'), reverse = setting('reverse');
+    const first = childListBound(setting('first'), MAX_DOCUMENT_CHILD_LIST_FIRST);
+    const depth = childListBound(setting('depth'), MAX_DOCUMENT_CHILD_LIST_DEPTH);
+    const sortValue = setting('sort'), styleValue = setting('style');
+    const sort = sortValue === 'creation' ? 'created' : sortValue === 'modified' ? 'updated' : sortValue === 'title' || !sortValue ? 'title' : null;
+    const style = !styleValue || styleValue === 'none' ? 'list' : styleValue;
+    if (first === null || depth === null || !sort || !['', 'true', 'false'].includes(all) || !['', 'true', 'false'].includes(reverse) ||
+        !['list', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(style)) return unsupported();
+    const parent = childListPageParameter(parameters.find(parameter => parameter.attrs['ac:name'] === 'page'));
+    if (parent === null) return unsupported();
+    let scope = 'current', documentId: string | null = null, projectId: string | null = null;
+    const unresolved = () => preserve('CHILD_LIST_SCOPE_UNRESOLVED', '확인 가능한 하위 문서 목록의 원본 부모 또는 공간을 찾지 못해 원문 코드 블록으로 보존했습니다.');
+    if (parent && 'spaceRoot' in parent) {
+      const project = this.context.resolveChildListSpaceProject?.(parent.spaceRoot);
+      if (!project) return unresolved();
+      scope = parent.spaceRoot === null ? 'current-space' : 'space';
+      projectId = parent.spaceRoot === null ? null : project;
+    } else if (parent) {
+      const target = this.resolve({ kind: 'page', ...parent });
+      if (!target) return unresolved();
+      scope = 'document';
+      documentId = target.id;
+    }
+    const options = normalizeDocumentChildListOptions({ scope, documentId, projectId, depth: all === 'true' ? 'all' : depth ?? 1,
+      first: first ?? null, sort, descending: reverse === 'true', style });
+    if (!options) return unsupported();
+    if (!sortValue) this.warn('CHILD_LIST_DEFAULT_ORDER_CONVERTED', '원본에 정렬 기준이 없어 문서 제목순으로 표시합니다. 원본의 수동 순서는 보관 자료에서 확인할 수 있습니다.');
+    return [{ type: 'documentChildList', attrs: { ...options } }];
   }
   private documentLabelList(node: XmlNode, params: Record<string, string>): RichContent[] {
     if (this.context.legacyDocumentLabelList) {

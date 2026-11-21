@@ -128,7 +128,8 @@ const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
   'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
   'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'LEGACY_TOC_REPRESENTATION',
-  'LEGACY_LABEL_LIST_REPRESENTATION', ...lossyConfluenceCalloutConversions,
+  'LEGACY_LABEL_LIST_REPRESENTATION', 'CHILD_LIST_PARAMETERS_UNSUPPORTED', 'CHILD_LIST_SCOPE_UNRESOLVED',
+  'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', ...lossyConfluenceCalloutConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -154,14 +155,14 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     if (usableConfluenceBody(converted)) values.content = converted.content;
     const currentHash = confluencePageFieldDigest('content', currentContent);
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
-      // An older document can still exactly match the former annotation, section and table of contents conversion.
-      for (const legacyAnnotations of [false, true]) {
-        const legacy = convertLegacyContent(record, { resolveReference, legacyAnnotations, legacySectionBaseline: true,
-          legacyDocumentToc: true, legacyDocumentLabelList: true });
+      // An older document can still exactly match a former renderer's conversion.
+      const earlierContent = { legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
+      for (const legacyOptions of [{}, earlierContent, { ...earlierContent, legacyAnnotations: true }]) {
+        const legacy = convertLegacyContent(record, { resolveReference, legacyDocumentChildList: true, ...legacyOptions });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
           !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION',
-            'LEGACY_LABEL_LIST_REPRESENTATION'].includes(item.code)) });
+            'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION'].includes(item.code)) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -885,13 +886,15 @@ class Planner{
       const bodyChanged = newer && hasConfluenceBody(row) && (!hasConfluenceBody(previous.record) || row.text !== previous.record.text);
       const converted = bodyChanged && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
-          resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id) }) : null;
+          resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
+          resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, append.project.id) }) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (bodyChanged && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
           if (lossyConfluenceCalloutConversions.has(diagnostic.code) || ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
-            'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED'].includes(diagnostic.code)) {
+            'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_PARAMETERS_UNSUPPORTED',
+            'CHILD_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_EXCERPT_UNSUPPORTED'].includes(diagnostic.code)) {
             this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry);
           }
         }
@@ -1982,6 +1985,19 @@ class Planner{
     if (append && (append.labelListScope !== 'isolated' || append.project.id !== projectId || append.sourceSpaceId !== scope.spaceId)) return null;
     return append || projected ? projectId : null;
   }
+  private confluenceChildListProject(entry: Entry, spaceKey: string | null, projectId?: string | null): string | null {
+    const current = this.confluenceLabelListProject(entry, spaceKey, projectId);
+    if (current || !spaceKey || this.input.appendPages || !this.sourceLabelListScope(entry)) return current;
+    const candidates = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []);
+    const spaceIds = new Set(candidates.map(candidate => candidate.row.sourceId));
+    if (spaceKey.startsWith('~') || spaceIds.size !== 1 || !this.uniqueConfluenceOrigin(candidates) ||
+        candidates.some(candidate => this.excluded.has(candidate.key) || string(candidate.row.metadata.spaceType).toLowerCase() === 'personal')) return null;
+    const source = JSON.stringify([entry.pkg.dataset.source.instanceKey, [...spaceIds][0]]);
+    const origin = candidates.map(candidate => this.originIdentity(candidate)).find(Boolean);
+    const projects = [...this.isolatedLabelListScopes()].filter(([, scope]) =>
+      scope?.source === source && (!origin || !scope.origin || scope.origin === origin));
+    return projects.length === 1 ? projects[0][0] : null;
+  }
   private originIdentity(entry: Entry): string | undefined {
     const base = this.originBases.get(entry.pkg.summary.id);
     return base && `${base.origin}${base.contextPath}`;
@@ -2275,6 +2291,7 @@ class Planner{
       resolveReference: request => this.resolve(entry, request), legacyAnnotations,
       sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
       resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, this.project(entry)?.id),
+      resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, this.project(entry)?.id),
     });
     for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
     return result;
@@ -2477,6 +2494,7 @@ class Planner{
           ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request),
         legacyAnnotations: version === null,
         resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, owner.projectId),
+        resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, owner.projectId),
       });
       const createdAt = version !== null ? row.updatedAt || row.createdAt : row.createdAt;
       const invalidBody = version === null

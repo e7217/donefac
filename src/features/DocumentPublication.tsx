@@ -41,7 +41,7 @@ const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 
 /** Resolve live includes to their saved labels while keeping immutable revision includes readable. */
 function snapshotContent(node: RichContent): RichContent {
-  if (node.type === 'documentLabelList') {
+  if (node.type === 'documentLabelList' || node.type === 'documentChildList') {
     return { type: 'paragraph', content: [{ type: 'text', text: `${documentPlainText(node)} · 이 저장본에는 목록 조건이 보관됩니다.` }] };
   }
   if (node.type === 'issueSummary') {

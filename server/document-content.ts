@@ -1,4 +1,5 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
+import { documentChildLists, MAX_DOCUMENT_CHILD_LISTS, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
@@ -47,6 +48,7 @@ function canonicalizeNodeAttributes(node: RichContent) {
     node.attrs = attributes;
   }
   if (node.type === 'documentLabelList') node.attrs = { ...normalizeDocumentLabelListOptions(node.attrs)! };
+  if (node.type === 'documentChildList') node.attrs = { ...normalizeDocumentChildListOptions(node.attrs)! };
   node.content?.forEach(canonicalizeNodeAttributes);
 }
 
@@ -54,7 +56,7 @@ function canonicalizeNodeAttributes(node: RichContent) {
 export function normalizeDocumentContent(value:unknown):{content:RichContent;plainText:string}{
   let serialized:string|undefined;try{serialized=JSON.stringify(value);}catch{invalid('문서 내용이 JSON 형식이 아닙니다.');}
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
-  let count=0, issueBlockCount=0, labelListCount=0;
+  let count=0, issueBlockCount=0, labelListCount=0, childListCount=0;
   const sectionIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
@@ -106,6 +108,10 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
       if (++labelListCount > MAX_DOCUMENT_LABEL_LISTS) invalid(`문서에 라벨별 문서 목록은 최대 ${MAX_DOCUMENT_LABEL_LISTS}개까지 넣을 수 있습니다.`);
       if (!normalizeDocumentLabelListOptions(attributes)) invalid('라벨별 문서 목록의 범위·라벨·표시 조건을 확인해 주세요.');
     }
+    if (node.type === 'documentChildList') {
+      if (++childListCount > MAX_DOCUMENT_CHILD_LISTS) invalid(`문서에 하위 문서 목록은 최대 ${MAX_DOCUMENT_CHILD_LISTS}개까지 넣을 수 있습니다.`);
+      if (!normalizeDocumentChildListOptions(attributes)) invalid('하위 문서 목록의 범위·깊이·표시 조건을 확인해 주세요.');
+    }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
   check(value,0);
@@ -118,12 +124,18 @@ export interface IssueBlockTargets {
   viewProject(viewId: string): string | undefined;
 }
 
-export function validateDocumentLabelListProjects(contents: Iterable<RichContent>, hasProject: (id: string) => boolean): void {
+export function validateDocumentListProjects(contents: Iterable<RichContent>, hasProject: (id: string) => boolean): void {
   const checked = new Set<string>();
-  for (const content of contents) for (const { projectId } of documentLabelLists(content)) {
-    if (projectId === null || checked.has(projectId)) continue;
-    if (!hasProject(projectId)) invalid('라벨별 문서 목록의 프로젝트를 찾을 수 없습니다.', 422, 'REFERENCE_NOT_FOUND');
+  const checkProject = (projectId: string | null, name: string) => {
+    if (projectId === null || checked.has(projectId)) return;
+    if (!hasProject(projectId)) invalid(`${name}의 프로젝트를 찾을 수 없습니다.`, 422, 'REFERENCE_NOT_FOUND');
     checked.add(projectId);
+  };
+  for (const content of contents) {
+    for (const { projectId } of documentLabelLists(content)) checkProject(projectId, '라벨별 문서 목록');
+    for (const { scope, projectId } of documentChildLists(content)) {
+      if (scope === 'space') checkProject(projectId, '하위 문서 목록');
+    }
   }
 }
 
@@ -186,7 +198,7 @@ export class DocumentContentService{
       hasProject: id => Boolean(this.store.get('projects', id)),
       viewProject: id => this.store.get<SavedView>('saved_views', id)?.projectId,
     };
-    validateDocumentLabelListProjects(edits.map(edit => edit.content), issueBlockTargets.hasProject);
+    validateDocumentListProjects(edits.map(edit => edit.content), issueBlockTargets.hasProject);
     for (const { id, content } of edits) contents.set(id, content);
     for (const { content, previousContent } of edits) {
       const previous = new Set(contentReferences(previousContent ?? { type: 'doc' })

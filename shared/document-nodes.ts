@@ -1,4 +1,5 @@
 import { Node, mergeAttributes } from '@tiptap/core';
+import { DOCUMENT_CHILD_LIST_DEFAULTS, documentChildListDescription, normalizeDocumentChildListOptions } from './document-child-list.js';
 import { DOCUMENT_LABEL_LIST_DEFAULTS, documentLabelListDescription, normalizeDocumentLabelListOptions } from './document-label-list.js';
 import { documentNodes } from './document-references.js';
 import type { ContentReference, RichContent } from './types.js';
@@ -6,7 +7,7 @@ import type { ContentReference, RichContent } from './types.js';
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 9;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 10;
 export type DocumentTocLevel = 1 | 2 | 3;
 export type DocumentTocLayout = 'list' | 'flat';
 export interface DocumentTocOptions {
@@ -35,9 +36,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentChildList') return 10;
   if (nodeType === 'documentLabelList') return 9;
   if (nodeType === 'documentToc') return 8;
   if (nodeType === 'heading' && attrs?.sectionId !== undefined) return 7;
@@ -194,6 +196,33 @@ export const DocumentLabelList = Node.create({
   },
 });
 
+export const DocumentChildList = Node.create({
+  name: 'documentChildList', group: 'block', atom: true, selectable: true, draggable: true,
+  addAttributes() {
+    return Object.fromEntries(Object.entries(DOCUMENT_CHILD_LIST_DEFAULTS).map(([key, value]) =>
+      [key, { default: value, rendered: false, parseHTML: () => null }]));
+  },
+  parseHTML() {
+    return [{
+      tag: 'div[data-teamspace-node="documentChildList"][data-document-child-list]',
+      getAttrs: element => {
+        try {
+          return normalizeDocumentChildListOptions(JSON.parse(element.getAttribute('data-document-child-list') ?? '')) ?? false;
+        } catch {
+          return false;
+        }
+      },
+    }];
+  },
+  renderHTML({ node }) {
+    const options = normalizeDocumentChildListOptions(node.attrs);
+    return ['div', {
+      'data-teamspace-node': 'documentChildList',
+      'data-document-child-list': JSON.stringify(options ?? DOCUMENT_CHILD_LIST_DEFAULTS),
+    }, '하위 문서 목록'];
+  },
+});
+
 function tocLevelAttribute(key: 'minLevel' | 'maxLevel', attribute: string) {
   return {
     default: DOCUMENT_TOC_DEFAULTS[key],
@@ -314,7 +343,7 @@ export const StatusBadge = Node.create({
 });
 
 export function documentNodeExtensions() {
-  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList];
+  return [IssueReference, DocumentReference, DocumentInclude, DocumentRevisionInclude, IssueList, IssueSummary, Details, DetailsSummary, DetailsContent, Callout, StatusBadge, DocumentToc, DocumentLabelList, DocumentChildList];
 }
 
 export function documentRevisionIncludes(content: RichContent): { documentId: string; revisionId: string }[] {
@@ -333,6 +362,13 @@ export function documentRevisionIncludes(content: RichContent): { documentId: st
 export function contentReferences(content: RichContent): ContentReference[] {
   const references: ContentReference[] = [];
   for (const node of documentNodes(content)) {
+    if (node.type === 'documentChildList') {
+      const options = normalizeDocumentChildListOptions(node.attrs);
+      if (options?.scope === 'document' && options.documentId) {
+        references.push({ type: 'document', id: options.documentId, kind: 'reference', label: options.title });
+      }
+      continue;
+    }
     if (!referenceNodes.has(node.type)) continue;
     const type = node.type === 'issueReference' ? 'issue' : 'document';
     const id = node.attrs?.[type === 'issue' ? 'issueId' : 'documentId'];
@@ -352,6 +388,10 @@ export function documentPlainText(node: RichContent): string {
   if (node.type === 'documentLabelList') {
     const options = normalizeDocumentLabelListOptions(node.attrs);
     return options ? `[라벨별 문서 · ${documentLabelListDescription(options)}]` : '[라벨별 문서]';
+  }
+  if (node.type === 'documentChildList') {
+    const options = normalizeDocumentChildListOptions(node.attrs);
+    return options ? `[하위 문서 목록 · ${documentChildListDescription(options)}]` : '[하위 문서 목록]';
   }
   if (referenceNodes.has(node.type)) {
     const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');

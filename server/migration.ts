@@ -478,7 +478,7 @@ export class MigrationService {
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
     const needsLabelListScope = labelListInventory ?? packages.some(({ dataset }) => dataset.records.some(record =>
       (record.kind === 'page' || record.kind === 'revision') && record.textFormat === 'confluence-storage' &&
-      (record.text.includes('contentbylabel') || record.text.includes('content-by-label'))));
+      (record.text.includes('contentbylabel') || record.text.includes('content-by-label') || /\bac:name\s*=\s*["']children["']/.test(record.text))));
     const labelListScope = needsLabelListScope ? this.confluenceLabelListIsolated(destination) ? 'isolated' : 'mixed' : undefined;
     if (labelListScope) digest.update(JSON.stringify(['label-list-scope', labelListScope]));
     // Additive history checks the exact reused files at apply, so unrelated local attachment updates can proceed.

@@ -1,0 +1,54 @@
+.doc-child-list ul.doc-child-list-rows {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.doc-child-list-rows > li {
+  margin: 0;
+}
+
+.doc-child-list .doc-child-list-row-heading {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  line-height: 1.4;
+}
+
+.doc-child-list :is(h1, h2).doc-child-list-row-heading { font-size: 1.15rem; }
+.doc-child-list :is(h3, h4).doc-child-list-row-heading { font-size: 1rem; }
+.doc-child-list :is(h5, h6).doc-child-list-row-heading { font-size: 0.9rem; }
+
+.doc-child-list a.doc-child-list-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 11px;
+  border-top: 1px solid #e8edf5;
+  color: #405780;
+  text-decoration: none;
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+
+.doc-child-list-link svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #5576af;
+}
+
+.doc-child-list a.doc-child-list-link:hover {
+  background: #f6f8fd;
+  text-decoration: underline;
+}
+
+.doc-child-list a.doc-child-list-link:focus-visible {
+  outline: 2px solid #5274b5;
+  outline-offset: -2px;
+}
+
+@media (max-width: 440px) {
+  .doc-child-list a.doc-child-list-link { padding-inline-end: 8px; }
+}

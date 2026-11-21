@@ -110,6 +110,7 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
     }
     case 'hardBreak': return '  \n';
     case 'documentLabelList':
+    case 'documentChildList':
       return `> ${documentPlainText(node).replace(/([\\`*_[\]<>])/g, '\\$1')}\n\n`;
     case 'documentToc': {
       const { minLevel, maxLevel, layout } = documentTocOptions(node.attrs);

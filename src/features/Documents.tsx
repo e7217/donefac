@@ -8,13 +8,14 @@ import type { Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
   Code2, FileCheck2, FileClock, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
-  ListChecks, ListFilter, ListOrdered, Loader2, MessageSquare, PanelRightClose,
+  ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Search, Send, Strikethrough,
   Table2, TableOfContents, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
+import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
@@ -1040,16 +1041,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); closeAnnotation();
   }
 
-  function insertDocumentLabelList() {
+  function insertDocumentList(type: 'documentLabelList' | 'documentChildList') {
     if (!editor?.isEditable || !selectedPage) return;
+    const isChildList = type === 'documentChildList';
+    const max = isChildList ? MAX_DOCUMENT_CHILD_LISTS : MAX_DOCUMENT_LABEL_LISTS;
     let count = 0;
-    editor.state.doc.descendants(node => { if (node.type.name === 'documentLabelList') count++; });
-    if (count >= MAX_DOCUMENT_LABEL_LISTS) {
-      notify(`라벨별 문서 목록은 문서당 ${MAX_DOCUMENT_LABEL_LISTS}개까지 넣을 수 있습니다.`, 'error');
+    editor.state.doc.descendants(node => { if (node.type.name === type) count++; });
+    if (count >= max) {
+      notify(`${isChildList ? '하위 문서 목록' : '라벨별 문서 목록'}은 문서당 ${max}개까지 넣을 수 있습니다.`, 'error');
       return;
     }
     return editor.chain().focus().insertContent([
-      { type: 'documentLabelList', attrs: { projectId: selectedPage.projectId } }, { type: 'paragraph' },
+      isChildList ? { type } : { type, attrs: { projectId: selectedPage.projectId } }, { type: 'paragraph' },
     ]).run();
   }
 
@@ -1065,7 +1068,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', action: () => { if (editor) openIssueBlock(editor, 'issueList'); } },
     { label: '업무 현황', search: 'issue summary chart 업무 현황 집계', action: () => { if (editor) openIssueBlock(editor, 'issueSummary'); } },
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
-    { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: insertDocumentLabelList },
+    { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: () => insertDocumentList('documentLabelList') },
+    { label: '하위 문서 목록', search: 'children child pages descendants tree 하위 문서 목록', action: () => insertDocumentList('documentChildList') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
     { label: '본문 목차', search: 'toc table of contents 본문 목차', action: () => insertDocumentToc(editor) },
@@ -1198,7 +1202,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
-    openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onLabelListDraftChange={trackListDraft}>
+    openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading" inert={newOpen || Boolean(templateManager)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
       <div className="document-template-heading-actions">
@@ -1298,7 +1302,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('업무 목록 삽입', <ListFilter size={15} />, () => { if (editor) openIssueBlock(editor, 'issueList'); })}
                 {button('업무 현황 삽입', <ChartBar size={15} />, () => { if (editor) openIssueBlock(editor, 'issueSummary'); })}
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
-                {button('라벨별 문서 목록 삽입', <Files size={15} />, insertDocumentLabelList)}
+                {button('라벨별 문서 목록 삽입', <Files size={15} />, () => insertDocumentList('documentLabelList'))}
+                {button('하위 문서 목록 삽입', <ListTree size={15} />, () => insertDocumentList('documentChildList'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('문서 버전 포함 삽입', <FileClock size={15} />, () => openReference('documentRevisionInclude'))}
                 {button('본문 목차 삽입', <TableOfContents size={15} />, () => insertDocumentToc(editor))}

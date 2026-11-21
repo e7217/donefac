@@ -156,6 +156,14 @@ curl --fail-with-body \
 
 본문 형식 9의 `documentLabelList`는 `projectId`에 프로젝트 ID 또는 팀 공통을 뜻하는 `null`을 받는다. `labels`는 문서 라벨과 같은 정규화 규칙을 사용하고, 라벨이 비어 있으면 결과가 비어 있다. `match`는 `any` 또는 `all`, `sort`는 `title`, `created`, `updated` 중 하나다. `descending`, `showLabels`, `showSpace`, `excludeCurrent`는 불리언이고 `limit`은 1~500, `title`은 최대 160 UTF-16 코드 단위다. 문서당 최대 30개 블록을 포함할 수 있다. 이 블록이 있는 본문을 교체할 때 `contentSchemaVersion: 9`를 보내며, 자체 백업 형식 59와 문서 JSON 형식 9는 목록 조건을 보존한다. 프로젝트 제한 API 키는 본문과 이력의 목록 대상도 같은 키의 허용 프로젝트에 있어야 한다.
 
+### 하위 문서 목록
+
+본문 형식 10의 `documentChildList`는 `scope`로 현재 문서(`current`), 그 문서가 속한 공간의 최상위(`current-space`), 명시한 문서(`document`) 또는 공간의 최상위(`space`)를 지정한다. `document`에는 `documentId`가 필요하고 `space`에는 `projectId` 또는 팀 공통을 뜻하는 `null`을 보낸다. 다른 범위에서는 두 ID를 `null`로 둔다.
+
+`depth`는 `1`~`60` 또는 모든 하위 단계를 뜻하는 `"all"`이다. 기본값은 `1`이다. `first`는 첫 단계에서 선택하는 문서 수의 상한 `1`~`500`이며 `null`은 첫 단계 제한을 해제한다. 각 계층을 `sort`의 `title`, `created`, `updated` 기준으로 정렬하며 `descending`으로 방향을 바꾼다. `style`은 `list` 또는 `h1`~`h6`, `title`은 최대 160 UTF-16 코드 단위다. 한 문서에 블록 30개, 한 목록에 표시 문서 500개까지 지원한다.
+
+교체하는 `PATCH`에는 `contentSchemaVersion: 10`을 보내며, 공동 편집은 프로토콜 10을 사용한다. 형식 67 자체 백업과 형식 10 문서 JSON에는 목록 설정을 저장한다. 이력·검토본·발행본·고정 포함은 저장 당시 조건을 표시한다. 프로젝트 제한 API 키는 명시한 부모 문서나 대상 프로젝트도 조회 범위에 포함해야 한다.
+
 ## 상위 업무에서 하위 업무 만들기
 
 브라우저의 `POST /api/issues/:id/children`에 `{requestId, expectedParentVersion, issue}`를 보낸다. `requestId`는 UUID v4다. `issue`에는 업무 생성과 같은 속성을 보낸다. `projectId`와 `parentId`는 현재 상위 업무에서 정해지며, 함께 보낼 경우 같은 ID여야 한다. 현재 프로젝트의 유형·워크플로·필수 속성을 검사한 뒤 하위 업무와 번호, 상위·하위 업무 변경 기록을 한 트랜잭션에 저장한다.

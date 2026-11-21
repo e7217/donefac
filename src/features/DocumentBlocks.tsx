@@ -8,6 +8,7 @@ import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentPlainText } from '../../shared/document-nodes';
+import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { DocumentSelectionHighlight } from '../../shared/document-selection-highlight';
@@ -18,6 +19,7 @@ import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import { DocumentLabelListCard } from './DocumentLabelList';
+import { DocumentChildListCard } from './DocumentChildList';
 import { DocumentOutline, jumpToReadonlyHeading, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
@@ -27,11 +29,11 @@ import './document-blocks.css';
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude';
 export type ReferenceSelection = { kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string };
 const MAX_INCLUDE_DEPTH = 5, TOTAL_INCLUDE_NODES = 4000;
-type Context = { data: WorkspaceSnapshot; documentId: string | null; openIssue: (id: string) => void; openDocument: (id: string) => void; openIssueBlock?: OpenIssueBlock; onLabelListDraftChange?: (id: string, dirty: boolean) => void; includeBudget: number };
+type Context = { data: WorkspaceSnapshot; documentId: string | null; openIssue: (id: string) => void; openDocument: (id: string) => void; openIssueBlock?: OpenIssueBlock; onListDraftChange?: (id: string, dirty: boolean) => void; includeBudget: number };
 const BlockContext = createContext<Context | null>(null);
-export function DocumentBlocksProvider({ data, documentId, content, openIssue, openDocument, openIssueBlock, onLabelListDraftChange, children }: { data: WorkspaceSnapshot; documentId: string | null; content?: RichContent; openIssue: Context['openIssue']; openDocument: Context['openDocument']; openIssueBlock?: OpenIssueBlock; onLabelListDraftChange?: Context['onLabelListDraftChange']; children: ReactNode }) {
+export function DocumentBlocksProvider({ data, documentId, content, openIssue, openDocument, openIssueBlock, onListDraftChange, children }: { data: WorkspaceSnapshot; documentId: string | null; content?: RichContent; openIssue: Context['openIssue']; openDocument: Context['openDocument']; openIssueBlock?: OpenIssueBlock; onListDraftChange?: Context['onListDraftChange']; children: ReactNode }) {
   const count = content ? contentReferences(content).filter(reference => reference.kind === 'include').length : 0;
-  const value = useMemo(() => ({ data, documentId, openIssue, openDocument, openIssueBlock, onLabelListDraftChange, includeBudget: Math.floor(TOTAL_INCLUDE_NODES / Math.max(1, count)) }), [data, documentId, openIssue, openDocument, openIssueBlock, onLabelListDraftChange, count]);
+  const value = useMemo(() => ({ data, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange, includeBudget: Math.floor(TOTAL_INCLUDE_NODES / Math.max(1, count)) }), [data, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange, count]);
   return <BlockContext.Provider value={value}>{children}</BlockContext.Provider>;
 }
 function contextOf(value: Context | null): Context { if (!value) throw new Error('문서 블록을 표시할 문맥이 없습니다.'); return value; }
@@ -242,7 +244,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (node.type === 'documentRevisionInclude' && state.mode !== 'pinned') {
     return pinnedRevision(textAttr(node, 'documentId'), textAttr(node, 'revisionId'), textAttr(node, 'label'), Math.min(state.remaining, context.includeBudget), key);
   }
-  if (state.mode && ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList'].includes(node.type)) {
+  if (state.mode && ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList', 'documentChildList'].includes(node.type)) {
     return <p className="doc-pinned-reference" key={key}>{documentPlainText(node)}</p>;
   }
   if (node.type === 'issueReference') {
@@ -252,6 +254,16 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (node.type === 'documentReference') return documentCard(context, textAttr(node, 'documentId'), textAttr(node, 'label'), false, key);
   if (node.type === 'documentInclude') return renderIncluded(context, textAttr(node, 'documentId'), textAttr(node, 'label'), state, key);
   if (node.type === 'documentToc') return <ReadonlyDocumentToc key={key} entries={state.outline} attrs={node.attrs} />;
+  if (node.type === 'documentChildList') {
+    const options = normalizeDocumentChildListOptions(node.attrs);
+    if (!options) return <Notice key={key}>저장된 하위 문서 목록 설정을 확인할 수 없습니다.</Notice>;
+    const projection = projectDocumentChildren(context.data.documents, state.documentId, options);
+    const limit = Math.max(0, Math.min(state.remaining, projection.items.length));
+    if (limit < projection.items.length) state.exhausted = true;
+    state.remaining -= limit;
+    return <DocumentChildListCard key={key} attrs={node.attrs} data={context.data} documentId={state.documentId}
+      openDocument={context.openDocument} projection={projection} renderLimit={limit} />;
+  }
   if (node.type === 'documentLabelList') {
     const options = normalizeDocumentLabelListOptions(node.attrs);
     if (!options) return <Notice key={key}>저장된 문서 목록 조건을 확인할 수 없습니다.</Notice>;
@@ -395,12 +407,29 @@ function IssueBlockNodeView({ node, selected, getPos, deleteNode, editor }: Node
   </NodeViewWrapper>;
 }
 function DocumentLabelListNodeView({ node, selected, editor, updateAttributes, deleteNode }: NodeViewProps) {
-  const { data, documentId, openDocument, onLabelListDraftChange } = contextOf(useContext(BlockContext));
+  const { data, documentId, openDocument, onListDraftChange } = contextOf(useContext(BlockContext));
   const id = useId();
-  const trackSettingsDraft = useCallback((dirty: boolean) => onLabelListDraftChange?.(id, dirty), [id, onLabelListDraftChange]);
+  const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
   return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node="documentLabelList">
     <DocumentLabelListCard attrs={node.attrs} data={data} documentId={documentId} openDocument={openDocument} onSettingsDraftChange={trackSettingsDraft}
       onChange={editor.isEditable ? attrs => { if (editor.isEditable) updateAttributes(attrs); } : undefined}
+      onDelete={editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined} />
+  </NodeViewWrapper>;
+}
+function DocumentChildListNodeView({ node, selected, editor, getPos, updateAttributes, deleteNode }: NodeViewProps) {
+  const { data, documentId, openDocument, onListDraftChange } = contextOf(useContext(BlockContext));
+  const id = useId();
+  const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
+  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node="documentChildList">
+    <DocumentChildListCard attrs={node.attrs} data={data} documentId={documentId} openDocument={openDocument} onSettingsDraftChange={trackSettingsDraft}
+      onChange={editor.isEditable ? (attrs, baseline) => {
+        const position = getPos();
+        const current = typeof position === 'number' ? editor.state.doc.nodeAt(position) : null;
+        if (!editor.isEditable || current?.type.name !== 'documentChildList' ||
+            JSON.stringify(normalizeDocumentChildListOptions(current.attrs)) !== JSON.stringify(baseline)) return false;
+        updateAttributes(attrs);
+        return true;
+      } : undefined}
       onDelete={editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined} />
   </NodeViewWrapper>;
 }
@@ -418,6 +447,8 @@ function detailsBody(editor: Editor): boolean {
 export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExtension[] {
   return extensions.map(extension => extension.name === 'documentToc' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentTocNodeView);
+  } }) : extension.name === 'documentChildList' ? extension.extend({ addNodeView() {
+    return ReactNodeViewRenderer(DocumentChildListNodeView);
   } }) : extension.name === 'documentLabelList' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentLabelListNodeView);
   } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : ['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude'].includes(extension.name) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({
