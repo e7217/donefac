@@ -354,6 +354,9 @@ function PublicationListView({
               {result.items.map((item) => {
                 const kind = item.status === 'published' ? 'published' : 'review';
                 const kindLabel = kind === 'published' ? '발행본' : '검토본';
+                const reviewers = item.reviewerIds?.map(person);
+                const reviewerLabel = reviewers ? `${reviewers.slice(0, 2).join(', ')}${reviewers.length > 2 ? ` 외 ${reviewers.length - 2}명` : ''}`
+                  : person(item.reviewerId);
                 return (
                   <li key={`${item.documentId}:${item.revision.id}`}>
                     <button
@@ -369,6 +372,7 @@ function PublicationListView({
                             {STATUS_LABELS[item.status]}
                           </span>
                           <span>{projectName(item.projectId)}</span>
+                          {reviewers && kind === 'review' && <span>승인 {item.approvedCount ?? 0}/{reviewers.length}</span>}
                         </span>
                         <strong>{item.revision.title}</strong>
                         <span className="publication-library-revision">
@@ -381,9 +385,9 @@ function PublicationListView({
                           <small>요청</small>
                           {person(item.requestedById)}
                         </span>
-                        <span>
+                        <span title={reviewers?.join(', ')}>
                           <small>검토</small>
-                          {person(item.reviewerId)}
+                          {reviewerLabel}
                         </span>
                       </span>
                       <time dateTime={item.actionAt}>{timestamp(item.actionAt)}</time>

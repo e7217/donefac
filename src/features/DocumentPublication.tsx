@@ -1,18 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, FileCheck2, FileText, RefreshCw, Send, X } from 'lucide-react';
+import { CheckCircle2, FileCheck2, FileText, Plus, RefreshCw, Send, X } from 'lucide-react';
 import { documentPlainText, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, isLiveDocumentInclude } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
-import type {
-  DocPage,
-  DocRevision,
-  DocumentPublicationTarget,
-  DocumentPublicationView,
-  FeatureProps,
-  RichContent,
-  WorkspaceSnapshot,
+import {
+  MAX_DOCUMENT_REVIEWERS,
+  type DocPage,
+  type DocRevision,
+  type DocumentPublicationTarget,
+  type DocumentPublicationView,
+  type DocumentReviewApproval,
+  type DocumentReviewParticipant,
+  type FeatureProps,
+  type RichContent,
+  type WorkspaceSnapshot,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
@@ -33,8 +36,10 @@ export interface DocumentPublicationProps {
   covered?: boolean;
 }
 
-type Action = 'request' | 'publish' | 'request_changes' | 'withdraw';
+type Action = 'request' | 'approve' | 'publish' | 'request_changes' | 'withdraw';
 type SnapshotKind = DocumentPublicationTarget['kind'];
+type ReviewerField = { key: number; reviewerId: string };
+const INITIAL_REVIEWER_FIELDS: ReviewerField[] = [{ key: 0, reviewerId: '' }];
 const messageOf = (error: unknown) =>
   error instanceof Error ? error.message : '문서 검토 상태를 처리하지 못했습니다.';
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
@@ -78,6 +83,37 @@ function snapshotContent(node: RichContent): RichContent {
   return node.content ? { ...node, content: node.content.map(snapshotContent) } : node;
 }
 
+function ReviewParticipants({ participants, changesRequested, published, person }: {
+  participants: DocumentReviewParticipant[];
+  changesRequested?: DocumentReviewApproval | null;
+  published?: boolean;
+  person: (id: string) => string;
+}) {
+  const approved = participants.filter(({ approval }) => approval).length;
+  return (
+    <>
+      {!published && <p className="document-publication-review-progress" role="status">승인 {approved}/{participants.length}</p>}
+      <ul className="document-publication-participants" role="list" aria-label={published ? '승인 기록' : '검토자별 상태'}>
+        {participants.map(({ reviewerId, approval }) => {
+          const changes = changesRequested?.byId === reviewerId ? changesRequested : null;
+          const decision = approval ?? changes;
+          const status = approval ? '승인' : changes ? '수정 요청' : changesRequested ? '검토 종료' : '대기';
+          return (
+            <li key={reviewerId}>
+              <div className="document-publication-participant">
+                <strong>{person(reviewerId)}</strong>
+                <span className={approval ? 'is-approved' : changes ? 'is-changes' : undefined}>{status}</span>
+              </div>
+              {decision && <time dateTime={decision.at}>{timestamp(decision.at)}</time>}
+              {decision?.note && <p className="document-publication-note">{decision.note}</p>}
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
 export function DocumentPublication(props: DocumentPublicationProps) {
   const target = props.initialSnapshot;
   return <PublicationDialog key={`${props.document.id}:${props.actorId}:${target?.kind ?? ''}:${target?.revisionId ?? ''}`} {...props} />;
@@ -102,7 +138,7 @@ function PublicationDialog({
   const [busy, setBusy] = useState<Action | null>(null);
   const [error, setError] = useState('');
   const [needsReload, setNeedsReload] = useState(false);
-  const [reviewerId, setReviewerId] = useState('');
+  const [reviewerFields, setReviewerFields] = useState(INITIAL_REVIEWER_FIELDS);
   const [requestNote, setRequestNote] = useState('');
   const [resultNote, setResultNote] = useState('');
   const [reviewSnapshot, setReviewSnapshot] = useState<DocRevision | null>(null);
@@ -115,6 +151,8 @@ function PublicationDialog({
   const [snapshotError, setSnapshotError] = useState('');
   const dialog = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const nextReviewerFieldKey = useRef(1);
+  const reviewerFieldFocus = useRef<number | null>(null);
   const wasCovered = useRef(covered);
   const active = useRef(true);
   const pending = useRef(false);
@@ -125,24 +163,54 @@ function PublicationDialog({
   const transitionRequest = useRef<AbortController | null>(null);
   const refreshDocumentRef = useRef(refreshDocument);
   const users = data.users.filter((user) => user.id !== actorId);
+  const reviewerIds = reviewerFields.map(({ reviewerId }) => reviewerId);
+  const availableReviewerIds = new Set(users.map(({ id }) => id));
+  const reviewerSelectionValid = new Set(reviewerIds).size === reviewerIds.length &&
+    reviewerIds.every((id) => availableReviewerIds.has(id));
+  const canAddReviewer = reviewerFields.length < Math.min(MAX_DOCUMENT_REVIEWERS, users.length);
   const person = (id: string) =>
     data.users.find((user) => user.id === id)?.name ?? '현재 목록에 없는 팀원';
 
   const resetNotes = useCallback(() => {
-    setReviewerId('');
+    setReviewerFields(INITIAL_REVIEWER_FIELDS);
     setRequestNote('');
     setResultNote('');
     dirty.current = false;
   }, []);
 
-  function updateInputs(next: { reviewerId?: string; requestNote?: string; resultNote?: string }) {
-    const reviewer = next.reviewerId ?? reviewerId;
+  function updateInputs(next: { reviewerFields?: ReviewerField[]; requestNote?: string; resultNote?: string }) {
+    const fields = next.reviewerFields ?? reviewerFields;
     const requestText = next.requestNote ?? requestNote;
     const resultText = next.resultNote ?? resultNote;
-    if (next.reviewerId !== undefined) setReviewerId(reviewer);
+    if (next.reviewerFields !== undefined) setReviewerFields(fields);
     if (next.requestNote !== undefined) setRequestNote(requestText);
     if (next.resultNote !== undefined) setResultNote(resultText);
-    dirty.current = Boolean(reviewer || requestText || resultText);
+    dirty.current = Boolean(fields.length > 1 || fields.some(({ reviewerId }) => reviewerId) || requestText || resultText);
+  }
+
+  useLayoutEffect(() => {
+    const key = reviewerFieldFocus.current;
+    if (key === null) return;
+    reviewerFieldFocus.current = null;
+    const target = dialog.current?.querySelector(`select[data-reviewer-field="${key}"]`);
+    if (target instanceof HTMLSelectElement) target.focus();
+  }, [reviewerFields]);
+
+  function updateReviewer(key: number, reviewerId: string) {
+    if (reviewerId && reviewerFields.some(field => field.key !== key && field.reviewerId === reviewerId)) return;
+    updateInputs({ reviewerFields: reviewerFields.map(field => field.key === key ? { key, reviewerId } : field) });
+  }
+
+  function addReviewer() {
+    if (!canAddReviewer) return;
+    const key = nextReviewerFieldKey.current++;
+    reviewerFieldFocus.current = key;
+    updateInputs({ reviewerFields: [...reviewerFields, { key, reviewerId: '' }] });
+  }
+
+  function removeReviewer(index: number) {
+    reviewerFieldFocus.current = reviewerFields[index - 1].key;
+    updateInputs({ reviewerFields: reviewerFields.filter((_, fieldIndex) => fieldIndex !== index) });
   }
 
   const load = useCallback(
@@ -344,18 +412,18 @@ function PublicationDialog({
       reviewSnapshot?.id === view.review.revisionId &&
       snapshotGenerations.review === view.workspaceGeneration,
   );
-  const isReviewer = Boolean(view?.review && view.review.reviewerId === actorId);
+  const reviewParticipants = view?.review?.reviewers;
+  const currentParticipant = reviewParticipants?.find((participant) => participant.reviewerId === actorId);
+  const isReviewer = reviewParticipants ? Boolean(currentParticipant) : view?.review?.reviewerId === actorId;
+  const canReview = Boolean(view?.review && isReviewer && !view.review.changesRequested && !currentParticipant?.approval);
   const isRequester = Boolean(view?.review && view.review.requestedById === actorId);
   const actionsDisabled = !view || loading || Boolean(busy) || needsReload;
 
   async function transition(action: Action) {
     if (!view || actionsDisabled || pending.current) return;
-    if (
-      action === 'request' &&
-      (!canRequest || requestOutdated || !reviewerId || reviewerId === actorId)
-    )
-      return;
-    if ((action === 'publish' || action === 'request_changes') && (!isReviewer || !reviewLoaded)) return;
+    if (action === 'request' && (!canRequest || requestOutdated || !reviewerSelectionValid)) return;
+    const sendingDecision = action === 'approve' || action === 'publish' || action === 'request_changes';
+    if (sendingDecision && (!canReview || !reviewLoaded)) return;
     if (action === 'request_changes' && !resultNote.trim()) return;
     if (action === 'withdraw' && !isRequester) return;
     if (
@@ -380,26 +448,29 @@ function PublicationDialog({
             expectedVersion: view.version,
             workspaceGeneration: view.workspaceGeneration,
             ...(action === 'request'
-              ? { expectedDocumentVersion: page.version, reviewerId, note: requestNote }
+              ? { expectedDocumentVersion: page.version, reviewerIds, note: requestNote }
               : {}),
-            ...(action === 'request_changes' || action === 'publish' ? { note: resultNote } : {}),
+            ...(sendingDecision ? { note: resultNote } : {}),
           }),
         },
       );
       if (!active.current || controller.signal.aborted) return;
       setView(result);
       setNeedsReload(false);
+      if (action === 'approve' && !result.review && reviewSnapshot && result.published?.revisionId === reviewSnapshot.id) {
+        setPublishedSnapshot(reviewSnapshot);
+        setSnapshotGenerations(previous => ({ ...previous, published: result.workspaceGeneration }));
+        setSnapshotKind('published');
+      }
       resetNotes();
       window.dispatchEvent(new Event('teamspace:publication-changed'));
-      notify(
-        action === 'request'
-          ? '저장된 문서의 검토를 요청했습니다.'
-          : action === 'publish'
-            ? '검토본을 발행했습니다.'
-            : action === 'request_changes'
-              ? '수정을 요청했습니다.'
-              : '검토 요청을 철회했습니다.',
-      );
+      notify({
+        request: '저장된 문서의 검토를 요청했습니다.',
+        approve: result.review ? '문서 검토를 승인했습니다.' : '검토본을 발행했습니다.',
+        publish: '검토본을 발행했습니다.',
+        request_changes: '수정을 요청했습니다.',
+        withdraw: '검토 요청을 철회했습니다.',
+      }[action]);
     } catch (cause) {
       if (!active.current || controller.signal.aborted) return;
       const ambiguous = !(cause instanceof ApiError) || cause.status >= 500;
@@ -514,10 +585,12 @@ function PublicationDialog({
                           <dt>요청자</dt>
                           <dd>{person(view.review.requestedById)}</dd>
                         </div>
-                        <div>
-                          <dt>검토자</dt>
-                          <dd>{person(view.review.reviewerId)}</dd>
-                        </div>
+                        {!reviewParticipants && (
+                          <div>
+                            <dt>검토자</dt>
+                            <dd>{person(view.review.reviewerId)}</dd>
+                          </div>
+                        )}
                         <div>
                           <dt>요청 시각</dt>
                           <dd>{timestamp(view.review.requestedAt)}</dd>
@@ -526,7 +599,10 @@ function PublicationDialog({
                       {view.review.note && (
                         <p className="document-publication-note">{view.review.note}</p>
                       )}
-                      {view.review.changesRequested && (
+                      {reviewParticipants && (
+                        <ReviewParticipants participants={reviewParticipants} changesRequested={view.review.changesRequested} person={person} />
+                      )}
+                      {!reviewParticipants && view.review.changesRequested && (
                         <div className="document-publication-changes">
                           <strong>{person(view.review.changesRequested.byId)}의 수정 요청</strong>
                           <time>{timestamp(view.review.changesRequested.at)}</time>
@@ -565,7 +641,9 @@ function PublicationDialog({
                           <dd>{timestamp(view.published.publishedAt)}</dd>
                         </div>
                       </dl>
-                      {view.published.note && <p className="document-publication-note">{view.published.note}</p>}
+                      {view.published.approvals ? (
+                        <ReviewParticipants published participants={view.published.approvals.map(approval => ({ reviewerId: approval.byId, approval }))} person={person} />
+                      ) : view.published.note && <p className="document-publication-note">{view.published.note}</p>}
                       <button
                         type="button"
                         className="btn"
@@ -584,10 +662,11 @@ function PublicationDialog({
                 </section>
               </div>
 
-              {view.review && isReviewer && !view.review.changesRequested && (
+              {canReview && (
                 <section className="document-publication-review-actions" aria-label="검토 결과 보내기">
                   <h3>검토 결과</h3>
                   <p>검토 요청 당시 저장본을 불러와 확인한 뒤 결과를 보내세요.</p>
+                  {reviewParticipants && <p>지정한 검토자가 모두 승인하면 이 검토본을 발행합니다.</p>}
                   <fieldset disabled={actionsDisabled}>
                     <label>
                       검토 결과 메모
@@ -598,7 +677,7 @@ function PublicationDialog({
                         onChange={(event) => updateInputs({ resultNote: event.target.value })}
                         maxLength={2000}
                         rows={3}
-                        placeholder="발행 메모를 남기거나 수정할 내용을 적어 주세요."
+                        placeholder={reviewParticipants ? '승인 메모를 남기거나 수정할 내용을 적어 주세요.' : '발행 메모를 남기거나 수정할 내용을 적어 주세요.'}
                       />
                     </label>
                     <div className="document-publication-actions">
@@ -614,10 +693,10 @@ function PublicationDialog({
                         type="button"
                         className="btn btn-primary"
                         disabled={!reviewLoaded}
-                        onClick={() => void transition('publish')}
+                        onClick={() => void transition(reviewParticipants ? 'approve' : 'publish')}
                       >
                         <CheckCircle2 size={15} />
-                        검토본 발행
+                        {reviewParticipants ? '승인' : '검토본 발행'}
                       </button>
                     </div>
                     {!reviewLoaded && (
@@ -626,6 +705,14 @@ function PublicationDialog({
                       </p>
                     )}
                   </fieldset>
+                </section>
+              )}
+              {!canReview && resultNote && (
+                <section className="document-publication-review-actions" aria-label="작성한 검토 결과 메모">
+                  <label>
+                    작성한 검토 결과 메모
+                    <textarea className="field" value={resultNote} readOnly rows={3} />
+                  </label>
                 </section>
               )}
 
@@ -664,25 +751,46 @@ function PublicationDialog({
                     </p>
                   )}
                   <fieldset disabled={actionsDisabled || !canRequest || requestOutdated}>
-                    <label>
-                      검토자
-                      <select
-                        className="field"
-                        aria-label="검토자"
-                        value={reviewerId}
-                        onChange={(event) => updateInputs({ reviewerId: event.target.value })}
-                      >
-                        <option value="">다른 팀원을 선택하세요</option>
-                        {reviewerId && !users.some((user) => user.id === reviewerId) && (
-                          <option value={reviewerId}>현재 목록에 없는 팀원</option>
-                        )}
-                        {users.map((user) => (
-                          <option key={user.id} value={user.id}>
-                            {user.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="document-publication-reviewer-fields">
+                      {reviewerFields.map(({ key, reviewerId }, index) => {
+                        const label = index === 0 ? '검토자' : `추가 검토자 ${index}`;
+                        return (
+                          <div className="document-publication-reviewer-field" key={key}>
+                            <label>
+                              {label}
+                              <select
+                                className="field"
+                                aria-label={label}
+                                data-reviewer-field={key}
+                                value={reviewerId}
+                                onChange={(event) => updateReviewer(key, event.target.value)}
+                              >
+                                <option value="">다른 팀원을 선택하세요</option>
+                                {reviewerId && !availableReviewerIds.has(reviewerId) && (
+                                  <option value={reviewerId}>현재 목록에 없는 팀원</option>
+                                )}
+                                {users.map((user) => (
+                                  <option key={user.id} value={user.id} disabled={user.id !== reviewerId && reviewerIds.includes(user.id)}>
+                                    {user.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            {index > 0 && (
+                              <button type="button" className="btn btn-ghost" aria-label={`${label} 삭제`} onClick={() => removeReviewer(index)}>
+                                <X size={15} aria-hidden="true" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {canAddReviewer && (
+                        <button type="button" className="btn btn-ghost document-publication-add-reviewer" onClick={addReviewer}>
+                          <Plus size={15} aria-hidden="true" />
+                          검토자 추가
+                        </button>
+                      )}
+                    </div>
                     <label>
                       검토 요청 메모 <span>(선택)</span>
                       <textarea
@@ -699,7 +807,7 @@ function PublicationDialog({
                       <button
                         type="button"
                         className="btn btn-primary"
-                        disabled={!reviewerId || !users.some((user) => user.id === reviewerId)}
+                        disabled={!reviewerSelectionValid}
                         onClick={() => void transition('request')}
                       >
                         <Send size={15} />

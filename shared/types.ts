@@ -897,13 +897,17 @@ export interface DocumentTreeCopyPreview extends DocumentTreeCopyOptions {
   warnings: string[];
 }
 export interface DocRevision { id: string; documentId: string; version: number; title: string; content: RichContent; plainText: string; authorId: string; createdAt: string; summary: string; confluenceSourceVersion?: number }
+export const MAX_DOCUMENT_REVIEWERS = 20;
+export interface DocumentReviewApproval { byId: string; at: string; note: string }
+export interface DocumentReviewParticipant { reviewerId: string; approval: DocumentReviewApproval | null }
 export interface DocumentReview {
   revisionId: string;
   requestedById: string;
   reviewerId: string;
   requestedAt: string;
   note: string;
-  changesRequested: { byId: string; at: string; note: string } | null;
+  changesRequested: DocumentReviewApproval | null;
+  reviewers?: DocumentReviewParticipant[];
 }
 export interface DocumentPublishedVersion {
   revisionId: string;
@@ -913,6 +917,7 @@ export interface DocumentPublishedVersion {
   requestedById: string;
   reviewerId: string;
   requestedAt: string;
+  approvals?: DocumentReviewApproval[];
 }
 export interface DocumentPublicationState {
   documentId: string;
@@ -938,6 +943,8 @@ export interface DocumentPublicationListItem {
   requestedById: string;
   reviewerId: string;
   actionAt: string;
+  reviewerIds?: string[];
+  approvedCount?: number;
 }
 export interface DocumentPublicationList {
   tab: DocumentPublicationListTab;
@@ -1056,7 +1063,7 @@ export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', ...ISSUE_RISK_NOTIFICATION_KINDS,
   ...ISSUE_DEADLINE_REMINDER_KINDS, ...COMMENT_MENTION_NOTIFICATION_KINDS,
   'document-created', 'document-comment', 'document-comment-reply', 'document-updated', 'document-review-requested',
-  'document-changes-requested', 'document-published', 'document-review-withdrawn',
+  'document-changes-requested', 'document-published', 'document-review-withdrawn', 'document-review-approved',
 ] as const;
 export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];
 export type TeamNotificationFilter = 'all' | 'unread';

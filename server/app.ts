@@ -2585,16 +2585,21 @@ export function createApp(options: {
     const importedCollaboration = collaboration.validateImport(data.schemaVersion >= 3 ? data.collabStates : [], importedDocuments, issueBlockTargets, revisionOwner);
     for (const entry of archivedDocuments) {
       if (entry.collaboration) collaboration.validateImport([entry.collaboration], [entry.resource], issueBlockTargets, revisionOwner);
-      if (entry.publication) [entry.publication] = documentPublication.validateRestore([entry.publication], [entry.resource], data.users, entry.revisions, data.exportedAt);
+      if (entry.publication) [entry.publication] = documentPublication.validateRestore(
+        [entry.publication], [entry.resource], data.users, entry.revisions, data.exportedAt, data.schemaVersion,
+      );
     }
     const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(
       data.worklogs,data.projects,data.issues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],
     ):[];
     if(data.schemaVersion<14&&Array.isArray(data.documentPublications)&&data.documentPublications.length)fail('문서 검토·발행 기록을 포함한 백업은 schemaVersion 14가 필요합니다.');
     const importedPublications=data.schemaVersion>=14?documentPublication.validateRestore(
-      data.documentPublications,data.documents,data.users,data.revisions,data.exportedAt,
+      data.documentPublications,data.documents,data.users,data.revisions,data.exportedAt,data.schemaVersion,
     ):[];
     if(data.schemaVersion<15&&Array.isArray(data.teamNotifications)&&data.teamNotifications.length)fail('팀 알림을 포함한 백업은 schemaVersion 15가 필요합니다.');
+    if (data.schemaVersion < 91 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: { kind?: unknown } | null) => row?.kind === 'document-review-approved',
+    )) fail('문서 검토 승인 알림을 포함한 백업은 schemaVersion 91이 필요합니다.');
     if(data.schemaVersion<25&&((data.notificationSubscriptions!==undefined&&
       (!Array.isArray(data.notificationSubscriptions)||data.notificationSubscriptions.length))||
       (Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row: {kind?: unknown} | null)=>row?.kind==='issue-status-changed'||row?.kind==='document-updated')))){

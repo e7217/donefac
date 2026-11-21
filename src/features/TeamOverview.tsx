@@ -233,7 +233,9 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
               onClick={() => { void openPublication(review.documentId, 'review', review.revision.id); }}>
               <span className="team-overview-row-main">
                 <strong>{review.revision.title}</strong>
-                <span className="team-overview-row-detail">{projectName(review.projectId)} · 검토자 {memberName(review.reviewerId)}</span>
+                <span className="team-overview-row-detail">{projectName(review.projectId)} · {review.reviewerIds
+                  ? `검토자 ${review.reviewerIds.length}명 · 승인 ${review.approvedCount ?? 0}/${review.reviewerIds.length}`
+                  : `검토자 ${memberName(review.reviewerId)}`}</span>
               </span>
               <span className="team-overview-row-side">
                 <span>저장본 v{review.revision.version}</span><time dateTime={review.actionAt}>{localTime(review.actionAt, zone)}</time>

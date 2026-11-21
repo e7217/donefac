@@ -52,7 +52,7 @@ curl --fail-with-body \
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·휴지통 이동 |
 | `POST /issues/:id/clone` | 같은 프로젝트에 업무 복제와 원본 관련 관계 저장 |
 | `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·휴지통 이동 |
-| `POST /documents/:id/publication` | 검토 요청·발행·수정 요청·철회 |
+| `POST /documents/:id/publication` | 검토 요청·승인·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
 | `POST /attachments` · `POST /attachments/:id/versions` | 첨부 생성 또는 새 버전 업로드 |
 | `PATCH /projects/:id/workload-capacity` | 프로젝트·팀원·날짜별 가용 시간 변경 |
@@ -1003,18 +1003,21 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 | `action` | 필요한 값과 동작 |
 | --- | --- |
-| `request` | 열어 본 문서의 버전을 `expectedDocumentVersion`으로 보내고, 다른 팀원의 `reviewerId`를 지정한다. 선택 항목 `note`와 함께 현재 서버 저장본을 검토 대상으로 고정한다. |
-| `publish` | 지정 검토자가 현재 검토본을 발행한다. 선택 항목 `note`를 발행본에 기록하고 검토 요청을 닫는다. |
-| `request_changes` | 지정 검토자가 필수 `note`와 함께 수정을 요청한다. 저장본의 참조와 의견을 남긴다. 새 검토 요청을 시작할 수 있다. |
+| `request` | 열어 본 문서의 버전을 `expectedDocumentVersion`으로 보내고, 서로 다른 팀원 1~20명의 `reviewerIds` 또는 한 명의 `reviewerId`를 지정한다. 선택 항목 `note`와 함께 현재 서버 저장본을 검토 대상으로 고정한다. |
+| `approve` | 아직 처리하지 않은 지정 검토자가 선택 항목 `note`와 함께 승인한다. 마지막 승인이 해당 저장본을 발행한다. |
+| `publish` | 검토자가 한 명인 요청에서 지정 검토자가 선택 항목 `note`와 함께 현재 검토본을 발행한다. |
+| `request_changes` | 아직 처리하지 않은 지정 검토자가 필수 `note`와 함께 수정을 요청한다. 저장본 참조와 진행된 승인, 수정 의견을 보존한다. 새 검토 요청을 시작할 수 있다. |
 | `withdraw` | 요청자가 검토를 철회한다. 기존 발행본은 유지된다. |
 
 메모는 최대 2,000자다. 버전·복원 세대 또는 요청 직전 문서 버전이 다르면 `409`로 응답한다. 다른 작업자에게만 허용된 동작은 `403`을 반환한다. 모든 경로는 해당 문서의 프로젝트 범위를 확인한다. 브라우저에서 사용하는 동일한 경로의 접두사는 `/api`다.
+
+그룹 검토의 `review.reviewers`에는 각 `reviewerId`와 `approval`이 들어간다. 승인한 검토자의 `approval`에는 `byId`, `at`, `note`를 기록한다. 그룹 발행의 `published.approvals`는 요청 당시의 검토자 순서대로 모든 승인 기록을 보존한다. `publishedById`는 마지막 승인자다. 자체 백업 형식 91부터 활성·휴지통 문서의 그룹 검토와 부분 승인 알림을 보존한다.
 
 ### 검토함·발행본 목록
 
 브라우저의 `GET /api/document-publications`는 `tab`에 `assigned`(기본, 현재 작업자의 검토 대기), `requested`(현재 작업자가 보낸 대기·수정 요청), `published`(문서별 마지막 발행본)를 받는다. `scope`는 `workspace`(기본), `project`, `common`이다. `project` 범위에서는 `projectId`가 필요하다. `q`는 최대 200자의 선택 검색어다. 저장본 제목과 검색어를 유니코드 NFC로 정규화하고 소문자로 바꿔 부분 일치를 비교한다.
 
-`offset`은 기본 0이며 한 페이지에 최대 30개를 반환한다. `total`은 현재 조건의 일치 수이고 `pendingAssigned`는 범위·탭·검색 조건과 독립적인 전체 배정 대기 건수다. 각 행은 문서·프로젝트·저장본 ID와 버전·고정 제목, 상태, 요청자·검토자, 상태 시각을 포함한다. 최신 상태 시각순으로 정렬하며 같은 시각은 문서 ID 순이다. 본문과 메모는 문서별 검토·발행 경로에서 조회한다.
+`offset`은 기본 0이며 한 페이지에 최대 30개를 반환한다. `total`은 현재 조건의 일치 수이고 `pendingAssigned`는 범위·탭·검색 조건과 독립적인 현재 작업자의 미처리 검토 건수다. 각 행은 문서·프로젝트·저장본 ID와 버전·고정 제목, 상태, 요청자·검토자, 상태 시각을 포함한다. 여러 검토자가 배정된 행에는 `reviewerIds`와 `approvedCount`가 포함된다. 최신 상태 시각순으로 정렬하며 같은 시각은 문서 ID 순이다. 본문과 메모는 문서별 검토·발행 경로에서 조회한다.
 
 `GET /api/document-publications/count`는 현재 작업자의 전체 `pendingAssigned`만 반환한다. 목록과 건수는 브라우저 경로에서 제공한다. 자동화 키는 문서별 `/api/v1/documents/:id/publication` 경로를 사용한다.
 

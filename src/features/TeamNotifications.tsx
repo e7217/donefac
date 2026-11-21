@@ -30,6 +30,7 @@ const EVENT_LABELS: Record<TeamNotificationKind, string> = {
   'document-comment-mentioned': '문서 댓글에서 멘션',
   'document-updated': '문서 변경',
   'document-review-requested': '검토 요청',
+  'document-review-approved': '문서 검토 승인',
   'document-changes-requested': '수정 요청',
   'document-published': '문서 발행',
   'document-review-withdrawn': '검토 철회',

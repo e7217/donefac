@@ -177,6 +177,61 @@
   font-size: 12px;
 }
 
+.document-publication-state .document-publication-review-progress {
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+.document-publication-participants {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 15px;
+  padding: 0;
+  list-style: none;
+}
+
+.document-publication-participants li {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #dfe7e1;
+  border-radius: 7px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.document-publication-participant {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  font-size: 13px;
+}
+
+.document-publication-participant span {
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: #edf2ee;
+  color: #526b60;
+  font-size: 12px;
+}
+
+.document-publication-participant .is-approved {
+  background: #e4f2e9;
+  color: #2e4e3f;
+}
+
+.document-publication-participant .is-changes {
+  background: #fff6df;
+  color: #72531f;
+}
+
+.document-publication-participants time {
+  display: block;
+  margin-top: 4px;
+  color: #526b60;
+  font-size: 12px;
+}
+
 .document-publication-dialog fieldset {
   display: grid;
   gap: 15px;
@@ -209,6 +264,28 @@
 .document-publication-dialog textarea {
   min-height: 84px;
   resize: vertical;
+}
+
+.document-publication-reviewer-fields {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.document-publication-reviewer-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.document-publication-reviewer-field > button {
+  min-inline-size: 38px;
+  justify-content: center;
+}
+
+.document-publication-add-reviewer {
+  justify-self: start;
 }
 
 .document-publication-actions {

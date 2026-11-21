@@ -16,6 +16,8 @@ interface Row {
   requestedById: string;
   reviewerId: string;
   actionAt: string;
+  reviewerIds: string | null;
+  approvedCount: number | null;
 }
 function fail(status: number, message: string): never { throw new DocumentPublicationError(status, message); }
 function identifier(value: unknown, label: string): string {
@@ -59,10 +61,16 @@ function joins(pointer: 'review' | 'published'): string {
 const validProject = '(d.project_id IS NULL OR project.id IS NOT NULL)';
 const pending = "json_type(p.json,'$.review')='object' AND json_type(p.json,'$.review.changesRequested')='null'";
 const reviewRequestedAt = "json_extract(p.json,'$.review.requestedAt')";
+const reviewParticipants = "json_each(p.json,'$.review.reviewers') member";
+const pendingForMember = `CASE WHEN json_type(p.json,'$.review.reviewers')='array' THEN EXISTS (
+    SELECT 1 FROM ${reviewParticipants}
+    WHERE json_extract(p.json,member.fullkey||'.reviewerId')=? AND json_type(p.json,member.fullkey||'.approval')='null'
+  ) ELSE reviewer.id=? END`;
+const latestApprovalAt = `(SELECT MAX(json_extract(p.json,member.fullkey||'.approval.at')) FROM ${reviewParticipants})`;
 const pendingCountSql = `SELECT COUNT(*) AS count ${joins('review')}
-  WHERE ${validProject} AND ${pending} AND json_extract(p.json,'$.review.reviewerId')=?`;
+  WHERE ${validProject} AND ${pending} AND (${pendingForMember})`;
 function pendingCount(store: Store, actorId: string): number {
-  return (store.db.prepare(pendingCountSql).get(actorId) as { count: number }).count;
+  return (store.db.prepare(pendingCountSql).get(actorId, actorId) as { count: number }).count;
 }
 function readSnapshot<T>(store: Store, action: () => T): T {
   const own = !store.db.isTransaction;
@@ -80,11 +88,21 @@ export function countDocumentAssignedReviews(store: Store, actorId: string): num
 }
 
 function publicationColumns(pointer: 'review' | 'published', status: string, actionAt: string): string {
+  const review = pointer === 'review';
+  const path = review ? '$.review.reviewers' : '$.published.approvals';
+  const reviewerField = review ? 'reviewerId' : 'byId';
+  const approvedCount = review ? `(SELECT COUNT(*) FROM ${reviewParticipants}
+    WHERE json_type(p.json,member.fullkey||'.approval')='object')` : `json_array_length(p.json,'${path}')`;
   return `SELECT p.document_id AS documentId,d.project_id AS projectId,
     json_extract(d.json,'$.version') AS documentVersion,r.id AS revisionId,
     json_extract(r.json,'$.version') AS revisionVersion,json_extract(r.json,'$.title') AS title,
     ${status} AS status,json_extract(p.json,'$.${pointer}.requestedById') AS requestedById,
-    json_extract(p.json,'$.${pointer}.reviewerId') AS reviewerId,${actionAt} AS actionAt`;
+    json_extract(p.json,'$.${pointer}.reviewerId') AS reviewerId,${actionAt} AS actionAt,
+    CASE WHEN json_type(p.json,'${path}')='array' THEN (
+      SELECT json_group_array(json_extract(p.json,member.fullkey||'.${reviewerField}') ORDER BY member.key)
+      FROM json_each(p.json,'${path}') member
+    ) END AS reviewerIds,
+    CASE WHEN json_type(p.json,'${path}')='array' THEN ${approvedCount} END AS approvedCount`;
 }
 
 function publicationItem(row: Row): DocumentPublicationListItem {
@@ -92,6 +110,8 @@ function publicationItem(row: Row): DocumentPublicationListItem {
     documentId: row.documentId, projectId: row.projectId, documentVersion: row.documentVersion,
     revision: { id: row.revisionId, version: row.revisionVersion, title: row.title }, status: row.status,
     requestedById: row.requestedById, reviewerId: row.reviewerId, actionAt: row.actionAt,
+    ...(row.reviewerIds !== null && row.approvedCount !== null
+      ? { reviewerIds: JSON.parse(row.reviewerIds) as string[], approvedCount: row.approvedCount } : {}),
   };
 }
 
@@ -104,7 +124,7 @@ export function listPendingTeamReviews(store: Store, filters: {
     const where = [validProject, pending, `typeof(${reviewRequestedAt})='text'`, `julianday(${reviewRequestedAt}) IS NOT NULL`];
     const params: string[] = [];
     if (projectId !== null) { where.push('d.project_id=?'); params.push(projectId); }
-    if (memberId !== null) { where.push('reviewer.id=?'); params.push(memberId); }
+    if (memberId !== null) { where.push(`(${pendingForMember})`); params.push(memberId, memberId); }
     const query = `${joins('review')} WHERE ${where.join(' AND ')}`;
     const { total } = store.db.prepare(`SELECT count(*) AS total ${query}`).get(...params) as { total: number };
     const rows = store.db.prepare(`${publicationColumns('review', "'pending'", reviewRequestedAt)} ${query}
@@ -123,12 +143,12 @@ export function listDocumentPublications(store: Store, actorId: string, query: R
     const where = [validProject], parameters: string[] = [];
     let status = "'published'", actionAt = "json_extract(p.json,'$.published.publishedAt')";
     if (selection.tab === 'assigned') {
-      where.push(pending, "json_extract(p.json,'$.review.reviewerId')=?"); parameters.push(actorId);
+      where.push(pending, `(${pendingForMember})`); parameters.push(actorId, actorId);
       status = "'pending'"; actionAt = reviewRequestedAt;
     } else if (selection.tab === 'requested') {
       where.push("json_type(p.json,'$.review')='object'", "json_type(p.json,'$.review.changesRequested') IN ('null','object')", "json_extract(p.json,'$.review.requestedById')=?"); parameters.push(actorId);
       status = "CASE WHEN json_type(p.json,'$.review.changesRequested')='object' THEN 'changes_requested' ELSE 'pending' END";
-      actionAt = "COALESCE(json_extract(p.json,'$.review.changesRequested.at'),json_extract(p.json,'$.review.requestedAt'))";
+      actionAt = `COALESCE(json_extract(p.json,'$.review.changesRequested.at'),${latestApprovalAt},${reviewRequestedAt})`;
     } else where.push("json_type(p.json,'$.published')='object'");
     if (selection.scope === 'project') { where.push('d.project_id=?'); parameters.push(selection.projectId!); }
     else if (selection.scope === 'common') where.push('d.project_id IS NULL');

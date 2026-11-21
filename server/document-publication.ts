@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type { DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion, DocumentReview, RichContent, TeamNotificationKind, User } from '../shared/types.js';
+import { MAX_DOCUMENT_REVIEWERS } from '../shared/types.js';
+import type {
+  DocPage, DocRevision, DocumentPublicationState, DocumentPublicationView, DocumentPublishedVersion,
+  DocumentReview, DocumentReviewApproval, DocumentReviewParticipant, RichContent, TeamNotificationKind, User,
+} from '../shared/types.js';
 import type { NotificationsService } from './notifications.js';
 import type { Store } from './store.js';
+
+const GROUP_REVIEW_BACKUP_VERSION = 91;
 
 export class DocumentPublicationError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
@@ -26,6 +32,12 @@ function note(value: unknown, required = false): string {
 function version(value: unknown, minimum = 0): number {
   if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) >= Number.MAX_SAFE_INTEGER) fail(400, '문서 검토·발행 버전을 확인해 주세요.');
   return Number(value);
+}
+function groupEntries(value: unknown): unknown[] {
+  if (!Array.isArray(value) || value.length < 2 || value.length > MAX_DOCUMENT_REVIEWERS) {
+    fail(400, `공동 검토 기록에는 2~${MAX_DOCUMENT_REVIEWERS}명의 검토자가 필요합니다.`);
+  }
+  return value;
 }
 type RevisionSummary = Pick<DocRevision, 'id' | 'version' | 'title'>;
 
@@ -66,6 +78,19 @@ export class DocumentPublicationService {
   private actor(actorId: string): User {
     id(actorId, '작업자 ID');
     return this.store.get<User>('users', actorId) ?? fail(400, '등록된 작업자를 선택해 주세요.');
+  }
+  private requestReviewers(body: Record<string, unknown>, actorId: string): User[] {
+    const hasGroup = Object.hasOwn(body, 'reviewerIds');
+    if (hasGroup && Object.hasOwn(body, 'reviewerId')) fail(400, '검토자 ID 입력 형식을 하나만 사용해 주세요.');
+    const values = hasGroup ? body.reviewerIds : [body.reviewerId];
+    if (!Array.isArray(values) || values.length < 1 || values.length > MAX_DOCUMENT_REVIEWERS) {
+      fail(400, `검토자를 1~${MAX_DOCUMENT_REVIEWERS}명 선택해 주세요.`);
+    }
+    const reviewerIds = values.map(value => id(value, '검토자 ID'));
+    if (new Set(reviewerIds).size !== reviewerIds.length) fail(400, '같은 검토자를 중복해서 선택할 수 없습니다.');
+    const reviewers = reviewerIds.map(reviewerId => this.actor(reviewerId));
+    if (reviewerIds.includes(actorId)) fail(400, '요청자와 다른 검토자를 선택해 주세요.');
+    return reviewers;
   }
   private audit(documentId: string, actorId: string, action: string, detail: string, at: string): void {
     this.store.put('activities', { id: randomUUID(), resourceType: 'document', resourceId: documentId, actorId, action, detail, createdAt: at });
@@ -113,14 +138,16 @@ export class DocumentPublicationService {
       if (expectedVersion !== current.version) fail(409, '다른 작업자가 문서 검토 상태를 변경했습니다. 최신 상태를 불러와 주세요.');
       if (current.version >= Number.MAX_SAFE_INTEGER - 1) fail(409, '문서 검토 버전 범위를 초과했습니다.');
       const at = new Date().toISOString(), next = { ...current, version: current.version + 1 };
-      if ([current.review?.requestedAt, current.review?.changesRequested?.at, current.published?.publishedAt].some(value => value && value > at)) fail(409, '현재 시각이 이전 검토·발행보다 이전입니다. 문서 상태와 서버 시각을 확인해 주세요.');
+      const previousTimes = [current.review?.requestedAt, current.review?.changesRequested?.at, current.published?.publishedAt,
+        ...(current.review?.reviewers?.map(reviewer => reviewer.approval?.at) ?? [])];
+      if (previousTimes.some(value => value && value > at)) fail(409, '현재 시각이 이전 검토·발행보다 이전입니다. 문서 상태와 서버 시각을 확인해 주세요.');
       const document = this.store.get<DocPage>('documents', documentId)!;
       let notification: {kind: TeamNotificationKind; recipientIds: string[]; targetLabel: string};
       if (body.action === 'request') {
         if (current.review && !current.review.changesRequested) fail(409, '진행 중인 검토 요청을 먼저 처리하거나 철회해 주세요.');
         if (version(body.expectedDocumentVersion, 1) !== documentVersion) fail(409, '검토 요청 전에 문서가 변경되었습니다. 저장된 최신 문서를 다시 확인해 주세요.');
-        const reviewerId = id(body.reviewerId, '검토자 ID'), reviewer = this.actor(reviewerId);
-        if (reviewerId === actorId) fail(400, '요청자와 다른 검토자를 선택해 주세요.');
+        const reviewers = this.requestReviewers(body, actorId);
+        const group = reviewers.length > 1 ? reviewers.map(reviewer => ({ reviewerId: reviewer.id, approval: null })) : undefined;
         const requestNote = note(body.note ?? '').trim();
         const publishedRevision = this.summary(documentId, current.published?.revisionId);
         if (publishedRevision && publishedRevision.version >= documentVersion) fail(409, '이미 발행한 문서 버전입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
@@ -128,27 +155,45 @@ export class DocumentPublicationService {
         const revision = this.capture(document, actorId, at);
         if (revision.id === current.published?.revisionId) fail(409, '이미 발행한 저장본입니다. 변경한 초안을 저장한 뒤 검토를 요청해 주세요.');
         if (!Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(at)) fail(409, '저장본 시각이 현재보다 미래입니다. 문서 이력을 확인해 주세요.');
-        next.review = { revisionId: revision.id, requestedById: actorId, reviewerId, requestedAt: at, note: requestNote, changesRequested: null };
-        this.audit(documentId, actorId, '문서 검토 요청', `${revision.title} · 저장본 v${revision.version} · 검토자 ${reviewer.name}${requestNote ? ` · ${requestNote}` : ''}`, at);
-        notification = {kind:'document-review-requested',recipientIds:[reviewerId],targetLabel:revision.title};
-      } else if (body.action === 'publish' || body.action === 'request_changes') {
+        next.review = { revisionId: revision.id, requestedById: actorId, reviewerId: reviewers[0].id,
+          requestedAt: at, note: requestNote, changesRequested: null, ...(group && { reviewers: group }) };
+        this.audit(documentId, actorId, '문서 검토 요청', `${revision.title} · 저장본 v${revision.version} · 검토자 ${reviewers.map(reviewer => reviewer.name).join(', ')}${requestNote ? ` · ${requestNote}` : ''}`, at);
+        notification = {kind:'document-review-requested',recipientIds:reviewers.map(reviewer => reviewer.id),targetLabel:revision.title};
+      } else if (body.action === 'publish' || body.action === 'approve' || body.action === 'request_changes') {
         const review = current.review;
         if (!review || review.changesRequested) fail(409, '처리할 검토 요청이 없습니다.');
-        if (review.reviewerId !== actorId) fail(403, '지정된 검토자만 발행하거나 수정을 요청할 수 있습니다.');
+        const group = review.reviewers;
+        const participant = group?.find(reviewer => reviewer.reviewerId === actorId);
+        if (group ? !participant : review.reviewerId !== actorId) fail(403, group
+          ? '지정된 검토자만 승인하거나 수정을 요청할 수 있습니다.' : '지정된 검토자만 발행하거나 수정을 요청할 수 있습니다.');
+        if (group && body.action === 'publish') fail(409, '여러 검토자가 지정된 요청입니다. 승인 작업을 사용해 주세요.');
+        if (participant?.approval) fail(409, '이 저장본에 이미 승인을 기록했습니다.');
         const revision = this.snapshot(documentId, 'review', review.revisionId);
         authorizeBody?.(revision.content);
         if (at < review.requestedAt) fail(409, '검토 요청보다 현재 시각이 이전입니다. 잠시 후 다시 시도해 주세요.');
-        if (body.action === 'publish') {
-          const publicationNote = note(body.note ?? '').trim();
-          next.published = { revisionId: review.revisionId, publishedById: actorId, publishedAt: at, note: publicationNote, requestedById: review.requestedById, reviewerId: review.reviewerId, requestedAt: review.requestedAt };
-          next.review = null;
-          this.audit(documentId, actorId, '문서 발행', `${revision.title} · 검토한 저장본 v${revision.version}${publicationNote ? ` · ${publicationNote}` : ''}`, at);
-          notification = {kind:'document-published',recipientIds:[review.requestedById,...this.subscribers(document)],targetLabel:revision.title};
-        } else {
+        const recipients = [review.requestedById, ...(group?.map(reviewer => reviewer.reviewerId) ?? [])];
+        if (body.action === 'request_changes') {
           const feedback = note(body.note, true).trim();
           next.review = { ...review, changesRequested: { byId: actorId, at, note: feedback } };
           this.audit(documentId, actorId, '문서 수정 요청', `${revision.title} · 저장본 v${revision.version} · ${feedback}`, at);
-          notification = {kind:'document-changes-requested',recipientIds:[review.requestedById],targetLabel:revision.title};
+          notification = {kind:'document-changes-requested',recipientIds:recipients,targetLabel:revision.title};
+        } else {
+          const publicationNote = note(body.note ?? '').trim();
+          const reviewers = group?.map(reviewer => reviewer.reviewerId === actorId
+            ? { ...reviewer, approval: { byId: actorId, at, note: publicationNote } } : reviewer);
+          const approvals = reviewers?.flatMap(reviewer => reviewer.approval ? [reviewer.approval] : []);
+          const detail = `${revision.title} · 검토한 저장본 v${revision.version}${publicationNote ? ` · ${publicationNote}` : ''}`;
+          if (reviewers && approvals && approvals.length < reviewers.length) {
+            next.review = { ...review, reviewers };
+            this.audit(documentId, actorId, '문서 검토 승인', detail, at);
+            notification = {kind:'document-review-approved',recipientIds:[review.requestedById],targetLabel:revision.title};
+          } else {
+            next.published = { revisionId: review.revisionId, publishedById: actorId, publishedAt: at, note: publicationNote,
+              requestedById: review.requestedById, reviewerId: actorId, requestedAt: review.requestedAt, ...(approvals && { approvals }) };
+            next.review = null;
+            this.audit(documentId, actorId, '문서 발행', detail, at);
+            notification = {kind:'document-published',recipientIds:[...recipients,...this.subscribers(document)],targetLabel:revision.title};
+          }
         }
       } else if (body.action === 'withdraw') {
         const review = current.review;
@@ -156,7 +201,7 @@ export class DocumentPublicationService {
         if (review.requestedById !== actorId) fail(403, '검토 요청자만 요청을 철회할 수 있습니다.');
         next.review = null;
         this.audit(documentId, actorId, '문서 검토 철회', `저장본 ${review.revisionId}${review.note ? ` · ${review.note}` : ''}`, at);
-        notification = {kind:'document-review-withdrawn',recipientIds:[review.reviewerId],targetLabel:document.title};
+        notification = {kind:'document-review-withdrawn',recipientIds:review.reviewers?.map(reviewer => reviewer.reviewerId) ?? [review.reviewerId],targetLabel:document.title};
       } else fail(400, '지원하지 않는 문서 검토 작업입니다.');
       this.put(next);
       this.notifications.notify({...notification,actorId,projectId:document.projectId,targetId:documentId,createdAt:at});
@@ -173,7 +218,8 @@ export class DocumentPublicationService {
   restoreArchived(state: DocumentPublicationState): void {
     this.put({ ...state, version: version(state.version + 1, 1) });
   }
-  validateRestore(value: unknown, documents: DocPage[], users: User[], revisions: DocRevision[], exportedAt: unknown): DocumentPublicationState[] {
+  validateRestore(value: unknown, documents: DocPage[], users: User[], revisions: DocRevision[], exportedAt: unknown,
+    schemaVersion = GROUP_REVIEW_BACKUP_VERSION): DocumentPublicationState[] {
     if (!Array.isArray(value) || value.length > 100000) fail(400, '백업의 문서 검토·발행 목록이 필요합니다.');
     if (!value.length) return [];
     const through = timestamp(exportedAt, '백업 내보내기 시각'), documentMap = new Map(documents.map(document => [document.id, document])), userIds = new Set(users.map(user => user.id));
@@ -184,33 +230,82 @@ export class DocumentPublicationService {
     }
     const user = (value: unknown): string => { const result = id(value, '검토 작업자 ID'); if (!userIds.has(result)) fail(400, '문서 검토·발행 작업자가 팀원 목록에 없습니다.'); return result; };
     const moment = (value: unknown, label: string): string => { const result = timestamp(value, label); if (result > through) fail(400, '문서 검토 시각이 백업 내보내기 이후입니다.'); return result; };
+    const approval = (value: unknown, requestedAt: string): DocumentReviewApproval => {
+      const decision = object(value, ['byId', 'at', 'note']), byId = user(decision.byId), at = moment(decision.at, '승인 시각');
+      if (at < requestedAt) fail(400, '승인 시각이 검토 요청보다 이전입니다.');
+      return { byId, at, note: note(decision.note) };
+    };
     const reference = (value: unknown, documentId: string, requestedAt: string): string => {
       const result = id(value, '문서 저장본 ID'), revision = revisionMap.get(result);
       if (!revision || revision.documentId !== documentId || revision.confluenceSourceVersion !== undefined || usedRevisions.has(result) || !Number.isSafeInteger(revision.version) || revision.version < 1 || revision.version > documentMap.get(documentId)!.version || typeof revision.title !== 'string' || !revision.title.trim() || revision.title.length > 300 || !userIds.has(revision.authorId) || !Number.isFinite(Date.parse(revision.createdAt)) || Date.parse(revision.createdAt) > Date.parse(requestedAt)) fail(400, '문서 검토 저장본이 중복되거나 문서 버전·제목·작성자·시각이 올바르지 않습니다.');
       usedRevisions.add(result); return result;
     };
+    const reviewKeys = ['revisionId', 'requestedById', 'reviewerId', 'requestedAt', 'note', 'changesRequested'];
+    const publishedKeys = ['revisionId', 'publishedById', 'publishedAt', 'note', 'requestedById', 'reviewerId', 'requestedAt'];
+    if (schemaVersion >= GROUP_REVIEW_BACKUP_VERSION) {
+      reviewKeys.push('reviewers');
+      publishedKeys.push('approvals');
+    }
     return value.map(raw => {
       const state = object(raw, ['documentId', 'version', 'review', 'published']), documentId = id(state.documentId, '문서 ID');
       if (!documentMap.has(documentId) || seen.has(documentId)) fail(400, '문서 검토·발행의 문서가 없거나 중복되었습니다.');
       seen.add(documentId);
       let review: DocumentReview | null = null, published: DocumentPublishedVersion | null = null;
       if (state.review !== null) {
-        const source = object(state.review, ['revisionId', 'requestedById', 'reviewerId', 'requestedAt', 'note', 'changesRequested']);
+        const source = object(state.review, reviewKeys);
         const requestedById = user(source.requestedById), reviewerId = user(source.reviewerId), requestedAt = moment(source.requestedAt, '검토 요청 시각');
         if (requestedById === reviewerId) fail(400, '검토 요청자와 검토자가 같을 수 없습니다.');
         const revisionId = reference(source.revisionId, documentId, requestedAt);
-        review = { revisionId, requestedById, reviewerId, requestedAt, note: note(source.note), changesRequested: null };
+        let reviewers: DocumentReviewParticipant[] | undefined;
+        if (Object.hasOwn(source, 'reviewers')) {
+          const assignedIds = new Set([requestedById]);
+          reviewers = groupEntries(source.reviewers).map(value => {
+            const entry = object(value, ['reviewerId', 'approval']), memberId = user(entry.reviewerId);
+            const decision = entry.approval === null ? null : approval(entry.approval, requestedAt);
+            if (assignedIds.has(memberId) || decision && decision.byId !== memberId) {
+              fail(400, '공동 검토자와 승인 기록이 일치해야 하며 검토자는 중복될 수 없습니다.');
+            }
+            assignedIds.add(memberId);
+            return { reviewerId: memberId, approval: decision };
+          });
+          if (reviewers[0].reviewerId !== reviewerId || reviewers.every(member => member.approval)) {
+            fail(400, '공동 검토의 대표 검토자 또는 대기 상태가 올바르지 않습니다.');
+          }
+        }
+        review = { revisionId, requestedById, reviewerId, requestedAt, note: note(source.note), changesRequested: null,
+          ...(reviewers && { reviewers }) };
         if (source.changesRequested !== null) {
           const changes = object(source.changesRequested, ['byId', 'at', 'note']), byId = user(changes.byId), at = moment(changes.at, '수정 요청 시각');
-          if (byId !== reviewerId || at < requestedAt) fail(400, '수정 요청의 검토자 또는 시각이 올바르지 않습니다.');
+          const assigned = reviewers ? reviewers.some(member => member.reviewerId === byId && !member.approval) : byId === reviewerId;
+          if (!assigned || at < requestedAt || reviewers?.some(member => member.approval && member.approval.at > at)) {
+            fail(400, '수정 요청의 검토자 또는 시각이 올바르지 않습니다.');
+          }
           review.changesRequested = { byId, at, note: note(changes.note, true) };
         }
       }
       if (state.published !== null) {
-        const source = object(state.published, ['revisionId', 'publishedById', 'publishedAt', 'note', 'requestedById', 'reviewerId', 'requestedAt']);
+        const source = object(state.published, publishedKeys);
         const requestedById = user(source.requestedById), reviewerId = user(source.reviewerId), publishedById = user(source.publishedById), requestedAt = moment(source.requestedAt, '발행본 검토 요청 시각'), publishedAt = moment(source.publishedAt, '발행 시각');
         if (requestedById === reviewerId || publishedById !== reviewerId || publishedAt < requestedAt || review && review.requestedAt < publishedAt) fail(400, '발행본의 검토자·발행자 또는 시각 순서가 올바르지 않습니다.');
-        published = { revisionId: reference(source.revisionId, documentId, requestedAt), publishedById, publishedAt, note: note(source.note), requestedById, reviewerId, requestedAt };
+        const publicationNote = note(source.note);
+        let approvals: DocumentReviewApproval[] | undefined;
+        if (Object.hasOwn(source, 'approvals')) {
+          const assignedIds = new Set([requestedById]);
+          approvals = groupEntries(source.approvals).map(value => {
+            const decision = approval(value, requestedAt);
+            if (assignedIds.has(decision.byId) || decision.at > publishedAt) {
+              fail(400, '공동 발행 승인 기록의 검토자 또는 시각이 올바르지 않습니다.');
+            }
+            assignedIds.add(decision.byId);
+            return decision;
+          });
+          const final = approvals.find(decision => decision.byId === publishedById);
+          if (!final || final.at !== publishedAt || final.note !== publicationNote) {
+            fail(400, '발행자·발행 시각과 마지막 승인 기록이 일치해야 합니다.');
+          }
+        }
+        published = { revisionId: reference(source.revisionId, documentId, requestedAt), publishedById, publishedAt,
+          note: publicationNote, requestedById, reviewerId, requestedAt, ...(approvals && { approvals }) };
         if (review && revisionMap.get(review.revisionId)!.version <= revisionMap.get(published.revisionId)!.version) fail(400, '진행 중인 검토본은 이전 발행본보다 새로운 문서 버전이어야 합니다.');
       }
       return { documentId, version: version(state.version, 1), review, published };
