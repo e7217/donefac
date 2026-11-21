@@ -64,6 +64,7 @@ import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVer
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError, previousIssueKeys } from './reporting-ledger.js';
+import { IssueKeyLookupError, readIssueKeyMatches, readIssueSearchAliases } from './issue-search-aliases.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
 import { WorklogService, WorklogError } from './worklogs.js';
@@ -104,6 +105,7 @@ import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlann
 import { fieldApplies, hasCustomValue, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
+import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
@@ -379,9 +381,11 @@ export function createApp(options: {
     const data = Object.fromEntries(Object.entries(tables).map(([key, table]) =>
       [key, table === 'issues' ? issues : table === 'documents' ? documents : store.all(table)]));
     const activeIssueIds = new Set(issues.map(issue => issue.id));
-    const issueMoveOrigins = purpose === 'workspace' ? [...previousIssueKeys(store)]
+    const priorIssueKeys = purpose === 'workspace' ? previousIssueKeys(store) : null;
+    const issueMoveOrigins = priorIssueKeys ? [...priorIssueKeys]
       .filter(([id]) => activeIssueIds.has(id))
       .map(([id, origins]) => [id, [...new Set(origins.map(origin => origin.projectId))]]) : [];
+    const issueAliases = priorIssueKeys ? readIssueSearchAliases(store, issues, priorIssueKeys) : null;
     return {
       ...data,
       workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
@@ -389,6 +393,7 @@ export function createApp(options: {
       baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
       issueOrders: issueOrders.snapshot(data.projects, issues),
       ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
+      ...(issueAliases && Object.keys(issueAliases).length ? { issueAliases } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
     } as unknown as WorkspaceSnapshot;
   };
@@ -2251,12 +2256,25 @@ export function createApp(options: {
     });
     res.json(result);
   });
+  app.get('/api/issue-key-matches', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(readIssueKeyMatches(store, req.query, apiKeys.projectScope(req)));
+  });
   app.get('/api/search',(req,res)=>{
     const query=String(req.query.q||'').trim(), q=query.toLocaleLowerCase();
     if(q.length>500)fail('검색어가 너무 깁니다.');
     const documentQuery=documentLabelKey(query);
-    const searchData={issueSchemas:issueSchemas.snapshot(),users:store.all<import('../shared/types.js').User>('users')};
-    res.json({issues:store.all<Issue>('issues').filter(i=>issueSearchText(searchData,i).toLocaleLowerCase().includes(q)),
+    const issues = store.all<Issue>('issues');
+    const issueAliases = q ? readIssueSearchAliases(store, issues) : {};
+    const searchData = { issueSchemas: issueSchemas.snapshot(), users: store.all<User>('users'), issueAliases };
+    const keyQuery = normalizeWorkspaceSearchQuery(query).toLowerCase();
+    const issueResults = issues.flatMap(issue => {
+      const aliases = matchingIssueSearchAliases(searchData, issue.id, keyQuery);
+      const exactCurrent = Boolean(keyQuery) && normalizeWorkspaceSearchQuery(issue.key).toLowerCase() === keyQuery;
+      if (!exactCurrent && !aliases.length && !issueSearchText(searchData, issue).toLocaleLowerCase().includes(q)) return [];
+      const exactAlias = aliases.some(alias => normalizeWorkspaceSearchQuery(alias.key).toLowerCase() === keyQuery);
+      return [{ issue, rank: exactCurrent ? 0 : exactAlias ? 1 : 2 }];
+    }).sort((left, right) => left.rank - right.rank).map(({ issue }) => issue);
+    res.json({issues:issueResults,
       documents:store.all<DocPage>('documents').filter(d=>documentSearchText(d).includes(documentQuery))});
   });
   app.get('/api/export',(_req,res)=>{
@@ -2796,6 +2814,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueKeyLookupError)return res.status(error.status).json({error:error.message});
     if(error instanceof RecurringIssueError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});

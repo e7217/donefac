@@ -7,12 +7,11 @@ import { DELIVERY_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueM
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
-import { issueSearchText } from '../shared/issue-schema';
 import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
-import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, normalizeWorkspaceSearchQuery, type WorkspaceSearchFilters } from '../shared/workspace-search';
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchQuery, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
@@ -27,6 +26,7 @@ import { IssuePanel } from './features/IssuePanel';
 import { MyWork } from './features/MyWork';
 import type { PrepareMigration } from './features/MigrationApplySettings';
 import TeamNotifications from './features/TeamNotifications';
+import './features/workspace-search.css';
 const WorkflowSettings = lazy(() => import('./features/WorkflowSettings').then(module => ({default: module.WorkflowSettings})));
 const IssueAssignmentRules = lazy(() => import('./features/IssueAssignmentRules').then(module => ({default: module.IssueAssignmentRules})));
 const IssueSchemaSettings = lazy(() => import('./features/IssueSchemaSettings').then(module => ({default: module.IssueSchemaSettings})));
@@ -1011,8 +1011,8 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
   const [query, setQuery] = useState('');
   const trimmed = query.trim();
   const normalized = normalizeWorkspaceSearchQuery(query);
-  const q = trimmed.toLocaleLowerCase();
-  const issues = q ? data.issues.filter(issue => issueSearchText(data, issue).toLocaleLowerCase().includes(q)).slice(0, 12) : [];
+  const issues = searchQuickIssues(data, query);
+  const projectNames = new Map(data.projects.map(project => [project.id, project.name]));
   const documentQuery = documentLabelKey(trimmed);
   const docs = documentQuery ? data.documents.filter(doc => documentSearchText(doc).includes(documentQuery)).slice(0, 8) : [];
   return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}>
@@ -1023,15 +1023,22 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
       }} id="workspace-quick-search">
         <Search size={21} aria-hidden="true"/>
         <input autoFocus value={query} maxLength={WORKSPACE_SEARCH_QUERY_LIMIT} onChange={event => setQuery(event.target.value)}
-          aria-label="통합 검색어" placeholder="티켓 번호, 업무 제목, 문서 내용 검색…"/>
+          aria-label="통합 검색어" placeholder="현재·이전 티켓 번호, 업무 제목, 문서 내용 검색…"/>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="검색 닫기"><X size={19}/></button>
       </form>
       <div className="search-results">
-        {!q ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>
+        {!trimmed ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>
           {issues.length > 0 && <div className="search-label">업무</div>}
-          {issues.map(issue => <button type="button" className="search-result" key={issue.id} onClick={() => openIssue(issue.id)}>
-            <CircleDot size={17} style={{color:statusMeta(data, issue.projectId, issue.status).color}}/>
-            <span className="issue-key">{issue.key}</span><span>{issue.title}</span><ChevronRight size={15}/>
+          {issues.map(({issue, matchedAliases}) => <button type="button" className="search-result search-result-issue" key={issue.id} onClick={() => openIssue(issue.id)}>
+            <CircleDot size={17} style={{color:statusMeta(data, issue.projectId, issue.status).color}} aria-hidden="true"/>
+            <span className="search-result-issue-content">
+              <span className="search-result-issue-title"><span className="workspace-search-issue-key">{issue.key}</span><span>{issue.title}</span></span>
+              <span className="workspace-search-result-path">{projectNames.get(issue.projectId) ?? '프로젝트'}</span>
+              {matchedAliases && <span className="workspace-search-result-labels">
+                {matchedAliases.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+              </span>}
+            </span>
+            <ChevronRight size={15} aria-hidden="true"/>
           </button>)}
           {docs.length > 0 && <div className="search-label">문서</div>}
           {docs.map(doc => <button type="button" className="search-result" key={doc.id} onClick={() => openDocument(doc.id)}>

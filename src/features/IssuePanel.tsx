@@ -10,6 +10,7 @@ import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { findIssueDocumentReferences } from '../../shared/document-references';
+import { issueSearchAliasLabel, issueSearchAliases } from '../../shared/workspace-search';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
@@ -590,6 +591,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     </div>;
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
+  const previousKeys = issueSearchAliases(data, issue.id);
   return <>
     <div className="issue-panel-backdrop" inert={nestedModalOpen || Boolean(previewDocument)} onMouseDown={event => {
       if (event.target === event.currentTarget && !saving && !nestedModalOpen && !dependencyBusyRef.current) closePanel();
@@ -616,6 +618,12 @@ function IssuePanelContent(props: IssuePanelProps) {
         <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}
       </span>
       <h2 id="issue-panel-heading">{issue.title}</h2>
+      {previousKeys.length > 0 && <div className="issue-panel-key-history">
+        <span>이전 티켓 번호</span>
+        <ul aria-label="이전 티켓 번호" role="list">
+          {previousKeys.map(alias => <li key={`${alias.source}:${alias.key}`}>{issueSearchAliasLabel(alias)}</li>)}
+        </ul>
+      </div>}
       {parent && <button className="issue-parent-link" onClick={() => navigateIssue(parent.id)}>
         상위 업무 · {parent.key} {parent.title}<ArrowRight size={13} />
       </button>}

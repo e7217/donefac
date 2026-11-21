@@ -9,7 +9,7 @@ interface SourceRow extends GitlabJiraSource {
 
 type OriginalIssue = { issueId: string; originalJiraKey: string };
 
-// The binding table also indexes source IDs. Only an exact archived Jira key establishes a GitLab alias.
+// The binding table also indexes source IDs. Only an exact archived Jira key establishes an alias.
 const archiveJson = "CASE WHEN json_valid(archive.json) THEN archive.json ELSE '{}' END";
 const sourceRows = `
   SELECT binding.source_instance AS jiraInstanceKey, projects.id AS projectId,
@@ -20,6 +20,11 @@ const sourceRows = `
     AND json_extract(${archiveJson},'$.record.metadata.key')=binding.source_alias
   JOIN projects ON projects.id=json_extract(${archiveJson},'$.targetProjectId')
   WHERE binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue'`;
+
+export function activeOriginalJiraIssueKeys(store: Store): Iterable<OriginalIssue> {
+  return store.db.prepare(`SELECT DISTINCT source.issueId, source.jiraKey AS originalJiraKey
+    FROM (${sourceRows}) AS source JOIN issues ON issues.id=source.issueId`).iterate() as Iterable<OriginalIssue>;
+}
 
 export function gitlabJiraSources(store: Store): GitlabJiraSource[] {
   const pairs = new Map<string, GitlabJiraSource>();

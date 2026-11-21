@@ -5,10 +5,9 @@ import { BookOpen, ChevronLeft, ChevronRight, CircleDot, Search } from 'lucide-r
 import type { FeatureProps, WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import {
-  DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, normalizeWorkspaceSearchQuery,
+  DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchQuery,
   searchWorkspace, workspaceSearchLabels, type WorkspaceSearchFilters,
 } from '../../shared/workspace-search';
-import './workspace-search.css';
 
 type Props = Pick<FeatureProps, 'openIssue' | 'openDocument'> & {
   data: WorkspaceSnapshot;
@@ -118,7 +117,7 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
         {results.items.map((result, index) => {
           const detailId = `${resultsId}-${index}`;
           if (result.kind === 'issue') {
-            const { issue, excerpt } = result;
+            const { issue, excerpt, matchedAliases } = result;
             const project = projectsById.get(issue.projectId);
             const status = statusMeta(data, issue.projectId, issue.status);
             return <li key={`issue:${issue.id}`}>
@@ -128,6 +127,9 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
                 <span className="workspace-search-result-content" id={detailId}>
                   <span className="workspace-search-result-title"><span className="workspace-search-issue-key">{issue.key}</span><strong>{issue.title}</strong></span>
                   <span className="workspace-search-result-path">{project?.name ?? '프로젝트'} · {status.label}</span>
+                  {matchedAliases && <span className="workspace-search-result-labels">
+                    {matchedAliases.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+                  </span>}
                   {excerpt && <span className="workspace-search-excerpt">{excerpt}</span>}
                 </span>
                 <ChevronRight size={16} aria-hidden="true" className="workspace-search-result-arrow" />

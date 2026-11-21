@@ -12,6 +12,8 @@ const boardTables = {
   gitlab_links: ['id', 'issue_id', 'json'],
   dependencies: ['id', 'predecessor_id', 'successor_id', 'json'],
   resource_links: ['id', 'issue_id', 'document_id', 'json'],
+  source_bindings: ['product', 'kind', 'source_instance', 'source_alias', 'target_type', 'target_id'],
+  source_records: ['product', 'kind', 'source_instance', 'target_type', 'target_id', 'json'],
 } as const;
 
 const ganttTables = {
@@ -32,6 +34,13 @@ const ganttSettingPredicates = {
   delete: `OLD.key='${teamWorkloadCapacitySettingKey}'`,
 };
 
+const jiraIssueSource = (row: 'OLD' | 'NEW') => `${row}.product='jira' AND ${row}.kind='issue' AND ${row}.target_type='issue'`;
+const workspaceAliasPredicates = {
+  insert: jiraIssueSource('NEW'),
+  update: `((${jiraIssueSource('OLD')}) OR (${jiraIssueSource('NEW')}))`,
+  delete: jiraIssueSource('OLD'),
+};
+
 function revisionSchema(
   prefix: 'team_board' | 'gantt', tables: Record<string, readonly string[]>,
 ): string {
@@ -42,6 +51,7 @@ function revisionSchema(
       const predicates: string[] = [];
       if (event === 'update') predicates.push(`(${changed})`);
       if (table === 'settings') predicates.push(ganttSettingPredicates[event]);
+      if (table === 'source_bindings' || table === 'source_records') predicates.push(workspaceAliasPredicates[event]);
       const when = predicates.length ? ` WHEN ${predicates.join(' AND ')}` : '';
       return `CREATE TRIGGER IF NOT EXISTS ${prefix}_${table}_${event}
         AFTER ${event} ON ${table}${when}

@@ -21,6 +21,7 @@ curl --fail-with-body \
 | `GET /projects/:id/workflow` | 업무 상태·허용 전이·필수 속성 규칙 |
 | `GET /projects/:id/issue-schema` | 업무 유형·사용자 정의 필드·선택지의 고유 ID와 입력 규칙 |
 | `GET /projects/:id/issue-templates` | 프로젝트의 활성 업무 템플릿과 적용할 버전 조회 |
+| `GET /issue-key-matches?key=...` | 현재 키·Jira 원래 키·프로젝트 이동 전 키의 정확한 후보 조회 |
 | `GET /projects/:id/recurring-issues` · `POST /projects/:id/recurring-issues` · `PATCH /projects/:id/recurring-issues/:ruleId` | 주간 반복 업무 조회·등록·편집 |
 | `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
@@ -62,6 +63,12 @@ curl --fail-with-body \
 백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 관리 화면에서 생성한다. 자동화 API로 계획을 조회하고 티켓에 연결하며 이월과 함께 사이클을 완료할 수 있다.
 
 업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
+
+## 현재·이전 티켓 키 조회
+
+`GET /api/v1/issue-key-matches?key=OLD-123`은 현재 키 또는 이전 키가 정확히 일치하는 활성 티켓을 `{issue,matchedAliases}` 배열로 반환한다. 대소문자와 전각 영숫자를 정규화한다. 현재 키가 맞는 티켓이 먼저 나오고, 같은 번호를 사용한 나머지 티켓도 배열에 각각 포함된다. 한 티켓은 한 번만 나오며 `matchedAliases` 항목은 `{key,source}` 형식이다. `source` 값은 Jira 원래 키의 `jira` 또는 Teamspace 프로젝트 이동 전 키의 `move`다.
+
+`projectId`를 보내면 티켓의 현재 소속 프로젝트로 좁힌다. 읽기·쓰기 키 모두 키에 허용된 현재 프로젝트만 조회한다. 조건에 맞는 티켓이 없으면 빈 배열을 반환한다. 브라우저는 같은 계약의 `/api/issue-key-matches`를 사용한다.
 
 ## 티켓 사이의 업무 관계
 

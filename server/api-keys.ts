@@ -329,6 +329,12 @@ export class ApiKeyService {
       this.used(key); return next();
     }
     if (request.method === 'GET') {
+      if (path === '/api/issue-key-matches') {
+        const query = this.query(request, ['key', 'projectId']);
+        if (query.projectId !== undefined) this.allowedProject(key, query.projectId);
+        this.used(key);
+        return next();
+      }
       const issueHistory = /^\/api\/issues\/([^/]+)\/change-history$/.exec(path);
       if (issueHistory) {
         this.query(request, ['beforeVersion']);

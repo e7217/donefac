@@ -148,6 +148,22 @@
   font-size: 11px;
 }
 
+.search-result-issue > svg { flex: none; }
+
+.search-result.search-result-issue > .search-result-issue-content {
+  display: grid;
+  gap: 3px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.search-result-issue-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 8px;
+}
+
 .workspace-search-empty {
   margin: 0;
   padding: 22px 16px;

@@ -164,3 +164,29 @@
 .issue-reporter-filter { max-width: 100%; min-width: 0; }
 .issue-reporter-filter > span { font-size: 11px; flex-shrink: 0; }
 .issue-reporter-filter > select { min-width: 0; max-width: 14rem; text-overflow: ellipsis; }
+
+.issue-panel-key-history {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.issue-panel-key-history ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 100px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: auto;
+}
+.issue-panel-key-history li {
+  max-width: 100%;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  overflow-wrap: anywhere;
+}

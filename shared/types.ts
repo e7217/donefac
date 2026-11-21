@@ -604,6 +604,8 @@ export interface Issue {
   customFields?: Record<string, CustomFieldValue>;
   version: number; createdAt: string; updatedAt: string; completedAt: string | null;
 }
+export interface IssueSearchAlias { key: string; source: 'jira' | 'move' }
+export interface IssueKeyMatch { issue: Issue; matchedAliases: IssueSearchAlias[] }
 export type IssueChangeHistoryField = keyof Pick<Issue,
   'projectId' | 'key' | 'title' | 'description' | 'descriptionFormat' | 'type' | 'status' | 'priority' |
   'assigneeId' | 'reporterId' | 'collaboratorIds' | 'parentId' | 'labels' | 'startDate' | 'endDate' | 'dueDate' |
@@ -1430,6 +1432,7 @@ export interface WorkspaceSnapshot {
   issueSchemas?: ProjectIssueSchema[];
   issueOrders?: ProjectIssueOrder[];
   issueMoveOrigins?: Record<string, string[]>;
+  issueAliases?: Record<string, IssueSearchAlias[]>;
   documentOrders?: DocumentSiblingOrder[];
 }
 export interface ScheduleChange {

@@ -38,6 +38,7 @@ Use `X-Actor-Id` to attribute operations to a team member. This identifies the a
 - `GET /api/attachments/:id/content`, `DELETE /api/attachments/:id`
 - `POST /api/resource-links`, `DELETE /api/resource-links/:id`
 - `GET|POST /api/issues/:id/relations`, `PATCH|DELETE /api/issues/:id/relations/:relationId`. Teamspace supports related, blocks, and duplicates. Bearer key operations require scope for both issues.
+- `GET /api/issue-key-matches?key=OLD-123&projectId=…` returns exact active matches for current, migrated Jira, and pre-move keys. The optional project filter and Bearer scope use the issue's current project. [Issue key lookup](../docs/API.md#현재이전-티켓-키-조회)
 - `POST /api/issues/:id/gitlab-links` verifies an MR or pipeline for a configured repository. `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…` removes a manual ticket link.
 - `POST /api/dependencies`, `PATCH /api/dependencies/:id`, `DELETE /api/dependencies/:id`. PATCH accepts `expectedVersion`, `type`, `lagDays`, and `reverse`. Reversals keep the relationship ID and are checked for cycles.
 - `POST /api/schedule/preview`, `POST /api/schedule/apply`, `POST /api/schedule/undo`
