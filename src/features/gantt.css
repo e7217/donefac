@@ -229,6 +229,28 @@
 }
 .gantt-team-scope select {
   width: min(17rem, 100%);
+  min-width: 0;
+}
+.gantt-team-scope .gantt-team-unscheduled {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+}
+.gantt-team-unscheduled input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+@media (max-width: 540px) {
+  .gantt-team-scope {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .gantt-team-scope select { width: 100%; }
+  .gantt-team-scope select,
+  .gantt-team-scope .gantt-team-unscheduled,
+  .gantt-team-scope > .btn { min-height: 44px; }
+  .gantt-team-scope > .btn { justify-self: start; }
 }
 .gantt-row-project {
   color: var(--accent);

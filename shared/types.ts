@@ -713,6 +713,10 @@ export interface TeamBoardFilters {
   query?: string;
   gitlab?: IssueViewGitlabFilter;
 }
+export interface TeamGanttScheduleFilters {
+  assigneeId?: string | null;
+  unscheduledOnly?: boolean;
+}
 export type TeamOverviewCounts = Record<TeamOverviewIssueMetric, number>;
 export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }
 export interface TeamOverviewDeadline {

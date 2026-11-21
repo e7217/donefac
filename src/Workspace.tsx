@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, ClipboardList, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
-import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
@@ -63,6 +63,7 @@ type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttScope?: 'team'; ganttProject?: string | null;
+  ganttScheduleFilters?: TeamGanttScheduleFilters;
   ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   blockerScope?: DeliveryBlockerDraftScope | null;
   decisionFollowUpScope?: DecisionFollowUpScope | null;
@@ -92,6 +93,7 @@ type WorkspaceRead = { request: number; snapshot: WorkspaceSnapshot | null; revi
 const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview','teamboard','search'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
+const emptyTeamGanttScheduleFilters: TeamGanttScheduleFilters = {};
 function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
   if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
 }
@@ -106,6 +108,9 @@ function routeHash(route: WorkspaceRoute) {
   if (teamGantt) {
     query.set('scope', 'team');
     if (route.ganttProject) query.set('ganttProject', route.ganttProject);
+    const filters = route.ganttScheduleFilters;
+    if (filters?.assigneeId !== undefined) query.set('ganttAssignee', filters.assigneeId ?? '');
+    if (filters?.unscheduledOnly) query.set('ganttUnscheduled', '1');
   }
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
@@ -181,9 +186,13 @@ function hasSameBoardContext(previous: WorkspaceRoute, next: WorkspaceRoute): bo
   return hasSameTeamBoardContext(previous, next) || (previous.view === 'issues' && next.view === 'issues' && previous.projectId === next.projectId &&
     (previous.savedViewId ?? null) === (next.savedViewId ?? null));
 }
+function sameTeamGanttScheduleFilters(a?: TeamGanttScheduleFilters, b?: TeamGanttScheduleFilters): boolean {
+  return a?.assigneeId === b?.assigneeId && Boolean(a?.unscheduledOnly) === Boolean(b?.unscheduledOnly);
+}
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
     previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
+    sameTeamGanttScheduleFilters(previous.ganttScheduleFilters, next.ganttScheduleFilters) &&
     previous.ganttFocusIssueId === next.ganttFocusIssueId && previous.ganttFocusDate === next.ganttFocusDate;
   const sameSearch = previous.view === 'search' && next.view === 'search' && previous.projectId === next.projectId &&
     sameWorkspaceSearchFilters(previous.searchFilters, next.searchFilters);
@@ -229,6 +238,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const ganttScope = view === 'gantt' && projectId && parameters.get('scope') === 'team' ? 'team' : undefined;
   const requestedGanttProject = parameters.get('ganttProject');
   const ganttProject = ganttScope && snapshot.projects.some(project => project.id === requestedGanttProject) ? requestedGanttProject : null;
+  const requestedGanttAssignee = parameters.get('ganttAssignee');
+  const ganttScheduleFilters: TeamGanttScheduleFilters | undefined = ganttScope ? {
+    assigneeId: requestedGanttAssignee === '' ? null : requestedGanttAssignee !== null &&
+      snapshot.users.some(user => user.id === requestedGanttAssignee) ? requestedGanttAssignee : undefined,
+    unscheduledOnly: parameters.get('ganttUnscheduled') === '1',
+  } : undefined;
   const requestedIssue = parameters.get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
@@ -302,7 +317,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   } : undefined;
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
-    ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters };
+    ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId,
+    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -324,6 +340,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttScope, setGanttScope] = useState<WorkspaceRoute['ganttScope']>();
   const [ganttProject, setGanttProject] = useState<string | null>(null);
+  const [ganttScheduleFilters, setGanttScheduleFilters] = useState(emptyTeamGanttScheduleFilters);
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
   const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
@@ -424,7 +441,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const previous = acceptedRouteRef.current;
     if (previous && (previous.view === 'teamboard' || previous.view === 'gantt')) {
       const changedPane = route.view !== previous.view || route.projectId !== previous.projectId || route.issueId !== previous.issueId;
-      const changedChart = previous.view === 'gantt' && (route.ganttScope !== previous.ganttScope || route.planningId !== previous.planningId ||
+      const changedChart = previous.view === 'gantt' && (route.ganttScope !== previous.ganttScope || route.ganttProject !== previous.ganttProject ||
+        !sameTeamGanttScheduleFilters(route.ganttScheduleFilters, previous.ganttScheduleFilters) || route.planningId !== previous.planningId ||
         route.savedViewId !== previous.savedViewId || route.ganttFocusIssueId !== previous.ganttFocusIssueId || route.ganttFocusDate !== previous.ganttFocusDate);
       if (changedPane || changedChart) refreshContextEpoch.current++;
     }
@@ -489,6 +507,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setSavedViewId(route.savedViewId ?? null);
     setGanttScope(route.ganttScope);
     setGanttProject(route.ganttProject ?? null);
+    const scheduleFilters = route.ganttScheduleFilters ?? emptyTeamGanttScheduleFilters;
+    setGanttScheduleFilters(previous => sameTeamGanttScheduleFilters(previous, scheduleFilters) ? previous : scheduleFilters);
     setGanttFocusIssueId(route.ganttFocusIssueId ?? null);
     setGanttFocusDate(route.ganttFocusDate ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
@@ -576,6 +596,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     // The chart has already confirmed any drafts this filter would hide.
     const next = { ...current, ganttProject: id };
     if (routeHash(next) !== routeHash(current)) writeRoute(next, routeIndexRef.current + 1, 'push');
+    return true;
+  };
+  const changeTeamGanttScheduleFilters = (filters: TeamGanttScheduleFilters) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'gantt' || current.ganttScope !== 'team' || current.issueId ||
+      (typeof filters.assigneeId === 'string' && !dataRef.current?.users.some(user => user.id === filters.assigneeId))) return false;
+    // The chart has already confirmed any drafts this filter would hide.
+    if (!sameTeamGanttScheduleFilters(current.ganttScheduleFilters, filters)) {
+      writeRoute({ ...current, ganttScheduleFilters: filters }, routeIndexRef.current + 1, 'push');
+    }
     return true;
   };
   const openIssue = (id: string, capacityTrigger?: { opener: HTMLElement; fallback: HTMLElement | null }) => {
@@ -669,7 +699,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const teamRoute = current?.view === 'gantt' && current.ganttScope === 'team' ? current : null;
     const target: WorkspaceRoute = {
       projectId: teamRoute?.projectId ?? issue.projectId, view: 'gantt', documentId: null, issueId: null,
-      ganttScope: teamRoute?.ganttScope, ganttProject: teamRoute?.ganttProject, ganttFocusIssueId: id, ganttFocusDate: endpoint,
+      ganttScope: teamRoute?.ganttScope, ganttProject: teamRoute?.ganttProject, ganttScheduleFilters: teamRoute?.ganttScheduleFilters,
+      ganttFocusIssueId: id, ganttFocusDate: endpoint,
     };
     if (endpoint && current && routeHash(current) === routeHash(target) && !confirmRouteNavigation(current, target)) return false;
     if (!requestRoute(target)) return false;
@@ -862,11 +893,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}
         {view === 'gantt' && <Gantt {...props} refreshGantt={refreshGantt} allProjects={teamGantt} teamProjectFilter={ganttProject} onChangeTeamProjectFilter={changeTeamGanttProject}
+          teamScheduleFilters={ganttScheduleFilters} onChangeTeamScheduleFilters={changeTeamGanttScheduleFilters}
           onOpenProjectGantt={id => requestRoute({ projectId: id, view: 'gantt', documentId: null, issueId: null })}
           initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
           focusIssueId={ganttFocusIssueId} focusDateEndpoint={ganttFocusDate} issueOverlayOpen={Boolean(openedIssue)} issueFocusActivation={issueFocusActivation}
           onLocateIssueDate={openIssueSchedule}
-          onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId,ganttScope,ganttProject})}
+          onClearIssueFocus={() => requestRoute({projectId,view:'gantt',documentId:null,issueId,ganttScope,ganttProject,ganttScheduleFilters})}
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
