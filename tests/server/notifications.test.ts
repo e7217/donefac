@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { ISSUE_RISK_NOTIFICATION_KINDS, type TeamNotification } from '../../shared/types.js';
+import { ISSUE_RISK_NOTIFICATION_KINDS, type Comment, type TeamNotification } from '../../shared/types.js';
 import { NotificationsService, TeamNotificationError } from '../../server/notifications.js';
 import { Store } from '../../server/store.js';
 
@@ -161,4 +161,64 @@ test('risk notification details survive restore and invalid or cross-kind detail
   assert.throws(() => notifications.notify({ ...event, ...recipients, kind: 'issue-block-resolved' }), TeamNotificationError);
   assert.throws(() => notifications.notify({ ...event, ...recipients, detail: '다른 알림의 상세 내용' }), TeamNotificationError);
   assert.deepEqual(notifications.all(), backup);
+});
+
+test('status notification details are optional, validated, and retained across backup restore', t => {
+  const { store, notifications } = fixture(t);
+  const status = { ...event, kind: 'issue-status-changed', recipientIds: ['recipient'] } satisfies Parameters<NotificationsService['notify']>[0];
+  notifications.notify(status);
+  notifications.notify({ ...status, detail: '할 일 → 진행 중' });
+  const [legacy, updated] = notifications.all();
+  notifications.markRead('recipient', updated.id);
+  const backup = notifications.all();
+  assert.equal(Object.hasOwn(legacy, 'detail'), false);
+  assert.equal(updated.detail, '할 일 → 진행 중');
+
+  for (const detail of [null, '', ' ', '가'.repeat(501), '할 일\n진행 중']) {
+    assert.throws(() => store.transaction(() => notifications.restore([{ ...updated, detail }], users)), TeamNotificationError);
+  }
+  assert.throws(() => notifications.notify({ ...status, detail: '할 일\n진행 중' }), TeamNotificationError);
+  assert.throws(() => notifications.notify({ ...status, kind: 'issue-comment', detail: updated.detail }), TeamNotificationError);
+  assert.deepEqual(notifications.all(), backup);
+
+  store.transaction(() => notifications.restore([], users));
+  store.transaction(() => notifications.restore(JSON.parse(JSON.stringify(backup)), users));
+  assert.deepEqual(notifications.all(), backup);
+});
+
+test('ordinary issue comment anchors validate existing comments and keep receipts after deletion', t => {
+  const { store, notifications } = fixture(t);
+  const ordinary = { ...event, kind: 'issue-comment', recipientIds: ['recipient'] } satisfies Parameters<NotificationsService['notify']>[0];
+  const comment = {
+    id: 'saved-comment', resourceType: 'issue', resourceId: ordinary.targetId, authorId: ordinary.actorId,
+    body: '확인했습니다.', createdAt: ordinary.createdAt,
+  } satisfies Comment;
+  notifications.notify(ordinary);
+  notifications.notify({ ...ordinary, commentId: comment.id });
+  const backup = notifications.all();
+  const [legacy, anchored] = backup;
+  assert.equal(Object.hasOwn(legacy, 'commentId'), false);
+  assert.equal(anchored.commentId, comment.id);
+
+  const available = (value: Comment) => new Map([[comment.id, value]]);
+  for (const mismatched of [
+    { ...comment, resourceId: 'other issue' },
+    { ...comment, resourceType: 'document' } as const,
+    { ...comment, authorId: 'teammate' },
+  ]) {
+    assert.throws(() => store.transaction(() => notifications.restore([anchored], users, available(mismatched))), TeamNotificationError);
+  }
+  for (const bad of [{ ...anchored, commentId: '' }, { ...anchored, commentId: null }, { ...anchored, kind: 'document-comment' },
+    { ...anchored, kind: 'issue-comment-mentioned' }, { ...legacy, kind: 'issue-comment-mentioned' }]) {
+    assert.throws(() => store.transaction(() => notifications.restore([bad], users, available(comment))), TeamNotificationError);
+  }
+  assert.throws(() => notifications.notify({ ...ordinary, kind: 'issue-status-changed', commentId: comment.id }), TeamNotificationError);
+  assert.throws(() => notifications.notify({ ...ordinary, kind: 'document-comment-reply', projectId: null }), TeamNotificationError);
+  assert.deepEqual(notifications.all(), backup);
+
+  for (const comments of [available(comment), new Map<string, Comment>()]) {
+    store.transaction(() => notifications.restore([], users));
+    store.transaction(() => notifications.restore(JSON.parse(JSON.stringify(backup)), users, comments));
+    assert.deepEqual(notifications.all(), backup);
+  }
 });

@@ -220,18 +220,74 @@ test('Store change listeners join implicit writes and preserve separate async mu
   }finally{store.db.close();rmSync(dir,{recursive:true,force:true});}
 });
 
-test('automation audit failure rolls back link, inbox, cursor, issue and outgoing delivery together',async()=>{
-  const f=await fixture();try{
-    await configure(f);await endpoint(f);await rule(f);const before=f.observer.get<Issue>('issues','issue-1')!,body=payload(),id=randomUUID();
-    const watcher={'X-Actor-Id':'user-jun'};
-    assert.equal((await f.call('/notifications/subscriptions/issue/issue-1','PUT',{subscribed:true},watcher)).status,200);
+test('automation audit failure rolls back issue changes and reporter notifications, then replay delivers once', async () => {
+  const f = await fixture();
+  try {
+    const issueId = 'issue-1';
+    const projectId = 'project-neo';
+    const reporter = {'X-Actor-Id':'user-min'};
+    const watcher = {'X-Actor-Id':'user-jun'};
+    const automationActor = {'X-Actor-Id':'user-seo'};
+    const original = f.observer.get<Issue>('issues', issueId)!;
+    const assignedReporter = await f.call<Issue>(`/issues/${issueId}`, 'PATCH', {
+      expectedVersion: original.version, reporterId: reporter['X-Actor-Id'],
+    });
+    assert.equal(assignedReporter.status, 200, JSON.stringify(assignedReporter.data));
+    const before = assignedReporter.data;
+
+    const workflowPath = `/projects/${projectId}/workflow`;
+    const { data: workflow } = await f.call<ProjectWorkflow>(workflowPath);
+    const beforeLabel = '개발 검토 중';
+    const afterLabel = '배포 반영';
+    const renamed = await f.call(workflowPath, 'PATCH', {
+      ...workflow, expectedVersion: workflow.version,
+      statuses: workflow.statuses.map(status => status.id === before.status ? { ...status, label: beforeLabel }
+        : status.id === 'done' ? { ...status, label: afterLabel } : status),
+    });
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+    await configure(f);
+    await endpoint(f);
+    await rule(f);
+    const body = payload(), id = randomUUID();
+    const watchIssue = `/notifications/subscriptions/issue/${issueId}`;
+    assert.equal((await f.call(watchIssue, 'PUT', { subscribed: true }, watcher)).status, 200);
+    assert.equal((await f.call(`/notifications/subscriptions/project/${projectId}`, 'PUT', { subscribed: true }, watcher)).status, 200);
+    assert.equal((await f.call(watchIssue, 'PUT', { subscribed: true }, automationActor)).status, 200);
+    assert.equal((await f.call(watchIssue, 'GET', undefined, reporter)).data.subscribed, false);
+
     f.observer.db.exec("CREATE TRIGGER reject_automation_audit BEFORE INSERT ON activities WHEN json_extract(NEW.json,'$.action')='GitLab 자동화 상태 변경' BEGIN SELECT RAISE(ABORT,'synthetic automation audit rejection'); END;");
-    assert.equal((await hook(f,body,id)).status,500);assert.deepEqual(f.observer.get('issues','issue-1'),before);for(const table of ['webhook_inbox','gitlab_object_cursors','gitlab_links','automation_runs','webhook_events','webhook_deliveries','team_notifications'])assert.equal(f.observer.db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()!.total,0,table);
-    f.observer.db.exec('DROP TRIGGER reject_automation_audit');assert.equal((await hook(f,body,id)).status,200);assert.equal(f.observer.get<Issue>('issues','issue-1')!.status,'done');assert.equal((await f.call('/webhook-deliveries')).data.length,1);
-    const notifications=await f.call<TeamNotificationPage>('/notifications','GET',undefined,watcher);
-    assert.equal(notifications.status,200);
-    assert.deepEqual(notifications.data.items.map(item=>[item.kind,item.actorId,item.targetId]),[['issue-status-changed','user-seo','issue-1']]);
-  }finally{await f.close();}
+    assert.equal((await hook(f, body, id)).status, 500);
+    assert.deepEqual(f.observer.get('issues', issueId), before);
+    const transactionalTables = ['webhook_inbox', 'gitlab_object_cursors', 'gitlab_links', 'automation_runs', 'webhook_events', 'webhook_deliveries', 'team_notifications'];
+    for (const table of transactionalTables) {
+      assert.equal(f.observer.db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()!.total, 0, table);
+    }
+
+    f.observer.db.exec('DROP TRIGGER reject_automation_audit');
+    assert.equal((await hook(f, body, id)).status, 200);
+    const updated = f.observer.get<Issue>('issues', issueId)!;
+    assert.equal(updated.status, 'done');
+    assert.equal(updated.version, before.version + 1);
+    const replay = await hook(f, body, id);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data.duplicate, true);
+    assert.deepEqual(f.observer.get('issues', issueId), updated);
+    assert.equal((await f.call('/webhook-deliveries')).data.length, 1);
+
+    for (const recipient of [reporter, watcher]) {
+      const notifications = await f.call<TeamNotificationPage>('/notifications', 'GET', undefined, recipient);
+      assert.equal(notifications.status, 200);
+      assert.deepEqual(notifications.data.items.map(item => [item.kind, item.actorId, item.targetId, item.detail]), [
+        ['issue-status-changed', automationActor['X-Actor-Id'], issueId, `${beforeLabel} → ${afterLabel}`],
+      ]);
+    }
+    const self = await f.call<TeamNotificationPage>('/notifications', 'GET', undefined, automationActor);
+    assert.equal(self.status, 200);
+    assert.deepEqual(self.data.items, []);
+  } finally {
+    await f.close();
+  }
 });
 
 test('rules protect status/type references and connection credential removal disables stale rules',async()=>{

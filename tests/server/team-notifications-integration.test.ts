@@ -11,7 +11,7 @@ import { ISSUE_RISK_NOTIFICATION_KINDS } from '../../shared/types.js';
 import type {
   ApiKeyCreated, Comment, DocPage, DocumentPublicationView, Issue, IssueRelation, LegacyPackageSummary, MigrationOptions,
   MigrationPreview, NotificationSubscription, NotificationSubscriptionState, NotificationSubscriptionTarget,
-  TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
+  ProjectWorkflow, TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const editor = 'user-min';
@@ -88,7 +88,7 @@ async function issue(f: Fixture, assigneeId: string, title: string, collaborator
 }
 
 async function comment(f: Fixture, resourceType: 'issue' | 'document', resourceId: string, actorId: string) {
-  return expectStatus(f.call('/comments', 'POST', { resourceType, resourceId, body: privateComment }, actorId), 201);
+  return expectStatus(f.call<Comment>('/comments', 'POST', { resourceType, resourceId, body: privateComment }, actorId), 201);
 }
 
 function event(item: TeamNotification) {
@@ -100,6 +100,116 @@ const riskKinds: ReadonlySet<TeamNotification['kind']> = new Set(ISSUE_RISK_NOTI
 const isRiskNotification = (item: TeamNotification) => riskKinds.has(item.kind);
 const riskInbox = async (f: Fixture, actorId: string, query = '') =>
   (await inbox(f, actorId, query)).items.filter(isRiskNotification);
+
+test('the current reporter receives exact comment and status alerts while API writes deduplicate and use their actual actor', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, reviewer, '요청자의 업무 진행 알림');
+  assert.equal(ticket.reporterId, editor);
+  const workflow = await expectStatus(f.call<ProjectWorkflow>(`/projects/${ticket.projectId}/workflow`));
+  const statusName = (id: string) => workflow.statuses.find(status => status.id === id)!.label;
+  const issuePath = `/issues/${ticket.id}`;
+  const ticketSubscription = subscriptionPath('issue', ticket.id), projectSubscription = subscriptionPath('project', ticket.projectId);
+  const alerts = async (id: string) => (await inbox(f, id)).items.filter(row => row.targetId === ticket.id &&
+    ['issue-status-changed', 'issue-comment', 'issue-comment-mentioned'].includes(row.kind));
+  assert.deepEqual(await checkSubscription(f, ticketSubscription, editor), { subscribed: false });
+  assert.deepEqual(await checkSubscription(f, projectSubscription, editor), { subscribed: false });
+
+  const started = await expectStatus(f.call<Issue>(issuePath, 'PATCH', { expectedVersion: ticket.version, status: 'in_progress' }, reviewer));
+  const firstComment = await comment(f, 'issue', ticket.id, reviewer);
+  await comment(f, 'issue', ticket.id, editor);
+  assert.deepEqual((await alerts(editor)).map(({ kind, commentId, detail, actorId }) => [kind, commentId, detail, actorId]), [
+    ['issue-comment', firstComment.id, undefined, reviewer],
+    ['issue-status-changed', undefined, `${statusName(ticket.status)} → ${statusName(started.status)}`, reviewer],
+  ]);
+  assert.equal(JSON.stringify(await alerts(editor)).includes(firstComment.body), false);
+
+  await checkSubscription(f, ticketSubscription, editor, true);
+  await checkSubscription(f, projectSubscription, editor, true);
+  const assigned = await expectStatus(f.call<Issue>(issuePath, 'PATCH', {
+    expectedVersion: started.version, assigneeId: editor, collaboratorIds: [editor],
+  }, reviewer));
+  const { token } = await expectStatus(f.call<ApiKeyCreated>('/api-keys', 'POST', {
+    name: '요청자 알림 검증 키', access: 'write', projectIds: [ticket.projectId],
+  }, reviewer), 201);
+  const keyHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Actor-Id': editor };
+  const statusResponse = await fetch(`${f.base}/v1${issuePath}`, {
+    method: 'PATCH', headers: keyHeaders, body: JSON.stringify({ expectedVersion: assigned.version, status: 'review' }),
+  });
+  const reviewed = await statusResponse.json() as Issue;
+  assert.equal(statusResponse.status, 200, JSON.stringify(reviewed));
+  const actor = (await expectStatus(f.call<WorkspaceSnapshot>('/workspace'))).users.find(user => user.id === editor)!;
+  const name = `@${actor.name}`;
+  const mentionResponse = await fetch(`${f.base}/v1/comments`, {
+    method: 'POST', headers: keyHeaders, body: JSON.stringify({ resourceType: 'issue', resourceId: ticket.id,
+      body: `${name} 검토 의견`, mentions: [{ userId: editor, from: 0, to: name.length }] }),
+  });
+  const mention = await mentionResponse.json() as Comment;
+  assert.equal(mentionResponse.status, 201, JSON.stringify(mention));
+  const rows = await alerts(editor);
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.slice(0, 2).map(({ kind, commentId, detail, actorId }) => [kind, commentId, detail, actorId]), [
+    ['issue-comment-mentioned', mention.id, undefined, reviewer],
+    ['issue-status-changed', undefined, `${statusName(started.status)} → ${statusName(reviewed.status)}`, reviewer],
+  ]);
+
+  await checkSubscription(f, ticketSubscription, editor, false);
+  await checkSubscription(f, projectSubscription, editor, false);
+  const changed = await expectStatus(f.call<Issue>(issuePath, 'PATCH', {
+    expectedVersion: reviewed.version, reporterId: other, assigneeId: reviewer, collaboratorIds: [], status: 'done',
+  }, reviewer));
+  const nextComment = await comment(f, 'issue', ticket.id, reviewer);
+  const otherRows = await alerts(other);
+  assert.deepEqual(otherRows.map(({ kind, commentId, detail }) => [kind, commentId, detail]), [
+    ['issue-comment', nextComment.id, undefined],
+    ['issue-status-changed', undefined, `${statusName(reviewed.status)} → ${statusName(changed.status)}`],
+  ]);
+  const cleared = await expectStatus(f.call<Issue>(issuePath, 'PATCH', { expectedVersion: changed.version, reporterId: null }, reviewer));
+  assert.equal(cleared.reporterId, null);
+  await comment(f, 'issue', ticket.id, reviewer);
+  assert.deepEqual(await alerts(other), otherRows);
+  assert.deepEqual(await alerts(editor), rows);
+});
+
+test('native notification backups preserve transition details, exact archived comments and legacy receipts', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, reviewer, '백업할 요청자 알림');
+  await expectStatus(f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: ticket.version, status: 'in_progress' }, reviewer));
+  const received = await comment(f, 'issue', ticket.id, reviewer);
+  const unrelated = await issue(f, collaborator, '복원 댓글 대상 검증');
+  const wrong = await comment(f, 'issue', unrelated.id, reviewer);
+  const delivered = (await inbox(f, editor)).items.find(item => item.commentId === received.id)!;
+  assert.ok(delivered);
+  await expectStatus(f.call(`/notifications/${delivered.id}/read`, 'PATCH', undefined, editor));
+  await expectStatus(f.call(`/comments/${received.id}`, 'DELETE', undefined, reviewer));
+  const before = await inbox(f, editor);
+  const data = await expectStatus(f.call<Backup>('/export'));
+  assert.equal(data.schemaVersion, 86);
+
+  const wrongAnchor = structuredClone(data);
+  wrongAnchor.teamNotifications.find(item => item.id === delivered.id)!.commentId = wrong.id;
+  await expectStatus(f.call('/import', 'POST', { data: wrongAnchor }), 400);
+  const earlierHeader = { ...structuredClone(data), schemaVersion: 85 };
+  const rejected = await f.call<{ error: string }>('/import', 'POST', { data: earlierHeader });
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.data.error, /schemaVersion 86/);
+  assert.deepEqual(await inbox(f, editor), before);
+
+  await expectStatus(f.call('/import', 'POST', { data }));
+  await f.restart();
+  assert.deepEqual(await inbox(f, editor), before);
+
+  earlierHeader.teamNotifications = earlierHeader.teamNotifications.map(item => {
+    const row = { ...item };
+    if (row.kind === 'issue-comment') delete row.commentId;
+    if (row.kind === 'issue-status-changed') delete row.detail;
+    return row;
+  });
+  await expectStatus(f.call('/import', 'POST', { data: earlierHeader }));
+  const oldRows = (await inbox(f, editor)).items;
+  assert.equal(oldRows.find(item => item.id === delivered.id)?.commentId, undefined);
+  assert.equal(oldRows.find(item => item.id === delivered.id)?.readAt, before.items.find(item => item.id === delivered.id)?.readAt);
+  assert.equal(oldRows.find(item => item.kind === 'issue-status-changed')?.detail, undefined);
+});
 
 test('issue assignment and comments notify their committed recipients without duplicates or self notifications', async t => {
   const f = await fixture(t);
@@ -620,7 +730,8 @@ test('deadline postponement uses the effective date and native backup preserves 
     [...saved].reverse(),
   );
   await f.restart();
-  const old = { ...backup, schemaVersion: 61 };
+  const old = { ...backup, schemaVersion: 61, teamNotifications: backup.teamNotifications.map(item =>
+    item.kind === 'issue-status-changed' ? { ...item, detail: undefined } : item) };
   const rejection = await expectStatus(f.call<{ error: string }>('/import', 'POST', { data: old }), 400);
   assert.match(rejection.error, /schemaVersion 62/);
   assert.deepEqual(await riskInbox(f, reviewer), saved);

@@ -10,7 +10,7 @@ import { Store } from '../../server/store.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   ApiKeyCreated, AutomationRule, Issue, IssueAssignmentPreview, IssueAssignmentRule, IssueAssignmentRuleInput, IssueAssignmentRunPage,
-  ProjectIssueOrder, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated,
+  ProjectIssueOrder, ProjectWorkflow, TeamNotification, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated,
   WebhookEnvelope, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -21,7 +21,7 @@ const runsPath = `${projectPath}/assignment-runs`;
 const target = 'user-seo';
 const editor = 'user-min';
 const headersFor = (actorId: string) => ({ 'X-Actor-Id': actorId });
-type Backup = WorkspaceSnapshot & { schemaVersion: number; issueAssignmentRules: IssueAssignmentRule[] };
+type Backup = WorkspaceSnapshot & { schemaVersion: number; issueAssignmentRules: IssueAssignmentRule[]; teamNotifications: TeamNotification[] };
 
 async function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-issue-assignment-'));
@@ -245,7 +245,8 @@ test('board and scoped API status changes share assignment while native import r
   assert.equal(updated.data.assigneeId, null);
   assert.equal((await f.runs()).total, 0);
 
-  const previousSchema: Partial<Backup> = { ...backup, schemaVersion: 31 };
+  const previousSchema: Partial<Backup> = { ...backup, schemaVersion: 31, teamNotifications: backup.teamNotifications.map(item =>
+    item.kind === 'issue-status-changed' ? { ...item, detail: undefined } : item) };
   delete previousSchema.issueAssignmentRules;
   await f.expectStatus(200, '/import', 'POST', { data: previousSchema });
   assert.deepEqual(await f.expectStatus(200, rulesPath), []);

@@ -10,8 +10,9 @@ export const MAX_NOTIFICATION_DETAIL_LENGTH = 500;
 const KINDS: ReadonlySet<string> = new Set(TEAM_NOTIFICATION_KINDS);
 const DEADLINE_KINDS: ReadonlySet<string> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
 const COMMENT_MENTION_KINDS: ReadonlySet<string> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
+const ISSUE_COMMENT_KIND = 'issue-comment';
 const COMMENT_REPLY_KIND = 'document-comment-reply';
-const DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
+const REQUIRED_DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
 const COLUMNS = `id,recipient_id AS recipientId,actor_id AS actorId,kind,project_id AS projectId,
   target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail,comment_id AS commentId`;
 const INSERT = `INSERT INTO team_notifications
@@ -58,20 +59,17 @@ function reminderId(kind: string, recipientId: string, targetId: string, date: s
 }
 
 function validateDetail(kind: string, detail: unknown, present: boolean): string | null {
-  if (DETAIL_KINDS.has(kind)) {
-    if (present && typeof detail === 'string' && detail.trim() && detail.length <= MAX_NOTIFICATION_DETAIL_LENGTH && !/\p{Cc}/u.test(detail)) return detail;
-  } else if (!present) {
-    return null;
-  }
+  const required = REQUIRED_DETAIL_KINDS.has(kind);
+  if (!present && !required) return null;
+  if (present && (required || kind === 'issue-status-changed') && typeof detail === 'string' &&
+    detail.trim() && detail.length <= MAX_NOTIFICATION_DETAIL_LENGTH && !/\p{Cc}/u.test(detail)) return detail;
   throw new TeamNotificationError('알림 종류에 맞는 상세 내용을 입력해 주세요.');
 }
 
 function validateCommentId(kind: string, commentId: unknown, present: boolean): string | null {
-  if (COMMENT_MENTION_KINDS.has(kind) || kind === COMMENT_REPLY_KIND) {
-    if (present && validId(commentId)) return commentId;
-  } else if (!present) {
-    return null;
-  }
+  const required = COMMENT_MENTION_KINDS.has(kind) || kind === COMMENT_REPLY_KIND;
+  if (!present && !required) return null;
+  if (present && (required || kind === ISSUE_COMMENT_KIND) && validId(commentId)) return commentId;
   throw new TeamNotificationError('댓글 알림의 댓글 ID를 확인해 주세요.');
 }
 
@@ -99,10 +97,10 @@ function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<s
   if (commentId !== null) {
     const comment = comments?.get(commentId);
     // A receipt remains available after permanent deletion of its target comment.
-    if (comment && (comment.resourceType !== (row.kind === 'issue-comment-mentioned' ? 'issue' : 'document') ||
+    if (comment && (comment.resourceType !== (row.kind.startsWith('issue-') ? 'issue' : 'document') ||
         comment.resourceId !== row.targetId || comment.authorId !== row.actorId ||
-        (row.kind === COMMENT_REPLY_KIND ? !comment.parentCommentId :
-          !comment.mentions?.some(mention => mention.userId === row.recipientId)))) {
+        (row.kind === COMMENT_REPLY_KIND && !comment.parentCommentId) ||
+        (COMMENT_MENTION_KINDS.has(row.kind) && !comment.mentions?.some(mention => mention.userId === row.recipientId)))) {
       throw new TeamNotificationError('댓글 알림의 대상과 수신자를 확인해 주세요.');
     }
   }

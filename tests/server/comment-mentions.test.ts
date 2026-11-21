@@ -106,7 +106,7 @@ test('regular issue and document comments notify selected IDs once and preserve 
     ]);
     assert.ok(!JSON.stringify(notices).includes(input.body));
   }
-  assert.deepEqual((await f.inbox(collaborator, issue.id)).map(({ kind, commentId }) => [kind, commentId]), [['issue-comment', undefined]]);
+  assert.deepEqual((await f.inbox(collaborator, issue.id)).map(({ kind, commentId }) => [kind, commentId]), [['issue-comment', created.id]]);
   for (const actor of [sameName.id, writer]) assert.deepEqual(await f.inbox(actor, issue.id), []);
 
   const docInput = compose(sameName, ' 문서 내용을 검토해 주세요.');
@@ -205,6 +205,7 @@ test('native format 71 verifies live, trash and individual comment mentions and 
 
   const old = structuredClone(backup);
   old.schemaVersion = 70;
+  for (const item of old.teamNotifications) if (item.kind === 'issue-comment') delete item.commentId;
   for (const comment of entries(old)) delete comment.mentions;
   assert.match((await f.restore(old, 400)).error!, /schemaVersion 71/);
   old.teamNotifications = old.teamNotifications.filter(item => !mentionKinds.has(item.kind));

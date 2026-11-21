@@ -982,6 +982,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `GET /api/document-publications/count`는 현재 작업자의 전체 `pendingAssigned`만 반환한다. 목록과 건수는 브라우저 경로에서 제공한다. 자동화 키는 문서별 `/api/v1/documents/:id/publication` 경로를 사용한다.
 
+## 요청자의 업무 알림
+
+브라우저의 `GET /api/notifications`는 선택한 작업자에게 해당하는 알림을 읽는다. 현재 요청자에게는 다른 작업자가 저장한 상태 전이와 새 댓글이 전달된다. 업무·프로젝트 구독이나 댓글의 담당자·협력자와 수신 대상이 겹치면 이벤트마다 한 건을 기록한다. 멘션된 요청자에게는 `issue-comment-mentioned`를 기록한다. 브라우저·API 키·GitLab 자동화는 상태를 실제로 저장한 작업자를 적용한다.
+
+새 `issue-status-changed`의 `detail`은 변경 전후 상태명이고, 새 `issue-comment`의 `commentId`는 해당 업무에 저장된 댓글 ID다. 이전 알림에서 이 필드들은 생략될 수 있다. 알림에는 티켓 식별 정보와 댓글 위치가 들어가며 본문은 티켓에서 읽는다. 자체 백업 형식 86은 상태 상세와 일반 댓글 위치를 보존한다. 복원할 댓글이 있으면 업무와 작성자가 알림의 대상·작업자와 일치해야 한다.
+
 ## 알림 구독
 
 브라우저의 `GET /api/notifications/subscriptions/:targetType/:targetId`는 `X-Actor-Id`로 선택한 작업자의 `{ "subscribed": true }` 또는 `{ "subscribed": false }`를 반환한다. 같은 경로의 `PUT`에 `subscribed` 불리언을 보내 구독 상태를 지정한다.

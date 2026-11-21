@@ -94,7 +94,7 @@ import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
 import type { IssueCloneResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
-import { isTerminalStatus, requiredFieldsFor } from '../shared/workflow-helpers.js';
+import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { fieldApplies, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
@@ -269,7 +269,7 @@ export function createApp(options: {
     return store.all<any>('users')[0]?.id || fail('먼저 팀원을 등록해 주세요.');
   };
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
-  const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string|null)[], createdAt: string, detail?: string) =>
+  const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string | null | undefined)[], createdAt: string, detail?: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt,...(detail===undefined?{}:{detail})});
   const notifyIssueRisk = (issue: Issue, actorId: string, kind: typeof ISSUE_RISK_NOTIFICATION_KINDS[number], createdAt: string, detail: string) =>
     notifyIssue(issue,actorId,kind,[issue.assigneeId,...(issue.collaboratorIds??[]),...issueSubscribers(issue)],createdAt,detail);
@@ -280,17 +280,18 @@ export function createApp(options: {
     notifyDocument(document,document.authorId,'document-created',spaceSubscribers(document),document.createdAt);
   const notifyDocumentUpdate = (document: DocPage, actorId: string, createdAt: string) =>
     notifyDocument(document,actorId,'document-updated',documentSubscribers(document),createdAt);
-  const notifyComment = (comment: Comment, projectId: string | null, targetLabel: string, usualRecipients: (string | null)[]) => {
+  const notifyComment = (comment: Comment, projectId: string | null, targetLabel: string, usualRecipients: (string | null | undefined)[]) => {
     const { resourceType, resourceId: targetId, authorId: actorId, createdAt } = comment;
     const fields = { projectId, targetId, targetLabel, actorId, createdAt };
     const mentioned = new Set(comment.mentions?.map(mention => mention.userId));
     if (mentioned.size) {
       notifications.notify({ ...fields, kind: `${resourceType}-comment-mentioned`, recipientIds: [...mentioned], commentId: comment.id });
     }
-    const recipients = usualRecipients.filter(userId => userId === null || !mentioned.has(userId));
+    const recipients = usualRecipients.filter(userId => userId == null || !mentioned.has(userId));
     if (resourceType === 'document' && comment.parentCommentId) {
       notifications.notify({ ...fields, kind: 'document-comment-reply', recipientIds: recipients, commentId: comment.id });
-    } else notifications.notify({ ...fields, kind: `${resourceType}-comment`, recipientIds: recipients });
+    } else notifications.notify({ ...fields, kind: `${resourceType}-comment`, recipientIds: recipients,
+      ...(resourceType === 'issue' ? { commentId: comment.id } : {}) });
   };
   const notifyDocumentComment = (document: DocPage, comment: Comment, participants: string[] = []) =>
     notifyComment(comment, document.projectId, document.title, [document.authorId, ...documentSubscribers(document), ...participants]);
@@ -303,7 +304,10 @@ export function createApp(options: {
     if((!statusChanged&&!projectChanged&&!datesChanged) || !context.actorId ||
       (context.origin!=='user' && context.origin!=='automation') || !store.get('users',context.actorId)) return;
     if(statusChanged){
-      notifyIssue(issue,context.actorId,'issue-status-changed',issueSubscribers(issue),issue.updatedAt);
+      const statusLabel = (ticket: Issue) => statusMeta({ workflows: [workflows.get(ticket.projectId)] }, ticket.projectId, ticket.status).label
+        .replace(/[\s\p{Cc}]+/gu, ' ').trim() || '알 수 없는 상태';
+      const detail = `${statusLabel(old)} → ${statusLabel(issue)}`;
+      notifyIssue(issue, context.actorId, 'issue-status-changed', [issue.reporterId, ...issueSubscribers(issue)], issue.updatedAt, detail);
     }
     if(statusChanged||projectChanged)blockerNotifications.sourceStatusChanged(old,issue,context.actorId,issue.updatedAt);
     if(!datesChanged)return;
@@ -1735,7 +1739,7 @@ export function createApp(options: {
       validateCurrentMentionNames(store, body, mentions);
       if(resourceType==='issue'){
         const issue=get<Issue>('issues',resourceId);
-        notifyComment(c, issue.projectId, `${issue.key} ${issue.title}`, [issue.assigneeId, ...issue.collaboratorIds, ...issueSubscribers(issue)]);
+        notifyComment(c, issue.projectId, `${issue.key} ${issue.title}`, [issue.reporterId, issue.assigneeId, ...issue.collaboratorIds, ...issueSubscribers(issue)]);
       }else{
         const doc=get<DocPage>('documents',resourceId);
         notifyDocumentComment(doc,c);
@@ -2408,7 +2412,8 @@ export function createApp(options: {
     )) fail('문장 댓글 답글 알림을 포함한 백업은 schemaVersion 77이 필요합니다.');
     const commentMentionKinds: ReadonlySet<unknown> = new Set(COMMENT_MENTION_NOTIFICATION_KINDS);
     if (data.schemaVersion < 71 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
-      (row: { kind?: unknown; commentId?: unknown } | null) => commentMentionKinds.has(row?.kind) || row?.commentId !== undefined,
+      (row: { kind?: unknown; commentId?: unknown } | null) => commentMentionKinds.has(row?.kind) ||
+        (row?.kind !== 'issue-comment' && row?.commentId !== undefined),
     )) fail('댓글 멘션 알림을 포함한 백업은 schemaVersion 71이 필요합니다.');
     const deadlineReminderKinds: ReadonlySet<unknown> = new Set(ISSUE_DEADLINE_REMINDER_KINDS);
     if (data.schemaVersion < 70 && (
@@ -2417,9 +2422,14 @@ export function createApp(options: {
         deadlineReminderKinds.has(row?.kind) || row?.actorId === null))
     )) fail('업무 마감 알림을 포함한 백업은 schemaVersion 70이 필요합니다.');
     if(data.schemaVersion<62&&Array.isArray(data.teamNotifications)&&data.teamNotifications.some((row:{kind?:unknown;detail?:unknown}|null)=>
-      row?.detail!==undefined||issueRiskKinds.has(row?.kind))){
+      (row?.kind !== 'issue-status-changed' && row?.detail !== undefined) || issueRiskKinds.has(row?.kind))){
       fail('업무 차단·마감 연기 알림을 포함한 백업은 schemaVersion 62가 필요합니다.');
     }
+    if (data.schemaVersion < 86 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: { kind?: unknown; detail?: unknown; commentId?: unknown } | null) =>
+        (row?.kind === 'issue-status-changed' && row.detail !== undefined) ||
+        (row?.kind === 'issue-comment' && row.commentId !== undefined),
+    )) fail('업무 상태 변경의 상세 내용이나 일반 댓글의 위치를 포함한 백업은 schemaVersion 86이 필요합니다.');
     const subscriptionRefs={
       users:importedUserIds,
       issueIds:new Set((data.issues as Issue[]).map(issue=>issue.id)),
