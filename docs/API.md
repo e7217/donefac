@@ -1016,6 +1016,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 같은 업무 조회에서 `includeEditTargets: true`를 보내면 현재 페이지의 `id`, `version`, `labels`를 `editTargets`에 함께 반환한다. 일괄 편집에서 페이지를 넘겨 선택한 업무의 버전과 라벨을 확인할 때 사용한다. [업무 일괄 편집](#업무-일괄-편집)
 
+### 이름으로 저장한 필드 집계
+
+브라우저의 `GET /api/projects/:id/field-breakdown-presets`로 프로젝트에 저장한 집계 목록을 읽는다. 같은 경로의 `POST`에 `{name,query}`를 보낸다. 이름은 공백을 정리한 뒤 최대 80자다. `query`에는 `groupBy` 또는 `fieldId`와 선택 항목 `comparisonBy`, `savedViewId`가 들어간다. 새로운 이름은 `201`과 `{id,projectId,name,query,version,createdAt,updatedAt}`을 반환한다. 같은 이름과 조건의 요청은 기존 결과를 `200`으로 돌려주며, 같은 이름에 다른 조건을 보내면 `409`를 반환한다.
+
+`PATCH /api/projects/:id/field-breakdown-presets/:presetId`에 `{expectedVersion,name?,query?}`를 보내 이름이나 조건을 바꾼다. 같은 경로의 `DELETE`는 `expectedVersion` 쿼리 매개변수를 검사한다. 목록에서 읽은 `query`로 현재 필드 집계 API를 호출한다. 저장 보기가 삭제된 경우 기존 기록은 목록에 남고 집계 조회는 `404`를 반환한다. 유효한 조회 조건으로 교체할 수 있다. 형식 92의 자체 백업은 저장 집계를 포함하며, 복원 뒤 이전 버전의 수정 요청을 거절한다.
+
 ## 문서 검토·발행
 
 `GET /api/v1/documents/:id/publication`은 현재 검토 요청, 마지막 발행 정보, 각 문서 저장본의 ID·제목·버전, 현재 초안의 `documentVersion`, 검토 상태의 `version`, `workspaceGeneration`을 반환한다. 검토 이력이 없는 문서의 상태 `version`은 0이다. 복원 전 워크스페이스의 `workspaceGeneration`은 `null`일 수 있다.

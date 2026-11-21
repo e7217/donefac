@@ -1366,6 +1366,19 @@ export interface SavedViewState {
 }
 export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type', 'reporter'] as const;
 export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIONS[number];
+export type IssueFieldBreakdownQuery = {
+  savedViewId?: string;
+  comparisonBy?: IssueFieldBreakdownDimension;
+} & ({ fieldId: string; groupBy?: never } | { groupBy: IssueFieldBreakdownDimension; fieldId?: never });
+export interface SavedFieldBreakdown {
+  id: string;
+  projectId: string;
+  name: string;
+  query: IssueFieldBreakdownQuery;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
 export type IssueFieldBreakdownSelection = {
   savedViewId?: string | null;
   comparisonBy?: IssueFieldBreakdownDimension | null;

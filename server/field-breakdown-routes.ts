@@ -1,6 +1,6 @@
 import type { Express } from 'express';
 import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS, PRIORITY, type CustomFieldDefinition, type GitlabLink,
-  type Issue, type IssueFieldBreakdownDimension, type IssueFieldBreakdownPage, type IssueFieldBreakdownSelection,
+  type Issue, type IssueFieldBreakdownDimension, type IssueFieldBreakdownPage, type IssueFieldBreakdownQuery, type IssueFieldBreakdownSelection,
   type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type User } from '../shared/types.js';
 import { IssueFieldFilterError } from '../shared/issue-field-filter.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
@@ -11,8 +11,6 @@ import type { Store } from './store.js';
 const issueLimit = 10_000;
 const pageSize = 50;
 const selectionFields = new Set(['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'revision', 'bucketId', 'comparisonBucketId']);
-type BreakdownQuery = Pick<IssueFieldBreakdownSelection, 'savedViewId' | 'comparisonBy'> &
-  ({ fieldId: string; groupBy?: never } | { groupBy: IssueFieldBreakdownDimension; fieldId?: never });
 
 function identifier(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 200) {
@@ -30,7 +28,7 @@ function dimension(value: unknown): IssueFieldBreakdownDimension {
   return value as IssueFieldBreakdownDimension;
 }
 
-function breakdownQuery(body: Record<string, unknown>): BreakdownQuery {
+export function parseFieldBreakdownQuery(body: Record<string, unknown>): IssueFieldBreakdownQuery {
   if (Object.hasOwn(body, 'fieldId') === Object.hasOwn(body, 'groupBy')) {
     throw new FieldBreakdownError(400, '사용자 정의 필드 또는 기본 필드 중 하나를 선택해 주세요.');
   }
@@ -39,6 +37,16 @@ function breakdownQuery(body: Record<string, unknown>): BreakdownQuery {
   if (comparisonBy && groupBy === comparisonBy) throw new FieldBreakdownError(400, '행과 열에 서로 다른 기준을 선택해 주세요.');
   const savedViewId = body.savedViewId == null ? undefined : identifier(body.savedViewId, '저장된 보기');
   return { ...(groupBy ? { groupBy } : { fieldId: identifier(body.fieldId, '집계할 필드') }), comparisonBy, savedViewId };
+}
+
+export function resolveFieldBreakdownSources(store: Store, schema: ProjectIssueSchema, query: IssueFieldBreakdownQuery) {
+  const field = query.groupBy ? undefined : schema.fields.find(item => item.id === query.fieldId);
+  if (!query.groupBy && !field) throw new FieldBreakdownError(404, '이 프로젝트에서 집계할 필드를 찾을 수 없습니다.');
+  const view = query.savedViewId ? store.get<SavedView>('saved_views', query.savedViewId) : undefined;
+  if (query.savedViewId && view?.projectId !== schema.projectId) {
+    throw new FieldBreakdownError(404, '이 프로젝트에서 저장된 보기를 찾을 수 없습니다.');
+  }
+  return { field, view: view ?? null };
 }
 
 function breakdownGroup(body: Record<string, unknown>) {
@@ -57,7 +65,7 @@ export function parseFieldBreakdownSelection(raw: unknown): IssueFieldBreakdownS
   }
   const body = raw as Record<string, unknown>;
   const group = breakdownGroup(body);
-  const query = breakdownQuery(body);
+  const query = parseFieldBreakdownQuery(body);
   if (group.comparisonBucketId && !query.comparisonBy) {
     throw new FieldBreakdownError(400, '교차 집계 기준과 비교 그룹을 확인해 주세요.');
   }
@@ -76,18 +84,11 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
   lookupWorkflow: (projectId: string) => ProjectWorkflow) {
   function breakdown(projectId: string, body: Record<string,unknown>) {
     const schema = schemas.get(projectId);
-    const { groupBy, comparisonBy, fieldId, savedViewId } = breakdownQuery(body);
+    const query = parseFieldBreakdownQuery(body);
+    const { groupBy, comparisonBy } = query;
     const workflow = groupBy === 'status' || comparisonBy === 'status' ? lookupWorkflow(projectId) : undefined;
-    const field = groupBy ? builtinField(groupBy, schema, workflow) : schema.fields.find(item => item.id === fieldId);
-    if (!field) throw new FieldBreakdownError(404, '이 프로젝트에서 집계할 필드를 찾을 수 없습니다.');
-    let view: SavedView | null = null;
-    if (savedViewId) {
-      const selected = store.get<SavedView>('saved_views', savedViewId);
-      if (!selected || selected.projectId !== projectId) {
-        throw new FieldBreakdownError(404, '이 프로젝트에서 저장된 보기를 찾을 수 없습니다.');
-      }
-      view = selected;
-    }
+    const { field: customField, view } = resolveFieldBreakdownSources(store, schema, query);
+    const field = groupBy ? builtinField(groupBy, schema, workflow) : customField!;
     const users = store.all<User>('users');
     const gitlabLinks = view?.filters.gitlab
       ? store.db.prepare(`SELECT link.json FROM gitlab_links AS link

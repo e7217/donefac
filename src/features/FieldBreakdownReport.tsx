@@ -13,7 +13,9 @@ import type {
   IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
   IssueFieldBreakdownPage,
+  IssueFieldBreakdownQuery,
   IssueFieldBreakdownSelection,
+  SavedFieldBreakdown,
   SavedView,
 } from '../../shared/types';
 import { projectIssueSchema } from '../../shared/issue-schema';
@@ -22,16 +24,18 @@ import { api, ApiError } from '../lib/api';
 import { fieldBreakdownHash, sameFieldBreakdownScope, type FieldBreakdownScope } from '../lib/field-breakdown-route';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { IssueBulkEdit, useIssueBulkEdit } from './IssueBulkEdit';
+import { FieldBreakdownPresets } from './FieldBreakdownPresets';
 import './field-breakdown.css';
 
-type Query = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
+type ConfirmedQuery = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
   | { fieldId: string; groupBy?: never }
   | { groupBy: IssueFieldBreakdownDimension; fieldId?: never }
-  | { fieldId?: never; groupBy?: never }
 );
+type Query = ConfirmedQuery | { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension; fieldId?: never; groupBy?: never };
 type Props = FeatureProps & {
   linkedScope: FieldBreakdownScope | null;
   onPublishScope: (scope: FieldBreakdownScope) => boolean;
+  onOpenScope: (scope: FieldBreakdownScope) => boolean;
   onOpenSavedIssueView?: (id: string) => void;
 };
 type CohortPosition = { bucketId: string; comparisonBucketId?: string; offset: number };
@@ -70,9 +74,14 @@ function scopeOf(query: Query): FieldBreakdownScope {
   return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined, comparisonBy: query.comparisonBy };
 }
 
-function reportQuery(report: IssueFieldBreakdown): Query {
+function reportQuery(report: IssueFieldBreakdown): ConfirmedQuery {
   const filters = { savedViewId: report.savedView?.id ?? null, comparisonBy: report.comparison?.by };
   return report.groupBy ? { groupBy: report.groupBy, ...filters } : { fieldId: report.field.id, ...filters };
+}
+
+function presetQuery(report: IssueFieldBreakdown): IssueFieldBreakdownQuery {
+  const { savedViewId, ...query } = reportQuery(report);
+  return { ...query, ...(savedViewId ? { savedViewId } : {}) };
 }
 
 function collectTargets(previous: readonly IssueBulkEditTarget[], current: readonly IssueBulkEditTarget[], selectedIds: ReadonlySet<string>) {
@@ -92,7 +101,7 @@ export function FieldBreakdownReport(props: Props) {
 }
 
 function ProjectFieldBreakdown(props: Props) {
-  const { data, projectId, actorId, linkedScope, onPublishScope, onOpenSavedIssueView } = props;
+  const { data, projectId, actorId, linkedScope, onPublishScope, onOpenScope, onOpenSavedIssueView } = props;
   const schema = projectIssueSchema(data, projectId);
   const firstFieldId = schema.fields.find((field) => !field.archived)?.id ?? schema.fields[0]?.id ?? '';
   const [origin, setOrigin] = useState(() => ({ scope: linkedScope, selection: linkedSelection(linkedScope, firstFieldId) }));
@@ -125,6 +134,10 @@ function ProjectFieldBreakdown(props: Props) {
   const activeSelection = useRef(origin.selection);
   const publishScope = useRef(onPublishScope);
   const drillHeading = useRef<HTMLHeadingElement>(null);
+  const focusDrillPage = useRef<IssueFieldBreakdownPage | null>(null);
+  const reportHeading = useRef<HTMLHeadingElement>(null);
+  const queryAlert = useRef<HTMLParagraphElement>(null);
+  const focusPresetScope = useRef<FieldBreakdownScope | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
   const bulkPanel = useRef<HTMLDivElement>(null);
   const dirty = !sameQuery(query, baseline);
@@ -166,6 +179,7 @@ function ProjectFieldBreakdown(props: Props) {
     pageRequest.current?.abort();
     openingRef.current = null;
     copyAttempt.current = null;
+    focusDrillPage.current = null;
   }, [origin.selection]);
   useLayoutEffect(() => { publishScope.current = onPublishScope; }, [onPublishScope]);
   useLayoutEffect(() => {
@@ -176,6 +190,11 @@ function ProjectFieldBreakdown(props: Props) {
     copyInput.current?.focus();
     copyInput.current?.select();
   }, [copyFallback]);
+  useLayoutEffect(() => {
+    if (!page || focusDrillPage.current !== page) return;
+    focusDrillPage.current = null;
+    drillHeading.current?.focus();
+  }, [page]);
   const discard = useCallback(() => {
     if (activeSelection.current !== origin.selection) return;
     setQuery({ ...baseline });
@@ -306,8 +325,10 @@ function ProjectFieldBreakdown(props: Props) {
       return { revision: result.revision, page: nextPage };
     } catch (cause) {
       if (active.current && !controller.signal.aborted) {
-        if (cohort || cause instanceof ApiError && cause.status === 409) setStale(true);
-        setQueryError(publish ? `${errorMessage(cause)} 입력과 이전 집계는 유지됩니다.` : errorMessage(cause));
+        const unavailable = cause instanceof ApiError && cause.status === 404;
+        if (cohort || unavailable || cause instanceof ApiError && cause.status === 409) setStale(true);
+        const message = `${errorMessage(cause)}${unavailable ? ' 조회 범위나 필드를 다시 선택해 주세요.' : ''}`;
+        setQueryError(publish ? `${message} 입력과 이전 집계는 유지됩니다.` : message);
       }
     } finally {
       if (active.current && !controller.signal.aborted) setReportLoading(false);
@@ -321,10 +342,32 @@ function ProjectFieldBreakdown(props: Props) {
     return () => clearTimeout(timer);
   }, [loadReport, origin.selection, validProject]);
 
+  useEffect(() => {
+    if (reportLoading || !focusPresetScope.current || !sameFieldBreakdownScope(linkedScope, focusPresetScope.current)) return;
+    focusPresetScope.current = null;
+    (queryError ? queryAlert.current : reportHeading.current)?.focus();
+  }, [linkedScope, queryError, reportLoading]);
+
   function requestReport(event: FormEvent) {
     event.preventDefault();
     if (bulk.active && !bulk.close()) return;
     void loadReport(query, true);
+  }
+
+  function openPreset(preset: SavedFieldBreakdown) {
+    const submitted: ConfirmedQuery = { ...preset.query, savedViewId: preset.query.savedViewId ?? null };
+    const scope = scopeOf(submitted);
+    if (!sameFieldBreakdownScope(linkedScope, scope)) {
+      if (onOpenScope(scope)) focusPresetScope.current = scope;
+      return;
+    }
+    if (dirtyRef.current && !window.confirm('조회하지 않은 필드 집계 조건을 버리고 이동할까요?')) return;
+    if (bulk.active && !bulk.close()) return;
+    setQuery(submitted);
+    setBaseline(submitted);
+    dirtyRef.current = false;
+    focusPresetScope.current = scope;
+    void loadReport(submitted, false);
   }
 
   async function refreshBulkCohort(): Promise<void> {
@@ -348,10 +391,10 @@ function ProjectFieldBreakdown(props: Props) {
     try {
       const result = await readBucket(baseline, report.revision, { bucketId: bucket.id, offset, comparisonBucketId }, controller.signal);
       if (active.current && !controller.signal.aborted) {
+        if (focusResult) focusDrillPage.current = result;
         setPage(result);
         setCohortNotice('');
         setVerifiedTargets(previous => sameCohort ? collectTargets(previous, result.editTargets ?? [], bulk.selectedIds) : result.editTargets ?? []);
-        if (focusResult) requestAnimationFrame(() => drillHeading.current?.focus());
       }
     } catch (cause) {
       if (active.current && !controller.signal.aborted) {
@@ -417,6 +460,14 @@ function ProjectFieldBreakdown(props: Props) {
   const start = Math.min(groupsOffset, Math.max(0, Math.floor((groups.length - 1) / GROUP_PAGE_SIZE) * GROUP_PAGE_SIZE));
   const selectedField = schema.fields.find((field) => field.id === query.fieldId);
   const drillBusy = pageLoading || reportLoading;
+  const saveableQuery = report && !dirty && !drillBusy && !bulk.locked && !stale && !queryError ? presetQuery(report) : null;
+  const describePresetQuery = (value: IssueFieldBreakdownQuery) => {
+    const primary = value.groupBy ? DIMENSION_LABELS[value.groupBy]
+      : schema.fields.find(field => field.id === value.fieldId)?.name ?? `${value.fieldId} · 현재 정의 없음`;
+    const comparison = value.comparisonBy ? ` × ${DIMENSION_LABELS[value.comparisonBy]}` : '';
+    const view = value.savedViewId ? views.find(item => item.id === value.savedViewId)?.name ?? '저장된 보기 · 현재 목록 없음' : '프로젝트 전체 업무';
+    return `${primary}${comparison} · ${view}`;
+  };
   const bulkEditor = {
     ...bulk,
     locked: bulk.locked || drillBusy,
@@ -540,17 +591,20 @@ function ProjectFieldBreakdown(props: Props) {
           </p>
         )}
         {queryError && (
-          <p className="field-breakdown-error" role="alert">
+          <p ref={queryAlert} className="field-breakdown-error" role="alert" tabIndex={-1}>
             {queryError}
           </p>
         )}
       </form>
 
+      <FieldBreakdownPresets projectId={projectId} actorId={actorId} currentQuery={saveableQuery}
+        reportBusy={drillBusy || bulk.locked} describeQuery={describePresetQuery} onOpen={openPreset} notify={props.notify} />
+
       {report && (
         <div className="field-breakdown-result" aria-label="필드 집계 결과">
           <header className="field-breakdown-asof">
             <div>
-              <h3>
+              <h3 ref={reportHeading} tabIndex={-1}>
                 {report.field.name}{report.comparison && ` × ${DIMENSION_LABELS[report.comparison.by]}`}
                 {report.field.archived && <span>보관된 필드</span>}
               </h3>

@@ -1,0 +1,79 @@
+.field-breakdown-presets {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+  padding: 24px;
+}
+
+.field-breakdown-presets-header,
+.field-breakdown-presets-list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px 16px;
+}
+
+.field-breakdown-presets-header > div > p,
+.field-breakdown-presets-meta { color: #516962; font-size: 14px; }
+.field-breakdown-presets-header > div > p { margin-top: 5px; }
+
+.field-breakdown-presets-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.field-breakdown-presets-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.field-breakdown-presets-list li {
+  padding: 9px 0;
+  border-top: 1px solid #e5eeea;
+}
+
+.field-breakdown-presets-row-copy { min-width: 0; overflow-wrap: anywhere; }
+.field-breakdown-presets-list .text-link {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 32px;
+  gap: 7px;
+  padding: 0;
+  text-align: left;
+  white-space: normal;
+}
+.field-breakdown-presets-list .text-link svg { flex: none; }
+
+.field-breakdown-presets-editor,
+.field-breakdown-presets-rebase {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.field-breakdown-presets-editor {
+  padding: 14px;
+  border: 1px solid #dfe7e4;
+  border-radius: 8px;
+  background: #f7fbf9;
+}
+
+.field-breakdown-presets-editor-name {
+  display: grid;
+  width: min(100%, 30rem);
+  gap: 5px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.field-breakdown-presets-editor-name .field { box-sizing: border-box; min-width: 0; }
+.field-breakdown-presets-editor-option { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+
+@media (max-width: 640px) {
+  .field-breakdown-presets { padding: 16px; }
+  .field-breakdown-presets-list li { align-items: flex-start; }
+}

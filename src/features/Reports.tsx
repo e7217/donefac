@@ -585,6 +585,7 @@ function ProjectReports(props: Props) {
       ) : view === 'fields' ? (
         <section role="tabpanel" id="report-fields-panel" aria-labelledby="report-fields-tab">
           <FieldBreakdownReport {...props} linkedScope={props.fieldBreakdownScope} onPublishScope={props.onPublishFieldBreakdownScope}
+            onOpenScope={props.onChangeFieldBreakdownScope}
             onOpenSavedIssueView={props.onOpenSavedIssueView} />
         </section>
       ) : view === 'blockers' ? (

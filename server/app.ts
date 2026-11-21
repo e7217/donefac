@@ -74,6 +74,7 @@ import { registerTeamOverviewRoutes } from './team-overview.js';
 import { DecisionFollowUpError, registerDecisionFollowUpRoutes } from './decision-follow-ups.js';
 import { FieldBreakdownError } from './field-breakdown.js';
 import { registerFieldBreakdownRoutes } from './field-breakdown-routes.js';
+import { SavedFieldBreakdownService } from './saved-field-breakdowns.js';
 import { registerDeliveryBlockerRoutes } from './delivery-blocker-routes.js';
 import { DocumentPublicationError, DocumentPublicationService } from './document-publication.js';
 import { countDocumentAssignedReviews, listDocumentPublications } from './document-publication-list.js';
@@ -202,6 +203,7 @@ export function createApp(options: {
   if (options.seed !== false) seed(store);
   const issueSchemas=new IssueSchemaService(store);
   const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
+  const savedFieldBreakdowns = new SavedFieldBreakdownService(store, issueSchemas);
   const documentContent=new DocumentContentService(store);
   const documentFollowUp=new DocumentFollowUpService(store);
   const documentSelectionComments=new DocumentSelectionCommentService(store);
@@ -933,6 +935,7 @@ export function createApp(options: {
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});
   issueAssignments.registerRoutes(app,{actor,activity,validate:(proposed,before)=>validateIssue(proposed,before)});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity,planningItems:projectId=>planning.forProject(projectId)});
+  savedFieldBreakdowns.registerRoutes(app, { actor, activity });
   issueSchemas.registerRoutes(app,{actor,activity});
   planning.registerRoutes(app,{actor,activity,validateIssue,findSavedViewReference:item=>savedViews.findPlanningItemReference(item)});apiKeys.registerManagementRoutes(app,{actor,activity});
   calendars.registerRoutes(app,{actor,activity});
@@ -2333,7 +2336,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2431,6 +2434,12 @@ export function createApp(options: {
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'reporter')
     )) fail('요청자 조건을 포함한 보기는 schemaVersion 85가 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
+    if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
+        (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {
+      fail('저장된 필드 집계가 포함된 백업은 schemaVersion 92가 필요합니다.');
+    }
+    const importedFieldBreakdowns = data.schemaVersion >= 92
+      ? savedFieldBreakdowns.validateImport(data.savedFieldBreakdowns, data.projects, importedViews) : [];
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
     const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
@@ -2718,6 +2727,7 @@ export function createApp(options: {
       const previousSchemas=new Map(issueSchemas.snapshot().map(schema=>[schema.projectId,schema.version]));
       const previousWorkflows=new Map(workflows.snapshot().map(w=>[w.projectId,w.version]));
       const previousViews=new Map(savedViews.all().map(v=>[v.id,v.version]));
+      const previousFieldBreakdowns = savedFieldBreakdowns.versions();
       const previousPlanning=new Map(planning.all().map(item=>[item.id,item.version]));
       const previousCalendars=new Map(calendars.snapshot().map(calendar=>[calendar.projectId,calendar.version]));
       const previousCapacities=new Map(workload.snapshot().map(capacity=>[capacity.projectId,capacity.version]));
@@ -2778,6 +2788,7 @@ export function createApp(options: {
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
+      savedFieldBreakdowns.replaceImported(importedFieldBreakdowns, previousFieldBreakdowns);
       automation.replaceImported(importedAutomation,previousAutomation);
       restoreAutomationRunHistory(store,importedAutomationRuns);
       issueAssignments.replaceImported(importedAssignments,previousAssignments);
