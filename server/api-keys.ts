@@ -370,6 +370,7 @@ export class ApiKeyService {
     }
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
+    const cycleCompletion = /^\/api\/planning-items\/([^/]+)\/complete(\/preview)?$/.exec(path);
     const resourceLink = /^\/api\/resource-links\/([^/]+)$/.exec(path);
     const dependency = /^\/api\/dependencies\/([^/]+)$/.exec(path);
     const relationDependency = /^\/api\/issues\/([^/]+)\/relations\/([^/]+)\/schedule-dependency$/.exec(path);
@@ -388,6 +389,11 @@ export class ApiKeyService {
         if (!Number.isSafeInteger(version) || version < 1 || (fromQuery !== undefined && fromQuery !== version)) fail(400, '삭제할 대상의 expectedVersion이 필요합니다.');
         request.body.expectedVersion = version;
       } else this.references(key, request, Object.hasOwn(request.body, 'projectId') ? request.body.projectId : source.projectId, detail[1] === 'issues' ? 'issue' : 'document', source as Issue | DocPage);
+    } else if (request.method === 'POST' && cycleCompletion) {
+      this.query(request, []);
+      this.resource(key, 'planning_items', this.decode(cycleCompletion[1]));
+      const destination = request.body?.destinationId;
+      if (cycleCompletion[2] && typeof destination === 'string' && destination) this.resource(key, 'planning_items', destination);
     } else if (request.method === 'POST' && path === '/api/resource-links') {
       this.query(request, []);
       this.resource(key, 'issues', request.body?.issueId);

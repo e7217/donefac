@@ -164,6 +164,15 @@ export class PlanningService{
     this.put(updated);
     return updated;
   }
+  completeCycle(id: string, expectedVersion: number, updatedAt: string): PlanningItem {
+    if (!this.store.db.isTransaction) fail('사이클 완료에는 적용 트랜잭션이 필요합니다.', 500);
+    const cycle = this.get(id);
+    version(expectedVersion, cycle.version);
+    if (cycle.kind !== 'cycle' || cycle.status !== 'active') fail('진행 중인 사이클을 다시 확인해 주세요.', 409);
+    const completed = this.parse({ ...cycle, status: 'completed', version: cycle.version + 1, updatedAt });
+    this.put(completed);
+    return completed;
+  }
   registerRoutes(app:Express,hooks:Hooks):void{
     const route=(handler:(req:Request,res:Response)=>unknown)=>(req:Request,res:Response,next:NextFunction)=>{try{handler(req,res);}catch(error){if(error instanceof PlanningError)return res.status(error.status).json({error:error.message,details:error.details});if(String((error as Error)?.message).includes('planning_items.project_id, planning_items.kind, planning_items.name'))return res.status(409).json({error:'같은 종류와 이름의 계획 항목이 이미 있습니다.'});next(error);}};
     app.get('/api/planning-items',route((req,res)=>{const projectId=this.project(req.query.projectId),kind=req.query.kind;if(kind!==undefined&&!kinds.includes(kind as PlanningKind))fail('계획 종류를 확인해 주세요.');res.json(this.forProject(projectId).filter(item=>kind===undefined||item.kind===kind).sort((a,b)=>a.name.localeCompare(b.name,'ko')));}));

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
+import type { CycleCompletionPreview, CycleCompletionResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
   MigrationPreview, PlanningItem, SourceImport, WorkspaceSnapshot } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
@@ -234,4 +234,23 @@ test('a shared Jira sprint is scoped to each destination project and repeated na
   const migrated = snapshot.issues.filter(issue => issue.projectId === a.id || issue.projectId === b.id);
   assert.equal(new Set(migrated.map(issue => issue.cycleId)).size, 3);
   for (const issue of migrated) assert.equal(allCycles.get(issue.cycleId!)?.projectId, issue.projectId);
+
+  const source = aCycles.find(item => item.name === `${title} (#5102)`)!;
+  const destination = aCycles.find(item => item.name === `${title} (#5103)`)!;
+  const path = `/planning-items/${source.id}/complete`;
+  const review = await f.call<CycleCompletionPreview>(`${path}/preview`, 'POST', {
+    expectedVersion: source.version, destinationId: destination.id,
+  });
+  assert.ok(review.previewId);
+  const carried = migrated.find(issue => issue.cycleId === source.id)!;
+  assert.deepEqual(review.issues.map(issue => [issue.id, issue.disposition]), [[carried.id, 'carry']]);
+  const result = await f.call<CycleCompletionResult>(path, 'POST', { previewId: review.previewId });
+  assert.equal(result.cycle.status, 'completed');
+  assert.equal(result.destination?.id, destination.id);
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  const moved = after.issues.find(issue => issue.id === carried.id)!;
+  assert.deepEqual(moved, { ...carried, cycle: destination.name, cycleId: destination.id,
+    version: carried.version + 1, updatedAt: moved.updatedAt });
+  const otherProjectIssue = migrated.find(issue => issue.projectId === b.id)!;
+  assert.deepEqual(after.issues.find(issue => issue.id === otherProjectIssue.id), otherProjectIssue);
 });

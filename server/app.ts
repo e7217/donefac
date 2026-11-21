@@ -10,6 +10,7 @@ import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
 import { CollaborationService, CollaborationError, type CollaborationUpgradeGuard } from './collaboration.js';
 import { PlanningService, PlanningError } from './planning.js';
+import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError, type AutomaticScheduleMutation } from './automatic-schedule.js';
@@ -172,6 +173,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const atlassian=new AtlassianReader(options.atlassianEnv);
   const documentPublication=new DocumentPublicationService(store,notifications,documentSubscribers);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
+  const cycleCompletion = new CycleCompletionService(store);
   const issueOrders = new IssueOrderService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
   const reportLedger=new ReportingLedger(store,projectId=>workflows.get(projectId));
@@ -946,6 +948,23 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
   const issueEditConfiguration = (projectId: string) => JSON.stringify([
     workflows.get(projectId).version, issueSchemas.get(projectId).version, issueAssignments.revisions(projectId),
   ]);
+  cycleCompletion.registerRoutes(app, {
+    actor,
+    activity,
+    workflow: projectId => workflows.get(projectId),
+    configurationToken: projectId => JSON.stringify([workflows.get(projectId).version, issueSchemas.get(projectId).version]),
+    prepare(before, destinationId) {
+      const updated = { ...before, cycleId: destinationId, version: before.version + 1, updatedAt: now() };
+      const { cycle } = validateIssue(structuredClone(updated), before);
+      return { issue: { ...updated, cycle }, decision: null, fields: ['cycleId'] };
+    },
+    validationMessage(error) {
+      return (error instanceof ApiError || error instanceof WorkflowError || error instanceof PlanningError || error instanceof IssueSchemaError) &&
+        error.status < 500 ? error.message : null;
+    },
+    commit: commitIssueUpdate,
+    closeCycle: (id, version, timestamp) => planning.completeCycle(id, version, timestamp),
+  });
   issueBulkEdit.registerRoutes(app,{
     actor,
     configurationToken:issueEditConfiguration,
@@ -1995,6 +2014,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
       issuePaste.resetForImport();
       documentCreation.invalidateForImport();
       issueBulkEdit.resetForImport();
+      cycleCompletion.resetForImport();
       outbound.resetForImport();
       migrations.resetForNativeImport();
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
@@ -2082,6 +2102,7 @@ export function createApp(options: {dataDir?: string; seed?: boolean; outboundWo
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});
     if(error?.type==='entity.too.large')return res.status(413).json({error:_req.originalUrl.startsWith('/api/attachments')?'첨부파일은 20MiB 이하여야 합니다.':_req.originalUrl.startsWith('/api/integrations/gitlab/webhook')?'GitLab 웹훅 본문은 2MiB 이하여야 합니다.':'요청 데이터는 64MiB 이하여야 합니다.'});

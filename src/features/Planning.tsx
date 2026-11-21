@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, Layers3, LoaderCircle, PackageCheck, Plus, RefreshCw, Save, Search, SquareChartGantt, Trash2 } from 'lucide-react';
 import type { FeatureProps, Issue, PlanningItem, PlanningKind, PlanningStatus } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, dateLabel, patch, post, remove } from '../lib/api';
+import { CycleCompletionPanel } from './CycleCompletionPanel';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
 import { errorMessage } from './schedule-utils';
 import './planning.css';
@@ -49,7 +50,7 @@ function ProjectPlanning(props: PlanningProps) {
     </div></div>;
 }
 
-function PlanningEditor({ data, projectId, kind, item, existingId, refresh, notify, openIssue, onCreated, onDeleted }: FeatureProps & { kind: PlanningKind; item?: PlanningItem; existingId: string | null; onCreated: (item: PlanningItem) => void; onDeleted: () => void }) {
+function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refresh, notify, openIssue, onCreated, onDeleted }: FeatureProps & { kind: PlanningKind; item?: PlanningItem; existingId: string | null; onCreated: (item: PlanningItem) => void; onDeleted: () => void }) {
   const [draft, setDraft] = useState<PlanDraft>(() => draftOf(item));
   const [baseline, setBaseline] = useState<PlanDraft>(() => draftOf(item));
   const [version, setVersion] = useState(item?.version || 0);
@@ -60,11 +61,32 @@ function PlanningEditor({ data, projectId, kind, item, existingId, refresh, noti
   const [assignmentVersion, setAssignmentVersion] = useState<number | null>(null);
   const [issueQuery, setIssueQuery] = useState('');
   const [showCandidates, setShowCandidates] = useState(false);
+  const [completionCycle, setCompletionCycle] = useState<PlanningItem | null>(null);
+  const completionButton = useRef<HTMLButtonElement>(null);
+  const title = useRef<HTMLHeadingElement>(null);
   const pendingRef = useRef(false), dirtyRef = useRef(false);
+  const closeCompletion = useCallback(() => setCompletionCycle(null), []);
+  const restoreCompletionFocus = useCallback(() => {
+    const button = completionButton.current;
+    (button && !button.disabled ? button : title.current)?.focus({ preventScroll: true });
+  }, []);
+  const acceptCycle = useCallback((latest: PlanningItem) => {
+    const next = draftOf(latest);
+    setDraft(next);
+    setBaseline(next);
+    setVersion(latest.version);
+    setError('');
+  }, []);
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const selectedAssignments = Object.values(assignments);
   const hasUnsaved = dirty || selectedAssignments.length > 0;
   const remoteChanged = Boolean(item && item.version > version);
+  const requiresCycleCompletion = Boolean(item && kind === 'cycle' && baseline.status === 'active');
+  function startCompletion() {
+    if (item && requiresCycleCompletion && !pendingRef.current && !hasUnsaved && !remoteChanged) {
+      setCompletionCycle({ ...item, ...baseline, version });
+    }
+  }
   if (item && remoteChanged && !hasUnsaved && !busy) { setDraft(draftOf(item)); setBaseline(draftOf(item)); setVersion(item.version); setError(''); }
   useEffect(() => { dirtyRef.current = hasUnsaved; }, [hasUnsaved]);
   useEffect(() => {
@@ -109,9 +131,19 @@ function PlanningEditor({ data, projectId, kind, item, existingId, refresh, noti
     catch (err) { setMembershipError(errorMessage(err)); await refresh().catch(() => undefined); } finally { pendingRef.current = false; setBusy(false); }
   }
   const Icon = KIND_ICONS[kind];
-  return <section className="planning-editor" aria-label={`${PLAN_LABELS[kind]} 상세`}><div className="planning-editor-heading"><div><span className="feature-eyebrow">{existingId ? `PLAN · V${version}` : 'NEW PLAN'}</span><h2><Icon size={21} />{existingId ? baseline.name : `새 ${PLAN_LABELS[kind]}`}</h2></div>{existingId && <button className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14} />최신 정보</button>}</div>
+  return <section className="planning-editor" aria-label={`${PLAN_LABELS[kind]} 상세`}><div className="planning-editor-heading"><div><span className="feature-eyebrow">{existingId ? `PLAN · V${version}` : 'NEW PLAN'}</span><h2 ref={title} tabIndex={-1}><Icon size={21} />{existingId ? baseline.name : `새 ${PLAN_LABELS[kind]}`}</h2></div>{existingId && <button className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14} />최신 정보</button>}</div>
     {existingId && !item && <div className="issue-form-error" role="alert">이 항목이 현재 작업공간에 없습니다. 작성 내용은 유지됩니다. 최신 정보를 확인하세요.</div>}{remoteChanged && hasUnsaved && <div className="issue-form-error" role="alert">다른 작업자가 계획을 변경했습니다. 작성 중인 내용은 버전 {version} 기준으로 유지됩니다.</div>}
-    <form onSubmit={save} aria-label="계획 정보 편집"><fieldset disabled={busy || selectedAssignments.length > 0}><label className="issue-form-label">이름<input className="field planning-name-input" aria-label="계획 이름" value={draft.name} onChange={event => update('name', event.target.value)} placeholder={`${PLAN_LABELS[kind]} 이름`} required maxLength={120} /></label><label className="issue-form-label">설명<textarea className="field" aria-label="계획 설명" value={draft.description} onChange={event => update('description', event.target.value)} rows={3} placeholder="목표와 범위를 간단히 적어주세요." /></label><div className="planning-form-grid"><label className="issue-form-label">상태<select className="field" aria-label="계획 상태" value={draft.status} onChange={event => update('status', event.target.value as PlanningStatus)}>{Object.entries(STATE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="issue-form-label">책임자<select className="field" aria-label="계획 책임자" value={draft.ownerId || ''} onChange={event => update('ownerId', event.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option value={user.id} key={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input className="field" type="date" aria-label="계획 시작일" value={draft.startDate || ''} onChange={event => update('startDate', event.target.value || null)} /></label><label className="issue-form-label">종료일<input className="field" type="date" aria-label="계획 종료일" value={draft.endDate || ''} onChange={event => update('endDate', event.target.value || null)} /></label><label className="issue-form-label">목표일<input className="field" type="date" aria-label="계획 목표일" value={draft.targetDate || ''} onChange={event => update('targetDate', event.target.value || null)} /></label></div>{error && <div className="issue-form-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}<div className="planning-save-row"><span>{selectedAssignments.length ? '업무 연결 변경을 적용하거나 초기화한 뒤 계획 정보를 수정하세요.' : '계획 상태와 개별 업무 상태는 별도로 관리됩니다.'}</span><button className="btn btn-primary" type="submit" disabled={busy || (existingId !== null && !dirty)}><Save size={15} />{busy ? '처리 중…' : existingId ? '계획 저장' : '계획 만들기'}</button></div></fieldset></form>
+    {requiresCycleCompletion && <div className="cycle-completion-launch">
+      <button ref={completionButton} className="btn btn-primary" type="button" disabled={busy || hasUnsaved || remoteChanged}
+        onClick={startCompletion}><Check size={15} />사이클 완료</button>
+      {hasUnsaved && <p>계획 정보와 업무 연결 변경을 먼저 저장하거나 초기화해 주세요.</p>}
+    </div>}
+    {completionCycle && <CycleCompletionPanel cycle={completionCycle} plans={data.planningItems ?? []} actorId={actorId}
+      refresh={refresh} notify={notify} onClose={closeCompletion} onSaved={acceptCycle} restoreFocus={restoreCompletionFocus} />}
+    <form onSubmit={save} aria-label="계획 정보 편집"><fieldset disabled={busy || selectedAssignments.length > 0}><label className="issue-form-label">이름<input className="field planning-name-input" aria-label="계획 이름" value={draft.name} onChange={event => update('name', event.target.value)} placeholder={`${PLAN_LABELS[kind]} 이름`} required maxLength={120} /></label><label className="issue-form-label">설명<textarea className="field" aria-label="계획 설명" value={draft.description} onChange={event => update('description', event.target.value)} rows={3} placeholder="목표와 범위를 간단히 적어주세요." /></label><div className="planning-form-grid"><label className="issue-form-label">상태<select className="field" aria-label="계획 상태" value={draft.status} onChange={event => {
+      const value = event.target.value as PlanningStatus;
+      if (value !== 'completed' || !requiresCycleCompletion) update('status', value);
+    }}>{Object.entries(STATE_LABELS).map(([value, label]) => <option key={value} value={value} disabled={value === 'completed' && requiresCycleCompletion}>{label}</option>)}</select></label><label className="issue-form-label">책임자<select className="field" aria-label="계획 책임자" value={draft.ownerId || ''} onChange={event => update('ownerId', event.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option value={user.id} key={user.id}>{user.name}</option>)}</select></label><label className="issue-form-label">시작일<input className="field" type="date" aria-label="계획 시작일" value={draft.startDate || ''} onChange={event => update('startDate', event.target.value || null)} /></label><label className="issue-form-label">종료일<input className="field" type="date" aria-label="계획 종료일" value={draft.endDate || ''} onChange={event => update('endDate', event.target.value || null)} /></label><label className="issue-form-label">목표일<input className="field" type="date" aria-label="계획 목표일" value={draft.targetDate || ''} onChange={event => update('targetDate', event.target.value || null)} /></label></div>{error && <div className="issue-form-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}<div className="planning-save-row"><span>{selectedAssignments.length ? '업무 연결 변경을 적용하거나 초기화한 뒤 계획 정보를 수정하세요.' : '계획 상태와 개별 업무 상태는 별도로 관리됩니다.'}</span><button className="btn btn-primary" type="submit" disabled={busy || (existingId !== null && !dirty)}><Save size={15} />{busy ? '처리 중…' : existingId ? '계획 저장' : '계획 만들기'}</button></div></fieldset></form>
     {existingId && <><div className="planning-issue-summary"><div><strong>{stats.percent}<small>%</small></strong><span>연결 업무 {linked.length}개 · 완료 {stats.done}/{stats.total}</span></div><div className="planning-progress-track"><i style={{ width: `${stats.percent}%` }} /></div><p>취소를 제외한 연결 업무 개수 기준입니다.</p></div><section className="planning-membership"><div className="planning-membership-heading"><h3>연결된 업무 <span>{linked.length}</span></h3><button className="btn btn-ghost" onClick={() => setShowCandidates(!showCandidates)} disabled={busy}><Plus size={14} />{showCandidates ? '연결된 업무만' : '업무 연결·해제'}</button></div><div className="planning-search"><Search size={14} /><input aria-label="연결할 업무 검색" placeholder="업무 번호 또는 제목 검색" value={issueQuery} onChange={event => setIssueQuery(event.target.value)} /></div>{dirty && <p className="planning-membership-note">계획 정보를 먼저 저장한 뒤 업무를 연결해 주세요.</p>}{draft.status === 'archived' && <p className="planning-membership-note">보관된 항목에는 새 업무를 연결할 수 없습니다. 기존 연결은 해제할 수 있습니다.</p>}<div className="planning-membership-list">{candidates.map(issue => { const assigned = issue[field] === existingId; const checked = assignments[issue.id]?.assigned ?? assigned; const meta = statusMeta(data, issue.projectId, issue.status); const currentPlan = (data.planningItems || []).find(plan => plan.id === issue[field]); return <div className="planning-membership-row" key={issue.id}><input type="checkbox" aria-label={`${issue.key} 계획 연결`} checked={checked} disabled={busy || dirty || (draft.status === 'archived' && !assigned)} onChange={event => toggle(issue, event.target.checked)} /><button className="planning-linked-issue" onClick={() => openIssue(issue.id)}><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong>{!assigned && currentPlan && <small>현재 {currentPlan.name}</small>}{assignments[issue.id] && assignments[issue.id].expectedVersion !== issue.version && <small className="planning-conflict-text">다른 변경 있음 · 선택 초기화 후 확인</small>}</button><span className="planning-issue-status" style={{ color: meta.color }}>{meta.label}</span><ArrowRight size={13} /></div>; })}{!candidates.length && <div className="planning-membership-empty">{showCandidates ? '조건에 맞는 업무가 없습니다.' : '아직 연결된 업무가 없습니다. 업무 연결·해제에서 선택하세요.'}</div>}</div>{membershipError && <div className="issue-form-error" role="alert">{membershipError} 선택한 변경은 유지됩니다. 최신 상태를 확인하고 선택을 초기화해 주세요.</div>}{selectedAssignments.length > 0 && <div className="planning-assignment-actions"><span>{selectedAssignments.length}개 업무 연결 변경</span><button className="btn btn-ghost" disabled={busy} onClick={() => { setAssignments({}); setAssignmentVersion(null); setMembershipError(''); }}>선택 초기화</button><button className="btn btn-primary" disabled={busy || dirty} onClick={applyAssignments}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}연결 변경 적용</button></div>}</section><div className="planning-danger-zone">{linked.length > 0 && <p>연결된 업무가 있어 삭제할 수 없습니다. 더 사용하지 않는 항목은 보관해 주세요.</p>}<div>{draft.status !== 'archived' && <button className="btn btn-ghost" disabled={busy || selectedAssignments.length > 0} onClick={() => update('status', 'archived')}><Archive size={14} />보관 상태로 변경</button>}<button className="btn btn-ghost" disabled={busy || linked.length > 0 || selectedAssignments.length > 0} title={linked.length ? '연결된 업무를 먼저 해제하세요.' : '계획 항목 삭제'} onClick={deleteItem}><Trash2 size={14} />계획 삭제</button></div></div></>}
   </section>;
 }

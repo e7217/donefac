@@ -456,6 +456,20 @@ export interface PlanningItem {
   status: PlanningStatus; ownerId: string | null; startDate: string | null; endDate: string | null; targetDate: string | null;
   version: number; createdAt: string; updatedAt: string;
 }
+export type CycleCompletionPlan = Pick<PlanningItem, 'id' | 'name' | 'version'>;
+export interface CycleCompletionCounts { carry: number; done: number; cancelled: number; blocked: number }
+export interface CycleCompletionIssue {
+  id: string; key: string; title: string; statusId: string; statusLabel: string;
+  disposition: 'carry' | 'done' | 'cancelled'; blockedReason?: string;
+}
+export interface CycleCompletionPreview {
+  previewId: string | null; expiresAt: string | null;
+  cycle: CycleCompletionPlan; destination: CycleCompletionPlan | null;
+  counts: CycleCompletionCounts; issues: CycleCompletionIssue[];
+}
+export interface CycleCompletionResult {
+  cycle: PlanningItem; destination: CycleCompletionPlan | null; counts: CycleCompletionCounts;
+}
 export type ApiKeyAccess = 'read' | 'write';
 export interface ApiKeyRecord {
   id: string; name: string; prefix: string; actorId: string; access: ApiKeyAccess; projectIds: string[] | null;

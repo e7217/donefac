@@ -29,6 +29,7 @@ curl --fail-with-body \
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
+| `POST /planning-items/:id/complete/preview` · `POST /planning-items/:id/complete` | 진행 중 사이클 완료와 미완료 업무 이월 검토·적용 |
 | `GET /issues?projectId=...` · `GET /issues/:id` | 업무 조회 |
 | `GET`·`POST /issues/:id/relations` · `PATCH`·`DELETE /issues/:id/relations/:relationId` | 양쪽이 키 범위에 있는 업무 관계 조회와 직접 만든 관계의 추가·수정·해제 |
 | `GET /issues/:id/resource-links` · `GET /documents/:id/resource-links` | 업무와 문서의 직접 연결 조회 |
@@ -51,7 +52,7 @@ curl --fail-with-body \
 
 표의 경로 앞에는 `/api/v1`이 붙는다. 읽기 키는 조회만 허용하며 쓰기 키는 조회와 표의 변경 요청을 허용한다. 프로젝트 범위는 조회·원래 대상·이동 대상·상위 항목·계획 참조에 적용한다. 공통 문서는 전체 프로젝트 키로 접근한다.
 
-백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 현재 관리 화면에서 생성하며 자동화 API로 조회하고 티켓에 연결할 수 있다.
+백업·가져오기·연동 설정·키 관리·팀 알림함·휴지통 관리·공동 편집 소켓 등 표에 없는 경로는 자동화 API에서 허용하지 않는다. 계획 항목은 관리 화면에서 생성한다. 자동화 API로 계획을 조회하고 티켓에 연결하며 이월과 함께 사이클을 완료할 수 있다.
 
 업무와 문서의 `DELETE`는 휴지통으로 이동하며 응답의 `trashEntryId`는 해당 이동을 식별한다. 복원과 영구 삭제는 워크스페이스의 **휴지통**에서 처리한다. 연결된 외부 웹훅에서는 휴지통 이동이 기존 `*.deleted`, 복원이 `*.created`와 `origin: "restore"`로 전달된다.
 
@@ -589,6 +590,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 응답의 `changes`는 업무별 현재·제안 일정이며, `dependencyChanges`는 행 번호와 선행·후행 업무의 키·제목, 변경 전후의 `{type,lagDays}`를 담는다. 새 연결의 `before` 또는 해제하는 연결의 `after`는 `null`이다. `warnings`는 선후행 날짜 조건 경고이며 `errors`는 적용을 막는 진단이다. `unchanged`는 날짜와 연결이 모두 바뀌지 않는 행 수다. 오류 없이 변경이 있는 경우에만 `previewId`와 `expiresAt`을 발급한다.
 
 `POST /api/schedule/paste-apply`에 `{previewId}`를 보낸다. 미리보기 작업자와 정책·달력·선후행·업무 버전을 검사해 30분 이내의 계획을 적용한다. 연결을 추가할 때 최종 그래프의 순환 여부도 검사한다. 같은 ID의 적용을 7일 안에 재요청하면 같은 `{undoId,updated,warnings}`를 반환하며 연결 변경이 있으면 `dependencyChanges` 건수도 포함한다. 날짜·연결·이력·되돌리기 기록·적용 응답을 같은 트랜잭션으로 저장한다. `POST /api/schedule/undo`는 대상 업무와 연결이 현재 상태와 일치하고 복구할 연결이 순환을 만들지 않을 때 두 변경을 함께 복원한다. 미리보기와 영수증은 자체 백업 범위 밖에 있으며 복원 시 초기화한다.
+
+## 사이클 완료와 업무 이월
+
+`POST /api/planning-items/:id/complete/preview`는 `{expectedVersion,destinationId}`를 받는다. 원래 사이클은 진행 중이어야 한다. 같은 프로젝트의 다른 계획·진행 중 사이클로 보내려면 ID를, 백로그에 두려면 명시적으로 `null`을 보낸다. `/api/v1`의 두 완료 경로에는 해당 프로젝트의 쓰기 키가 필요하다.
+
+미리보기의 `cycle`과 `destination`은 ID·이름·버전을 담으며 백로그의 `destination`은 `null`이다. `issues`의 각 업무는 상태 라벨과 `disposition`을 담는다. 프로젝트 워크플로의 완료(`done`)·취소(`cancelled`) 업무는 유지하고 나머지 업무는 이월(`carry`)한다. `counts.blocked`는 `carry` 중 필수 속성 등의 검증을 통과하지 못한 건수다. 차단 사유는 업무의 `blockedReason`에 포함되며 적용 ID는 `null`이다. 적용 가능한 `previewId`는 30분간 유효하다.
+
+`POST /api/planning-items/:id/complete`에 `{previewId}`를 보낸다. 작업자·사이클과 미리보기 이후의 연결 업무·계획 버전·업무 설정을 확인한다. 업무의 사이클 연결과 이력, 이전 사이클의 완료 상태와 적용 결과를 한 번에 저장한다. 응답은 완료된 `cycle`, 검토한 `destination`, `counts`다. 같은 작업자가 같은 ID의 결과를 7일간 다시 받을 수 있다. 자체 JSON 복원은 미리보기와 재확인 기록을 초기화한다.
 
 ## 계획과 연결 업무 일정 이동
 
