@@ -1898,6 +1898,10 @@ export function createApp(options: {
     const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };
     const importedCalendars=calendars.validateImport(data.schemaVersion>=5?data.calendars:[],data.projects,{legacy:data.schemaVersion<5});
     const importedArtifacts=scheduleArtifacts.validateImport(data.schemaVersion>=5?data.milestones:[],data.schemaVersion>=5?data.baselines:[],data.projects,data.users,data.issues);
+    if (data.schemaVersion < 75 && (
+      Array.isArray(data.automationRules) && data.automationRules.some((rule: { trigger?: unknown } | null) => rule?.trigger === 'deployment.succeeded') ||
+      Array.isArray(data.automationRuns) && data.automationRuns.some((run: { context?: { trigger?: unknown } } | null) => run?.context?.trigger === 'deployment.succeeded')
+    )) fail('GitLab 배포 자동화 규칙이나 실행 기록을 포함한 백업은 schemaVersion 75가 필요합니다.');
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
     if(data.schemaVersion<64&&data.automationRuns!==undefined&&(!Array.isArray(data.automationRuns)||data.automationRuns.length)){
       fail('GitLab 상태 자동화 실행 기록을 포함한 백업은 schemaVersion 64가 필요합니다.');

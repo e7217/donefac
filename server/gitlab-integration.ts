@@ -10,7 +10,7 @@ import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadErro
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
-import type { GitlabDeploymentSyncResult } from '../shared/types.js';
+import type { GitlabDeployment, GitlabDeploymentSyncResult } from '../shared/types.js';
 import type { Store } from './store.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -734,6 +734,29 @@ export class GitlabIntegrationService{
     }
     return linked;
   }
+  private deploymentSucceeded(raw: RawSettings, deployment: GitlabDeployment, fresh: boolean, receivedAt: string): AutomationRun[] {
+    const { instance, repositoryId, deploymentId, environment, changedAt } = deployment;
+    const objectId = String(deploymentId);
+    const digest = createHash('sha256').update(`deployment-success:${objectId}`).digest('hex');
+    const id = `gitlab:${instance}:${repositoryId}:deployment:${digest}`;
+    // Claim the success even when no ticket qualifies, so a redelivery cannot apply it to links added later.
+    const receipt = this.store.db.prepare('INSERT OR IGNORE INTO webhook_inbox(id,created_at) VALUES(?,?)')
+      .run(`automation:${id}`, receivedAt);
+    if (receipt.changes !== 1 || !fresh) return [];
+
+    const links = this.deployments.matchingAutomaticLinks(deployment);
+    if (!links.length) return [];
+    const route = raw.jiraRoutes?.find(candidate => candidate.repositoryId === repositoryId);
+    const matcher = this.ticketMatcher(this.syncIssues(), route);
+    const issueIds = [...new Set(links.flatMap(link => {
+      const match = matcher.inherit(link);
+      return match ? [match.issue.id] : [];
+    }))];
+    if (!issueIds.length) return [];
+    return this.hooks.processEvent({ id, trigger: 'deployment.succeeded', gitlabProjectId: repositoryId,
+      objectKind: 'deployment', objectId, branch: '', environment, issueIds, occurredAt: changedAt,
+      receivedAt, disposition: 'fresh', reason: '' });
+  }
   webhook(req:Request):WebhookResult{
     const raw=this.raw(),authentication=this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
     const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push','Deployment Hook':'deployment'} as Record<string,string>)[header]||'';
@@ -744,8 +767,11 @@ export class GitlabIntegrationService{
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
       if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:this.recordPush(raw,instance,projectId,kind,body,project),runs:[]};
       if(kind==='deployment'){
-        const changed=this.deployments.observe(instance,raw.baseUrl,projectId,body);
-        return{ok:true,duplicate:false,linked:0,runs:[],...(changed?{deploymentUpdated:true}:{})};
+        let runs: AutomationRun[] = [];
+        const changed=this.deployments.observe(instance,raw.baseUrl,projectId,body,(deployment, fresh) => {
+          runs = this.deploymentSucceeded(raw, deployment, fresh, receivedAt);
+        });
+        return{ok:true,duplicate:false,linked:0,runs,...(changed?{deploymentUpdated:true}:{})};
       }
       if(kind!=='merge_request'&&kind!=='pipeline')return{ok:true,duplicate:false,linked:0,runs:[]};
       const id=objectId(attributes),state=string(attributes.state)||string(attributes.status)||'unknown',branch=bound(kind==='merge_request'?attributes.source_branch:attributes.ref,512),sha=bound(attributes.sha||record(attributes.last_commit).id||record(body.commit).id,128);

@@ -348,7 +348,7 @@ curl --fail-with-body \
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
 | `POST /api/automation-rules` | 규칙 생성 |
 | `PATCH /api/automation-rules/:id` · `DELETE /api/automation-rules/:id` | `expectedVersion`으로 변경·삭제 |
-| `POST /api/automation/preview` | `{rule,issueIds,sample:{trigger,gitlabProjectId,branch}}` 모의 검토 |
+| `POST /api/automation/preview` | `{rule,issueIds,sample}`로 브랜치 또는 배포 환경 조건 미리보기 |
 | `GET /api/automation-runs?projectId=...&limit=100` | 최근 실행·차단·무시 이유, 최대500건 |
 
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
@@ -361,9 +361,11 @@ curl --fail-with-body \
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 
-규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `branchPattern`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. 브랜치는 `*`·`?`만 와일드카드로 사용하는 최대128자 패턴이다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. 미리보기는 티켓이나 실행 기록을 쓰지 않고 외부 요청도 하지 않는다.
+규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. MR·파이프라인 규칙의 `branchPattern`은 `*`·`?`만 와일드카드로 사용하는 최대 128자 패턴이다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. MR·파이프라인의 미리보기 `sample`은 `{trigger,gitlabProjectId,branch}`다. 미리보기는 티켓 및 이력을 그대로 두고 저장된 규칙과 데이터로 결과를 계산한다.
 
-트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`다. MR의 update/approval 이벤트와 push는 상태 자동화를 실행하지 않는다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 다른 규칙으로 넘어가거나 연쇄 실행하지 않는다. 이미 도착 상태이면 업무 버전은 바꾸지 않는다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
+트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`, `deployment.succeeded`다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 이미 도착 상태이면 업무 버전을 유지한다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
+
+배포 성공 규칙의 `environment`는 GitLab의 정확한 환경 이름이며 대소문자를 구분한다. 공백으로 시작하거나 끝나는 문자열과 제어 문자를 제외한 1~255자를 받는다. 미리보기 `sample`은 `{trigger:'deployment.succeeded',gitlabProjectId,environment}`다. 실제 실행은 활성화 이후 발생한 인증 성공 이벤트에서 같은 저장소의 전체 SHA나 포함 MR ID·IID가 자동 업무 연결과 일치할 때만 평가한다. 첫 성공 이벤트의 처리는 배포 ID별로 한 번 기록하며 상태 이력 동기화는 읽은 배포와 MR 근거를 보관한다. 실행 기록에는 `context.objectKind: 'deployment'`, `context.objectId`, `context.environment`가 남는다. 자체 백업 형식 75는 배포 규칙과 실행 기록을 보존하며 규칙을 비활성 상태로 복원한다.
 
 브라우저용 `GET /api/issues/:id/automation-runs`는 해당 티켓에 저장된 최근 실행을 20건씩 반환한다. `nextCursor`를 `before`로 보내 이전 기록을 연다. `issueVersion`은 조회 시점의 티켓 버전이고, `latestBlockedRunId`는 가장 최근 유효 실행이 차단됐으며 현재 출발 상태와 전이가 맞을 때 표시한다. 새 실행의 `context`에 저장소·객체·브랜치, 규칙 이름과 당시 상태 표시 이름을 담는다. 목표 상태를 사용한 편집은 일반 티켓 저장 API의 버전·전이·필수 필드 검사를 거친다.
 

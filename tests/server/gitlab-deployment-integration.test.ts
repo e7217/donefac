@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 
 const integrationPath = '/api/integrations/gitlab';
 const baseUrl = 'https://git.example.test/gitlab';
@@ -151,6 +151,92 @@ test('authenticated deployment first, merge later, scoped ticket evidence, and n
   assert.equal((await f.request(`/api/issues/${issue.id}/gitlab-deployments`)).status, 404);
   await f.json(`/api/trash/${trashEntryId}/restore`, 'POST', undefined, headers);
   assert.deepEqual(await f.deployments(issue.id), tracked);
+});
+
+test('live deployment rules require exact environment and established SHA proof, preserve audit on restore and apply once', async t => {
+  const f = await fixture(t);
+  const { projects: [project], users: [user] } = await f.json<WorkspaceSnapshot>('/api/workspace');
+  const headers = { 'X-Actor-Id': user.id };
+  const [ticket, unverified] = await Promise.all(['Released feature', 'Unverified deployment text'].map(title =>
+    f.json<Issue>('/api/issues', 'POST', { projectId: project.id, title }, headers, 201)));
+  assert.equal((await f.send(mergeRequest(ticket.key), 'Merge Request Hook')).status, 200);
+  const otherMerge = mergeRequest(unverified.key, 102);
+  otherMerge.object_attributes.sha = mergeSha;
+  otherMerge.object_attributes.merge_commit_sha = 'd'.repeat(40);
+  otherMerge.object_attributes.squash_commit_sha = 'e'.repeat(40);
+  assert.equal((await f.send(otherMerge, 'Merge Request Hook')).status, 200);
+
+  const environment = 'production/eu';
+  const ruleDraft = { projectId: project.id, name: 'Mark production rollout', enabled: true, trigger: 'deployment.succeeded',
+    gitlabProjectIds: [repositoryId], environment, issueTypes: [], fromStatuses: [ticket.status], toStatusId: 'done', actorId: user.id };
+  const rulePath = '/api/automation-rules';
+  await f.json(rulePath, 'POST', { ...ruleDraft, environment: ` ${environment}` }, headers, 400);
+  const rule = await f.json<AutomationRule>(rulePath, 'POST', ruleDraft, headers, 201);
+  assert.equal(rule.environment, environment);
+  const preview = (name: string) => f.json<AutomationPreview>('/api/automation/preview', 'POST', {
+    rule: ruleDraft, issueIds: [ticket.id], sample: { trigger: rule.trigger, gitlabProjectId: repositoryId, environment: name },
+  }, headers);
+  assert.equal((await preview('Production/eu')).outcomes[0].outcome, 'ignored');
+  assert.equal((await preview(environment)).outcomes[0].outcome, 'changed');
+  const getIssue = async (issue: Issue) => {
+    const current = (await f.json<WorkspaceSnapshot>('/api/workspace')).issues.find(row => row.id === issue.id);
+    assert.ok(current);
+    return current;
+  };
+  const runsPath = `/api/automation-runs?projectId=${project.id}`;
+  assert.equal((await getIssue(ticket)).status, ticket.status);
+  assert.deepEqual(await f.json(runsPath), []);
+
+  function live(id: number, name = environment, status = 'success') {
+    return { ...deployment(id, mergeSha, status, 5, name), environment_tier: 'production',
+      status_changed_at: new Date().toISOString(), commit_title: `Text alone ${unverified.key}` };
+  }
+  assert.equal((await f.send(deployment(300, mergeSha, 'success', 5, environment))).status, 200);
+  assert.equal((await f.send(live(301, 'Production/eu'))).status, 200);
+  assert.equal((await f.send(live(302, environment, 'running'))).status, 200);
+  assert.equal((await f.send(live(303), 'Deployment Hook', 'wrong-token')).status, 401);
+  assert.equal((await getIssue(ticket)).status, ticket.status);
+
+  const eventId = randomUUID();
+  const success = live(303);
+  const first = await f.send(success, 'Deployment Hook', secret, eventId);
+  assert.equal(first.status, 200);
+  const { runs: [run] } = await first.json() as { runs: AutomationRun[] };
+  assert.equal(run?.outcome, 'changed');
+  assert.equal(run.ruleId, rule.id);
+  assert.equal(run.issueId, ticket.id);
+  assert.deepEqual(run.context && [run.context.trigger, run.context.objectKind, run.context.objectId, run.context.environment, run.context.branch],
+    ['deployment.succeeded', 'deployment', '303', environment, '']);
+  assert.equal((await getIssue(ticket)).status, 'done');
+  assert.equal((await getIssue(ticket)).version, ticket.version + 1);
+  assert.equal((await getIssue(unverified)).status, unverified.status);
+  const replay = await (await f.send(success, 'Deployment Hook', secret, eventId)).json() as { duplicate: boolean };
+  assert.equal(replay.duplicate, true);
+  assert.equal((await f.send(live(303))).status, 200);
+  assert.equal((await f.json<AutomationRun[]>(runsPath)).filter(row => row.outcome === 'changed').length, 1);
+
+  const laterLinkedSha = 'f'.repeat(40);
+  const noProof = { ...deployment(304, laterLinkedSha, 'success', 5, environment), status_changed_at: new Date().toISOString() };
+  const { runs: initialRuns } = await (await f.send(noProof)).json() as { runs: AutomationRun[] };
+  assert.deepEqual(initialRuns, []);
+  const addedProof = mergeRequest(unverified.key, 103);
+  addedProof.object_attributes.merge_commit_sha = laterLinkedSha;
+  assert.equal((await f.send(addedProof, 'Merge Request Hook')).status, 200);
+  const { runs: laterRuns } = await (await f.send({ ...noProof, status_changed_at: new Date().toISOString() })).json() as { runs: AutomationRun[] };
+  assert.deepEqual(laterRuns, []);
+  const outOfOrder = { ...noProof, deployment_id: 305 };
+  const { runs: staleRuns } = await (await f.send(outOfOrder)).json() as { runs: AutomationRun[] };
+  assert.deepEqual(staleRuns, []);
+  assert.equal((await getIssue(unverified)).status, unverified.status);
+
+  const archived = await f.json<{ schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[] }>('/api/export');
+  assert.equal(archived.schemaVersion, 75);
+  await f.json('/api/import', 'POST', { data: { ...archived, schemaVersion: 74 } }, headers, 400);
+  await f.json('/api/import', 'POST', { data: archived }, headers);
+  const restored = (await f.json<AutomationRule[]>(`${rulePath}?projectId=${project.id}`)).find(row => row.id === rule.id);
+  assert.deepEqual(restored && [restored.environment, restored.enabled, restored.enabledAt], [environment, false, null]);
+  const restoredRun = (await f.json<AutomationRun[]>(runsPath)).find(row => row.id === run.id);
+  assert.deepEqual(restoredRun?.context, run.context);
 });
 
 test('REST backfill links every confirmed batched merge request and preserves both old backups and partial proof', async t => {

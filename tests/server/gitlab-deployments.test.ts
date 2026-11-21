@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { GitlabDeploymentError, GitlabDeployments } from '../../server/gitlab-deployments.js';
+import { GitlabDeploymentError, GitlabDeployments, gitlabDeploymentTime } from '../../server/gitlab-deployments.js';
 import { Store } from '../../server/store.js';
 import type { GitlabDeployment, GitlabLink } from '../../shared/types.js';
 
@@ -78,7 +78,9 @@ test('GitLab deployment observations verify repository, full SHA and scope and p
   }), /reject webhook transaction/u);
   assert.deepEqual(deployments.exportRows(), []);
 
-  assert.equal(observe({ status: 'running', status_changed_at: '2026-01-02T19:30:00+09:00' }), true);
+  assert.equal(gitlabDeploymentTime('2026-01-02 10:30:00 UTC'), started);
+  assert.equal(gitlabDeploymentTime('2026-01-02 10:30:00 +9060'), undefined);
+  assert.equal(observe({ status: 'running', status_changed_at: '2026-01-02 19:30:00 +0900' }), true);
   assert.equal(deployments.exportRows()[0].changedAt, started);
   assert.equal(observe({ deployable_id: null, deployable_url: null }), true);
   assert.equal(observe(), false);

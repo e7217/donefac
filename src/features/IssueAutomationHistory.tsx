@@ -23,7 +23,7 @@ type Props = Pick<FeatureProps, 'refresh'> & {
 
 function sourceUrl(run: AutomationRun, links: readonly GitlabLink[]): URL | null {
   const context = run.context;
-  if (!context || !/^[1-9]\d*$/u.test(context.objectId)) return null;
+  if (!context || context.objectKind === 'deployment' || !/^[1-9]\d*$/u.test(context.objectId)) return null;
   const source = /^gitlab:([a-f0-9]{12}):([1-9]\d*):(merge_request|pipeline):[a-f0-9]{64}$/u.exec(run.eventId);
   if (!source || source[2] !== String(context.gitlabProjectId) || source[3] !== context.objectKind) return null;
   const linkId = `gitlab:${source[1]}:${context.gitlabProjectId}:${context.objectKind}:${context.objectId}:${run.issueId}`;
@@ -107,7 +107,9 @@ export function IssueAutomationHistory({ issueId, issueVersion, links, users, re
           <p className="issue-automation-reason">{run.reason}</p>
           {context && <div className="issue-automation-context">
             <span>{context.ruleName} · {AUTOMATION_TRIGGER_LABELS[context.trigger]}</span>
-            <span>저장소 #{context.gitlabProjectId}{context.objectId && ` · 객체 #${context.objectId}`}{context.branch && <> · <code>{context.branch}</code></>}</span>
+            <span>저장소 #{context.gitlabProjectId}{context.objectKind === 'deployment'
+              ? <> · 배포 #{context.objectId} · 환경 <code>{context.environment}</code></>
+              : <>{context.objectId && ` · 객체 #${context.objectId}`}{context.branch && <> · <code>{context.branch}</code></>}</>}</span>
           </div>}
           <div className="issue-automation-meta">
             <span>{run.occurredAt ? '이벤트 시각' : '기록 시각'} <time dateTime={time}>{new Date(time).toLocaleString('ko-KR')}</time></span>

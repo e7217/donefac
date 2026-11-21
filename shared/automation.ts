@@ -6,8 +6,14 @@ export const AUTOMATION_TRIGGER_LABELS:Record<GitlabAutomationTrigger,string>={
   'merge_request.closed':'Merge Request 닫힘',
   'pipeline.succeeded':'파이프라인 성공',
   'pipeline.failed':'파이프라인 실패',
+  'deployment.succeeded':'배포 성공',
 };
 export const AUTOMATION_TRIGGERS=Object.keys(AUTOMATION_TRIGGER_LABELS) as GitlabAutomationTrigger[];
+
+export function isGitlabDeploymentEnvironment(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 255 && value.trim() === value &&
+    value.isWellFormed() && !/[\u0000-\u001f\u007f]/u.test(value);
+}
 
 /** Only * and ? are wildcards. Dynamic programming bounds matching work to 128×512. */
 export function branchMatches(pattern:string,branch:string):boolean{

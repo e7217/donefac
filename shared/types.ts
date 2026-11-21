@@ -1006,16 +1006,16 @@ export interface GitlabSyncPreview {
   repositories: GitlabSyncRepositoryResult[];
   counts: GitlabSyncPreviewCounts; candidates: GitlabSyncPreviewCandidate[]; candidatesTruncated: boolean;
 }
-export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
+export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed' | 'deployment.succeeded';
 export interface AutomationRule {
   id: string; projectId: string; name: string; enabled: boolean; trigger: GitlabAutomationTrigger;
-  gitlabProjectIds: number[]; branchPattern: string; issueTypes: string[]; fromStatuses: string[]; toStatusId: string;
+  gitlabProjectIds: number[]; branchPattern: string; environment?: string; issueTypes: string[]; fromStatuses: string[]; toStatusId: string;
   actorId: string; priority: number; gitlabBaseUrl: string; enabledAt: string | null;
   version: number; createdAt: string; updatedAt: string;
 }
 export interface AutomationEvent {
-  id: string; trigger: GitlabAutomationTrigger; gitlabProjectId: number; objectKind: 'merge_request' | 'pipeline'; objectId: string;
-  branch: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
+  id: string; trigger: GitlabAutomationTrigger; gitlabProjectId: number; objectKind: 'merge_request' | 'pipeline' | 'deployment'; objectId: string;
+  branch: string; environment?: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
   disposition: 'fresh' | 'stale' | 'ambiguous' | 'unverified'; reason: string;
 }
 export interface AutomationOutcome {
@@ -1024,7 +1024,7 @@ export interface AutomationOutcome {
 }
 export interface AutomationRunContext {
   ruleName: string; trigger: GitlabAutomationTrigger; gitlabBaseUrl: string; gitlabProjectId: number;
-  objectKind: 'merge_request' | 'pipeline'; objectId: string; branch: string;
+  objectKind: AutomationEvent['objectKind']; objectId: string; branch: string; environment?: string;
   fromStatusLabel: string; toStatusLabel: string;
 }
 export interface AutomationRun extends AutomationOutcome {
