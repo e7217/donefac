@@ -841,7 +841,7 @@ export function createApp(options: {
   });
   worklogs.registerRoutes(app,{actor,activity});
   timeReservations.registerRoutes(app,{actor,activity});
-  registerFieldBreakdownRoutes(app,store,issueSchemas);
+  registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId));
   function createReportDocument(
     req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>,
     content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' = '주간 보고서',

@@ -5,6 +5,8 @@ import type {
   Issue,
   IssueFieldBreakdown,
   IssueFieldBreakdownBucket,
+  IssueFieldBreakdownColumn,
+  IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
   User,
 } from '../shared/types.js';
@@ -23,6 +25,9 @@ interface BreakdownInput {
   savedView: IssueFieldBreakdown['savedView'];
   schemaVersion: number;
   generatedAt: string;
+  groupBy?: IssueFieldBreakdownDimension;
+  comparison?: { by: IssueFieldBreakdownDimension; field: CustomFieldDefinition };
+  configuration?: { workflowVersion?: number; importGeneration: string | null };
 }
 
 const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'variant' });
@@ -38,6 +43,22 @@ function displayLabel(value: string, limit = 180): string {
   }
   return characters.join('');
 }
+
+function distinguishLabels(groups: ReadonlyMap<string, IssueFieldBreakdownColumn>) {
+  const counts = new Map<string, number>();
+  for (const group of groups.values()) counts.set(group.label, (counts.get(group.label) ?? 0) + 1);
+  for (const group of groups.values()) {
+    if (group.id.startsWith('value:') && counts.get(group.label)! > 1) {
+      group.label = `${displayLabel(group.label, 165)} · ${group.id.slice(-12)}`;
+    }
+  }
+}
+
+function builtinValue(issue: Issue, by: IssueFieldBreakdownDimension): string | null {
+  return by === 'assignee' ? issue.assigneeId : issue[by];
+}
+
+const valueId = (field: CustomFieldDefinition, value: string | number | boolean) => `value:${hash([field.id, field.kind, value])}`;
 
 function ownValue(issue: Issue, field: CustomFieldDefinition): CustomFieldValue | undefined {
   const property = issue.customFields && Object.getOwnPropertyDescriptor(issue.customFields, field.id);
@@ -109,13 +130,17 @@ function numericStatistics(values: number[]): IssueFieldBreakdown['numeric'] {
 export function buildIssueFieldBreakdown(input: BreakdownInput): {
   report: IssueFieldBreakdown;
   issuesByBucket: Map<string, IssueFieldBreakdownIssue[]>;
+  columnByIssue: ReadonlyMap<string, string>;
 } {
   if (!Array.isArray(input.issues) || input.issues.length > 10000) fail('필드 분포는 최대 10,000개 업무까지 집계할 수 있습니다.', 413);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) fail('업무 스키마 버전을 확인해 주세요.', 400);
-  const { projectId, field, users } = input;
+  const { projectId, field, users, groupBy, comparison } = input;
   const buckets = new Map<string, IssueFieldBreakdownBucket>();
   const issuesByBucket = new Map<string, IssueFieldBreakdownIssue[]>();
-  const missing: IssueFieldBreakdownBucket = { id: 'missing', label: '값 없음', kind: 'missing', count: 0 };
+  const columnByIssue = new Map<string, string>();
+  const columns = new Map<string, IssueFieldBreakdownColumn>();
+  const counts = new Map<string, Map<string, number>>();
+  const missing: IssueFieldBreakdownBucket = { id: 'missing', label: groupBy === 'assignee' ? '미지정' : '값 없음', kind: 'missing', count: 0 };
   const notApplicable: IssueFieldBreakdownBucket = { id: 'not-applicable', label: '유형 미적용', kind: 'not_applicable', count: 0 };
   buckets.set(missing.id, missing);
   buckets.set(notApplicable.id, notApplicable);
@@ -131,16 +156,36 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     if (!summary) { summary = { id: issue.id, key: issue.key, title: issue.title }; summaries.set(issue.id, summary); }
     bucket.count++;
     issuesByBucket.get(bucket.id)!.push(summary);
+    const columnId = columnByIssue.get(issue.id);
+    if (columnId) {
+      let row = counts.get(bucket.id);
+      if (!row) { row = new Map(); counts.set(bucket.id, row); }
+      row.set(columnId, (row.get(columnId) ?? 0) + 1);
+    }
   };
   for (const issue of input.issues) {
     if (issue.projectId !== projectId) fail('다른 프로젝트 업무를 필드 분포에 포함할 수 없습니다.', 400);
     if (!issue.id || seen.has(issue.id)) fail('필드 분포에 중복되거나 비어 있는 업무 ID가 있습니다.', 400);
     if (!Number.isSafeInteger(issue.version) || issue.version < 1) fail('업무 버전을 확인해 주세요.', 400);
     seen.add(issue.id);
+    let columnId: string | undefined;
+    if (comparison) {
+      const comparedValue = builtinValue(issue, comparison.by);
+      columnId = hasCustomValue(comparedValue) ? valueId(comparison.field, comparedValue!) : 'missing';
+      let column = columns.get(columnId);
+      if (!column) {
+        const label = columnId === 'missing' ? (comparison.by === 'assignee' ? '미지정' : '값 없음')
+          : fieldValueLabel(comparison.field, comparedValue, users);
+        column = { id: columnId, label: displayLabel(label), count: 0 };
+        columns.set(columnId, column);
+      }
+      column.count++;
+      columnByIssue.set(issue.id, columnId);
+    }
     const applicable = fieldApplies(field, issue.type);
-    const value = applicable ? ownValue(issue, field) : undefined;
+    const value = applicable ? (groupBy ? builtinValue(issue, groupBy) : ownValue(issue, field)) : undefined;
     fingerprints.push([issue.id, issue.version, issue.key, issue.title, issue.type, applicable,
-      value === undefined || value === null ? null : hash([field.kind, value])]);
+      value === undefined || value === null ? null : hash([field.kind, value]), ...(columnId ? [columnId] : [])]);
     if (!applicable) { add(notApplicable, issue); continue; }
     applicableIssues++;
     if (!hasCustomValue(value)) { add(missing, issue); continue; }
@@ -151,7 +196,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       ? [...new Set(value as string[])].sort(compareText)
       : [value as string | number | boolean];
     for (const distinct of distinctValues) {
-      const id = `value:${hash([field.id, field.kind, distinct])}`;
+      const id = valueId(field, distinct);
       let bucket = buckets.get(id);
       if (!bucket) {
         const label = fieldValueLabel(field, field.kind === 'multi_select' ? [distinct as string] : distinct, users);
@@ -164,19 +209,29 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
   }
   const compareIssues = (left: IssueFieldBreakdownIssue, right: IssueFieldBreakdownIssue) => compareText(left.key, right.key) || compareText(left.id, right.id);
   for (const issues of issuesByBucket.values()) issues.sort(compareIssues);
-  const labelCounts = new Map<string, number>();
-  for (const bucket of buckets.values()) labelCounts.set(bucket.label, (labelCounts.get(bucket.label) || 0) + 1);
-  for (const bucket of buckets.values()) {
-    if (bucket.kind === 'value' && labelCounts.get(bucket.label)! > 1) {
-      bucket.label = `${displayLabel(bucket.label, 165)} · ${bucket.id.slice(-12)}`;
-    }
-  }
+  distinguishLabels(buckets);
   const groups = [...buckets.values()].filter(bucket => bucket.kind === 'value').sort(
     (left, right) => right.count - left.count || compareText(left.label, right.label) || compareText(left.id, right.id),
   );
   groups.push(missing, notApplicable);
   const numeric = field.kind === 'number' ? numericStatistics(numericValues) : null;
   const savedView = input.savedView ? { id: input.savedView.id, name: input.savedView.name, version: input.savedView.version } : null;
+  let comparisonResult: IssueFieldBreakdown['comparison'];
+  if (comparison) {
+    distinguishLabels(columns);
+    const workflowOrder = comparison.by === 'status'
+      ? new Map(comparison.field.options.map((option, index) => [valueId(comparison.field, option.id), index]))
+      : new Map<string, number>();
+    const orderedColumns = [...columns.values()].sort((left, right) =>
+      Number(left.id === 'missing') - Number(right.id === 'missing') ||
+      (workflowOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (workflowOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER) ||
+      compareText(left.label, right.label) || compareText(left.id, right.id));
+    const columnPosition = new Map(orderedColumns.map((column, index) => [column.id, index]));
+    comparisonResult = { by: comparison.by, columns: orderedColumns, counts: Object.fromEntries(groups.flatMap(group => {
+      const row = counts.get(group.id);
+      return row ? [[group.id, Object.fromEntries([...row].sort(([left], [right]) => columnPosition.get(left)! - columnPosition.get(right)!))]] : [];
+    })) };
+  }
   const revision = hash({
     projectId, schemaVersion: input.schemaVersion,
     field: [field.id, field.name, field.description, field.kind, field.required, field.archived,
@@ -185,14 +240,16 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     issues: fingerprints.sort((left, right) => compareText(left[0] as string, right[0] as string)),
     groups: groups.map(bucket => [bucket.id, bucket.label, bucket.kind, bucket.count]),
     numeric,
+    ...(groupBy || comparisonResult ? { groupBy, comparison: comparisonResult, configuration: input.configuration } : {}),
   });
   return {
     report: {
       projectId, field: { id: field.id, name: field.name, kind: field.kind, archived: field.archived },
+      ...(groupBy ? { groupBy } : {}), ...(comparisonResult ? { comparison: comparisonResult } : {}),
       savedView, revision, generatedAt: input.generatedAt, totalIssues: input.issues.length,
       applicableIssues, populatedIssues, missingIssues: missing.count, notApplicableIssues: notApplicable.count,
       groups, numeric,
     },
-    issuesByBucket,
+    issuesByBucket, columnByIssue,
   };
 }

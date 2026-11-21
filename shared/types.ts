@@ -1238,6 +1238,18 @@ export interface SavedViewState {
     labels?: IssueViewLabelFilter;
   };
 }
+export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type'] as const;
+export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIONS[number];
+export interface IssueFieldBreakdownColumn {
+  id: string;
+  label: string;
+  count: number;
+}
+export interface IssueFieldBreakdownComparison {
+  by: IssueFieldBreakdownDimension;
+  columns: IssueFieldBreakdownColumn[];
+  counts: Record<string, Record<string, number>>;
+}
 export interface IssueFieldBreakdownBucket {
   id: string;
   label: string;
@@ -1248,6 +1260,8 @@ export interface IssueFieldBreakdownIssue { id: string; key: string; title: stri
 export interface IssueFieldBreakdown {
   projectId: string;
   field: Pick<CustomFieldDefinition, 'id' | 'name' | 'kind' | 'archived'>;
+  groupBy?: IssueFieldBreakdownDimension;
+  comparison?: IssueFieldBreakdownComparison;
   savedView: { id: string; name: string; version: number } | null;
   revision: string;
   generatedAt: string;
@@ -1261,6 +1275,7 @@ export interface IssueFieldBreakdown {
 }
 export interface IssueFieldBreakdownPage {
   bucket: IssueFieldBreakdownBucket;
+  comparisonBucket?: IssueFieldBreakdownColumn;
   total: number;
   offset: number;
   issues: IssueFieldBreakdownIssue[];

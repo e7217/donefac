@@ -26,7 +26,7 @@ curl --fail-with-body \
 | `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
 | `GET /decision-follow-ups` · `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 팀·프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
-| `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
+| `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 기본·사용자 정의 필드의 현재 값별 집계, 두 기준의 교차 집계와 해당 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
 | `GET /planning-items?projectId=...&kind=cycle` | 프로젝트별 사이클·모듈·릴리스 조회 |
 | `GET /planning-items/:id` | 계획 항목 조회 |
@@ -919,13 +919,15 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 파이프라인은 같은 업무·GitLab 인스턴스·저장소·브랜치의 연결 중 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 브랜치나 원본 ID를 확인할 수 없는 기존 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 57은 MR 병합 상태와 `merge_blocked` 조건을 보존한다. 기존 GitLab 조건은 형식 53에서 지원한다.
 
-## 사용자 정의 필드 집계
+## 업무 필드 집계
 
-`POST /api/v1/projects/:id/field-breakdown`에 `fieldId`와 선택 항목인 `savedViewId`를 보낸다. 보기를 생략하거나 `null`을 보내면 전체 프로젝트를 집계한다. 보기를 지정하면 현재 저장된 검색어와 상태·담당자·유형·필드·계획·일정·GitLab 조건을 적용한다. 두 조회 경로는 같은 프로젝트 범위의 읽기 키와 브라우저의 `/api` 경로에서 사용할 수 있다.
+`POST /api/v1/projects/:id/field-breakdown`에는 기본 필드를 선택하는 `groupBy`와 사용자 정의 필드를 선택하는 `fieldId` 중 하나가 필요하다. `groupBy`는 `status`, `assignee`, `priority`, `type`을 지원한다. 선택 항목인 `savedViewId`를 생략하거나 `null`로 보내면 전체 프로젝트를 집계한다. 보기를 지정하면 현재 저장된 검색어와 상태·담당자·유형·필드·계획·일정·GitLab 조건을 적용한다. 두 조회 경로는 같은 프로젝트 범위의 읽기 키와 브라우저의 `/api` 경로에서 사용할 수 있다.
 
 응답에는 조회 시각 `generatedAt`, 비교 기준 `revision`, 조건에 맞는 전체 업무 수와 적용·입력·미입력·유형 미적용 업무 수, 값별 `groups`가 포함된다. 숫자 0과 확인 여부 `false`는 각각 입력된 값이다. 다중 선택은 선택지마다 그 선택지를 가진 업무를 한 번 세므로 한 업무가 여러 그룹에 나타날 수 있다. 그룹 ID는 필드 ID와 저장 값에 기반한다. 숫자 필드의 `numeric`에는 값이 있을 때 `min`, `max`, `average`, `sum`이 포함된다. 합계가 유한한 JSON 숫자 범위를 넘으면 `sum`은 `null`이다. 한 번에 선택된 업무 10,000개까지 집계하며 초과 시 `413`을 반환한다.
 
-`POST /api/v1/projects/:id/field-breakdown/issues`에 같은 `fieldId`, `savedViewId`와 응답의 `revision`, 그룹 `id`를 `bucketId`로 보낸다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 자료가 바뀌어 `revision`이 달라지면 `409`를 반환한다. 그때는 집계를 다시 조회해 새 `revision`을 사용한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 그룹의 응답은 `404`다.
+교차 집계에는 위 네 값 중 `comparisonBy`를 추가한다. 기본 필드로 집계할 때는 `groupBy`와 서로 다른 값을 지정한다. `comparison.columns`는 각 열의 ID·현재 이름·조건에 해당하는 업무 수를 반환한다. `comparison.counts[행 ID][열 ID]`는 교차 업무 수이며, 생략된 셀은 0건이다. 다중 선택의 한 업무는 그 선택지에 해당하는 여러 행에 들어갈 수 있다. 열 합계에는 조회 범위의 해당 업무를 한 번씩 센다.
+
+`POST /api/v1/projects/:id/field-breakdown/issues`에 집계 때 사용한 조건과 응답의 `revision`, 행의 `id`를 `bucketId`로 보낸다. `comparisonBucketId`에 열의 `id`를 추가하면 `comparisonBucket`에 열 정보를, `total`에 두 조건을 모두 충족하는 업무 수를 반환한다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 뒤 업무·보기·필드 또는 비교 기준의 설정이 바뀌면 이전 `revision`의 조회는 `409`를 반환한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 행이나 열은 `404`를 반환한다.
 
 ## 문서 검토·발행
 

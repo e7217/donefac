@@ -2,11 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { BarChart3, RefreshCw } from 'lucide-react';
+import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS } from '../../shared/types';
 import type {
   CustomFieldKind,
   FeatureProps,
   IssueFieldBreakdown,
   IssueFieldBreakdownBucket,
+  IssueFieldBreakdownComparison,
+  IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
   IssueFieldBreakdownPage,
   SavedView,
@@ -16,9 +19,16 @@ import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import './field-breakdown.css';
 
-type Query = { fieldId: string; savedViewId: string | null };
+type Query = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
+  | { fieldId: string; groupBy?: never }
+  | { groupBy: IssueFieldBreakdownDimension; fieldId?: never }
+);
 const GROUP_PAGE_SIZE = 25;
 const ISSUE_PAGE_SIZE = 50;
+const COMPARISON_PAGE_SIZE = 10;
+const DIMENSION_LABELS: Record<IssueFieldBreakdownDimension, string> = {
+  status: '상태', priority: '우선순위', assignee: '담당자', type: '유형',
+};
 const KIND_LABELS: Record<CustomFieldKind, string> = {
   text: '텍스트',
   number: '숫자',
@@ -29,7 +39,8 @@ const KIND_LABELS: Record<CustomFieldKind, string> = {
   user: '사용자',
   url: 'URL',
 };
-const sameQuery = (a: Query, b: Query) => a.fieldId === b.fieldId && a.savedViewId === b.savedViewId;
+const sameQuery = (a: Query, b: Query) => a.fieldId === b.fieldId && a.groupBy === b.groupBy &&
+  a.comparisonBy === b.comparisonBy && a.savedViewId === b.savedViewId;
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '필드 집계를 불러오지 못했습니다.';
 const numberLabel = (value: number | null) =>
@@ -44,10 +55,10 @@ export function FieldBreakdownReport(props: FeatureProps) {
 function ProjectFieldBreakdown(props: FeatureProps) {
   const { data, projectId, actorId } = props;
   const schema = projectIssueSchema(data, projectId);
-  const [query, setQuery] = useState<Query>(() => ({
-    fieldId: schema.fields.find((field) => !field.archived)?.id ?? schema.fields[0]?.id ?? '',
-    savedViewId: null,
-  }));
+  const firstFieldId = schema.fields.find((field) => !field.archived)?.id ?? schema.fields[0]?.id ?? '';
+  const [query, setQuery] = useState<Query>(() => firstFieldId
+    ? { fieldId: firstFieldId, savedViewId: null }
+    : { groupBy: 'status', savedViewId: null });
   const [baseline, setBaseline] = useState<Query>(query);
   const [report, setReport] = useState<IssueFieldBreakdown | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
@@ -67,6 +78,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
   const pageRequest = useRef<AbortController | null>(null);
   const viewsRequest = useRef<AbortController | null>(null);
   const openingRef = useRef(false);
+  const drillHeading = useRef<HTMLHeadingElement>(null);
   const dirty = !sameQuery(query, baseline);
   const validProject = data.projects.some((project) => project.id === projectId);
   const views = (reloadedViews ?? data.savedViews ?? []).filter((view) => view.projectId === projectId);
@@ -132,9 +144,16 @@ function ProjectFieldBreakdown(props: FeatureProps) {
     dirtyRef.current = !sameQuery(next, baseline);
   }
 
+  function choosePrimary(value: string) {
+    const groupBy = ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value);
+    const { savedViewId, comparisonBy } = query;
+    if (groupBy) update({ groupBy, savedViewId, comparisonBy: comparisonBy === groupBy ? undefined : comparisonBy });
+    else if (value === 'custom' && firstFieldId) update({ fieldId: firstFieldId, savedViewId, comparisonBy });
+  }
+
   async function requestReport(event: FormEvent) {
     event.preventDefault();
-    if (!query.fieldId || !validProject) return;
+    if ((!query.fieldId && !query.groupBy) || !validProject) return;
     queryRequest.current?.abort();
     pageRequest.current?.abort();
     const controller = new AbortController();
@@ -171,7 +190,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
     }
   }
 
-  async function loadBucket(bucket: IssueFieldBreakdownBucket, offset: number) {
+  async function loadBucket(bucket: IssueFieldBreakdownBucket, offset: number, comparisonBucketId?: string, focusResult = false) {
     if (!report || stale || reportLoading || !bucket.count) return;
     pageRequest.current?.abort();
     const controller = new AbortController();
@@ -186,15 +205,18 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           headers: { 'X-Actor-Id': actorId },
           signal: controller.signal,
           body: JSON.stringify({
-            fieldId: report.field.id,
-            savedViewId: report.savedView?.id ?? null,
+            ...baseline,
             revision: report.revision,
             bucketId: bucket.id,
             offset,
+            comparisonBucketId,
           }),
         },
       );
-      if (active.current && !controller.signal.aborted) setPage(result);
+      if (active.current && !controller.signal.aborted) {
+        setPage(result);
+        if (focusResult) requestAnimationFrame(() => drillHeading.current?.focus());
+      }
     } catch (cause) {
       if (active.current && !controller.signal.aborted) {
         if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404)) setStale(true);
@@ -225,18 +247,14 @@ function ProjectFieldBreakdown(props: FeatureProps) {
     return (
       <section className="field-breakdown-feature">
         <h2>필드 집계</h2>
-        <p>프로젝트를 선택하면 사용자 정의 필드를 집계할 수 있습니다.</p>
+        <p>프로젝트를 선택하면 업무를 집계할 수 있습니다.</p>
       </section>
     );
-  const start = report
-    ? Math.min(
-        groupsOffset,
-        Math.max(0, Math.floor((report.groups.length - 1) / GROUP_PAGE_SIZE) * GROUP_PAGE_SIZE),
-      )
-    : 0;
+  const groups = report?.comparison ? report.groups.filter(bucket => bucket.count > 0) : report?.groups ?? [];
+  const start = Math.min(groupsOffset, Math.max(0, Math.floor((groups.length - 1) / GROUP_PAGE_SIZE) * GROUP_PAGE_SIZE));
   const selectedField = schema.fields.find((field) => field.id === query.fieldId);
   return (
-    <section className="field-breakdown-feature" aria-label="사용자 정의 필드 집계">
+    <section className="field-breakdown-feature" aria-label="업무 필드 집계">
       <form
         className="card field-breakdown-query"
         aria-label="필드 집계 조회 조건"
@@ -247,17 +265,25 @@ function ProjectFieldBreakdown(props: FeatureProps) {
             <BarChart3 size={19} />
             필드별 업무 현황
           </h2>
-          <p>전체 프로젝트 또는 저장된 보기의 업무를 필드 값으로 나누어 확인하세요.</p>
+          <p>프로젝트 전체 업무나 저장된 보기의 업무를 한두 가지 기준으로 집계합니다.</p>
         </header>
         <fieldset disabled={reportLoading}>
           <div className="field-breakdown-query-grid">
             <label>
+              집계 기준
+              <select className="field" aria-label="집계 기준" value={query.groupBy ?? 'custom'}
+                onChange={event => choosePrimary(event.currentTarget.value)}>
+                {(firstFieldId || query.fieldId) && <option value="custom">사용자 정의 필드</option>}
+                {ISSUE_FIELD_BREAKDOWN_DIMENSIONS.map(value => <option key={value} value={value}>{DIMENSION_LABELS[value]}</option>)}
+              </select>
+            </label>
+            {!query.groupBy && <label>
               집계할 필드
               <select
                 className="field"
                 aria-label="집계할 사용자 정의 필드"
                 value={query.fieldId}
-                onChange={(event) => update({ ...query, fieldId: event.target.value })}
+                onChange={(event) => update({ fieldId: event.currentTarget.value, savedViewId: query.savedViewId, comparisonBy: query.comparisonBy })}
               >
                 <option value="">필드 선택</option>
                 {query.fieldId && !selectedField && (
@@ -269,6 +295,18 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                     {field.archived ? ' · 보관됨' : ''}
                   </option>
                 ))}
+              </select>
+            </label>}
+            <label>
+              비교 기준
+              <select className="field" aria-label="비교 기준" value={query.comparisonBy ?? ''}
+                onChange={event => {
+                  const value = event.currentTarget.value;
+                  update({ ...query, comparisonBy: ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value && dimension !== query.groupBy) });
+                }}>
+                <option value="">비교 안 함</option>
+                {ISSUE_FIELD_BREAKDOWN_DIMENSIONS.filter(value => value !== query.groupBy)
+                  .map(value => <option key={value} value={value}>{DIMENSION_LABELS[value]}</option>)}
               </select>
             </label>
             <label>
@@ -307,17 +345,12 @@ function ProjectFieldBreakdown(props: FeatureProps) {
               <RefreshCw size={15} />
               보기 목록 새로고침
             </button>
-            <button className="btn btn-primary" type="submit" disabled={!query.fieldId}>
+            <button className="btn btn-primary" type="submit" disabled={!query.fieldId && !query.groupBy}>
               <BarChart3 size={16} />
               {reportLoading ? '집계 중…' : '필드 집계 조회'}
             </button>
           </div>
         </fieldset>
-        {!schema.fields.length && (
-          <p className="field-breakdown-info">
-            이 프로젝트에 사용자 정의 필드가 없습니다. 프로젝트 설정에서 필드를 만든 뒤 조회하세요.
-          </p>
-        )}
         {dirty && report && (
           <p className="field-breakdown-info">
             조회 조건이 변경되었습니다. 아래에는 이전 조건의 집계가 표시됩니다.
@@ -340,11 +373,11 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           <header className="field-breakdown-asof">
             <div>
               <h3>
-                {report.field.name}
+                {report.field.name}{report.comparison && ` × ${DIMENSION_LABELS[report.comparison.by]}`}
                 {report.field.archived && <span>보관된 필드</span>}
               </h3>
               <p>
-                {KIND_LABELS[report.field.kind]} ·{' '}
+                {!report.groupBy && `${KIND_LABELS[report.field.kind]} · `}
                 {report.savedView
                   ? `${report.savedView.name} · 보기 버전 ${report.savedView.version}`
                   : '프로젝트 전체 업무'}
@@ -362,10 +395,12 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           )}
           <div className="field-breakdown-summary">
             <Metric label="조회 대상 업무" value={report.totalIssues} />
-            <Metric label="필드 적용 업무" value={report.applicableIssues} />
-            <Metric label="값이 있는 업무" value={report.populatedIssues} />
-            <Metric label="값이 없는 업무" value={report.missingIssues} />
-            <Metric label="유형에 미적용" value={report.notApplicableIssues} />
+            {!report.groupBy && <>
+              <Metric label="필드 적용 업무" value={report.applicableIssues} />
+              <Metric label="값이 있는 업무" value={report.populatedIssues} />
+              <Metric label="값이 없는 업무" value={report.missingIssues} />
+              <Metric label="유형에 미적용" value={report.notApplicableIssues} />
+            </>}
           </div>
           {report.numeric && (
             <section className="card field-breakdown-numeric" aria-label="숫자 필드 통계">
@@ -392,15 +427,18 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           )}
           <section className="card field-breakdown-groups" aria-label="필드 값별 분포">
             <header>
-              <h3>값별 업무 수</h3>
-              <span>{report.groups.length.toLocaleString()}개 그룹</span>
+              <h3>{report.comparison ? '기준별 교차 집계' : '값별 업무 수'}</h3>
+              <span>{groups.length.toLocaleString()}개 그룹</span>
             </header>
-            <p>
-              막대는 조회 대상 전체 업무 대비 비율입니다.
+            {(!report.comparison || report.field.kind === 'multi_select') && <p>
+              {!report.comparison && '막대는 조회 대상 전체 업무 대비 비율입니다.'}
               {report.field.kind === 'multi_select' &&
                 ' 여러 선택 필드는 한 업무가 여러 값에 포함되므로 그룹 수량 합계가 전체 업무 수보다 클 수 있습니다.'}
-            </p>
-            <div className="field-breakdown-table-scroll">
+            </p>}
+            {report.comparison ? <FieldBreakdownMatrix key={`${report.revision}:${report.generatedAt}`}
+              rowLabel={report.field.name} rows={groups.slice(start, start + GROUP_PAGE_SIZE)} comparison={report.comparison} total={report.totalIssues}
+              page={page} disabled={stale || reportLoading || pageLoading}
+              onOpen={(bucket, comparisonBucketId) => void loadBucket(bucket, 0, comparisonBucketId, true)} /> : <div className="field-breakdown-table-scroll">
               <table aria-label="필드 값별 집계 표">
                 <thead>
                   <tr>
@@ -410,7 +448,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {report.groups.slice(start, start + GROUP_PAGE_SIZE).map((bucket) => {
+                  {groups.slice(start, start + GROUP_PAGE_SIZE).map((bucket) => {
                     const percent = report.totalIssues ? (bucket.count / report.totalIssues) * 100 : 0;
                     return (
                       <tr key={bucket.id} className={page?.bucket.id === bucket.id ? 'is-selected' : ''}>
@@ -440,12 +478,12 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                   })}
                 </tbody>
               </table>
-            </div>
-            {report.groups.length > GROUP_PAGE_SIZE && (
+            </div>}
+            {groups.length > GROUP_PAGE_SIZE && (
               <div className="field-breakdown-pagination">
                 <span>
-                  {start + 1}–{Math.min(start + GROUP_PAGE_SIZE, report.groups.length)} /{' '}
-                  {report.groups.length}
+                  {start + 1}–{Math.min(start + GROUP_PAGE_SIZE, groups.length)} /{' '}
+                  {groups.length}
                 </span>
                 <button
                   className="btn btn-ghost"
@@ -459,7 +497,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                 <button
                   className="btn btn-ghost"
                   type="button"
-                  disabled={start + GROUP_PAGE_SIZE >= report.groups.length}
+                  disabled={start + GROUP_PAGE_SIZE >= groups.length}
                   aria-label="필드 집계 그룹 다음 페이지"
                   onClick={() => setGroupsOffset(start + GROUP_PAGE_SIZE)}
                 >
@@ -481,7 +519,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           {page ? (
             <section className="card field-breakdown-issues" aria-label="필드 집계 그룹 업무">
               <header>
-                <h3>{page.bucket.label}</h3>
+                <h3 ref={drillHeading} tabIndex={-1}>{page.bucket.label}{page.comparisonBucket && ` × ${page.comparisonBucket.label}`}</h3>
                 <span>업무 {page.total.toLocaleString()}개</span>
               </header>
               <ul>
@@ -512,7 +550,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                   aria-label="필드 집계 업무 이전 페이지"
                   disabled={stale || pageLoading || reportLoading || page.offset === 0}
                   onClick={() =>
-                    void loadBucket(page.bucket, Math.max(0, page.offset - ISSUE_PAGE_SIZE))
+                    void loadBucket(page.bucket, Math.max(0, page.offset - ISSUE_PAGE_SIZE), page.comparisonBucket?.id)
                   }
                 >
                   이전
@@ -524,7 +562,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
                   disabled={
                     stale || pageLoading || reportLoading || page.offset + ISSUE_PAGE_SIZE >= page.total
                   }
-                  onClick={() => void loadBucket(page.bucket, page.offset + ISSUE_PAGE_SIZE)}
+                  onClick={() => void loadBucket(page.bucket, page.offset + ISSUE_PAGE_SIZE, page.comparisonBucket?.id)}
                 >
                   다음
                 </button>
@@ -533,7 +571,7 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           ) : (
             !pageLoading && (
               <p className="field-breakdown-info">
-                값별 업무 수에서 그룹을 선택하면 해당 업무를 확인할 수 있습니다.
+                {report.comparison ? '교차표에서 업무 수를 누르면 해당 업무를 확인할 수 있습니다.' : '값별 업무 수에서 그룹을 선택하면 해당 업무를 확인할 수 있습니다.'}
               </p>
             )
           )}
@@ -546,12 +584,63 @@ function ProjectFieldBreakdown(props: FeatureProps) {
       {!report && !reportLoading && (
         <div className="card field-breakdown-empty">
           <BarChart3 size={30} />
-          <h3>필드의 분포를 확인하세요</h3>
-          <p>필드와 조회 범위를 선택하고 집계를 조회하세요.</p>
+          <h3>업무 분포를 확인하세요</h3>
+          <p>집계 기준과 조회 범위를 선택하고 집계를 조회하세요.</p>
         </div>
       )}
     </section>
   );
+}
+
+function FieldBreakdownMatrix({ rowLabel, rows, comparison, total, page, disabled, onOpen }: {
+  rowLabel: string;
+  rows: IssueFieldBreakdownBucket[];
+  comparison: IssueFieldBreakdownComparison;
+  total: number;
+  page: IssueFieldBreakdownPage | null;
+  disabled: boolean;
+  onOpen: (bucket: IssueFieldBreakdownBucket, comparisonBucketId?: string) => void;
+}) {
+  const [offset, setOffset] = useState(0);
+  const columnCount = comparison.columns.length;
+  const columns = comparison.columns.slice(offset, offset + COMPARISON_PAGE_SIZE);
+  return <>
+    <div className="field-breakdown-table-scroll" role="region" aria-label="교차 집계 표 스크롤" tabIndex={0}>
+      <table className="field-breakdown-matrix" aria-label="필드 교차 집계 표">
+        <thead><tr>
+          <th scope="col">{rowLabel}</th>
+          <th scope="col">전체</th>
+          {columns.map(column => <th scope="col" key={column.id}>{column.label}</th>)}
+        </tr></thead>
+        <tbody>{rows.map(bucket => <tr key={bucket.id}>
+          <th scope="row">{bucket.label}</th>
+          <td>{bucket.count ? <button type="button" className="field-breakdown-cell"
+            aria-label={`그룹 ${bucket.label} 업무 보기`} aria-pressed={page?.bucket.id === bucket.id && !page.comparisonBucket}
+            disabled={disabled} onClick={() => onOpen(bucket)}>{numberLabel(bucket.count)}</button> : 0}</td>
+          {columns.map(column => {
+            const count = comparison.counts[bucket.id]?.[column.id] ?? 0;
+            const selected = page?.bucket.id === bucket.id && page.comparisonBucket?.id === column.id;
+            return <td key={column.id}>{count ? <button type="button" className="field-breakdown-cell"
+              aria-label={`${bucket.label} × ${column.label} 업무 보기 · ${numberLabel(count)}개`} aria-pressed={selected}
+              disabled={disabled} onClick={() => onOpen(bucket, column.id)}>{numberLabel(count)}</button> : 0}</td>;
+          })}
+        </tr>)}</tbody>
+        <tfoot><tr>
+          <th scope="row">전체 조회 범위</th>
+          <td>{numberLabel(total)}</td>
+          {columns.map(column => <td key={column.id}>{numberLabel(column.count)}</td>)}
+        </tr></tfoot>
+      </table>
+    </div>
+    {!rows.length && <p className="field-breakdown-info">조건에 맞는 업무가 없습니다.</p>}
+    {columnCount > COMPARISON_PAGE_SIZE && <div className="field-breakdown-pagination">
+      <span aria-live="polite">비교 그룹 {offset + 1}–{Math.min(offset + COMPARISON_PAGE_SIZE, columnCount)} / {columnCount}</span>
+      <button className="btn btn-ghost" type="button" aria-label="교차 집계 열 이전 페이지" disabled={offset === 0}
+        onClick={() => setOffset(Math.max(0, offset - COMPARISON_PAGE_SIZE))}>이전 열</button>
+      <button className="btn btn-ghost" type="button" aria-label="교차 집계 열 다음 페이지" disabled={offset + COMPARISON_PAGE_SIZE >= columnCount}
+        onClick={() => setOffset(offset + COMPARISON_PAGE_SIZE)}>다음 열</button>
+    </div>}
+  </>;
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
