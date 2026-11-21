@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { GitMerge, Link2, RefreshCw } from 'lucide-react';
+import { GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
 import type { FeatureProps, GitlabLink, GitlabSettings } from '../../shared/types';
 import { api, ApiError, post, remove } from '../lib/api';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { IssueGitlabDeployments } from './GitlabDeployments';
 
 type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
@@ -29,6 +30,8 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [unlinkTarget, setUnlinkTarget] = useState<GitlabLink | null>(null);
+  const [branchOpen, setBranchOpen] = useState(false);
+  const [branchDraft, setBranchDraft] = useState({ dirty: false, pending: false });
   const [settings, setSettings] = useState<GitlabSettings | null>(null);
   const [loading, setLoading] = useState(false);
   const [settingsError, setSettingsError] = useState('');
@@ -50,21 +53,27 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
     setLoading(false);
     setDraft(null);
     setUnlinkTarget(null);
+    setBranchOpen(false);
+    setBranchDraft({ dirty: false, pending: false });
     setActionError('');
   }, []);
   const defaultRepository = draft?.existing?.projectId ?? (settings?.projectIds.length === 1 ? settings.projectIds[0] : undefined);
   const dirty = Boolean(draft && (draft.url.trim() !== (draft.existing?.webUrl ?? '') ||
     (draft.repositoryId && Number(draft.repositoryId) !== defaultRepository)));
   useLayoutEffect(() => {
-    onDraftChange(dirty, busy, discard);
+    onDraftChange(dirty || branchDraft.dirty, busy || branchDraft.pending, discard);
     return () => onDraftChange(false, false, discard);
-  }, [dirty, busy, discard, onDraftChange]);
+  }, [dirty, busy, branchDraft, discard, onDraftChange]);
   useLayoutEffect(() => {
-    if (draft || unlinkTarget || busy || disabled || !focusAfterClose.current) return;
+    if (draft || unlinkTarget || branchOpen || busy || disabled || !focusAfterClose.current) return;
     const { target } = focusAfterClose.current;
     focusAfterClose.current = null;
     (target?.isConnected && !target.disabled ? target : addButton.current)?.focus({ preventScroll: true });
-  }, [draft, unlinkTarget, busy, disabled]);
+  }, [draft, unlinkTarget, branchOpen, busy, disabled]);
+
+  const trackBranchDraft = useCallback((dirty: boolean, pending: boolean) => {
+    setBranchDraft(current => current.dirty === dirty && current.pending === pending ? current : { dirty, pending });
+  }, []);
 
   async function readSettings(defaultRepository: boolean) {
     settingsRequest.current?.abort();
@@ -111,6 +120,16 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
     requestAnimationFrame(() => cancelUnlink.current?.focus());
   }
 
+  function showBranchEditor(trigger: HTMLButtonElement) {
+    opener.current = trigger;
+    setBranchOpen(true);
+    void readSettings(false);
+  }
+
+  function showLinkedActivity(link: GitlabLink) {
+    setView(current => ({ source: current.source, rows: [...current.rows.filter(row => row.id !== link.id), link] }));
+  }
+
   async function afterChange(message: string) {
     try {
       await refresh();
@@ -148,7 +167,7 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
       const link = await post<GitlabLink>(path, {
         repositoryId: Number(draft.repositoryId), url: draft.url.trim(), expectedSettingsVersion: settings.version,
       });
-      setView(current => ({ source: current.source, rows: [...current.rows.filter(row => row.id !== link.id), link] }));
+      showLinkedActivity(link);
       await afterChange(draft.existing ? 'GitLab 연결을 다시 확인했습니다.' : 'GitLab 연결을 저장했습니다.');
       closeAction();
     }, () => readSettings(false));
@@ -172,8 +191,8 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
     if (!busy) closeAction();
   }
 
-  const actionOpen = Boolean(draft || unlinkTarget);
-  const controlsDisabled = disabled || busy;
+  const actionOpen = Boolean(draft || unlinkTarget || branchOpen);
+  const controlsDisabled = disabled || busy || branchDraft.pending;
 
   return <section className="issue-related-section" aria-label="GitLab">
     <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{visibleLinks.length}</span></h3>
@@ -181,8 +200,13 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
         <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={controlsDisabled} />
         <button ref={addButton} className="btn" type="button" disabled={controlsDisabled || actionOpen}
           onClick={event => showEditor(event.currentTarget)}><Link2 aria-hidden="true" size={15} />GitLab 링크 추가</button>
+        <button className="btn" type="button" disabled={controlsDisabled || actionOpen}
+          onClick={event => showBranchEditor(event.currentTarget)}><GitBranch aria-hidden="true" size={15} />GitLab 브랜치 만들기</button>
       </div>
     </div>
+    {branchOpen && <IssueGitlabBranchCreate issueId={issueId} issueKey={issueKey} settings={settings} loadingSettings={loading}
+      settingsError={settingsError} disabled={disabled || busy} reloadSettings={() => void readSettings(false)} refresh={refresh}
+      onClose={closeAction} onDraftChange={trackBranchDraft} onLinked={showLinkedActivity} />}
     {draft && <form className="gitlab-activity-editor" aria-labelledby={formHeading} aria-busy={busy} onSubmit={submit} onKeyDown={cancelOnEscape}>
       <h4 id={formHeading}>{draft.existing ? 'GitLab 링크 다시 확인' : 'GitLab 링크 추가'}</h4>
       {loading && <p className="gitlab-activity-hint" role="status">GitLab 설정을 불러오는 중입니다.</p>}

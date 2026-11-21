@@ -600,6 +600,7 @@ export function createApp(options: {
     jiraSources:()=>gitlabJiraSources(store),
     jiraOriginalKeys:route=>gitlabJiraOriginalKeys(store,route),
     previousIssueKeys:()=>previousIssueKeys(store),
+    onIssueBranchAttached:(actorId,issueId,link)=>recordActivity(actorId,'issue',issueId,'GitLab 브랜치 연결',`${link.sourceBranch} · 저장소 ${link.projectId}`),
   },options.gitlabWebhookPublicOrigin);
   const issueProjectMove = new IssueProjectMoveService(store, {
     schema: projectId => issueSchemas.get(projectId), workflow: projectId => workflows.get(projectId),

@@ -1,13 +1,14 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
+import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-branch-creation.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
@@ -31,6 +32,7 @@ type Hooks={
   jiraSources?:()=>GitlabJiraSource[];
   jiraOriginalKeys?:(route:GitlabJiraRoute)=>Map<string,JiraKeyBinding|null>;
   previousIssueKeys?: () => ReadonlyMap<string, PreviousIssueKey[]>;
+  onIssueBranchAttached?: (actorId: string, issueId: string, link: GitlabLink) => void;
 };
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
 type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number};
@@ -350,6 +352,7 @@ export class GitlabIntegrationService{
   private readonly manualLinkRows:StatementSync;
   private readonly linkedMergeRequestRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
+  private readonly issueBranches: GitlabIssueBranchCreation;
   private readonly deploymentSyncs = new Set<string>();
   private readonly syncAttempts: GitlabManualSyncStatus;
   readonly deployments: GitlabDeployments;
@@ -372,6 +375,11 @@ export class GitlabIntegrationService{
         matchesCredential: value => this.sameCredential(authMode === 'signature' ? saved.signingToken : saved.webhookSecret, value),
       };
     }, webhookPublicOrigin);
+    this.issueBranches = new GitlabIssueBranchCreation(store, () => {
+      const saved = this.raw();
+      return { baseUrl: saved.baseUrl, version: saved.version, projectIds: saved.projectIds,
+        readToken: () => saved.token ? this.store.unseal(saved.token) : null };
+    }, input => this.attachCreatedBranch(input));
   }
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
   private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{}),...(this.projectWebhooks.receiverUrl?{webhookReceiverUrl:this.projectWebhooks.receiverUrl}:{})};}
@@ -396,6 +404,22 @@ export class GitlabIntegrationService{
   private instance(raw:Pick<RawSettings,'baseUrl'>=this.raw()):string{return createHash('sha256').update(raw.baseUrl).digest('hex').slice(0,12);}
   private requireIssue(issueId:string):Issue{
     return this.store.get<Issue>('issues',issueId)??fail('업무를 찾을 수 없습니다.',404);
+  }
+  private attachCreatedBranch({ issue, target, observedSha, actorId }: {
+    issue: Issue; target: GitlabIssueBranchTarget; observedSha: string; actorId: string;
+  }): GitlabLink {
+    const instance = this.instance();
+    const draft = repositoryBranchDraft({ name: target.branch, commit: { id: observedSha }, web_url: target.webUrl }, keys);
+    const snapshot = linkForIssue(instance, target.repositoryId, 'branch', { issue }, draft);
+    const existing = this.store.get<GitlabLink>('gitlab_links', snapshot.id);
+    const link = existing && !existing.manualLinkId ? existing : this.verifiedBranchAttachment(instance, snapshot, existing, now());
+    if (!isRestorableGitlabLink(link) || link.issueId !== issue.id || link.sourceBranch !== target.branch ||
+      link.sourceSha !== observedSha || link.state !== 'active') {
+      fail('GitLab에서 확인한 브랜치와 티켓의 최신 활동이 달라 다시 확인해야 합니다.', 409);
+    }
+    if (link !== existing) this.store.put('gitlab_links', link);
+    if (!existing) this.hooks.onIssueBranchAttached?.(actorId, issue.id, link);
+    return link;
   }
   async attachLink(issueId:string,value:unknown,afterAttach?:(link:GitlabLink)=>void,signal?:AbortSignal):Promise<{link:GitlabLink;created:boolean}>{
     const input=record(value);
@@ -1279,6 +1303,25 @@ export class GitlabIntegrationService{
     };
     app.post('/api/integrations/gitlab/project-webhook-review', projectWebhookRequest('review'));
     app.post('/api/integrations/gitlab/project-webhook-register', projectWebhookRequest('register'));
+    const issueBranchRequest = (operation: 'preview' | 'apply' | 'reconcile') => async (req: Request, res: Response) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).length) fail('브랜치 생성 요청의 입력을 확인해 주세요.');
+      const actorId = hooks.actor(req);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.issueBranches[operation](String(req.params.id), req.body, actorId, controller.signal);
+        if (!controller.signal.aborted) res.status(result.state === 'created' ? 201 : 200).json(result);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (error instanceof GitlabIssueBranchError) return res.status(error.status).json({ error: error.message, details: error.details });
+        throw error;
+      } finally { res.off('close', disconnected); }
+    };
+    app.post('/api/issues/:id/gitlab-branch/preview', issueBranchRequest('preview'));
+    app.post('/api/issues/:id/gitlab-branch/apply', issueBranchRequest('apply'));
+    app.post('/api/issues/:id/gitlab-branch/reconcile', issueBranchRequest('reconcile'));
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;
     app.post('/api/issues/:id/gitlab-links',async(req,res)=>{
       hooks.actor(req);

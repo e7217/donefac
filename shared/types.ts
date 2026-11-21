@@ -1116,6 +1116,22 @@ export interface GitlabMergeReadiness {
   source: 'read' | 'webhook';
 }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[] }
+export interface GitlabIssueBranchTarget {
+  repositoryId: number;
+  repositoryPath: string;
+  branch: string;
+  ref: string;
+  sourceSha: string;
+  webUrl: string;
+}
+export interface GitlabIssueBranchResult {
+  state: 'created' | 'found' | 'pending' | 'conflict' | 'existing' | 'link_needed';
+  target: GitlabIssueBranchTarget;
+  link?: GitlabLink;
+  observedSha?: string;
+}
+export type GitlabIssueBranchReview = GitlabIssueBranchResult |
+  { state: 'ready'; target: GitlabIssueBranchTarget; previewId: string; expiresAt: string };
 export const GITLAB_DEPLOYMENT_STATES = ['created', 'blocked', 'running', 'success', 'failed', 'canceled', 'skipped'] as const;
 export type GitlabDeploymentState = typeof GITLAB_DEPLOYMENT_STATES[number];
 export interface GitlabDeploymentMergeRequest { id: number; iid: number }

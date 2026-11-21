@@ -52,6 +52,31 @@
   overflow-wrap: anywhere;
 }
 
+.gitlab-branch-read-token {
+  display: grid;
+  font-size: 12px;
+  color: #4d685b;
+}
+
+.gitlab-branch-read-token label {
+  margin: 8px 0 4px;
+}
+
+.gitlab-branch-target {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid #dce8e1;
+  border-radius: 6px;
+  color: #365b4c;
+  font-size: 12px;
+}
+
+.gitlab-branch-target dt { font-weight: 650; }
+.gitlab-branch-target dd { margin: 0; overflow-wrap: anywhere; }
+
 .gitlab-activity-list {
   display: grid;
   gap: 13px;

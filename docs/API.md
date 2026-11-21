@@ -597,6 +597,14 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 수동 연결을 해제하려면 `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…`에 현재 행의 `manualLinkId`를 보낸다. 자체 백업 형식 52는 활성·휴지통의 MR·파이프라인 수동 연결을, 형식 60은 브랜치·커밋 수동 연결도 저장한다. 복원한 연결에는 새 `manualLinkId`를 부여한다.
 
+### 티켓에서 GitLab 브랜치 만들기
+
+브라우저의 `POST /api/issues/:id/gitlab-branch/preview`에 `{expectedSettingsVersion,repositoryId,branch,ref?,accessToken?}`을 보낸다. 저장한 GitLab 설정의 버전과 저장소 ID를 사용한다. `ref`를 생략하면 기본 브랜치를 사용하며 브랜치 이름이나 전체 커밋 SHA를 지정할 수 있다. 조회 토큰을 별도로 입력하면 해당 요청에서만 사용한다. 같은 이름의 브랜치가 아직 없으면 응답의 `state`는 `ready`이고 `target`, `previewId`, `expiresAt`을 반환한다. `target`에는 저장소 ID·경로, 브랜치 이름, 기준 참조와 고정 SHA, 확인한 GitLab 주소가 담긴다. 같은 이름이 이미 있으면 `existing`과 현재 SHA를 반환한다. [GitLab Branches API](https://docs.gitlab.com/api/branches/)
+
+`POST /api/issues/:id/gitlab-branch/apply`에 `{previewId,writeToken}`을 보낸다. 같은 작업자와 티켓의 위치, 설정, 브랜치 이름을 확인하고 고정한 SHA에서 생성한다. 입력한 API 쓰기 토큰은 해당 요청에서만 사용한다. 생성하고 현재 티켓에 연결한 첫 결과는 `201` 및 `{state: 'created',target,link,observedSha}`다. 같은 요청의 확인 결과는 `200`이며 `found`와 연결을 반환한다. 외부 생성 결과가 불명확하면 `pending`, GitLab 생성 후 Teamspace 연결이 보류되면 `link_needed`를 반환한다.
+
+`POST /api/issues/:id/gitlab-branch/reconcile`에 `{expectedSettingsVersion,repositoryId,branch,accessToken?}`을 보낸다. 기록된 시도와 GitLab의 현재 이름·SHA를 조회한다. 검토한 SHA와 일치하면 연결하고 `found`를 반환한다. 접속이 끊겼을 때도 생성 시도를 물리 DB에서 찾고 조회로만 확인한다. 다른 SHA는 `conflict`, 아직 GitLab에서 찾을 수 없으면 `pending`을 반환한다. 시도 자체가 남아 있지 않으면 `404`와 `attempt_missing`을 반환하므로 다시 미리본다. 저장한 요청으로 이전에 사용한 이름은 조회 대상으로 남으며 새 브랜치를 시작할 때는 다른 이름을 고른다. 프로젝트 이동 후에도 동일한 활성 티켓 ID에서 명시적으로 연결을 확인할 수 있다. 티켓 자동 전이는 기존의 인증된 이벤트와 활성 규칙을 따른다.
+
 ### MR 병합 상태
 
 열린 MR의 `GitlabLink.mergeReadiness`는 확인한 `state`, 기준 시각 `observedAt`, 출처 `source`를 담는다. `source`는 `read` 또는 `webhook`이다. 기존 MR 조회와 인증된 MR 이벤트에서 GitLab의 병합 상태를 읽는다. 확인한 사유는 `approval_required`, `changes_requested`, `conflict`, `ci_required` 등 제한된 값으로 반환한다. `checking`, `unknown` 또는 필드 부재는 별도로 표시되며 병합 확인 필터의 대상에서 빠진다. 병합하거나 닫힌 MR은 일반 링크의 수명주기 상태로 표시한다. [GitLab Merge Requests API](https://docs.gitlab.com/api/merge_requests/#merge-status) · [GitLab 웹훅](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)

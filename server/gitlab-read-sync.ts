@@ -1,6 +1,6 @@
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
+import type { GitlabIssueBranchTarget, GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
@@ -337,7 +337,105 @@ function verifiedProjectRepository(project: unknown, projectId: number, base: UR
   if (!repositoryPath || !repository || canonicalPath(repository.pathname) !== repositoryPath) {
     throw new GitlabReadError('project', 'invalid-response');
   }
-  return { repositoryPath, repository };
+  return { project, repositoryPath, repository };
+}
+
+async function readBranchProject(connection: Connection, repositoryId: number, signal?: AbortSignal) {
+  const request = projectReadRequest(connection, repositoryId, 'project');
+  const project = await readJson(request.projectUrl, request.headers, 'project', signal);
+  return { ...request, ...verifiedProjectRepository(project, repositoryId, request.base) };
+}
+
+function verifiedBranchSha(value: unknown, repositoryId: number, branch: string): string {
+  if (!isReadObject(value) || value.name !== branch ||
+      (value.project_id !== undefined && value.project_id !== repositoryId) || !isReadObject(value.commit)) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+  const sha = gitlabObjectSha(value.commit.id);
+  if (!sha || /^0+$/u.test(sha)) throw new GitlabReadError('branches', 'invalid-response');
+  return sha;
+}
+
+async function readExactBranch({ projectUrl, headers }: ReturnType<typeof projectReadRequest>, repositoryId: number,
+  branch: string, signal?: AbortSignal): Promise<string | null> {
+  if (!isGitlabBranchName(branch)) throw new GitlabReadError('branches', 'invalid-response');
+  const url = new URL(projectUrl);
+  url.pathname += `/repository/branches/${encodeURIComponent(branch)}`;
+  try {
+    const value = await readJson(url, headers, 'branches', signal);
+    return verifiedBranchSha(value, repositoryId, branch);
+  } catch (error) {
+    if (error instanceof GitlabReadError && error.httpStatus === 404) return null;
+    throw error;
+  }
+}
+
+async function readExactCommit({ projectUrl, headers }: ReturnType<typeof projectReadRequest>, repositoryId: number,
+  sha: string, signal?: AbortSignal): Promise<string> {
+  const url = new URL(projectUrl);
+  url.pathname += `/repository/commits/${sha}`;
+  const value = await readJson(url, headers, 'commits', signal);
+  if (!isReadObject(value) || gitlabObjectSha(value.id) !== sha ||
+      (value.project_id !== undefined && value.project_id !== repositoryId)) {
+    throw new GitlabReadError('commits', 'invalid-response');
+  }
+  return sha;
+}
+
+function includesGitlabCredential(token: string | null | undefined, values: readonly string[]) {
+  if (!token) return false;
+  if (!token.isWellFormed()) return true;
+  const encoded = encodeURIComponent(token);
+  return values.some(value => value.includes(token) || value.includes(encoded));
+}
+
+export async function readGitlabBranchTarget(connection: Connection, repositoryId: number, branch: string,
+  ref: string | undefined, signal?: AbortSignal): Promise<{ target: GitlabIssueBranchTarget; existingSha?: string }> {
+  if (!isGitlabBranchName(branch)) throw new GitlabReadError('branches', 'invalid-response');
+  const project = await readBranchProject(connection, repositoryId, signal);
+  const sourceRef = ref ?? project.project.default_branch;
+  if (!isGitlabBranchName(sourceRef)) throw new GitlabReadError('branches', 'invalid-response');
+  const commit = ref === undefined ? null : gitlabObjectSha(sourceRef);
+  if (commit && /^0+$/u.test(commit)) throw new GitlabReadError('commits', 'invalid-response');
+  const webUrl = gitlabPushLinkUrl(project.repository, 'tree', branch);
+  const basePath = project.base.pathname.replace(/\/+$/u, '');
+  const repositoryPath = decodeURIComponent(project.repository.pathname.slice(basePath.length + 1));
+  if (!webUrl || includesGitlabCredential(connection.token, [branch, sourceRef, repositoryPath, webUrl])) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+  const sourceRead = commit
+    ? readExactCommit(project, repositoryId, commit, signal)
+    : readExactBranch(project, repositoryId, sourceRef, signal);
+  const targetRead = !commit && branch === sourceRef ? sourceRead : readExactBranch(project, repositoryId, branch, signal);
+  const [sourceSha, existingSha] = await Promise.all([sourceRead, targetRead]);
+  if (!sourceSha) throw new GitlabReadError('branches', 'http', 404);
+  if (includesGitlabCredential(connection.token, [sourceSha, existingSha ?? ''])) throw new GitlabReadError('branches', 'invalid-response');
+  const target: GitlabIssueBranchTarget = { repositoryId, repositoryPath, branch, ref: sourceRef, sourceSha, webUrl };
+  return { target, ...(existingSha && { existingSha }) };
+}
+
+export async function readGitlabBranchHead(connection: Connection, repositoryId: number, branch: string,
+  signal?: AbortSignal): Promise<string | null> {
+  if (!isGitlabBranchName(branch) || includesGitlabCredential(connection.token, [branch])) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+  const project = await readBranchProject(connection, repositoryId, signal);
+  const sha = await readExactBranch(project, repositoryId, branch, signal);
+  if (sha && includesGitlabCredential(connection.token, [sha])) throw new GitlabReadError('branches', 'invalid-response');
+  return sha;
+}
+
+export async function createGitlabIssueBranch(connection: Connection, repositoryId: number, branch: string,
+  sourceSha: string): Promise<string> {
+  const sha = gitlabObjectSha(sourceSha);
+  if (!connection.token?.trim() || !isGitlabBranchName(branch) || !sha || /^0+$/u.test(sha) ||
+      includesGitlabCredential(connection.token, [branch, sha])) throw new GitlabReadError('branches', 'invalid-response');
+  const { headers, projectUrl } = projectReadRequest(connection, repositoryId, 'branches');
+  projectUrl.pathname += '/repository/branches';
+  const value = await readJson(projectUrl, headers, 'branches', undefined, undefined, { branch, ref: sha });
+  const createdSha = verifiedBranchSha(value, repositoryId, branch);
+  if (createdSha !== sha) throw new GitlabReadError('branches', 'invalid-response');
+  return createdSha;
 }
 
 export function createGitlabDeploymentReader(connection: Connection, projectId: number, signal?: AbortSignal) {
