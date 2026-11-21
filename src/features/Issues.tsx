@@ -107,10 +107,11 @@ export function Issues(props: FeatureProps & {
   savedViewId?: string | null;
   onChangeSavedView?: (id: string | null) => boolean;
   onOpenGantt?: (viewId: string) => void;
+  onOpenFieldBreakdown?: (viewId: string) => void;
   onOpenCycleBoard?: () => void;
   onOpenBoardCapacityIssue?: (id: string, source: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
 }) {
-  const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt, onOpenBoardCapacityIssue } = props;
+  const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt, onOpenFieldBreakdown, onOpenBoardCapacityIssue } = props;
   const [loadedViews, setLoadedViews] = useState<{ projectId: string; snapshot: typeof data.savedViews; values: SavedView[] }>();
   const workspaceViews = useMemo(() => (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((left, right) => left.name.localeCompare(right.name, 'ko')), [data.savedViews, projectId]);
@@ -485,6 +486,7 @@ export function Issues(props: FeatureProps & {
     </fieldset>}
     <SavedViews projectId={projectId} planningItems={planningItems} views={projectViews} selectedId={savedViewId}
       current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
+      onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results">
       <span>{activeFilters ? `${projectIssues.length}개 중 ` : ''}<strong>{issues.length}</strong>개의 업무</span>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
-import { Bookmark, Check, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
+import { BarChart3, Bookmark, Check, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
 import type { PlanningItem, SavedView, SavedViewState } from '../../shared/types';
 import { issuePriorityLabelFilterLabels } from '../../shared/issue-view';
 import { api, patch, post, remove } from '../lib/api';
@@ -19,6 +19,7 @@ type Props = {
   onSelect?: (id: string | null) => boolean;
   onApply: (view: SavedViewState) => void;
   onOpenGantt?: (viewId: string) => void;
+  onOpenFieldBreakdown?: (viewId: string) => void;
   onViewsLoaded: (views: SavedView[]) => void;
   onViewsChanged: () => Promise<void>;
   notify: (message: string, kind?: 'success' | 'error') => void;
@@ -33,7 +34,7 @@ export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, planningItems, views, selectedId, current, onSelect, onApply, onOpenGantt, onViewsLoaded, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, planningItems, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -48,7 +49,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
   const copyRequest = useRef(0);
   const mounted = useRef(true);
   const navigationEpoch = useRef(0);
-  const ganttRequest = useRef<symbol | null>(null);
+  const openViewRequest = useRef<symbol | null>(null);
   const submittedEditor = useRef<ViewEditor | null>(null);
   const savedEditor = useRef<ViewEditor | null>(null);
   const editorReload = useRef<Event | null>(null);
@@ -63,7 +64,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
     const controller = new AbortController();
     const onNavigate = (event: Event) => {
       if (event.defaultPrevented) return;
-      const request = ganttRequest.current;
+      const request = openViewRequest.current;
       const editor = readEditor();
       const reloading = editorReload.current === event;
       if (editor && !reloading) {
@@ -83,7 +84,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
         copyRequest.current++;
         setCopyFallback(null);
         if (editor && !reloading) setEditing(current => current === editor.editing ? null : current);
-        if (request && ganttRequest.current === request) ganttRequest.current = null;
+        if (request && openViewRequest.current === request) openViewRequest.current = null;
       });
     };
     const onUnload = (event: BeforeUnloadEvent) => {
@@ -108,7 +109,7 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
     return () => {
       mounted.current = false;
       controller.abort();
-      ganttRequest.current = null;
+      openViewRequest.current = null;
       window.removeEventListener('teamspace:navigate', onNavigate);
       window.removeEventListener('beforeunload', onUnload);
     };
@@ -145,18 +146,18 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
     await refreshWorkspace();
     if (mounted.current) setBusy(false);
   };
-  const openInGantt = async () => {
-    if (!selected || !onOpenGantt || busy || ganttRequest.current) return;
-    const request = Symbol('open saved view in Gantt');
+  const openSavedView = async (open: (viewId: string) => void) => {
+    if (!selected || busy || openViewRequest.current) return;
+    const request = Symbol('open saved view');
     const origin = window.location.hash;
-    ganttRequest.current = request;
+    openViewRequest.current = request;
     setBusy(true);
     const ready = await refreshWorkspace();
     if (!mounted.current) return;
     setBusy(false);
-    if (ganttRequest.current !== request) return;
-    ganttRequest.current = null;
-    if (ready && window.location.hash === origin) onOpenGantt(selected.id);
+    if (openViewRequest.current !== request) return;
+    openViewRequest.current = null;
+    if (ready && window.location.hash === origin) open(selected.id);
   };
   const save = async (event: React.FormEvent) => {
     event.preventDefault();if (busy || !editing || submittedEditor.current) return;setBusy(true);setDialogError('');
@@ -265,8 +266,10 @@ function ProjectSavedViews({projectId, planningItems, views, selectedId, current
     {selected && <>
       <span className="saved-view-indicator">{changed ? '조건이 변경됨' : <><Check size={12}/> 저장된 조건</>}</span>
       {changed && <button className="btn btn-ghost" type="button" disabled={busy} onClick={reapplySelected}>저장된 조건 다시 적용</button>}
-      {onOpenGantt && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openInGantt()}
+      {onOpenGantt && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenGantt)}
         title="선택한 보기의 저장된 조건을 적용합니다."><SquareChartGantt size={14} aria-hidden="true" /> 간트에서 열기</button>}
+      {onOpenFieldBreakdown && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenFieldBreakdown)}
+        title="선택한 보기의 저장된 조건으로 집계 범위를 지정합니다."><BarChart3 size={14} aria-hidden="true" /> 필드 집계에서 열기</button>}
       <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void copyViewLink(selected)}
         title="저장된 조건을 여는 주소를 복사합니다."><Link2 size={14} aria-hidden="true" />보기 링크 복사</button>
       <button className="btn btn-ghost" disabled={busy} onClick={() => openEditor('update')} title="현재 조건으로 보기 수정"><Pencil size={13}/> 보기 수정</button>

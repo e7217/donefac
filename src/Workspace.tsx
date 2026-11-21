@@ -16,6 +16,7 @@ import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
+import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
@@ -62,6 +63,7 @@ type WorkspaceRoute = {
   ganttFocusIssueId?: string | null; ganttFocusDate?: ScheduleDependencyEndpoint | null;
   blockerScope?: DeliveryBlockerDraftScope | null;
   decisionFollowUpScope?: DecisionFollowUpScope | null;
+  fieldBreakdownScope?: FieldBreakdownScope | null;
   publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
   documentCommentId?: string | null;
@@ -91,7 +93,8 @@ function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
 }
 
 function routeHash(route: WorkspaceRoute) {
-  const reportDetail = route.decisionFollowUpScope ? 'decision-follow-ups' : route.blockerScope ? 'blockers' : route.reportId;
+  const reportDetail = route.decisionFollowUpScope ? 'decision-follow-ups' : route.blockerScope ? 'blockers' :
+    route.fieldBreakdownScope ? 'fields' : route.reportId;
   const teamGantt = route.view === 'gantt' && route.ganttScope === 'team';
   const detail = route.view === 'documents' ? route.documentId : route.view === 'publication' ? route.publicationTab ?? 'assigned' : route.view === 'reports' ? reportDetail :
     (route.view === 'gantt' && !teamGantt || route.view === 'planning' || route.view === 'backlog') ? route.planningId : null;
@@ -108,6 +111,9 @@ function routeHash(route: WorkspaceRoute) {
   }
   if (route.view === 'reports' && route.decisionFollowUpScope) {
     for (const [name, value] of decisionFollowUpParameters(route.decisionFollowUpScope)) query.set(name, value);
+  }
+  if (route.view === 'reports' && route.fieldBreakdownScope) {
+    for (const [name, value] of fieldBreakdownParameters(route.fieldBreakdownScope)) query.set(name, value);
   }
   if (route.view === 'gantt' && route.ganttFocusIssueId) {
     query.set('focusIssue', route.ganttFocusIssueId);
@@ -156,7 +162,8 @@ function sameBlockerScope(a?: DeliveryBlockerDraftScope | null, b?: DeliveryBloc
 function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'reports' && next.view === 'reports' && previous.projectId === next.projectId &&
     (previous.reportId ?? null) === (next.reportId ?? null) && sameBlockerScope(previous.blockerScope, next.blockerScope) &&
-    sameDecisionFollowUpScope(previous.decisionFollowUpScope, next.decisionFollowUpScope);
+    sameDecisionFollowUpScope(previous.decisionFollowUpScope, next.decisionFollowUpScope) &&
+    sameFieldBreakdownScope(previous.fieldBreakdownScope, next.fieldBreakdownScope);
 }
 function sameTeamBoardFilters(a?: TeamBoardFilters, b?: TeamBoardFilters): boolean {
   return a?.projectId === b?.projectId && a?.memberId === b?.memberId && a?.query === b?.query && a?.gitlab === b?.gitlab;
@@ -236,6 +243,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     (projectId === parts[0] || parameters.get('scope') === 'team')
     ? readDecisionFollowUpScope(parameters, id => snapshot.users.some(user => user.id === id),
       id => snapshot.projects.some(project => project.id === id)) : null;
+  const fieldBreakdownScope = view === 'reports' && parts[2] === 'fields'
+    ? projectId && projectId === parts[0] ? readFieldBreakdownScope(parameters) : { invalid: true as const }
+    : null;
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
@@ -283,7 +293,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     query: boardQuery || undefined,
     gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, planningId, savedViewId,
+  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters, teamBoardFilters };
 }
 
@@ -301,6 +311,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [reportId, setReportId] = useState<string | null>(null);
   const [blockerScope, setBlockerScope] = useState<DeliveryBlockerDraftScope | null>(null);
   const [decisionFollowUpScope, setDecisionFollowUpScope] = useState<DecisionFollowUpScope | null>(null);
+  const [fieldBreakdownScope, setFieldBreakdownScope] = useState<FieldBreakdownScope | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttScope, setGanttScope] = useState<WorkspaceRoute['ganttScope']>();
@@ -400,7 +411,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
-  const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace') => {
+  const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace', preserveIssueOpener = false) => {
     const previous = acceptedRouteRef.current;
     if (previous && (previous.view === 'teamboard' || previous.view === 'gantt')) {
       const changedPane = route.view !== previous.view || route.projectId !== previous.projectId || route.issueId !== previous.issueId;
@@ -429,19 +440,21 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         });
       }
     }
-    if (!previous || !hasSameIssueOverlayContext(previous, route)) overlayIssueOpener.current = null;
-    else if (!previous.issueId && route.issueId) {
-      const active = document.activeElement;
-      overlayIssueOpener.current = active instanceof HTMLElement && active !== document.body ? active : null;
-    } else if (previous.issueId && !route.issueId) {
-      const opener = overlayIssueOpener.current;
-      overlayIssueOpener.current = null;
-      if (!boardTrigger && (opener || route.view === 'teamboard')) requestAnimationFrame(() => {
-        const current = acceptedRouteRef.current;
-        if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
-        if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-        else if (route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
-      });
+    if (!preserveIssueOpener) {
+      if (!previous || !hasSameIssueOverlayContext(previous, route)) overlayIssueOpener.current = null;
+      else if (!previous.issueId && route.issueId) {
+        const active = document.activeElement;
+        overlayIssueOpener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+      } else if (previous.issueId && !route.issueId) {
+        const opener = overlayIssueOpener.current;
+        overlayIssueOpener.current = null;
+        if (!boardTrigger && (opener || route.view === 'teamboard')) requestAnimationFrame(() => {
+          const current = acceptedRouteRef.current;
+          if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
+          if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+          else if (route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
+        });
+      }
     }
     if (hasDocumentIssueOverlay(route) || hasReportIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
@@ -461,6 +474,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     });
     setBlockerScope(previousScope => sameBlockerScope(previousScope, route.blockerScope) ? previousScope : route.blockerScope ?? null);
     setDecisionFollowUpScope(scope => sameDecisionFollowUpScope(scope, route.decisionFollowUpScope) ? scope : route.decisionFollowUpScope ?? null);
+    setFieldBreakdownScope(scope => sameFieldBreakdownScope(scope, route.fieldBreakdownScope) ? scope : route.fieldBreakdownScope ?? null);
     setDocumentLabel(route.documentLabel ?? null);
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
@@ -580,6 +594,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
       blockerScope:view === 'reports' ? current?.blockerScope : null,
       decisionFollowUpScope:view === 'reports' ? current?.decisionFollowUpScope : null,
+      fieldBreakdownScope:view === 'reports' ? current?.fieldBreakdownScope : null,
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
       ganttFocusDate:sameProject ? ganttFocusDate : null,
       publicationTab, issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
@@ -597,8 +612,23 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const changeDecisionFollowUpScope = (scope: DecisionFollowUpScope | null) => {
     const current = acceptedRouteRef.current;
-    return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null, decisionFollowUpScope: scope });
+    return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null,
+      decisionFollowUpScope: scope, fieldBreakdownScope: null });
   };
+  const changeFieldBreakdownScope = (scope: FieldBreakdownScope | null) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null,
+      decisionFollowUpScope: null, fieldBreakdownScope: scope });
+  };
+  const publishFieldBreakdownScope = useCallback((scope: FieldBreakdownScope): boolean => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'reports' || !current.fieldBreakdownScope || current.projectId !== projectId ||
+        !sameFieldBreakdownScope(current.fieldBreakdownScope, fieldBreakdownScope) || location.hash !== routeHash(current)) return false;
+    if (!sameFieldBreakdownScope(current.fieldBreakdownScope, scope)) {
+      writeRoute({ ...current, fieldBreakdownScope: scope }, routeIndexRef.current, 'replace', true);
+    }
+    return true;
+  }, [fieldBreakdownScope, projectId, writeRoute]);
   const openTeamDecisionFollowUps = () => {
     const scope = decisionFollowUpScope?.projectId !== undefined ? decisionFollowUpScope : { ...DEFAULT_DECISION_FOLLOW_UP_SCOPE, projectId: null };
     requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, decisionFollowUpScope: scope });
@@ -802,7 +832,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onOpenBoardCapacityIssue={openIssue}
           onOpenCycleBoard={() => openPlanIn('backlog')}
           onChangeSavedView={id => requestRoute({projectId,view:'issues',documentId:null,issueId,savedViewId:id})}
-          onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,savedViewId:id})}/>}
+          onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,savedViewId:id})}
+          onOpenFieldBreakdown={id => requestRoute({projectId,view:'reports',documentId:null,issueId:null,fieldBreakdownScope:{savedViewId:id}})}/>}
         {view === 'backlog' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>사이클 계획을 불러오는 중입니다.</p></div>}>
           <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
@@ -820,7 +851,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         </Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>
           <Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope} decisionFollowUpScope={decisionFollowUpScope}
-            onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} issueOverlayOpen={reportIssueOpen}/>
+            onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} fieldBreakdownScope={fieldBreakdownScope}
+            onChangeFieldBreakdownScope={changeFieldBreakdownScope} onPublishFieldBreakdownScope={publishFieldBreakdownScope}
+            onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}
+            issueOverlayOpen={reportIssueOpen}/>
         </Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}

@@ -17,6 +17,7 @@ import { projectIssueTypes } from '../../shared/issue-schema';
 import { isCalendarDate } from '../../shared/calendar';
 import { api } from '../lib/api';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, type DecisionFollowUpScope } from '../lib/decision-follow-up-route';
+import type { FieldBreakdownScope } from '../lib/field-breakdown-route';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { WorklogReport } from './WorklogReport';
 import { FieldBreakdownReport } from './FieldBreakdownReport';
@@ -30,6 +31,10 @@ type Props = FeatureProps & {
   initialBlockerScope?: DeliveryBlockerDraftScope | null;
   decisionFollowUpScope: DecisionFollowUpScope | null;
   onChangeDecisionFollowUpScope: (scope: DecisionFollowUpScope | null) => boolean;
+  fieldBreakdownScope: FieldBreakdownScope | null;
+  onChangeFieldBreakdownScope: (scope: FieldBreakdownScope | null) => boolean;
+  onPublishFieldBreakdownScope: (scope: FieldBreakdownScope) => boolean;
+  onOpenSavedIssueView?: (id: string) => void;
   issueOverlayOpen: boolean;
 };
 const CATEGORIES: StatusCategory[] = ['backlog', 'todo', 'in_progress', 'review', 'done', 'cancelled'];
@@ -114,10 +119,10 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [standardView, setView] = useState<'live' | 'saved' | 'worklogs' | 'fields' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
+  const [standardView, setView] = useState<'live' | 'saved' | 'worklogs' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
-  const view = props.decisionFollowUpScope ? 'decisions' : standardView;
+  const view = props.decisionFollowUpScope ? 'decisions' : props.fieldBreakdownScope ? 'fields' : standardView;
   const [creating, setCreating] = useState(false),
     [createError, setCreateError] = useState('');
   const active = useRef(true),
@@ -338,9 +343,15 @@ function ProjectReports(props: Props) {
       props.onChangeDecisionFollowUpScope(DEFAULT_DECISION_FOLLOW_UP_SCOPE);
       return;
     }
+    if (next === 'fields') {
+      props.onChangeFieldBreakdownScope({});
+      return;
+    }
     if (view === 'decisions') {
       if (!props.onChangeDecisionFollowUpScope(null)) return;
-    } else if ([view, next].some(item => item === 'worklogs' || item === 'fields') &&
+    } else if (view === 'fields') {
+      if (!props.onChangeFieldBreakdownScope(null)) return;
+    } else if ((view === 'worklogs' || next === 'worklogs') &&
         !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setView(next);
   }
@@ -573,7 +584,8 @@ function ProjectReports(props: Props) {
         </section>
       ) : view === 'fields' ? (
         <section role="tabpanel" id="report-fields-panel" aria-labelledby="report-fields-tab">
-          <FieldBreakdownReport {...props} />
+          <FieldBreakdownReport {...props} linkedScope={props.fieldBreakdownScope} onPublishScope={props.onPublishFieldBreakdownScope}
+            onOpenSavedIssueView={props.onOpenSavedIssueView} />
         </section>
       ) : view === 'blockers' ? (
         <section role="tabpanel" id="report-blockers-panel" aria-labelledby="report-blockers-tab">

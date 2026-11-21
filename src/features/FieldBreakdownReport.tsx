@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { BarChart3, RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { ArrowUpRight, BarChart3, Link2, RefreshCw } from 'lucide-react';
 import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS } from '../../shared/types';
 import type {
   CustomFieldKind,
@@ -16,13 +16,20 @@ import type {
 } from '../../shared/types';
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { api, ApiError } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { fieldBreakdownHash, sameFieldBreakdownScope, type FieldBreakdownScope } from '../lib/field-breakdown-route';
+import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import './field-breakdown.css';
 
 type Query = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
   | { fieldId: string; groupBy?: never }
   | { groupBy: IssueFieldBreakdownDimension; fieldId?: never }
+  | { fieldId?: never; groupBy?: never }
 );
+type Props = FeatureProps & {
+  linkedScope: FieldBreakdownScope | null;
+  onPublishScope: (scope: FieldBreakdownScope) => boolean;
+  onOpenSavedIssueView?: (id: string) => void;
+};
 const GROUP_PAGE_SIZE = 25;
 const ISSUE_PAGE_SIZE = 50;
 const COMPARISON_PAGE_SIZE = 10;
@@ -41,6 +48,18 @@ const KIND_LABELS: Record<CustomFieldKind, string> = {
 };
 const sameQuery = (a: Query, b: Query) => a.fieldId === b.fieldId && a.groupBy === b.groupBy &&
   a.comparisonBy === b.comparisonBy && a.savedViewId === b.savedViewId;
+function linkedSelection(scope: FieldBreakdownScope | null, firstFieldId: string): { query: Query; automatic: boolean } {
+  const valid = scope?.invalid ? null : scope;
+  const savedViewId = valid?.savedViewId ?? null;
+  if (valid?.fieldId) return { query: { fieldId: valid.fieldId, savedViewId, comparisonBy: valid.comparisonBy }, automatic: true };
+  if (valid?.groupBy) return { query: { groupBy: valid.groupBy, savedViewId, comparisonBy: valid.comparisonBy }, automatic: true };
+  if (savedViewId || scope?.invalid) return { query: { savedViewId }, automatic: false };
+  return { query: firstFieldId ? { fieldId: firstFieldId, savedViewId } : { groupBy: 'status', savedViewId }, automatic: false };
+}
+
+function scopeOf(query: Query): FieldBreakdownScope {
+  return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined, comparisonBy: query.comparisonBy };
+}
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '필드 집계를 불러오지 못했습니다.';
 const numberLabel = (value: number | null) =>
@@ -48,20 +67,20 @@ const numberLabel = (value: number | null) =>
 const bucketKind = (bucket: IssueFieldBreakdownBucket) =>
   bucket.kind === 'missing' ? '값 없음' : bucket.kind === 'not_applicable' ? '유형에 미적용' : '값';
 
-export function FieldBreakdownReport(props: FeatureProps) {
+export function FieldBreakdownReport(props: Props) {
   return <ProjectFieldBreakdown key={`${props.projectId}:${props.actorId}`} {...props} />;
 }
 
-function ProjectFieldBreakdown(props: FeatureProps) {
-  const { data, projectId, actorId } = props;
+function ProjectFieldBreakdown(props: Props) {
+  const { data, projectId, actorId, linkedScope, onPublishScope, onOpenSavedIssueView } = props;
   const schema = projectIssueSchema(data, projectId);
   const firstFieldId = schema.fields.find((field) => !field.archived)?.id ?? schema.fields[0]?.id ?? '';
-  const [query, setQuery] = useState<Query>(() => firstFieldId
-    ? { fieldId: firstFieldId, savedViewId: null }
-    : { groupBy: 'status', savedViewId: null });
+  const [origin, setOrigin] = useState(() => ({ scope: linkedScope, selection: linkedSelection(linkedScope, firstFieldId) }));
+  const [echoScope, setEchoScope] = useState<FieldBreakdownScope | null>(null);
+  const [query, setQuery] = useState<Query>(origin.selection.query);
   const [baseline, setBaseline] = useState<Query>(query);
   const [report, setReport] = useState<IssueFieldBreakdown | null>(null);
-  const [reportLoading, setReportLoading] = useState(false);
+  const [reportLoading, setReportLoading] = useState(origin.selection.automatic);
   const [queryError, setQueryError] = useState('');
   const [stale, setStale] = useState(false);
   const [page, setPage] = useState<IssueFieldBreakdownPage | null>(null);
@@ -72,28 +91,68 @@ function ProjectFieldBreakdown(props: FeatureProps) {
   const [viewsLoading, setViewsLoading] = useState(false);
   const [viewsError, setViewsError] = useState('');
   const [openingIssue, setOpeningIssue] = useState<string | null>(null);
+  const [copyFallback, setCopyFallback] = useState<string | null>(null);
   const active = useRef(true);
   const dirtyRef = useRef(false);
   const queryRequest = useRef<AbortController | null>(null);
   const pageRequest = useRef<AbortController | null>(null);
   const viewsRequest = useRef<AbortController | null>(null);
-  const openingRef = useRef(false);
+  const openingRef = useRef<symbol | null>(null);
+  const copyAttempt = useRef<symbol | null>(null);
+  const copyInput = useRef<HTMLInputElement>(null);
+  const activeSelection = useRef(origin.selection);
+  const publishScope = useRef(onPublishScope);
   const drillHeading = useRef<HTMLHeadingElement>(null);
   const dirty = !sameQuery(query, baseline);
   const validProject = data.projects.some((project) => project.id === projectId);
   const views = (reloadedViews ?? data.savedViews ?? []).filter((view) => view.projectId === projectId);
 
-  useEffect(() => {
+  if (!sameFieldBreakdownScope(origin.scope, linkedScope)) {
+    if (echoScope && sameFieldBreakdownScope(echoScope, linkedScope)) setOrigin({ ...origin, scope: linkedScope });
+    else {
+      const selection = linkedSelection(linkedScope, firstFieldId);
+      setOrigin({ scope: linkedScope, selection });
+      setQuery(selection.query);
+      setBaseline(selection.query);
+      setReport(null);
+      setReportLoading(selection.automatic);
+      setQueryError('');
+      setStale(false);
+      setPage(null);
+      setPageLoading(false);
+      setPageError('');
+      setGroupsOffset(0);
+      setOpeningIssue(null);
+      setCopyFallback(null);
+    }
+    setEchoScope(null);
+  }
+
+  useLayoutEffect(() => {
+    activeSelection.current = origin.selection;
+    queryRequest.current?.abort();
+    pageRequest.current?.abort();
+    openingRef.current = null;
+    copyAttempt.current = null;
+  }, [origin.selection]);
+  useLayoutEffect(() => { publishScope.current = onPublishScope; }, [onPublishScope]);
+  useLayoutEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
+  useLayoutEffect(() => {
+    if (!copyFallback) return;
+    copyInput.current?.focus();
+    copyInput.current?.select();
+  }, [copyFallback]);
   const discard = useCallback(() => {
+    if (activeSelection.current !== origin.selection) return;
     setQuery({ ...baseline });
     setQueryError('');
     dirtyRef.current = false;
-  }, [baseline]);
+  }, [baseline, origin.selection]);
   useEffect(() => {
     const guard = (event: Event) => {
-      if (event.defaultPrevented || !dirtyRef.current) return;
+      if (event.defaultPrevented || !dirtyRef.current || isReportPreservedByNavigation(event)) return;
       if (!window.confirm('조회하지 않은 필드 집계 조건을 버리고 이동할까요?')) event.preventDefault();
       else afterAcceptedNavigation(event, discard);
     };
@@ -151,9 +210,8 @@ function ProjectFieldBreakdown(props: FeatureProps) {
     else if (value === 'custom' && firstFieldId) update({ fieldId: firstFieldId, savedViewId, comparisonBy });
   }
 
-  async function requestReport(event: FormEvent) {
-    event.preventDefault();
-    if ((!query.fieldId && !query.groupBy) || !validProject) return;
+  const loadReport = useCallback(async (submitted: Query, publish: boolean) => {
+    if ((!submitted.fieldId && !submitted.groupBy) || !validProject) return;
     queryRequest.current?.abort();
     pageRequest.current?.abort();
     const controller = new AbortController();
@@ -161,7 +219,6 @@ function ProjectFieldBreakdown(props: FeatureProps) {
     setReportLoading(true);
     setPageLoading(false);
     setQueryError('');
-    const submitted = { ...query };
     try {
       const result = await api<IssueFieldBreakdown>(
         `/projects/${encodeURIComponent(projectId)}/field-breakdown`,
@@ -173,21 +230,43 @@ function ProjectFieldBreakdown(props: FeatureProps) {
         },
       );
       if (!active.current || controller.signal.aborted) return;
+      const appliedOptions = { savedViewId: result.savedView?.id ?? null, comparisonBy: result.comparison?.by };
+      const confirmed: Query = result.groupBy ? { groupBy: result.groupBy, ...appliedOptions } : { fieldId: result.field.id, ...appliedOptions };
+      if (!sameQuery(confirmed, submitted)) throw new Error('조회한 결과의 조건이 요청한 필드 집계 조건과 일치하지 않습니다.');
       setReport(result);
-      setBaseline(submitted);
+      setBaseline(confirmed);
       dirtyRef.current = false;
+      copyAttempt.current = null;
+      setCopyFallback(null);
       setPage(null);
       setPageError('');
       setGroupsOffset(0);
       setStale(false);
+      if (publish) {
+        const scope = scopeOf(confirmed);
+        setEchoScope(scope);
+        if (!publishScope.current(scope)) setEchoScope(null);
+      }
     } catch (cause) {
       if (active.current && !controller.signal.aborted) {
         if (cause instanceof ApiError && cause.status === 409) setStale(true);
-        setQueryError(`${errorMessage(cause)} 입력과 이전 집계는 유지됩니다.`);
+        setQueryError(publish ? `${errorMessage(cause)} 입력과 이전 집계는 유지됩니다.` : errorMessage(cause));
       }
     } finally {
       if (active.current && !controller.signal.aborted) setReportLoading(false);
     }
+  }, [actorId, projectId, validProject]);
+
+  useEffect(() => {
+    const { automatic, query: selected } = origin.selection;
+    if (!automatic || !validProject) return;
+    const timer = setTimeout(() => void loadReport(selected, false), 0);
+    return () => clearTimeout(timer);
+  }, [loadReport, origin.selection, validProject]);
+
+  function requestReport(event: FormEvent) {
+    event.preventDefault();
+    void loadReport(query, true);
   }
 
   async function loadBucket(bucket: IssueFieldBreakdownBucket, offset: number, comparisonBucketId?: string, focusResult = false) {
@@ -229,17 +308,34 @@ function ProjectFieldBreakdown(props: FeatureProps) {
 
   async function openRow(row: IssueFieldBreakdownIssue) {
     if (openingRef.current) return;
-    openingRef.current = true;
+    const token = Symbol();
+    openingRef.current = token;
     setOpeningIssue(row.id);
     try {
       const cached = data.issues.find((issue) => issue.id === row.id);
       if (cached?.key !== row.key || cached.title !== row.title) await props.refresh();
-      if (active.current) props.openIssue(row.id);
+      if (active.current && openingRef.current === token) props.openIssue(row.id);
     } catch (cause) {
-      if (active.current) props.notify(errorMessage(cause), 'error');
+      if (active.current && openingRef.current === token) props.notify(errorMessage(cause), 'error');
     } finally {
-      openingRef.current = false;
-      if (active.current) setOpeningIssue(null);
+      if (openingRef.current === token) {
+        openingRef.current = null;
+        if (active.current) setOpeningIssue(null);
+      }
+    }
+  }
+
+  async function copyLink() {
+    if (!report) return;
+    const token = Symbol();
+    copyAttempt.current = token;
+    setCopyFallback(null);
+    const url = new URL(fieldBreakdownHash(projectId, scopeOf(baseline)), window.location.href).href;
+    try {
+      await navigator.clipboard.writeText(url);
+      if (active.current && copyAttempt.current === token) props.notify('필드 집계 링크를 복사했습니다.');
+    } catch {
+      if (active.current && copyAttempt.current === token) setCopyFallback(url);
     }
   }
 
@@ -271,13 +367,14 @@ function ProjectFieldBreakdown(props: FeatureProps) {
           <div className="field-breakdown-query-grid">
             <label>
               집계 기준
-              <select className="field" aria-label="집계 기준" value={query.groupBy ?? 'custom'}
+              <select className="field" aria-label="집계 기준" value={query.groupBy ?? (query.fieldId === undefined ? '' : 'custom')}
                 onChange={event => choosePrimary(event.currentTarget.value)}>
+                <option value="" disabled>집계 기준 선택</option>
                 {(firstFieldId || query.fieldId) && <option value="custom">사용자 정의 필드</option>}
                 {ISSUE_FIELD_BREAKDOWN_DIMENSIONS.map(value => <option key={value} value={value}>{DIMENSION_LABELS[value]}</option>)}
               </select>
             </label>
-            {!query.groupBy && <label>
+            {query.fieldId !== undefined && <label>
               집계할 필드
               <select
                 className="field"
@@ -351,6 +448,9 @@ function ProjectFieldBreakdown(props: FeatureProps) {
             </button>
           </div>
         </fieldset>
+        {linkedScope?.invalid && <p className="field-breakdown-error" role="alert">
+          이 링크의 필드 집계 조건을 확인할 수 없습니다. 조건을 선택한 뒤 다시 조회해 주세요.
+        </p>}
         {dirty && report && (
           <p className="field-breakdown-info">
             조회 조건이 변경되었습니다. 아래에는 이전 조건의 집계가 표시됩니다.
@@ -387,6 +487,18 @@ function ProjectFieldBreakdown(props: FeatureProps) {
               {new Date(report.generatedAt).toLocaleString('ko-KR')} 기준
             </time>
           </header>
+          <div className="field-breakdown-link-actions">
+            <button type="button" className="btn" onClick={() => void copyLink()}>
+              <Link2 size={15} aria-hidden="true" />필드 집계 링크 복사
+            </button>
+            {report.savedView && onOpenSavedIssueView && <button type="button" className="btn"
+              onClick={() => { if (report.savedView) onOpenSavedIssueView(report.savedView.id); }}>
+              <ArrowUpRight size={15} aria-hidden="true" />저장한 업무 보기 열기
+            </button>}
+          </div>
+          {copyFallback && <label className="field-breakdown-link-fallback">필드 집계 링크 주소
+            <input ref={copyInput} className="field" readOnly value={copyFallback} onFocus={event => event.currentTarget.select()} />
+          </label>}
           {stale && (
             <p className="field-breakdown-stale" role="status">
               집계 이후 업무·보기·필드 설정이 변경되었습니다. 이전 결과를 표시하고 있습니다. 위의 ‘필드
