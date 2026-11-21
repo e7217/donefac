@@ -921,8 +921,9 @@ export interface GitlabMergeReadiness {
   source: 'read' | 'webhook';
 }
 export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[] }
-export const GITLAB_DEPLOYMENT_STATES = ['blocked', 'running', 'success', 'failed', 'canceled'] as const;
+export const GITLAB_DEPLOYMENT_STATES = ['created', 'blocked', 'running', 'success', 'failed', 'canceled', 'skipped'] as const;
 export type GitlabDeploymentState = typeof GITLAB_DEPLOYMENT_STATES[number];
+export interface GitlabDeploymentMergeRequest { id: number; iid: number }
 export interface GitlabDeployment {
   instance: string;
   repositoryId: number;
@@ -934,8 +935,20 @@ export interface GitlabDeployment {
   changedAt: string;
   projectUrl: string;
   jobUrl?: string;
+  source?: 'sync';
+  mergeRequests?: GitlabDeploymentMergeRequest[];
 }
 export interface GitlabDeploymentPage { items: GitlabDeployment[]; total: number; offset: number; limit: number }
+export interface GitlabDeploymentSyncResult {
+  repositoryId: number;
+  settingsVersion: number;
+  deploymentsRead: number;
+  deploymentsStored: number;
+  mergeRequestsStored: number;
+  associationUnavailable: number;
+  associationLimited: number;
+  deploymentLimitReached: boolean;
+}
 export interface GitlabJiraSource { projectId: string; jiraInstanceKey: string }
 export interface GitlabJiraRoute extends GitlabJiraSource { repositoryId: number }
 export interface GitlabSettings { baseUrl: string; projectIds: number[]; tokenConfigured: boolean; webhookSecretConfigured: boolean; signingTokenConfigured: boolean; version: number; lastSyncAt: string | null; lastError: string | null; jiraRoutes?: GitlabJiraRoute[]; webhookReceiverUrl?: string }

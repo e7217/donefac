@@ -1818,6 +1818,10 @@ export function createApp(options: {
         (!Array.isArray(data.gitlabDeployments) || data.gitlabDeployments.length)) {
       fail('GitLab 배포 기록을 포함한 백업은 schemaVersion 72가 필요합니다.');
     }
+    if (data.schemaVersion < 74 && Array.isArray(data.gitlabDeployments) && data.gitlabDeployments.some(
+      (row: { source?: unknown; mergeRequests?: unknown; status?: unknown } | null) => row && typeof row === 'object' &&
+        (Object.hasOwn(row, 'source') || Object.hasOwn(row, 'mergeRequests') || row.status === 'created' || row.status === 'skipped'),
+    )) fail('GitLab 배포 동기화 기록을 포함한 백업은 schemaVersion 74가 필요합니다.');
     const importedTemplateAssets=documentTemplateAssets.validateRestore(data.schemaVersion>=65?data.documentTemplateAssets:[],importedTemplates);
     const importedPlanning=planning.prepareImport(data.schemaVersion>=4?data.planningItems:[],data.projects,data.users,data.issues,{legacy:data.schemaVersion<4});
     data.issues=importedPlanning.issues;

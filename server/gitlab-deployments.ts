@@ -1,34 +1,46 @@
 import { createHash } from 'node:crypto';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha } from '../shared/gitlab-links.js';
-import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabLink } from '../shared/types.js';
+import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabLink } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl } from './gitlab-push.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 50;
+const MERGE_REQUEST_LIMIT = 250;
 const STATES: ReadonlySet<unknown> = new Set(GITLAB_DEPLOYMENT_STATES);
+const WEBHOOK_STATES: ReadonlySet<unknown> = new Set(['blocked', 'running', 'success', 'failed', 'canceled']);
 const INSTANCE = /^[a-f0-9]{12}$/u;
 const SHA_PATH = /\/-\/commit\/([a-f\d]{40}|[a-f\d]{64})$/iu;
 const JOB_PATH = /\/-\/jobs\/([1-9]\d*)$/u;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
-const FIELDS = new Set(['instance', 'repositoryId', 'deploymentId', 'environment', 'environmentTier', 'sha', 'status', 'changedAt', 'projectUrl', 'jobUrl']);
+const FIELDS = new Set(['instance', 'repositoryId', 'deploymentId', 'environment', 'environmentTier', 'sha', 'status', 'changedAt', 'projectUrl', 'jobUrl', 'source', 'mergeRequests']);
 const select = `d.instance, d.repository_id AS repositoryId, d.deployment_id AS deploymentId,
   d.environment, d.environment_tier AS environmentTier, d.sha, d.status, d.changed_at AS changedAt,
-  d.project_url AS projectUrl, d.job_url AS jobUrl`;
+  d.project_url AS projectUrl, d.job_url AS jobUrl, d.source,
+  (SELECT json_group_array(json_object('id',m.merge_request_id,'iid',m.merge_request_iid) ORDER BY m.merge_request_id)
+    FROM gitlab_deployment_merge_requests m
+    WHERE m.instance=d.instance AND m.repository_id=d.repository_id AND m.deployment_id=d.deployment_id) AS mergeRequests`;
 const byLatest = `ORDER BY d.changed_at DESC, d.deployment_id DESC, d.repository_id, d.instance`;
-const write = `INSERT INTO gitlab_deployments(instance,repository_id,deployment_id,environment,environment_tier,sha,status,changed_at,project_url,job_url)
-  VALUES(?,?,?,?,?,?,?,?,?,?)
+const write = `INSERT INTO gitlab_deployments(instance,repository_id,deployment_id,environment,environment_tier,sha,status,changed_at,project_url,job_url,source,webhook_received_at)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(instance,repository_id,deployment_id) DO UPDATE SET
     environment_tier=COALESCE(excluded.environment_tier,gitlab_deployments.environment_tier),
     status=excluded.status, changed_at=excluded.changed_at, project_url=excluded.project_url,
+    source=excluded.source, webhook_received_at=COALESCE(excluded.webhook_received_at,gitlab_deployments.webhook_received_at),
     job_url=CASE WHEN excluded.project_url=gitlab_deployments.project_url
       THEN COALESCE(excluded.job_url,gitlab_deployments.job_url) ELSE excluded.job_url END
   WHERE excluded.sha=gitlab_deployments.sha AND excluded.environment=gitlab_deployments.environment
-    AND excluded.changed_at>gitlab_deployments.changed_at
-    AND (gitlab_deployments.status IN ('blocked','running') OR excluded.status NOT IN ('blocked','running'))`;
+    AND (excluded.changed_at>gitlab_deployments.changed_at OR
+      excluded.changed_at=gitlab_deployments.changed_at AND gitlab_deployments.source='sync' AND excluded.source IS NULL)
+    AND (gitlab_deployments.status IN ('created','blocked','running') OR excluded.status NOT IN ('created','blocked','running'))
+    AND (excluded.source IS NULL OR gitlab_deployments.webhook_received_at IS NULL OR gitlab_deployments.webhook_received_at<?)`;
 
-type StoredDeployment = Omit<GitlabDeployment, 'environmentTier' | 'jobUrl'> & { environmentTier: string | null; jobUrl: string | null };
-type Evidence = Pick<GitlabDeployment, 'instance' | 'repositoryId' | 'sha'>;
+type StoredDeployment = Omit<GitlabDeployment, 'environmentTier' | 'jobUrl' | 'source' | 'mergeRequests'> & {
+  environmentTier: string | null; jobUrl: string | null; source: 'sync' | null; mergeRequests: string;
+};
+type DeploymentScope = Pick<GitlabDeployment, 'instance' | 'repositoryId'>;
+type ShaEvidence = DeploymentScope & Pick<GitlabDeployment, 'sha'>;
+type MergeRequestEvidence = DeploymentScope & GitlabDeploymentMergeRequest;
 
 export class GitlabDeploymentError extends Error {
   readonly status = 400;
@@ -59,7 +71,7 @@ function isState(value: unknown): value is GitlabDeploymentState {
   return STATES.has(value);
 }
 
-function canonicalTime(value: unknown): string | undefined {
+export function gitlabDeploymentTime(value: unknown): string | undefined {
   if (typeof value !== 'string' || !TIMESTAMP.test(value) || !isCalendarDate(value.slice(0, 10))) return;
   const time = Date.parse(value);
   if (!Number.isFinite(time) || time > Date.now()) return;
@@ -71,8 +83,10 @@ function fingerprint(baseUrl: string): string {
   return createHash('sha256').update(baseUrl).digest('hex').slice(0, 12);
 }
 
-function publicRow({ environmentTier, jobUrl, ...record }: StoredDeployment): GitlabDeployment {
-  return { ...record, ...(environmentTier === null ? {} : { environmentTier }), ...(jobUrl === null ? {} : { jobUrl }) };
+function publicRow({ environmentTier, jobUrl, source, mergeRequests, ...record }: StoredDeployment, exporting = false): GitlabDeployment {
+  return { ...record, ...(environmentTier === null ? {} : { environmentTier }), ...(jobUrl === null ? {} : { jobUrl }),
+    ...(source === null ? {} : { source }),
+    ...(mergeRequests !== '[]' && (exporting || record.status === 'success') ? { mergeRequests: JSON.parse(mergeRequests) as GitlabDeploymentMergeRequest[] } : {}) };
 }
 
 function jobAddress(projectUrl: string, jobId: number): string {
@@ -88,9 +102,9 @@ function parseObservation(instance: string, baseUrl: string, repositoryId: numbe
 
   const deploymentId = positiveId(input.deployment_id);
   const { environment, status } = input;
-  const changedAt = canonicalTime(input.status_changed_at);
+  const changedAt = gitlabDeploymentTime(input.status_changed_at);
   const repository = gitlabRepositoryUrl(baseUrl, project);
-  if (!deploymentId || !label(environment, 255) || !isState(status) || !changedAt || !repository) return;
+  if (!deploymentId || !label(environment, 255) || !isState(status) || !WEBHOOK_STATES.has(status) || !changedAt || !repository) return;
 
   const projectUrl = repository.href;
   const commitUrl = gitlabScopedPushUrl(baseUrl, input.commit_url);
@@ -126,30 +140,53 @@ function isInstanceRepository(instance: string, projectUrl: string): boolean {
   return false;
 }
 
-function parseBackupRow(raw: unknown, exportedAt: string): GitlabDeployment | undefined {
+function parseMergeRequests(value: unknown): GitlabDeploymentMergeRequest[] | undefined {
+  if (!Array.isArray(value) || value.length > MERGE_REQUEST_LIMIT) return;
+  const ids = new Set<number>(), iids = new Set<number>();
+  const result: GitlabDeploymentMergeRequest[] = [];
+  for (const item of value) {
+    const record = object(item);
+    if (!record || Object.keys(record).length !== 2 || typeof record.id !== 'number' || typeof record.iid !== 'number' ||
+        !positiveId(record.id) || !positiveId(record.iid) || ids.has(record.id) || iids.has(record.iid)) return;
+    ids.add(record.id);
+    iids.add(record.iid);
+    result.push({ id: record.id, iid: record.iid });
+  }
+  return result.sort((left, right) => left.id - right.id);
+}
+
+function parseStoredRow(raw: unknown, latestTime: string): GitlabDeployment | undefined {
   const input = object(raw);
   if (!input || Object.keys(input).some(key => !FIELDS.has(key))) return;
-  const { instance, repositoryId, deploymentId, environment, environmentTier, sha, status, changedAt, projectUrl, jobUrl } = input;
+  const { instance, repositoryId, deploymentId, environment, environmentTier, sha, status, changedAt, projectUrl, jobUrl, source, mergeRequests } = input;
   if (typeof instance !== 'string' || !INSTANCE.test(instance) || typeof repositoryId !== 'number' || !positiveId(repositoryId) ||
       typeof deploymentId !== 'number' || !positiveId(deploymentId) || !label(environment, 255) ||
       environmentTier !== undefined && !label(environmentTier, 64) || typeof sha !== 'string' || revision(sha) !== sha ||
-      !isState(status) || typeof changedAt !== 'string' || canonicalTime(changedAt) !== changedAt || changedAt > exportedAt ||
+      !isState(status) || (source === undefined ? !WEBHOOK_STATES.has(status) : source !== 'sync') ||
+      typeof changedAt !== 'string' || gitlabDeploymentTime(changedAt) !== changedAt || changedAt > latestTime ||
       typeof projectUrl !== 'string' || !isInstanceRepository(instance, projectUrl)) return;
 
   if (jobUrl !== undefined) {
     const jobId = typeof jobUrl === 'string' && jobUrl.length <= 4_000 && positiveId(jobUrl.match(JOB_PATH)?.[1]);
     if (!jobId || jobUrl !== jobAddress(projectUrl, jobId)) return;
   }
+  const associations = mergeRequests === undefined ? [] : parseMergeRequests(mergeRequests);
+  if (!associations) return;
 
   return { instance, repositoryId, deploymentId, environment, sha, status, changedAt, projectUrl,
-    ...(environmentTier === undefined ? {} : { environmentTier }), ...(typeof jobUrl === 'string' ? { jobUrl } : {}) };
+    ...(environmentTier === undefined ? {} : { environmentTier }), ...(typeof jobUrl === 'string' ? { jobUrl } : {}),
+    ...(source === 'sync' ? { source } : {}), ...(associations.length ? { mergeRequests: associations } : {}) };
 }
 
-function linkEvidence(link: GitlabLink): Evidence[] {
-  if (typeof link.id !== 'string' || !positiveId(link.projectId)) return [];
+function linkScope(link: GitlabLink): (DeploymentScope & { objectId: string }) | undefined {
+  if (typeof link.id !== 'string' || !positiveId(link.projectId)) return;
   const [, instance, , , objectId] = link.id.split(':', 5);
-  if (!INSTANCE.test(instance) || link.id !== `gitlab:${instance}:${link.projectId}:${link.kind}:${objectId}:${link.issueId}`) return [];
-  const evidence = (sha: string): Evidence => ({ instance, repositoryId: link.projectId, sha });
+  if (!INSTANCE.test(instance) || link.id !== `gitlab:${instance}:${link.projectId}:${link.kind}:${objectId}:${link.issueId}`) return;
+  return { instance, repositoryId: link.projectId, objectId };
+}
+
+function linkEvidence(link: GitlabLink, { instance, repositoryId, objectId }: DeploymentScope & { objectId: string }): ShaEvidence[] {
+  const evidence = (sha: string): ShaEvidence => ({ instance, repositoryId, sha });
   if (link.kind === 'commit') {
     const sha = revision(link.sourceSha);
     return sha && revision(objectId) === sha ? [evidence(sha)] : [];
@@ -173,31 +210,74 @@ export class GitlabDeployments {
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_deployments (
       instance TEXT NOT NULL, repository_id INTEGER NOT NULL, deployment_id INTEGER NOT NULL,
       environment TEXT NOT NULL, environment_tier TEXT, sha TEXT NOT NULL, status TEXT NOT NULL,
-      changed_at TEXT NOT NULL, project_url TEXT NOT NULL, job_url TEXT,
+      changed_at TEXT NOT NULL, project_url TEXT NOT NULL, job_url TEXT, source TEXT, webhook_received_at INTEGER,
       PRIMARY KEY(instance, repository_id, deployment_id)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS gitlab_deployments_revision ON gitlab_deployments(instance,repository_id,sha);
-    CREATE INDEX IF NOT EXISTS gitlab_deployments_repository ON gitlab_deployments(instance,repository_id,changed_at DESC,deployment_id DESC);`);
+    CREATE INDEX IF NOT EXISTS gitlab_deployments_repository ON gitlab_deployments(instance,repository_id,changed_at DESC,deployment_id DESC);
+    CREATE TABLE IF NOT EXISTS gitlab_deployment_merge_requests (
+      instance TEXT NOT NULL, repository_id INTEGER NOT NULL, deployment_id INTEGER NOT NULL,
+      merge_request_id INTEGER NOT NULL, merge_request_iid INTEGER NOT NULL,
+      PRIMARY KEY(instance, repository_id, deployment_id, merge_request_id),
+      UNIQUE(instance, repository_id, deployment_id, merge_request_iid),
+      FOREIGN KEY(instance, repository_id, deployment_id)
+        REFERENCES gitlab_deployments(instance, repository_id, deployment_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS gitlab_deployment_merge_requests_proof
+      ON gitlab_deployment_merge_requests(instance,repository_id,merge_request_id,merge_request_iid,deployment_id);`);
+    const columns = new Set(store.db.prepare('PRAGMA table_info(gitlab_deployments)').all().map(row => row.name));
+    if (!columns.has('source')) store.db.exec('ALTER TABLE gitlab_deployments ADD COLUMN source TEXT');
+    if (!columns.has('webhook_received_at')) store.db.exec('ALTER TABLE gitlab_deployments ADD COLUMN webhook_received_at INTEGER');
   }
 
   /** The webhook caller includes this observation in the same transaction as its delivery receipt. */
   observe(instance: string, baseUrl: string, repositoryId: number, raw: unknown): boolean {
     const observation = parseObservation(instance, baseUrl, repositoryId, raw);
-    return observation ? this.save(observation) : false;
+    return observation ? this.save(observation, Date.now()) : false;
+  }
+
+  /** The caller checks the saved connection version and applies the read inside a repository transaction. */
+  recordSync(instance: string, repositoryId: number, rows: readonly Omit<GitlabDeployment, 'instance'>[], capturedAt: number) {
+    const latestTime = new Date().toISOString();
+    const stored = new Set<number>();
+    let mergeRequestsStored = 0;
+    if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || capturedAt > Date.now()) throw new GitlabDeploymentError();
+    for (const candidate of rows) {
+      const deployment = parseStoredRow({ ...candidate, instance }, latestTime);
+      if (deployment?.repositoryId !== repositoryId || deployment.source !== 'sync') throw new GitlabDeploymentError();
+      if (this.save(deployment, null, capturedAt)) stored.add(deployment.deploymentId);
+      if (deployment.status === 'success') mergeRequestsStored += this.saveMergeRequests(deployment);
+    }
+    return { stored: stored.size, mergeRequestsStored };
   }
 
   issuePage(issueId: string, offset: number): GitlabDeploymentPage {
     const links = this.store.db.prepare('SELECT json FROM gitlab_links WHERE issue_id=?').all(issueId) as { json: string }[];
-    const evidence = new Map<string, Evidence>();
+    const shaEvidence = new Map<string, ShaEvidence>();
+    const mergeRequestEvidence = new Map<string, MergeRequestEvidence>();
     for (const { json } of links) {
       const link = JSON.parse(json) as GitlabLink;
-      for (const value of linkEvidence(link)) evidence.set(`${value.instance}:${value.repositoryId}:${value.sha}`, value);
+      const scope = linkScope(link);
+      if (!scope) continue;
+      for (const value of linkEvidence(link, scope)) shaEvidence.set(`${value.instance}:${value.repositoryId}:${value.sha}`, value);
+      const { instance, repositoryId, objectId } = scope;
+      if (link.kind === 'merge_request' && typeof link.iid === 'number' && positiveId(link.iid) && positiveId(objectId)) {
+        mergeRequestEvidence.set(`${instance}:${repositoryId}:${objectId}:${link.iid}`, { instance, repositoryId, id: Number(objectId), iid: link.iid });
+      }
     }
-    if (!evidence.size) return { items: [], total: 0, offset, limit: PAGE_SIZE };
-    const query = `FROM json_each(?) e
-      JOIN gitlab_deployments d ON d.instance=json_extract(e.value,'$.instance')
-      AND d.repository_id=json_extract(e.value,'$.repositoryId') AND d.sha=json_extract(e.value,'$.sha')`;
-    return this.page(query, [JSON.stringify([...evidence.values()])], offset);
+    if (!shaEvidence.size && !mergeRequestEvidence.size) return { items: [], total: 0, offset, limit: PAGE_SIZE };
+    const query = `FROM (
+      SELECT r.instance,r.repository_id,r.deployment_id FROM json_each(?) e
+      JOIN gitlab_deployments r ON r.instance=json_extract(e.value,'$.instance')
+        AND r.repository_id=json_extract(e.value,'$.repositoryId') AND r.sha=json_extract(e.value,'$.sha')
+      UNION
+      SELECT m.instance,m.repository_id,m.deployment_id FROM json_each(?) e
+      JOIN gitlab_deployment_merge_requests m ON m.instance=json_extract(e.value,'$.instance')
+        AND m.repository_id=json_extract(e.value,'$.repositoryId') AND m.merge_request_id=json_extract(e.value,'$.id')
+        AND m.merge_request_iid=json_extract(e.value,'$.iid')
+      JOIN gitlab_deployments r USING(instance,repository_id,deployment_id) WHERE r.status='success'
+    ) AS matched JOIN gitlab_deployments d USING(instance,repository_id,deployment_id)`;
+    return this.page(query, [JSON.stringify([...shaEvidence.values()]), JSON.stringify([...mergeRequestEvidence.values()])], offset);
   }
 
   repositoryPage(instance: string, repositoryId: number, offset: number): GitlabDeploymentPage {
@@ -205,17 +285,18 @@ export class GitlabDeployments {
   }
 
   exportRows(): GitlabDeployment[] {
-    return (this.store.db.prepare(`SELECT ${select} FROM gitlab_deployments d ORDER BY d.instance,d.repository_id,d.deployment_id`).all() as StoredDeployment[]).map(publicRow);
+    return (this.store.db.prepare(`SELECT ${select} FROM gitlab_deployments d ORDER BY d.instance,d.repository_id,d.deployment_id`).all() as StoredDeployment[])
+      .map(row => publicRow(row, true));
   }
 
   /** Replace observations inside the caller's workspace restore transaction. */
   restore(raw: unknown, exportedAt: unknown): void {
-    if (!Array.isArray(raw) || raw.length > 0 && (typeof exportedAt !== 'string' || canonicalTime(exportedAt) !== exportedAt)) {
+    if (!Array.isArray(raw) || raw.length > 0 && (typeof exportedAt !== 'string' || gitlabDeploymentTime(exportedAt) !== exportedAt)) {
       throw new GitlabDeploymentError();
     }
     const seen = new Set<string>();
     const records = raw.map(value => {
-      const record = parseBackupRow(value, exportedAt as string);
+      const record = parseStoredRow(value, exportedAt as string);
       if (!record) throw new GitlabDeploymentError();
       const identity = `${record.instance}:${record.repositoryId}:${record.deploymentId}`;
       if (seen.has(identity)) throw new GitlabDeploymentError();
@@ -223,18 +304,39 @@ export class GitlabDeployments {
       return record;
     });
     this.store.db.exec('DELETE FROM gitlab_deployments');
-    for (const record of records) this.save(record);
+    for (const record of records) {
+      this.save(record);
+      this.saveMergeRequests(record);
+    }
   }
 
   private page(query: string, arguments_: (string | number)[], offset: number): GitlabDeploymentPage {
     const { total } = this.store.db.prepare(`SELECT COUNT(*) AS total ${query}`).get(...arguments_) as { total: number };
     const rows = this.store.db.prepare(`SELECT ${select} ${query} ${byLatest} LIMIT ? OFFSET ?`)
       .all(...arguments_, PAGE_SIZE, offset) as StoredDeployment[];
-    return { items: rows.map(publicRow), total, offset, limit: PAGE_SIZE };
+    return { items: rows.map(row => publicRow(row)), total, offset, limit: PAGE_SIZE };
   }
 
-  private save({ instance, repositoryId, deploymentId, environment, environmentTier, sha, status, changedAt, projectUrl, jobUrl }: GitlabDeployment): boolean {
+  private save({ instance, repositoryId, deploymentId, environment, environmentTier, sha, status, changedAt, projectUrl, jobUrl, source }: GitlabDeployment,
+    receivedAt: number | null = null, capturedAt: number | null = null): boolean {
     return this.store.db.prepare(write).run(instance, repositoryId, deploymentId, environment, environmentTier ?? null,
-      sha, status, changedAt, projectUrl, jobUrl ?? null).changes === 1;
+      sha, status, changedAt, projectUrl, jobUrl ?? null, source ?? null, receivedAt, capturedAt).changes === 1;
+  }
+
+  private saveMergeRequests({ instance, repositoryId, deploymentId, sha, environment, mergeRequests }: GitlabDeployment): number {
+    if (!mergeRequests?.length) return 0;
+    const current = this.store.db.prepare(`SELECT sha, environment FROM gitlab_deployments
+      WHERE instance=? AND repository_id=? AND deployment_id=?`).get(instance, repositoryId, deploymentId);
+    if (current?.sha !== sha || current.environment !== environment) return 0;
+    const { total } = this.store.db.prepare(`SELECT COUNT(*) AS total FROM gitlab_deployment_merge_requests
+      WHERE instance=? AND repository_id=? AND deployment_id=?`).get(instance, repositoryId, deploymentId) as { total: number };
+    const insert = this.store.db.prepare(`INSERT INTO gitlab_deployment_merge_requests
+      (instance,repository_id,deployment_id,merge_request_id,merge_request_iid) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`);
+    let inserted = 0;
+    for (const { id, iid } of mergeRequests) {
+      if (total + inserted >= MERGE_REQUEST_LIMIT) break;
+      inserted += Number(insert.run(instance, repositoryId, deploymentId, id, iid).changes);
+    }
+    return inserted;
   }
 }

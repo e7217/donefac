@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { expect, test, type APIResponse } from '@playwright/test';
 import type { GitlabDeploymentPage, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
@@ -119,5 +122,106 @@ test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 �
         baseUrl: original.baseUrl, projectIds: original.projectIds, webhookSecret: '', token: '', signingToken: '', jiraRoutes: original.jiraRoutes ?? [] },
       }));
     }
+  }
+});
+
+test('360px 저장소에서 과거 배포를 동기화해 서로 다른 MR의 티켓 두 개에서 같은 배포를 본다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [author] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const original = await json<GitlabSettings>(await request.get(integration));
+  expect(original.baseUrl).toBe('');
+  const token = `synthetic-read-${randomUUID()}`;
+  const secret = `synthetic-hook-${randomUUID()}`;
+  const artifact = 'ad'.repeat(20);
+  const headers = { 'X-Actor-Id': author.id };
+  const readPaths: string[] = [];
+  const issues: Issue[] = [];
+  let denyAssociations = false;
+  let configured = false;
+  const repoPath = '/gitlab/api/v4/projects/42';
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', baseUrl).pathname;
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end();
+    readPaths.push(path);
+    response.setHeader('Content-Type', 'application/json');
+    if (path === repoPath) return response.end(JSON.stringify({ id: 42, web_url: projectUrl, path_with_namespace: 'team/product' }));
+    if (path === `${repoPath}/deployments`) {
+      return response.end(JSON.stringify([{ id: 700, sha: artifact, status: 'success', updated_at: timestamp(9),
+        environment: { id: 1, name: 'production' }, deployable: null }]));
+    }
+    if (path === `${repoPath}/deployments/700/merge_requests`) {
+      if (denyAssociations) return response.writeHead(403).end('{}');
+      return response.end(JSON.stringify([775, 776].map((id, index) => ({ id, iid: 20 + index, state: 'merged', target_project_id: 42 }))));
+    }
+    response.writeHead(404).end();
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/gitlab`;
+  const projectUrl = `${baseUrl}/team/product`;
+  try {
+    await json<GitlabSettings>(await request.patch(integration, { headers,
+      data: { expectedVersion: original.version, baseUrl, projectIds: [42], token, webhookSecret: secret },
+    }));
+    configured = true;
+    const identifier = randomUUID().slice(0, 8);
+    for (let index = 0; index < 2; index++) {
+      const issue = await json<Issue>(await request.post('/api/issues', { headers,
+        data: { projectId: project.id, title: `배포 포함 MR ${index + 1} ${identifier}` } }), 201);
+      issues.push(issue);
+      const iid = 20 + index;
+      const linked = await json<{ linked: number }>(await request.post(`${integration}/webhook`, {
+        headers: { 'X-Gitlab-Token': secret, 'X-Gitlab-Event': 'Merge Request Hook', 'X-Gitlab-Event-UUID': randomUUID() },
+        data: { object_kind: 'merge_request', project: { id: 42, web_url: projectUrl }, object_attributes: {
+          id: 775 + index, iid, target_project_id: 42, title: `${issue.key} MR`, state: 'merged', action: 'merge',
+          source_branch: `feature/${issue.key}`, sha: (index ? 'b' : 'a').repeat(40), merge_commit_sha: (index ? 'e' : 'f').repeat(40),
+          url: `${projectUrl}/-/merge_requests/${iid}`, updated_at: timestamp(index),
+        } },
+      }));
+      expect(linked.linked).toBe(1);
+    }
+    await page.goto(`/#/${project.id}/development`);
+    const region = page.getByRole('region', { name: 'GitLab 배포 기록', exact: true });
+    const sync = region.getByRole('button', { name: '배포 이력 동기화', exact: true });
+    const report = region.getByRole('status', { name: '배포 이력 동기화 결과', exact: true });
+    const record = region.getByRole('listitem').filter({ hasText: 'production' });
+    await expect(sync).toBeVisible({ timeout: 30_000 });
+    await expect(record).toHaveCount(0);
+    await sync.click();
+    await expect(report).toContainText('배포 1건 조회 · 1건 반영 · 포함 MR 2건 반영');
+    await expect(record).toContainText('포함 MR 2개');
+    await expect(record).toContainText('GitLab 동기화');
+    expect(readPaths).toEqual([repoPath, `${repoPath}/deployments`, `${repoPath}/deployments/700/merge_requests`]);
+
+    denyAssociations = true;
+    await sync.click();
+    await expect(report).toContainText('배포 1건 조회 · 0건 반영 · 포함 MR 0건 반영');
+    await expect(report).toContainText('포함 MR을 조회하지 못한 배포 1건');
+    await expect(record).toContainText('포함 MR 2개');
+    for (const issue of issues) {
+      await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+      const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+      const result = panel.getByRole('region', { name: '연결된 GitLab 배포', exact: true }).getByRole('listitem');
+      await expect(result).toHaveCount(1);
+      await expect(result).toHaveAttribute('data-deployment-id', '700');
+      await expect(result).toContainText('포함 MR 2개');
+      await expect(result.getByRole('link', { name: 'GitLab 커밋 열기' })).toHaveAttribute('href', `${projectUrl}/-/commit/${artifact}`);
+    }
+  } finally {
+    for (const issue of issues) {
+      const deleted = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (!deleted.ok()) continue;
+      const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers });
+    }
+    if (configured) {
+      const current = await json<GitlabSettings>(await request.get(integration));
+      await json<GitlabSettings>(await request.patch(integration, { headers,
+        data: { expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '' },
+      }));
+    }
+    mock.closeAllConnections();
+    await new Promise<void>(resolve => mock.close(() => resolve()));
   }
 });

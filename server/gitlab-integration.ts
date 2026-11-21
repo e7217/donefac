@@ -9,6 +9,8 @@ import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlab
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
+import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
+import type { GitlabDeploymentSyncResult } from '../shared/types.js';
 import type { Store } from './store.js';
 
 export class GitlabIntegrationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -333,6 +335,7 @@ export class GitlabIntegrationService{
   private readonly manualLinkRows:StatementSync;
   private readonly linkedMergeRequestRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
+  private readonly deploymentSyncs = new Set<string>();
   readonly deployments: GitlabDeployments;
   constructor(private readonly store:Store,private readonly hooks:Hooks,webhookPublicOrigin?:string){
     this.deployments=new GitlabDeployments(store);
@@ -978,7 +981,7 @@ export class GitlabIntegrationService{
       options.signal?.throwIfAborted();
       try { reads.push({ projectId, plan: await readProjectPlan(connection, projectId, options) }); }
       catch (error) {
-        if (!(error instanceof GitlabReadError) || error.stage === 'webhooks') throw error;
+        if (!(error instanceof GitlabReadError) || error.stage === 'webhooks' || error.stage === 'deployments' || error.stage === 'deployment-merge-requests') throw error;
         const { stage, httpStatus, message } = error;
         reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
       }
@@ -986,6 +989,53 @@ export class GitlabIntegrationService{
       this.currentForSync(connection.version);
     }
     return reads;
+  }
+
+  async syncDeployments(value: unknown, signal?: AbortSignal, afterSave?: (result: GitlabDeploymentSyncResult) => void): Promise<GitlabDeploymentSyncResult> {
+    const input = record(value);
+    if (Object.keys(input).length !== 2 || !Object.hasOwn(input, 'repositoryId') || !Object.hasOwn(input, 'expectedVersion')) {
+      return fail('GitLab 배포 이력 동기화 요청을 확인해 주세요.');
+    }
+    const saved = this.raw();
+    assertSettingsVersion(input.expectedVersion, saved.version);
+    const repositoryId = input.repositoryId;
+    if (typeof repositoryId !== 'number' || !Number.isSafeInteger(repositoryId) || repositoryId < 1) {
+      return fail('배포 이력을 읽을 GitLab 저장소를 선택해 주세요.');
+    }
+    if (!saved.baseUrl || !saved.projectIds.includes(repositoryId)) return fail('저장된 GitLab 저장소를 선택해 주세요.', 403);
+    const instance = this.instance(saved);
+    const key = `${instance}:${repositoryId}`;
+    if (this.deploymentSyncs.has(key)) return fail('이 저장소의 배포 이력을 동기화 중입니다.', 409);
+    const token = saved.token ? this.store.unseal(saved.token) : null;
+    const capturedAt = Date.now();
+    this.deploymentSyncs.add(key);
+    try {
+      signal?.throwIfAborted();
+      const history = await readGitlabDeploymentHistory({ baseUrl: saved.baseUrl, token }, repositoryId, signal);
+      signal?.throwIfAborted();
+      return this.store.transaction(() => {
+        this.currentForSync(saved.version);
+        const { stored, mergeRequestsStored } = this.deployments.recordSync(instance, repositoryId, history.deployments, capturedAt);
+        const result = { repositoryId, settingsVersion: saved.version, deploymentsRead: history.scanned,
+          deploymentsStored: stored, mergeRequestsStored,
+          associationUnavailable: history.associationUnavailable, associationLimited: history.associationLimited,
+          deploymentLimitReached: history.deploymentLimitReached } satisfies GitlabDeploymentSyncResult;
+        if (stored || mergeRequestsStored) afterSave?.(result);
+        return result;
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      this.currentForSync(saved.version);
+      if (error instanceof GitlabReadError) {
+        const denied = error.httpStatus === 401 || error.httpStatus === 403;
+        const message = denied ? 'GitLab 배포 이력을 읽을 수 없습니다. 읽기 토큰과 접근 권한을 확인해 주세요.'
+          : 'GitLab 배포 이력을 읽지 못했습니다. 저장소 주소와 연결 상태를 확인해 주세요.';
+        return fail(message, 502, { stage: error.stage, httpStatus: error.httpStatus, reason: error.message });
+      }
+      throw error;
+    } finally {
+      this.deploymentSyncs.delete(key);
+    }
   }
 
   async previewSync(value:unknown, signal?:AbortSignal):Promise<GitlabSyncPreview>{
@@ -1095,6 +1145,20 @@ export class GitlabIntegrationService{
       if(!repositoryId)fail('배포를 조회할 GitLab 저장소를 선택해 주세요.');
       if(!settings.projectIds.includes(repositoryId))fail('저장된 GitLab 저장소를 선택해 주세요.',403);
       res.set('Cache-Control','no-store').json(this.deployments.repositoryPage(this.instance(settings),repositoryId,deploymentOffset(req)));
+    });
+    app.post('/api/integrations/gitlab/deployments/sync', async (req, res) => {
+      hooks.actor(req);
+      res.set('Cache-Control', 'no-store');
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.syncDeployments(req.body, controller.signal, ({ repositoryId, deploymentsStored, mergeRequestsStored }) => {
+          hooks.activity(req, 'integration', 'gitlab', 'GitLab 배포 이력 동기화', `저장소 ${repositoryId} · 배포 ${deploymentsStored}건 · 포함 MR ${mergeRequestsStored}건`);
+        });
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
     });
     app.get('/api/issues/:id/gitlab-deployments',(req,res)=>{
       if(Object.keys(req.query).some(key=>key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');

@@ -380,6 +380,10 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 
 브라우저의 `GET /api/integrations/gitlab/deployments?repositoryId=42`는 저장된 연결의 해당 저장소를 조회한다. `GET /api/issues/:id/gitlab-deployments`와 범위 제한 `/api/v1/issues/:id/gitlab-deployments`는 해당 티켓의 개발 활동과 같은 인스턴스·저장소·전체 SHA의 결과를 읽는다. 연결된 커밋·파이프라인의 SHA와 대상 저장소가 확인된 병합 MR의 병합·스쿼시 SHA를 증거로 사용한다. 두 경로는 최신 변경 시각순으로 `{items,total,offset,limit}`을 반환한다. `offset` 기본값은 0이며 한 페이지는 50건이다. 자체 백업 형식 72는 `gitlabDeployments`와 `GitlabLink.mergeCommitShas`를 보존한다.
 
+브라우저의 `POST /api/integrations/gitlab/deployments/sync`에 저장한 `repositoryId`와 `expectedVersion`을 보낸다. 저장소의 최근 배포 50건과 성공한 배포당 포함 MR을 최대 200건 조회한다. 같은 저장소에서 명시적으로 포함됐다고 확인한 MR의 `{id,iid}`만 저장하며, 기존 티켓 연결에 그 ID·IID가 함께 있으면 배포 목록에 표시한다. REST에서 저장한 현재 배포 상태는 `source: 'sync'`와 GitLab의 갱신 시각을 기록한다. `created`와 `skipped`도 동기화에서 읽는다. [GitLab 배포 API](https://docs.gitlab.com/api/deployments/)
+
+동기화 응답에는 `repositoryId`, `settingsVersion`, `deploymentsRead`, `deploymentsStored`, `mergeRequestsStored`, `associationUnavailable`, `associationLimited`, `deploymentLimitReached`가 들어간다. 확인한 MR은 일부 페이지를 읽지 못해도 저장하고 기존 근거는 유지한다. 같은 저장소에서 동기화가 이미 진행 중이거나 읽는 동안 연결 설정이 변경되면 `409`를 반환한다. 새로 수신한 웹훅의 배포 상태를 우선하며, 별도로 검증한 MR 정보는 기록할 수 있다. 자체 백업 형식 74부터 배포의 `source`와 `mergeRequests`를 보존한다.
+
 ### 이관한 Jira 키로 연결
 
 `jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Teamspace 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Teamspace 키로 연결한다.

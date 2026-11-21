@@ -59,6 +59,27 @@
   overflow-wrap: anywhere;
 }
 
+.gitlab-deployment-sync {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gitlab-deployment-sync-report {
+  color: #3c6554;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-deployment-sync p {
+  margin: 0;
+}
+
+.gitlab-deployment-sync-report p + p {
+  margin-top: 3px;
+}
+
 .gitlab-deployment-list {
   display: grid;
   gap: 0;
@@ -149,6 +170,7 @@
 
 @media (max-width: 520px) {
   .gitlab-deployment-heading button,
+  .gitlab-deployment-sync button,
   .gitlab-deployment-repository select,
   .gitlab-deployment-source,
   .gitlab-deployment-pages button {

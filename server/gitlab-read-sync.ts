@@ -4,7 +4,8 @@ import type { GitlabRepositoryCandidate, GitlabRepositorySearch } from '../share
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
-export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks';
+export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
+  'deployments' | 'deployment-merge-requests';
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -39,6 +40,8 @@ const stageNames: Record<GitlabReadStage, string> = {
   branches: '브랜치',
   commits: '커밋',
   webhooks: '프로젝트 웹훅',
+  deployments: '배포',
+  'deployment-merge-requests': '배포에 포함된 MR',
 };
 
 export class GitlabReadError extends Error {
@@ -325,6 +328,48 @@ function gitlabPathInScope(pathname: string, scope: string) {
   return path && path.startsWith(`${scope}/`) ? path : null;
 }
 
+function verifiedProjectRepository(project: unknown, projectId: number, base: URL) {
+  if (!isReadObject(project) || project.id !== projectId) throw new GitlabReadError('project', 'invalid-response');
+  const address = gitlabPageAddress(project.web_url, base, false);
+  const repositoryPath = address && gitlabPathInScope(address.pathname, address.scope);
+  const repository = project.path_with_namespace === undefined ? gitlabRepositoryUrl(base.href, { web_url: project.web_url })
+    : gitlabRepositoryUrl(base.href, { path_with_namespace: project.path_with_namespace });
+  if (!repositoryPath || !repository || canonicalPath(repository.pathname) !== repositoryPath) {
+    throw new GitlabReadError('project', 'invalid-response');
+  }
+  return { repositoryPath, repository };
+}
+
+export function createGitlabDeploymentReader(connection: Connection, projectId: number, signal?: AbortSignal) {
+  const { base, headers, projectUrl } = projectReadRequest(connection, projectId, 'project');
+
+  async function list(suffix: string, query: URLSearchParams, stage: 'deployments' | 'deployment-merge-requests', pageSize: number) {
+    const url = new URL(projectUrl);
+    url.pathname += suffix;
+    url.search = query.toString();
+    let pagination = new Headers();
+    const rows = await readPage(url, headers, stage, pageSize, signal, received => { pagination = received; });
+    return { rows, pagination };
+  }
+
+  return {
+    async repository() {
+      const project = await readJson(projectUrl, headers, 'project', signal);
+      return verifiedProjectRepository(project, projectId, base).repository;
+    },
+    deployments(pageSize: number) {
+      return list('/deployments', new URLSearchParams({ order_by: 'id', sort: 'desc', per_page: String(pageSize), page: '1' }),
+        'deployments', pageSize);
+    },
+    mergeRequests(deploymentId: number, pageSize: number, page: number) {
+      if (!Number.isSafeInteger(deploymentId) || deploymentId < 1) throw new GitlabReadError('deployment-merge-requests', 'invalid-response');
+      return list(`/deployments/${deploymentId}/merge_requests`,
+        new URLSearchParams({ scope: 'all', state: 'merged', per_page: String(pageSize), page: String(page) }),
+        'deployment-merge-requests', pageSize);
+    },
+  };
+}
+
 function searchedRepository(project: GitlabReadObject, base: URL): GitlabRepositoryCandidate {
   const { id, name, path_with_namespace: pathWithNamespace, web_url: rawWebUrl, archived } = project;
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 || typeof name !== 'string' ||
@@ -429,18 +474,13 @@ export async function readGitlabManualObject(
   if (!page) throw new GitlabManualUrlError('설정한 GitLab의 브랜치·커밋·MR·파이프라인 주소를 입력해 주세요.');
 
   const project = await readJson(projectUrl, headers, 'project', signal);
-  if (!isReadObject(project) || project.id !== projectId) throw new GitlabReadError('project', 'invalid-response');
-  const address = gitlabPageAddress(project.web_url, base, false);
-  const repositoryPath = address && gitlabPathInScope(address.pathname, address.scope);
-  const namespace = project.path_with_namespace === undefined ? gitlabRepositoryUrl(connection.baseUrl, { web_url: project.web_url })
-    : gitlabRepositoryUrl(connection.baseUrl, { path_with_namespace: project.path_with_namespace });
-  if (!repositoryPath || !namespace || canonicalPath(namespace.pathname) !== repositoryPath) throw new GitlabReadError('project', 'invalid-response');
+  const { repositoryPath, repository } = verifiedProjectRepository(project, projectId, base);
   if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 활동 주소를 입력해 주세요.');
 
   const itemUrl = new URL(projectUrl);
   if (page.kind === 'branch' || page.kind === 'commit') {
     const stage = page.kind === 'branch' ? 'branches' : 'commits';
-    const webUrl = gitlabPushLinkUrl(namespace, page.kind === 'branch' ? 'tree' : 'commit', page.id);
+    const webUrl = gitlabPushLinkUrl(repository, page.kind === 'branch' ? 'tree' : 'commit', page.id);
     if (!webUrl) throw new GitlabManualUrlError('GitLab 활동 주소가 너무 깁니다.');
     itemUrl.pathname += `/repository/${stage}/${encodeURIComponent(page.id)}`;
     if (page.kind === 'branch') onResolvedBranch?.(page.id, webUrl);
