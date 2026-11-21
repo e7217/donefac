@@ -7,6 +7,7 @@ import { MAX_PACKAGE_BYTES } from './attachments.js';
 import { creationRequestId } from './creation-request.js';
 import { workspaceContentOrigins, workspaceContentUrl } from './document-content-urls.js';
 import type { DocumentCopyAssets } from './document-copy-assets.js';
+import type { DocumentOrderService } from './document-order.js';
 import type { Store } from './store.js';
 
 const MAX_COPY_DOCUMENTS = 100;
@@ -90,7 +91,7 @@ export class DocumentTreeCopyService {
   private readonly findMember;
   private readonly findChildren;
 
-  constructor(private readonly store: Store, private readonly assets: DocumentCopyAssets) {
+  constructor(private readonly store: Store, private readonly assets: DocumentCopyAssets, private readonly orders: DocumentOrderService) {
     this.findMember = store.db.prepare(`SELECT id,project_id AS projectId,parent_id AS parentId,
       json_extract(json,'$.version') AS version,json_extract(json,'$.title') AS title FROM documents WHERE id=?`);
     this.findChildren = store.db.prepare('SELECT id FROM documents WHERE parent_id=? ORDER BY rowid');
@@ -137,12 +138,14 @@ export class DocumentTreeCopyService {
       if (contentBytes > MAX_PACKAGE_BYTES) invalid(413, '한 번에 본문 64MiB까지 복제할 수 있습니다.', 'copy_limit_exceeded');
       documents.push(page);
       if (!options.includeDescendants) continue;
+      const children: string[] = [];
       for (const { id: childId } of this.findChildren.iterate(id) as Iterable<{ id: string }>) {
         if (discovered.has(childId)) hierarchyError();
-        if (pending.length === MAX_COPY_DOCUMENTS) invalid(413, `한 번에 문서 ${MAX_COPY_DOCUMENTS}개까지 복제할 수 있습니다.`, 'copy_limit_exceeded');
+        if (pending.length + children.length === MAX_COPY_DOCUMENTS) invalid(413, `한 번에 문서 ${MAX_COPY_DOCUMENTS}개까지 복제할 수 있습니다.`, 'copy_limit_exceeded');
         discovered.add(childId);
-        pending.push(childId);
+        children.push(childId);
       }
+      pending.push(...this.orders.orderChildren(id, children));
     }
 
     const authorizedOrigins = workspaceContentOrigins(origins);

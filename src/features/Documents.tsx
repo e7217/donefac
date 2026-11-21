@@ -30,6 +30,7 @@ import { DocumentOfflineExport, type DocumentOfflineExportScope } from './Docume
 import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFailure, templateErrorReason, useDocumentTemplates } from './DocumentTemplates';
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentTreeCopy } from './DocumentTreeCopy';
+import { DocumentSiblingOrderDialog } from './DocumentSiblingOrderDialog';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
@@ -40,7 +41,7 @@ import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentD
 import { DocumentLinkedWork } from './DocumentLinkedWork';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
-import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSourceSelection, type DocumentTemplateSummary, type FeatureProps, type RichContent } from '../../shared/types';
+import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSiblingOrder, type DocumentSourceSelection, type DocumentTemplateSummary, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
@@ -82,6 +83,20 @@ type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type CommentFilter = 'all' | 'open' | 'resolved';
 const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
 const COMMENT_FILTERS: CommentFilter[] = ['all', 'open', 'resolved'];
+function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrder[] | undefined) {
+  if (!orders?.length) return pages;
+  const byId = new Map(pages.map((page, index) => [page.id, { page, index }]));
+  const sorted = [...pages];
+  for (const { projectId, parentId, documentIds } of orders) {
+    const members = documentIds.flatMap(id => {
+      const entry = byId.get(id);
+      return entry?.page.projectId === projectId && entry.page.parentId === parentId ? [entry] : [];
+    });
+    const slots = members.map(({ index }) => index).sort((first, second) => first - second);
+    members.forEach(({ page }, index) => { sorted[slots[index]] = page; });
+  }
+  return sorted;
+}
 const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
@@ -127,6 +142,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const closeMove = useCallback(() => setMoveDocumentId(null), []);
   const [copyDocumentId, setCopyDocumentId] = useState<string | null>(null);
   const closeCopy = useCallback(() => setCopyDocumentId(null), []);
+  const [orderDocumentId, setOrderDocumentId] = useState<string | null>(null);
+  const closeOrder = useCallback(() => setOrderDocumentId(null), []);
   const publicationOpener = useRef<HTMLButtonElement>(null);
   const closePublication = useCallback(() => {
     setPublicationDocumentId(null);
@@ -272,6 +289,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
   const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
   const copyOpen = Boolean(selectedPage && selectedPage.id === copyDocumentId);
+  const orderOpen = Boolean(selectedPage && selectedPage.id === orderDocumentId);
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
@@ -288,6 +306,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     return (!documentLabel || labelKeys.includes(documentLabel))
       && (documentLabelKey(page.title).includes(searchKey) || labelKeys.some(key => key.includes(searchKey)));
   }), [filterPages, searchKey, documentLabel]);
+  const treePages = useMemo(() => filtersActive ? visible : orderedTreePages(visible, data.documentOrders), [visible, filtersActive, data.documentOrders]);
   const labelOptions = useMemo(() => {
     const options = new Map<string, string>();
     for (const page of filterPages) {
@@ -630,13 +649,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (issueDrawerOpen || newOpen || templateManager || offlineExport) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        if (!publicationOpen && !moveOpen && !copyOpen) void saveDraft();
+        if (!publicationOpen && !moveOpen && !copyOpen && !orderOpen) void saveDraft();
       }
       if (event.key === 'Escape') { setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); setIssueBlockSelection(null); setExportOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, copyOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
+  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1424,7 +1443,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <button type="button" className="docs-tree-group-add" aria-label="프로젝트 문서 추가" onClick={() => openNew()}><Plus size={14} /></button>
             </div>
           </div>
-          {tree(visible.filter(page => page.projectId !== null))}
+          {tree(treePages.filter(page => page.projectId !== null))}
           {!filtersActive && !visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">첫 문서를 작성해보세요.</p>}
           <div className="docs-tree-group docs-tree-common"><span>팀 공통 문서</span>
             <div className="docs-tree-group-actions">
@@ -1432,7 +1451,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <button type="button" className="docs-tree-group-add" aria-label="팀 공통 문서 추가" onClick={() => { openNew(); setNewProject(''); }}><Plus size={14} /></button>
             </div>
           </div>
-          {tree(visible.filter(page => page.projectId === null))}
+          {tree(treePages.filter(page => page.projectId === null))}
           {!filtersActive && !visible.some(page => page.projectId === null) && <p className="docs-tree-empty">함께 참고하는 지식을 모아보세요.</p>}
         </div>
         <button className="docs-template-shortcut" onClick={() => openNew('', 'meeting')}><FilePlus2 size={16} /><span>템플릿으로 시작하기</span><ChevronRight size={14} /></button>
@@ -1466,6 +1485,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <button type="button" className="btn btn-ghost docs-icon-button" title="문서 복제" aria-label="문서 복제"
                 disabled={saving || restoring} onClick={() => { setExportOpen(false); setCopyDocumentId(selectedPage.id); }}>
                 <Copy size={16} aria-hidden="true" />
+              </button>
+              <button type="button" className="btn btn-ghost docs-icon-button" title="문서 순서 편집" aria-label="문서 순서 편집"
+                disabled={saving || restoring} onClick={() => { setExportOpen(false); setOrderDocumentId(selectedPage.id); }}>
+                <ListOrdered size={16} aria-hidden="true" />
               </button>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
               <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
@@ -1686,6 +1709,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       onClose={closeMove} onMoved={moveSaved} />}
     {copyOpen && latestPage && <DocumentTreeCopy key={latestPage.id} source={latestPage} documents={data.documents}
       projects={data.projects} actorId={actorId} refreshWorkspace={refresh} onClose={closeCopy} onOpenCopy={selectDocument} />}
+    {orderOpen && selectedPage && <DocumentSiblingOrderDialog key={selectedPage.id} documentId={selectedPage.id} documents={data.documents}
+      projects={data.projects} refreshWorkspace={refresh} onClose={closeOrder} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}

@@ -780,6 +780,12 @@ export interface DocumentTreeCopyOptions {
   includeDescendants: boolean;
   expectedSourceVersion: number;
 }
+export interface DocumentSiblingOrder {
+  projectId: string | null;
+  parentId: string | null;
+  documentIds: string[];
+  version: string;
+}
 export interface DocumentTreeCopyPreview extends DocumentTreeCopyOptions {
   sourceDocumentId: string;
   token: string;
@@ -1264,6 +1270,7 @@ export interface WorkspaceSnapshot {
   teamWorkloadCapacity?: TeamWorkloadCapacity;
   issueSchemas?: ProjectIssueSchema[];
   issueOrders?: ProjectIssueOrder[];
+  documentOrders?: DocumentSiblingOrder[];
 }
 export interface ScheduleChange {
   id: string;

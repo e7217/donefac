@@ -139,7 +139,7 @@ test('native format 81 retains blocker guards and rejects a mislabeled legacy ba
     assert.equal(guarded.status, 200);
     assert.equal(edgeFor(guarded.data)?.requireResolvedBlockers, true);
     const saved = (await f.call('/export')).data;
-    assert.equal(saved.schemaVersion, 81);
+    assert.equal(saved.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     const bad = await f.call<{ error: string }>('/import', 'POST', { data: { ...saved, schemaVersion: 80 } });
     assert.equal(bad.status, 400);
     assert.match(bad.data.error, /schemaVersion 81/u);
@@ -147,7 +147,7 @@ test('native format 81 retains blocker guards and rejects a mislabeled legacy ba
 
     assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
     assert.equal(edgeFor((await f.call<ProjectWorkflow>(path)).data)?.requireResolvedBlockers, undefined);
-    assert.equal((await f.call('/import', 'POST', { data: saved })).status, 200);
+    assert.equal((await f.call('/import', 'POST', { data: { ...saved, schemaVersion: 81 } })).status, 200);
     const restored = (await f.call<ProjectWorkflow>(path)).data;
     assert.equal(edgeFor(restored)?.requireResolvedBlockers, true);
     assert.ok(restored.version > guarded.data.version);

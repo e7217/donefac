@@ -1,0 +1,47 @@
+.docs-sibling-order-position {
+  color: #485a70;
+}
+
+.docs-sibling-order-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.docs-sibling-order-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid #edf0f6;
+}
+
+.docs-sibling-order-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.docs-sibling-order-title small {
+  display: inline-block;
+  margin-inline-start: 5px;
+  color: #3858ad;
+  font-size: 11px;
+}
+
+.docs-sibling-order-arrows {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.docs-sibling-order-arrows button {
+  min-width: 38px;
+  min-height: 38px;
+}
+
+.docs-sibling-order-arrows [aria-disabled='true'] {
+  opacity: .5;
+  cursor: not-allowed;
+}

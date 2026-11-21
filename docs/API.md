@@ -239,6 +239,14 @@ curl --fail-with-body \
 
 문서 화면의 Markdown 가져오기는 브라우저에서 파일이나 입력 내용을 미리보기로 변환한다. 저장은 새 문서와 같은 API에 검토한 `content`를 보낸다. 미리보기 입력을 바꾸면 다시 검토한 뒤 저장한다. 첫 저장 응답을 확인할 수 없으면 같은 요청을 다시 보내고, 응답을 받은 뒤 목록이 갱신되지 않았으면 문서 열기만 다시 시도한다.
 
+## 형제 문서 순서
+
+브라우저의 `GET /api/documents/:id/sibling-order`는 기준 문서의 현재 위치에 속한 전체 형제 순서를 `{projectId,parentId,documentIds,version}`으로 반환한다. 형제 범위는 최상위에서 공간별이며, 하위에서는 같은 상위 문서의 현재 공간을 따른다. 사용자 지정 순서가 생기기 전에는 삽입 순서를 적용한다.
+
+`PATCH /api/documents/:id/sibling-order`에 `{expectedVersion,documentIds}`로 같은 위치의 전체 ID를 한 번씩 보낸다. 다른 순서가 저장됐거나 문서 구성이나 위치가 바뀌면 `409`를 반환한다. 순서 저장에는 독립된 순서 버전과 활동 기록을 사용한다. 저장 응답을 받지 못하면 `GET`으로 현재 순서와 저장하려던 순서를 대조할 수 있다.
+
+새로 생성·복원하거나 다른 상위 문서에서 이동한 문서는 해당 형제 그룹의 끝에 놓인다. 트리가 공간을 옮기면 내부 형제 순서도 이어지고 복제는 미리보기의 형제 순서를 따른다. 자체 백업 형식 82는 사용자 지정 순서를 포함하며 복원 시 새 순서 버전을 발급한다.
+
 ## 문서 트리 복제
 
 브라우저의 `POST /api/documents/:id/copy-preview`에 `{title,projectId,parentId,includeDescendants,expectedSourceVersion}`을 보낸다. `projectId: null`은 팀 공통 공간이고 `parentId: null`은 최상위다. 미리보기에는 선택한 문서와 버전, 복제할 파일 수와 바이트, 확인이 필요한 첨부 주소, `token`을 담는다. 활성 문서 최대 100개, 본문 합계 64MiB와 복제할 첨부 합계 64MiB·1,500개를 지원한다.
