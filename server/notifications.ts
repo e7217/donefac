@@ -97,10 +97,13 @@ function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<s
   if (commentId !== null) {
     const comment = comments?.get(commentId);
     // A receipt remains available after permanent deletion of its target comment.
+    // A later edit can also remove the mention that generated the receipt.
+    const wasEditedSinceNotification = comment?.editVersion !== undefined && timestamp(comment.editedAt) && row.createdAt <= comment.editedAt;
     if (comment && (comment.resourceType !== (row.kind.startsWith('issue-') ? 'issue' : 'document') ||
         comment.resourceId !== row.targetId || comment.authorId !== row.actorId ||
         (row.kind === COMMENT_REPLY_KIND && !comment.parentCommentId) ||
-        (COMMENT_MENTION_KINDS.has(row.kind) && !comment.mentions?.some(mention => mention.userId === row.recipientId)))) {
+        (COMMENT_MENTION_KINDS.has(row.kind) && !wasEditedSinceNotification &&
+          !comment.mentions?.some(mention => mention.userId === row.recipientId)))) {
       throw new TeamNotificationError('댓글 알림의 대상과 수신자를 확인해 주세요.');
     }
   }

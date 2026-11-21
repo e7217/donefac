@@ -975,11 +975,15 @@ export interface Comment {
   authorId: string;
   body: string;
   createdAt: string;
+  editVersion?: number;
+  editedAt?: string;
   documentSource?: DocumentDecisionSource;
   parentCommentId?: string;
   mentions?: CommentMention[];
   resolution?: DocumentCommentResolution;
 }
+export interface CommentEditSnapshot { comment: Comment; editToken: string }
+export interface CommentEditResult extends CommentEditSnapshot { duplicate: boolean }
 export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }
 export interface DocumentCommentReplyResult { comment: Comment; duplicate: boolean }
 export interface Attachment { id: string; resourceType: 'issue' | 'document'; resourceId: string; filename: string; mimeType: string; size: number; sha256: string; authorId: string; createdAt: string; versionCount?: number }

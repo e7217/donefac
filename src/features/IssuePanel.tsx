@@ -17,7 +17,8 @@ import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
-import { CommentMentionInput, CommentMentionText, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
+import { CommentMentionInput, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
+import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
@@ -101,6 +102,11 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
   const [comments, setComments] = useState<Comment[]>([]);
+  const commentEditing = useCommentEditing({
+    actorId: props.actorId, resourceId: issueId, refresh, notify,
+    onSaved: saved => setComments(previous => previous.map(item => item.id === saved.id ? saved : item)),
+  });
+  const { discard: discardCommentEdit, hasDraft: hasCommentEditDraft, isPending: isCommentEditPending } = commentEditing;
   const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
   const [loadingComments, setLoadingComments] = useState(true);
   const [loadedCommentActivation, setLoadedCommentActivation] = useState<number>();
@@ -201,6 +207,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, []);
   const switchTab = useCallback((next: typeof tab) => {
     if (next === tab) return true;
+    if (isCommentEditPending()) { notify('댓글 수정 요청이 끝난 뒤 이동해 주세요.', 'error'); return false; }
     const editingReservations = tab === 'reservations';
     const drafts = [childDraft.current, gitlabDraft.current];
     const pending = drafts.find(value => value?.pending);
@@ -214,7 +221,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     for (const value of drafts) value?.discard();
     setTab(next);
     return true;
-  }, [notify, tab]);
+  }, [isCommentEditPending, notify, tab]);
   useEffect(() => {
     const focusCommentTab = (event: Event) => {
       const target = (event as CustomEvent<{ issueId: string }>).detail;
@@ -242,13 +249,14 @@ function IssuePanelContent(props: IssuePanelProps) {
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
-      if (savingRef.current || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || projectMoveGuard.current.pending) {
+      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || projectMoveGuard.current.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
       }
       const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
       if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
+      if (hasCommentEditDraft()) childNames.push('댓글 수정 입력');
       const moveGuard = projectMoveGuard.current;
       const moveDiscard = moveGuard.uncertain ? '이동 결과를 아직 확인하지 못했습니다. 다른 화면으로 이동할까요?' : '작성 중인 프로젝트 이동 설정을 버릴까요?';
       if (moveGuard.dirty && !dirtyRef.current && !childNames.length && !window.confirm(moveDiscard)) {
@@ -269,15 +277,16 @@ function IssuePanelContent(props: IssuePanelProps) {
         });
       }
       if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
+      afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
+      if (!dirtyRef.current && !savingRef.current && !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
           !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify, tab, projectMove, closeProjectMove]);
+  }, [issue, notify, tab, projectMove, closeProjectMove, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -388,10 +397,10 @@ function IssuePanelContent(props: IssuePanelProps) {
       ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
   function projectMoveDraftMessage() {
     const childDrafts = [childDraft.current, gitlabDraft.current];
-    if (savingRef.current || commenting || linkingRef.current || dependencyBusyRef.current || childDrafts.some(value => value?.pending)) {
+    if (savingRef.current || commenting || isCommentEditPending() || linkingRef.current || dependencyBusyRef.current || childDrafts.some(value => value?.pending)) {
       return '현재 작업을 저장한 뒤 프로젝트를 이동해 주세요.';
     }
-    if (dirty || commentDraft.body.trim() || dependencyDraftRef.current || childDrafts.some(value => value?.dirty)) {
+    if (dirty || commentDraft.body.trim() || hasCommentEditDraft() || dependencyDraftRef.current || childDrafts.some(value => value?.dirty)) {
       return '이동을 적용하려면 창을 닫고 저장하지 않은 업무 변경사항이나 작성 중인 댓글·연결을 먼저 정리해 주세요.';
     }
     return null;
@@ -446,12 +455,13 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   async function deleteIssue() {
     if (gitlabDraft.current?.pending) { notify('GitLab 연결 변경이 끝난 뒤 업무를 휴지통으로 옮겨 주세요.', 'error'); return; }
-    if (!issue || savingRef.current || commenting || dependencyBusyRef.current || childDraft.current?.pending) return;
+    if (!issue || savingRef.current || commenting || isCommentEditPending() || dependencyBusyRef.current || childDraft.current?.pending) return;
     savingRef.current = true; setSaving(true); setError(null);
     try {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       dirtyRef.current = false;
+      discardCommentEdit();
       try {
         await refresh();
         notify(`${issue.key} 업무를 휴지통으로 옮겼습니다.`);
@@ -741,13 +751,18 @@ function IssuePanelContent(props: IssuePanelProps) {
             <span className="issue-avatar" style={{ background: user?.color || '#8996a4' }}>{user?.name.slice(0, 1) || '?'}</span>
             <div>
               <header><strong>{user?.name || '알 수 없는 사용자'}</strong><time title={comment.createdAt}>{relativeTime(comment.createdAt)}</time>
-                <CommentTrashButton comment={comment} actorId={props.actorId} notify={notify} refresh={refresh} disabled={commenting || saving}
+                <CommentEditedMark comment={comment} />
+                <CommentEditButton comment={comment} editing={commentEditing} disabled={commenting || saving} />
+                <CommentTrashButton comment={comment} actorId={props.actorId} notify={notify} refresh={refresh}
+                  disabled={commenting || saving || commentEditing.current?.base.id === comment.id}
                   onArchived={removed => setComments(previous => previous.filter(value => value.id !== removed.id))} />
               </header>
-              <p><CommentMentionText comment={comment} /></p>
+              <CommentEditBody comment={comment} editing={commentEditing} users={data.users} />
             </div>
           </article>;
         })}
+        {commentEditing.current && !comments.some(comment => comment.id === commentEditing.current?.base.id) &&
+          <CommentEditBody comment={commentEditing.current.base} editing={commentEditing} users={data.users} />}
         {commentError && <div className="issue-form-error" role="alert">{commentError}</div>}
         <form onSubmit={addComment}>
           <CommentMentionInput className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" draft={commentDraft}
@@ -755,7 +770,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           <div className="issue-comment-submit"><button className="btn" disabled={!commentDraft.body.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div>
         </form>
       </section>
-      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentDraft.body.trim()) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
+      <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentDraft.body.trim() || commentEditing.dirty) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting || Boolean(commentEditing.operation)}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />

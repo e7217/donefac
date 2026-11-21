@@ -5,8 +5,9 @@ import { Link2, Send } from 'lucide-react';
 import type { Comment, DocumentCommentReplyResult, FeatureProps, User } from '../../shared/types';
 import { ApiError, api, relativeTime } from '../lib/api';
 import { newRequestId } from '../lib/request-id';
+import { CommentEditBody, CommentEditButton, CommentEditedMark, type CommentEditing } from './CommentEdit';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
-import { CommentMentionInput, CommentMentionText, commentDraftPayload, decodeCommentDraft, emptyCommentDraft,
+import { CommentMentionInput, commentDraftPayload, decodeCommentDraft, emptyCommentDraft,
   encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
 
 type Scope = { actorId: string; documentId: string; parentId: string };
@@ -241,8 +242,8 @@ export function DocumentReplyComposer({ editor, resolved, busy, users, onChange,
   </form>;
 }
 
-export function DocumentReplyList({ replies, users, actorId, notify, refresh, disabled, onArchived, onCopyCommentLink }: Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
-  replies: readonly Comment[]; users: readonly User[]; disabled?: boolean;
+export function DocumentReplyList({ replies, users, actorId, notify, refresh, editing, disabled, onArchived, onCopyCommentLink }: Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
+  replies: readonly Comment[]; users: readonly User[]; editing: CommentEditing; disabled?: boolean;
   onArchived: (comment: Comment) => void; onCopyCommentLink?: (id: string) => void;
 }) {
   if (!replies.length) return null;
@@ -254,13 +255,16 @@ export function DocumentReplyList({ replies, users, actorId, notify, refresh, di
           <span className="docs-avatar" aria-hidden="true" style={{ background: user?.color ?? '#78849a' }}>{user?.name.slice(0, 1) ?? '팀'}</span>
           <strong>{user?.name ?? '팀원'}</strong>
           <time dateTime={reply.createdAt} title={new Date(reply.createdAt).toLocaleString('ko-KR')}>{relativeTime(reply.createdAt)}</time>
+          <CommentEditedMark comment={reply} />
+          <CommentEditButton comment={reply} editing={editing} disabled={disabled} />
           {onCopyCommentLink && <button type="button" className="btn btn-ghost docs-comment-reply-link"
             aria-label="답글 링크 복사" title="답글 링크 복사" onClick={() => onCopyCommentLink(reply.id)}>
             <Link2 size={13} aria-hidden="true" />
           </button>}
-          <CommentTrashButton comment={reply} actorId={actorId} notify={notify} refresh={refresh} disabled={disabled} onArchived={onArchived} />
+          <CommentTrashButton comment={reply} actorId={actorId} notify={notify} refresh={refresh}
+            disabled={disabled || editing.current?.base.id === reply.id} onArchived={onArchived} />
         </div>
-        <p><CommentMentionText comment={reply} /></p>
+        <CommentEditBody comment={reply} editing={editing} users={users} />
       </article>;
     })}
   </section>;

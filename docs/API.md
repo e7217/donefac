@@ -45,6 +45,7 @@ curl --fail-with-body \
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
 | `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
 | `GET /comments?resourceType=issue&resourceId=...` | 업무 또는 문서 댓글 조회 |
+| `GET /comments/:id/edit` · `PATCH /comments/:id` | 작성자가 현재 댓글을 확인하고 수정 |
 | `GET /attachments?resourceType=issue&resourceId=...` · `GET /attachments/:id/versions` | 업무·문서의 첨부 목록, 각 첨부의 버전 이력 |
 | `GET /attachments/:id/content` · `GET /attachment-versions/:id/download` | 지정된 파일 버전의 바이너리 |
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·휴지통 이동 |
@@ -373,6 +374,14 @@ curl --fail-with-body \
 새 답글은 같은 문서의 열린 문장 댓글에 쓴다. 해결 상태 또는 버전이 바뀌면 `409`와 `details.reason`의 `thread_resolved` 또는 `thread_changed`, `currentResolutionVersion`을 반환한다. 원래 댓글을 찾을 수 없으면 `404`와 `thread_missing`을 반환한다. 같은 작업자가 요청 ID·해결 버전·본문·멘션을 그대로 보내면 대화가 해결된 뒤에도 이미 저장한 활성 답글을 `200`과 `duplicate:true`로 반환한다. 요청 ID를 다른 입력에 재사용하면 `409`와 `request_reused`를, 저장한 답글이나 원래 댓글을 조회할 수 없으면 `409`와 `receipt_unavailable`을 반환한다.
 
 댓글 읽기 응답에는 답글의 `parentCommentId`가 포함된다. 프로젝트 범위 키의 읽기에는 원래 댓글의 고정 원문 범위도 적용한다. 답글 알림의 `commentId`는 답글을 가리키며 `?comment=<ID>`로 열 수 있다. 자체 백업 형식 77은 문서·댓글의 활성 및 휴지통 데이터와 답글 알림을 보존한다. 원래 댓글을 휴지통에 넣을 때 함께 보관한 답글은 원래 댓글과 함께 복원한다. 별도로 휴지통에 넣은 답글은 원래 댓글이 활성일 때 복원할 수 있다. 물리 백업은 댓글 요청 기록을 보존한다.
+
+### 등록한 댓글 수정
+
+`GET /api/comments/:id/edit`에서 `{comment,editToken}`을 조회한다. `PATCH /api/comments/:id`에 `{editToken,requestId,body,mentions?}`를 보낸다. `requestId`는 요청마다 발급한 UUID v4다. 현재 등록된 댓글의 작성자가 수정할 수 있다. 쓰기 키의 `/api/v1`에서도 같은 계약을 사용하며, 키의 작업자가 작성자여야 한다. 대상 프로젝트와 문장 댓글 또는 답글의 고정 원문도 키의 범위 안에 있어야 한다.
+
+응답은 `{comment,editToken,duplicate}`다. 변경한 댓글에는 `editVersion`과 `editedAt`이 붙는다. 수정은 기존 댓글 ID와 등록 시각, 원문 선택 위치, 답글과 해결 상태를 보존한다. 달라진 댓글을 이전 토큰으로 저장하면 `409`와 `comment_edit_conflict`를 반환한다. 같은 요청 ID와 입력을 다시 보내면 현재 댓글과 `duplicate:true`를 반환한다. 요청 ID를 다른 입력에 재사용하면 `409`와 `comment_edit_request_reused`를 반환한다.
+
+수정한 본문에서 유지할 멘션의 전체 범위를 `mentions`로 보낸다. 배열을 생략하거나 비우면 현재 멘션을 해제한다. 새로 멘션한 팀원이 알림을 받는다. 자체 백업 형식 89는 활성·휴지통 댓글의 수정 시각과 버전을 보존한다. 자체 백업으로 작업공간을 교체하면 편집 토큰을 새로 받아야 한다.
 
 ### 댓글 멘션
 

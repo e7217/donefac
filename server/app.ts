@@ -34,6 +34,7 @@ import { DocumentSelectionCommentError, DocumentSelectionCommentService } from '
 import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
+import { CommentEditError, CommentEditingService, validateCommentEdit } from './comment-editing.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
@@ -198,6 +199,7 @@ export function createApp(options: {
   const documentFollowUp=new DocumentFollowUpService(store);
   const documentSelectionComments=new DocumentSelectionCommentService(store);
   const documentCommentReplies=new DocumentCommentReplyService(store);
+  const commentEditing = new CommentEditingService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
@@ -1849,6 +1851,27 @@ export function createApp(options: {
       store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));
     });res.status(201).json(c);
   });
+  app.get('/api/comments/:id/edit', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(commentEditing.get(req.params.id, actor(req)));
+  });
+  app.patch('/api/comments/:id', (req, res) => {
+    const result = commentEditing.update({ commentId: req.params.id, actorId: actor(req), body: req.body }, {
+      validateBody: body => text(body, '댓글', 20000),
+      onEdited(comment, newlyMentionedIds) {
+        const { resourceType, resourceId, authorId, id, editedAt } = comment;
+        if (newlyMentionedIds.length) {
+          const target = resourceType === 'issue' ? get<Issue>('issues', resourceId) : get<DocPage>('documents', resourceId);
+          notifications.notify({
+            kind: `${resourceType}-comment-mentioned`, actorId: authorId, recipientIds: newlyMentionedIds,
+            projectId: target.projectId, targetId: resourceId, targetLabel: 'key' in target ? `${target.key} ${target.title}` : target.title,
+            commentId: id, createdAt: editedAt,
+          });
+        }
+        activity(req, resourceType, resourceId, comment.parentCommentId ? '댓글 답글 수정' : '댓글 수정');
+      },
+    });
+    res.set('Cache-Control', 'no-store').json(result);
+  });
   app.post('/api/documents/:id/selection-comments',(req,res)=>{
     const result=documentSelectionComments.create({documentId:String(req.params.id),actorId:actor(req),body:req.body},{
       validateBody:body=>text(body,'댓글',20000),
@@ -2476,6 +2499,7 @@ export function createApp(options: {
     const legacyConfluenceRevisionIds = new Set(importedSources.records.filter(record =>
       record.source.product === 'confluence' && record.targetType === 'revision').map(record => record.targetId));
     for (const comment of allImportedComments) {
+      validateCommentEdit(comment, data.schemaVersion, data.exportedAt);
       if (data.schemaVersion < 73 && Object.hasOwn(comment, 'resolution')) {
         fail('문장 댓글 해결 상태를 포함한 백업은 schemaVersion 73이 필요합니다.');
       }
@@ -2594,6 +2618,7 @@ export function createApp(options: {
       documentFollowUp.clearForImport();
       documentSelectionComments.clearForImport();
       documentCommentReplies.clearForImport();
+      commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
       issueProjectMove.clearForImport();
@@ -2697,6 +2722,7 @@ export function createApp(options: {
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CommentEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});

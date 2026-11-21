@@ -240,6 +240,31 @@ export class ApiKeyService {
       this.used(key);
       return next();
     }
+    const commentEdit = /^\/api\/comments\/([^/]+)(\/edit)?$/.exec(path);
+    if (commentEdit && (commentEdit[2] ? request.method === 'GET' : request.method === 'PATCH')) {
+      if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
+      this.query(request, []);
+      const comment = this.store.get<Comment>('comments', this.decode(commentEdit[1]));
+      if (!comment) return fail(404, '수정할 댓글을 찾을 수 없습니다.');
+      this.resource(key, comment.resourceType === 'issue' ? 'issues' : 'documents', comment.resourceId);
+      if (comment.resourceType === 'document') {
+        let source = comment.documentSource;
+        if (comment.parentCommentId) {
+          const parent = this.store.get<Comment>('comments', comment.parentCommentId);
+          if (parent?.resourceType !== 'document' || parent.resourceId !== comment.resourceId || !parent.documentSource) {
+            return fail(404, '원래 문장 댓글을 찾을 수 없습니다.');
+          }
+          source = parent.documentSource;
+        }
+        if (source) {
+          const revision = this.store.get<DocRevision>('revisions', source.revisionId);
+          if (!revision || revision.documentId !== comment.resourceId) return fail(404, '댓글의 원문 저장본을 찾을 수 없습니다.');
+          this.requireDocumentBody(key, revision.content);
+        }
+      }
+      this.used(key);
+      return next();
+    }
     const fieldBreakdown = /^\/api\/projects\/([^/]+)\/field-breakdown(?:\/issues)?$/.exec(path);
     if (request.method === 'POST' && fieldBreakdown) {
       this.query(request, []);
