@@ -3,9 +3,9 @@ import type { Express, Request } from 'express';
 import { isCalendarDate } from '../shared/calendar.js';
 import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput,
   type ScheduleChange, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview,
-  type ScheduleRowDependencyEdit, type ScheduleRowEditInput } from '../shared/types.js';
+  type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type WorkCalendar } from '../shared/types.js';
 import { dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
-import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, type AutomaticScheduleMutation } from './automatic-schedule.js';
+import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
 import type { Store } from './store.js';
@@ -25,6 +25,8 @@ export type ScheduleDateMutation = AutomaticScheduleMutation & Partial<Pick<Issu
 interface PasteHooks {
   actor(request: Request): string;
   versions(projectId: string): ScheduleVersions;
+  calendar(projectId: string): WorkCalendar;
+  workflow(projectId: string): ProjectWorkflow;
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
   commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
@@ -45,6 +47,7 @@ interface PasteProposal extends ScheduleScope {
   guard: string;
   changes: ScheduleDateMutation[];
   linkChanges?: ScheduleDependencyMutation[];
+  followUpWarnings?: string[];
   kind?: 'bulk-dates' | 'row-edit';
   result?: SchedulePasteApplyResult;
 }
@@ -131,9 +134,11 @@ function parseRowDependencyEdit(raw: unknown): ScheduleRowDependencyEdit {
 
 function parseRowEditInput(raw: unknown): Pick<ScheduleRowEditInput, 'projectId' | 'issue' | 'changes'> & {
   linkEdits: { line: number | null; input: ScheduleRowDependencyEdit }[];
+  rescheduleSuccessors: boolean;
 } {
   if (!isRecord(raw) || !isId(raw.projectId) ||
-    Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency', 'dependencies'].includes(key)) ||
+    Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency', 'dependencies', 'rescheduleSuccessors'].includes(key)) ||
+    (Object.hasOwn(raw, 'rescheduleSuccessors') && typeof raw.rescheduleSuccessors !== 'boolean') ||
     (Object.hasOwn(raw, 'dependency') && Object.hasOwn(raw, 'dependencies'))) {
     throw new SchedulePasteError(400, '프로젝트와 업무 일정 변경 항목을 확인해 주세요.');
   }
@@ -151,6 +156,7 @@ function parseRowEditInput(raw: unknown): Pick<ScheduleRowEditInput, 'projectId'
     issue: parseScheduleIssue(raw.issue),
     changes: raw.changes === undefined ? {} : parseDateChanges(raw.changes, true),
     linkEdits,
+    rescheduleSuccessors: raw.rescheduleSuccessors === true,
   };
 }
 
@@ -247,7 +253,7 @@ export class SchedulePasteService {
   }
 
   private savePreview(preview: SchedulePastePreview, state: ScheduleState,
-    proposal: Pick<PasteProposal, 'actorId' | 'issueIds' | 'changes' | 'linkChanges' | 'kind'>, hooks: PasteHooks): SchedulePastePreview {
+    proposal: Pick<PasteProposal, 'actorId' | 'issueIds' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings'>, hooks: PasteHooks): SchedulePastePreview {
     if (preview.errors.length || (!proposal.changes.length && !proposal.linkChanges?.length)) return preview;
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
@@ -431,7 +437,7 @@ export class SchedulePasteService {
   }
 
   private previewRowEdit(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    const { projectId, issue: selected, changes: requested, linkEdits } = parseRowEditInput(raw);
+    const { projectId, issue: selected, changes: requested, linkEdits, rescheduleSuccessors } = parseRowEditInput(raw);
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
@@ -493,17 +499,50 @@ export class SchedulePasteService {
         });
       }
       if (!changes.length && !linkChanges.length && !preview.errors.length) preview.unchanged = 1;
+      const followUpWarnings: string[] = [];
       if (changes.length || linkChanges.length) {
-        const [change] = changes;
-        const projectedIssues = change ? state.issues.map(value => value.id === issue.id
-          ? { ...value, startDate: change.startDate, endDate: change.endDate } : value) : state.issues;
         const projectedLinks = projectScheduleDependencies(state.dependencies, linkChanges);
         if (linkChanges.some(link => !link.before) && hasScheduleDependencyCycle(projectedLinks)) {
           linkError(null, '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.');
         }
-        preview.warnings = hooks.warnings(projectedIssues, affectedLinks(projectedLinks, changes.map(value => value.id), linkChanges));
+        if (rescheduleSuccessors && !preview.errors.length) {
+          const plan = calculateFixedFollowUpSchedule({
+            issues: state.issues, dependencies: projectedLinks, calendar: hooks.calendar(projectId), workflow: hooks.workflow(projectId),
+            anchor: dates?.change ?? { id: issue.id, expectedVersion: issue.version, startDate: issue.startDate, endDate: issue.endDate },
+          });
+          // Include unchanged successors so a new link or changed outside predecessor also invalidates this review.
+          for (const id of plan.issueIds) issueIds.add(id);
+          for (const message of plan.blocking) preview.errors.push({ line: null, message });
+          followUpWarnings.push(...plan.warnings);
+          for (const suggestion of plan.changes) {
+            if (suggestion.id === issue.id) continue; // The selected row also has its own optional due-date change.
+            const successor = issuesById.get(suggestion.id)!;
+            const suggestedDates = proposeDateEdit(successor, { startDate: suggestion.toStart, endDate: suggestion.toEnd });
+            if (!suggestedDates) continue;
+            const error = hooks.validateChange(successor, suggestedDates.change);
+            if (error) preview.errors.push({ line: null, issueId: successor.id, key: successor.key, message: error });
+            else {
+              changes.push(suggestedDates.change);
+              preview.changes.push(suggestedDates.summary);
+            }
+          }
+          if (changes.length > 1000 && !preview.errors.length) {
+            linkError(null, '한 번에 변경할 수 있는 업무는 1000개입니다. 범위를 나누어 미리 확인해 주세요.');
+          }
+          for (const { key, toEnd, toDue } of preview.changes) {
+            if (toEnd && toDue && toEnd > toDue) followUpWarnings.push(`${key}: 제안한 종료일 ${toEnd}이 목표 마감일 ${toDue}보다 늦습니다.`);
+          }
+        }
+        const changeById = new Map(changes.map(value => [value.id, value]));
+        const projectedIssues = state.issues.map(value => {
+          const change = changeById.get(value.id);
+          return change ? { ...value, startDate: change.startDate, endDate: change.endDate } : value;
+        });
+        preview.warnings = [...new Set([...followUpWarnings, ...hooks.warnings(projectedIssues, affectedLinks(projectedLinks, changeById.keys(), linkChanges))])];
       }
-      return this.savePreview(preview, state, { actorId, issueIds: [...issueIds], changes, linkChanges, kind: 'row-edit' }, hooks);
+      return this.savePreview(preview, state, { actorId, issueIds: [...issueIds], changes, linkChanges, kind: 'row-edit',
+        ...(followUpWarnings.length ? { followUpWarnings } : {}),
+      }, hooks);
     });
   }
 
@@ -530,6 +569,7 @@ export class SchedulePasteService {
       }
       const links = affectedLinks(projectedLinks, proposal.changes.map(change => change.id), linkChanges);
       const result = hooks.commitChanges(request, proposal.changes, links, linkChanges);
+      if (proposal.followUpWarnings) result.warnings = [...new Set([...proposal.followUpWarnings, ...result.warnings])];
       this.store.put(table, {...proposal,removeAfter:after(AUTO_RESULT_RETENTION_MS),result});
       return result;
     });

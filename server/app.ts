@@ -960,6 +960,8 @@ export function createApp(options: {
   schedulePaste.registerRoutes(app,{
     actor,
     versions:scheduleVersions,
+    calendar:projectId=>calendars.get(projectId),
+    workflow:projectId=>workflows.get(projectId),
     validateChange:validateScheduleChange,
     warnings:scheduleWarnings,
     commitChanges:(request,changes,dependencies,linkChanges)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true),

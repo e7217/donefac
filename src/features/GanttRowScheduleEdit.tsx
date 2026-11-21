@@ -122,6 +122,7 @@ export function GanttRowScheduleEdit({
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>({});
   const [drafts, setDrafts] = useState(() => [linkDraft(1)]);
+  const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const nextDraftId = useRef(2);
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -170,7 +171,8 @@ export function GanttRowScheduleEdit({
   }
   const duplicateDraft = ({ target }: DraftResolution) => target !== undefined && (targetCounts.get(target) ?? 0) > 1;
   const payload: ScheduleRowEditInput = { projectId: issue.projectId, issue: versionedIssue(anchor), changes,
-    ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}) };
+    ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}),
+    ...(rescheduleSuccessors ? { rescheduleSuccessors } : {}) };
   const input = JSON.stringify({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
@@ -464,6 +466,19 @@ export function GanttRowScheduleEdit({
               </button>
             </div>;
           })}
+          <div className="gantt-row-edit-cascade">
+            <label>
+              <input type="checkbox" checked={rescheduleSuccessors} aria-describedby={`${uid}-reschedule-help`}
+                onChange={event => {
+                  setRescheduleSuccessors(event.currentTarget.checked);
+                  invalidate();
+                }} />
+              후행 일정 함께 검토
+            </label>
+            <p id={`${uid}-reschedule-help`} className="gantt-row-edit-hint">
+              선택한 업무는 위 날짜를 유지합니다. 변경할 연결을 기준으로 후행 업무의 근무일 기간을 유지하며 일정을 필요한 만큼 늦춥니다.
+            </p>
+          </div>
         </fieldset>
         <div className="gantt-row-edit-actions">
           <button className="btn btn-primary" type="submit" disabled={editLocked || !canPreview || reloadNeeded}>변경 미리보기</button>
@@ -485,10 +500,14 @@ export function GanttRowScheduleEdit({
           })}</ul>}
           {!result.errors.length && !hasChanges(result) && <p className="schedule-paste-noop" role="status">적용할 변경이 없습니다.</p>}
           {reviewStale && !retryId && !applied && <p className="schedule-paste-stale" role="status">일정 조건이 바뀌었거나 미리보기가 만료되었습니다. 다시 검토해 주세요.</p>}
-          {result.changes.map(change => <dl className="gantt-row-edit-diff" key={change.id}>
-            {dates.filter(({ from, to }) => (change[from] ?? null) !== (change[to] ?? null)).map(({ field, label, from, to }) =>
-              <div key={field}><dt>{label}</dt><dd>{change[from] ?? '미정'} → <strong>{change[to] ?? '미정'}</strong></dd></div>)}
-          </dl>)}
+          {result.changes.map(change => <div className="gantt-row-edit-diff" key={change.id}>
+            {rescheduleSuccessors && <header className="gantt-row-edit-diff-title">
+              <h4>{change.key} · {change.title}</h4>
+              <small className="gantt-row-edit-hint">{change.id === anchor.id ? '선택한 업무' : '후행 업무'}</small>
+            </header>}
+            <dl>{dates.filter(({ from, to }) => (change[from] ?? null) !== (change[to] ?? null)).map(({ field, label, from, to }) =>
+              <div key={field}><dt>{label}</dt><dd>{change[from] ?? '미정'} → <strong>{change[to] ?? '미정'}</strong></dd></div>)}</dl>
+          </div>)}
           {result.dependencyChanges?.map(change => <div className="gantt-row-edit-link-diff" key={change.line}>
             {reviewGroup(change.line) && <small className="gantt-row-edit-hint">{reviewGroup(change.line)}</small>}
             <h4>{change.predecessorKey} → {change.successorKey}</h4>

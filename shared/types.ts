@@ -1477,6 +1477,7 @@ export interface ScheduleRowEditInput {
   changes: ScheduleBulkDateChanges;
   dependency?: ScheduleRowDependencyEdit;
   dependencies?: readonly ScheduleRowDependencyEdit[];
+  rescheduleSuccessors?: boolean;
 }
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {

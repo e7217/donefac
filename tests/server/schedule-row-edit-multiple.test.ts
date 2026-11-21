@@ -47,8 +47,8 @@ async function fixture(t: TestContext) {
   const project = await call<Project>('/projects', 201, 'POST', { key: 'LINKROW', name: '다중 연결 편집' });
   return {
     call, dir, project,
-    issue: (title: string, projectId = project.id) => call<Issue>('/issues', 201, 'POST', {
-      title, projectId, startDate: '2026-11-23', endDate: '2026-11-24', dueDate: '2026-11-27',
+    issue: (title: string, projectId = project.id, schedule: Partial<ReturnType<typeof dates>> = {}) => call<Issue>('/issues', 201, 'POST', {
+      title, projectId, startDate: '2026-11-23', endDate: '2026-11-24', dueDate: '2026-11-27', ...schedule,
     }),
     link: (predecessor: Issue, successor: Issue) => call<Dependency>('/dependencies', 201, 'POST', {
       predecessorId: predecessor.id, successorId: successor.id,
@@ -176,4 +176,122 @@ test('multi-link apply rechecks every reviewed endpoint and a late cycle outside
   const rejection = await f.call<{ error: string }>(applyPath, 409, 'POST', { previewId: fresh.previewId });
   assert.match(rejection.error, /순환/u);
   assert.deepEqual(await f.workspace(), beforeLateApply);
+});
+
+test('row rescheduling uses added, removed and edited links for one atomic transitive apply and undo', async t => {
+  const f = await fixture(t);
+  const issue = (title: string, startDate: string, endDate: string, dueDate: string | null = null) =>
+    f.issue(title, f.project.id, { startDate, endDate, dueDate });
+  const anchor = await f.issue('기준 업무');
+  const direct = await issue('연결 규칙을 바꿀 후행', '2026-11-25', '2026-11-26', '2026-11-27');
+  const downstream = await issue('간접 후행', '2026-11-27', '2026-11-27');
+  const detached = await issue('연결을 해제할 업무', '2026-11-25', '2026-11-25');
+  const newSuccessor = await issue('새로 연결할 업무', '2026-11-23', '2026-11-23');
+  const later = await issue('조건을 충족하는 후행', '2026-12-10', '2026-12-11');
+  const laterPartial = await f.issue('시작일이 조건을 충족하는 후행', f.project.id, { startDate: '2026-12-10', endDate: null });
+  const original = await f.link(anchor, direct);
+  const removed = await f.link(anchor, detached);
+  const transitive = await f.link(direct, downstream);
+  await f.link(anchor, later);
+  await f.link(anchor, laterPartial);
+  const body = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: { endDate: '2026-11-26', dueDate: null },
+    dependencies: [update(original, direct, 'FS', 1), remove(removed, detached), add(newSuccessor, 'successor', 'FS')],
+  };
+  const before = await f.workspace();
+  const legacy = await f.review(body);
+  assert.deepEqual(legacy.changes.map(change => change.id), [anchor.id]);
+  await f.review({ ...body, rescheduleSuccessors: 'true' }, 400);
+  const preview = await f.review({ ...body, rescheduleSuccessors: true });
+  assert.deepEqual(preview.errors, []);
+  assert.ok(preview.previewId);
+  const expectedDates = new Map([
+    [anchor.id, { startDate: '2026-11-23', endDate: '2026-11-26', dueDate: null }],
+    [direct.id, { startDate: '2026-11-30', endDate: '2026-12-01', dueDate: direct.dueDate }],
+    [downstream.id, { startDate: '2026-12-02', endDate: '2026-12-02', dueDate: null }],
+    [newSuccessor.id, { startDate: '2026-11-27', endDate: '2026-11-27', dueDate: null }],
+  ]);
+  assert.deepEqual(new Map(preview.changes.map(change => [change.id, [change.toStart, change.toEnd]])),
+    new Map([...expectedDates].map(([id, { startDate, endDate }]) => [id, [startDate, endDate]])));
+  assert.equal(preview.changes.find(change => change.id === anchor.id)?.toDue, null);
+  const dueWarning = preview.warnings.find(warning => warning.includes(direct.key) && warning.includes('목표 마감일'));
+  assert.ok(dueWarning);
+  assert.equal(preview.dependencyChanges?.length, 3);
+  assert.deepEqual(await f.workspace(), before);
+
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER fail_cascade_write BEFORE UPDATE ON issues
+      WHEN json_extract(NEW.json,'$.title')='간접 후행'
+      BEGIN SELECT RAISE(ABORT,'synthetic downstream row edit failure'); END`);
+    await f.apply(preview.previewId, 500);
+    assert.deepEqual(await f.workspace(), before);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+    database.exec('DROP TRIGGER fail_cascade_write');
+  } finally { database.close(); }
+
+  const applied = await f.apply(preview.previewId);
+  assert.equal(applied.dependencyChanges, 3);
+  assert.deepEqual(new Map(applied.updated.map(value => [value.id, dates(value)])), expectedDates);
+  assert.ok(applied.warnings.includes(dueWarning));
+  assert.deepEqual(await f.apply(preview.previewId), applied);
+  const after = await f.workspace();
+  assert.deepEqual(after.issues.find(value => value.id === detached.id), detached);
+  assert.deepEqual(after.issues.find(value => value.id === later.id), later);
+  assert.deepEqual(after.issues.find(value => value.id === laterPartial.id), laterPartial);
+  assert.equal(pair(after, anchor, direct)?.lagDays, 1);
+  assert.equal(pair(after, anchor, detached), undefined);
+  assert.ok(pair(after, anchor, newSuccessor));
+  assert.deepEqual(pair(after, direct, downstream), transitive);
+
+  const undone = await f.call<SchedulePasteApplyResult>('/schedule/undo', 200, 'POST', { undoId: applied.undoId });
+  assert.equal(undone.dependencyChanges, 3);
+  assert.deepEqual(new Map(undone.updated.map(value => [value.id, dates(value)])),
+    new Map([anchor, direct, downstream, newSuccessor].map(value => [value.id, dates(value)])));
+  const restored = await f.workspace();
+  assert.equal(pair(restored, anchor, direct)?.id, original.id);
+  assert.equal(pair(restored, anchor, direct)?.lagDays, original.lagDays);
+  assert.equal(pair(restored, anchor, detached)?.id, removed.id);
+  assert.equal(pair(restored, anchor, newSuccessor), undefined);
+  assert.deepEqual(pair(restored, direct, downstream), transitive);
+});
+
+test('row rescheduling rejects a stale preview if a downstream task’s other predecessor changes', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('기준 업무');
+  const successor = await f.issue('후행 업무');
+  const outside = await f.issue('별도 선행 업무', f.project.id, { endDate: '2026-11-26' });
+  await f.link(outside, successor);
+  const body = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: {}, rescheduleSuccessors: true,
+    dependencies: [add(successor, 'successor', 'FS')],
+  };
+  const preview = await f.review(body);
+  assert.ok(preview.previewId);
+  assert.deepEqual(preview.changes.map(change => [change.id, change.toStart, change.toEnd]), [
+    [successor.id, '2026-11-27', '2026-11-30'],
+  ]);
+  await f.call(`/issues/${outside.id}`, 200, 'PATCH', { expectedVersion: outside.version, endDate: '2026-11-30' }, 'user-seo');
+  const beforeStaleApply = await f.workspace();
+  await f.apply(preview.previewId, 409);
+  assert.deepEqual(await f.workspace(), beforeStaleApply);
+  const fresh = await f.review(body);
+  assert.ok(fresh.previewId);
+  assert.deepEqual(fresh.changes.map(change => [change.id, change.toStart, change.toEnd]), [
+    [successor.id, '2026-12-01', '2026-12-02'],
+  ]);
+});
+
+test('row rescheduling blocks a partial downstream schedule without applying a staged link', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('기준 업무');
+  const partial = await f.issue('기간이 미정인 후행 업무', f.project.id, { endDate: null });
+  const before = await f.workspace();
+  const preview = await f.review({
+    projectId: f.project.id, issue: versionOf(anchor), changes: {}, rescheduleSuccessors: true,
+    dependencies: [add(partial, 'successor', 'FS')],
+  });
+  assert.equal(preview.previewId, null);
+  assert.ok(preview.errors.some(error => error.message.includes(partial.key) && error.message.includes('기간')));
+  assert.deepEqual(await f.workspace(), before);
 });

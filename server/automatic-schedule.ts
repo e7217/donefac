@@ -1,7 +1,7 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomaticSchedulePreview, Dependency, Issue, ProjectWorkflow, ProjectWorkloadCapacity, ScheduleChange,
-  TeamFollowUpScheduleInput, TeamScheduleBlocker, TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
+  TeamFollowUpScheduleInput, TeamScheduleBlocker, TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkCalendar, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -111,6 +111,205 @@ function readSeedChange(value: unknown, issues: ReadonlyMap<string, Issue>) {
   return { issue, dates: { startDate, endDate } };
 }
 
+type ProjectScheduleInput = {
+  issues: ReadonlyMap<string, Issue>;
+  dependencies: readonly Dependency[];
+  math: ReturnType<typeof createCalendarMath>;
+  selected: ReadonlySet<string>;
+  terminal: (issue: Issue) => boolean;
+  anchor: ReturnType<typeof readSeedChange> | null;
+  seeds?: ReadonlyMap<string, ScheduleDates>;
+  anchorDate?: string | null;
+  defaultDuration?: number | null;
+  preserveSatisfied?: boolean;
+};
+
+function calculateProjectSchedule({
+  issues, dependencies, math, selected: initialIds, terminal, anchor, seeds, anchorDate, defaultDuration = null, preserveSatisfied,
+}: ProjectScheduleInput) {
+  const selected = new Set(initialIds);
+  const successors = new Map<string, Dependency[]>();
+  const predecessors = new Map<string, Dependency[]>();
+  for (const dependency of dependencies) {
+    const outgoing = successors.get(dependency.predecessorId);
+    if (outgoing) outgoing.push(dependency);
+    else successors.set(dependency.predecessorId, [dependency]);
+    const incoming = predecessors.get(dependency.successorId);
+    if (incoming) incoming.push(dependency);
+    else predecessors.set(dependency.successorId, [dependency]);
+  }
+
+  const pending = [...selected];
+  while (pending.length) {
+    const id = pending.pop()!;
+    for (const dependency of successors.get(id) ?? []) {
+      if (selected.has(dependency.successorId)) continue;
+      if (!issues.has(dependency.successorId)) fail('프로젝트를 벗어난 의존성이 있습니다.');
+      selected.add(dependency.successorId);
+      pending.push(dependency.successorId);
+    }
+  }
+  const indegree = new Map([...selected].map(id => [id, (predecessors.get(id) ?? []).filter(link => selected.has(link.predecessorId)).length]));
+  const order = [...selected].filter(id => indegree.get(id) === 0).sort();
+  for (let index = 0; index < order.length; index++) {
+    for (const dependency of successors.get(order[index]) ?? []) {
+      if (!selected.has(dependency.successorId)) continue;
+      const remaining = indegree.get(dependency.successorId)! - 1;
+      indegree.set(dependency.successorId, remaining);
+      if (remaining === 0) order.push(dependency.successorId);
+    }
+  }
+
+  const warnings: string[] = [];
+  const blocking: string[] = [];
+  const changes: ScheduleChange[] = [];
+  const blocked = new Set<string>();
+  const effective = new Map<string, ScheduleDates>();
+  const block = (issue: Issue, message: string) => {
+    blocked.add(issue.id);
+    blocking.push(`${issue.key}: ${message}`);
+  };
+  const propose = (issue: Issue, { startDate, endDate }: ScheduleDates) => {
+    if (startDate !== issue.startDate || endDate !== issue.endDate) {
+      changes.push({ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+        fromStart: issue.startDate, fromEnd: issue.endDate, toStart: startDate, toEnd: endDate });
+    }
+  };
+  for (const id of order) {
+    const issue = issues.get(id)!;
+    const isTerminal = terminal(issue);
+    const fixed = anchor?.issue.id === id ? anchor.dates : null;
+    const seed = fixed ?? seeds?.get(id);
+    const basis = isTerminal ? issue : seed ?? issue;
+    effective.set(id, basis);
+    if (isTerminal && seed && (seed.startDate !== issue.startDate || seed.endDate !== issue.endDate)) {
+      block(issue, '완료·취소 업무는 고정 일정입니다. 초기 일정 변경을 적용할 수 없습니다.');
+    }
+    const required: ScheduleDates = { startDate: null, endDate: null };
+    for (const dependency of predecessors.get(id) ?? []) {
+      const predecessor = issues.get(dependency.predecessorId);
+      if (!predecessor) {
+        block(issue, '프로젝트 밖의 선행 업무를 확인해 주세요.');
+        continue;
+      }
+      if (!isDependencyType(dependency.type) || !isDependencyLag(dependency.lagDays)) {
+        block(issue, `${predecessor.key} 연결의 종류와 간격을 확인해 주세요.`);
+        continue;
+      }
+      if (blocked.has(predecessor.id)) {
+        block(issue, `${predecessor.key}의 일정이 막혀 후속 일정을 계산할 수 없습니다.`);
+        continue;
+      }
+      try {
+        const bound = dependencyBound(dependency, effective.get(predecessor.id) ?? predecessor, math);
+        if (!bound) {
+          const label = SCHEDULE_DATE_LABELS[DEPENDENCY_ENDPOINTS[dependency.type].predecessor];
+          block(issue, `${predecessor.key}의 ${label}이 없어 선후행 조건을 계산할 수 없습니다.`);
+          continue;
+        }
+        const prior = required[bound.endpoint];
+        if (!prior || bound.date > prior) required[bound.endpoint] = bound.date;
+      } catch (error) {
+        if (!(error instanceof CalendarError)) throw error;
+        block(issue, `${predecessor.key} · ${error.message}`);
+      }
+    }
+    if (isTerminal || fixed) {
+      for (const endpoint of ['startDate', 'endDate'] as const) {
+        const bound = required[endpoint];
+        const actual = basis[endpoint];
+        if (bound && (!actual || actual < bound)) {
+          const label = isTerminal ? '고정' : '입력한';
+          block(issue, `${label} ${SCHEDULE_DATE_LABELS[endpoint]} ${actual || '미정'}과 선후행 조건 ${bound}이 충돌합니다.`);
+        }
+      }
+      if (isTerminal && (!basis.startDate || !basis.endDate)) warnings.push(`${issue.key}: 완료·취소 업무의 미정 일정은 변경하지 않습니다.`);
+      if (!isTerminal && !blocked.has(id)) propose(issue, basis);
+      continue;
+    }
+    if (blocked.has(id)) continue;
+
+    let start = basis.startDate;
+    let end = basis.endDate;
+    let duration: number;
+    // A row review moves successors only when a projected dependency requires it.
+    if (preserveSatisfied && (!required.startDate || (start && start >= required.startDate)) &&
+        (!required.endDate || (end && end >= required.endDate))) continue;
+    if ((start === null) !== (end === null)) {
+      block(issue, '시작일과 종료일 중 하나만 있어 기간을 계산하지 않았습니다.');
+      continue;
+    }
+    if (!start && !end) {
+      if (!anchorDate || defaultDuration === null) {
+        block(issue, '일정이 없습니다. 기준일과 기본 작업 기간을 명시하거나 날짜를 먼저 입력해 주세요.');
+        continue;
+      }
+      start = anchorDate;
+      duration = defaultDuration;
+    } else {
+      try { duration = math.count(start!, end!); }
+      catch (error) {
+        if (!(error instanceof CalendarError)) throw error;
+        block(issue, error.message);
+        continue;
+      }
+      if (duration < 1) {
+        block(issue, '기존 일정에 작업일이 없어 기간을 임의로 만들지 않았습니다.');
+        continue;
+      }
+      if (duration > 3650) {
+        block(issue, '기존 작업 기간이 3650 작업일을 초과합니다. 범위를 나누어 계획해 주세요.');
+        continue;
+      }
+    }
+    try {
+      const originalStart = start;
+      const originalEnd = end;
+      start = math.onOrAfter(start!);
+      if (start !== originalStart) warnings.push(`${issue.key}: 비작업 시작일 ${originalStart}을 다음 작업일 ${start}로 조정합니다.`);
+      if (required.startDate && required.startDate > start) start = math.onOrAfter(required.startDate);
+      if (end === null || start !== originalStart) {
+        end = math.shift(start, duration - 1);
+        if (originalEnd && end < originalEnd) end = originalEnd;
+      }
+      if (required.endDate && end < required.endDate) {
+        end = math.onOrAfter(required.endDate);
+        start = math.shift(end, 1 - duration);
+      }
+      effective.set(id, { startDate: start, endDate: end });
+      propose(issue, { startDate: start, endDate: end });
+    } catch (error) {
+      if (!(error instanceof CalendarError)) throw error;
+      block(issue, error.message);
+    }
+  }
+  for (const id of selected) {
+    if (!effective.has(id)) block(issues.get(id)!, '의존성 순환으로 일정을 계산할 수 없습니다.');
+  }
+  return { changes, warnings, blocking, issueIds: [...selected] };
+}
+
+const CHANGE_LIMIT_MESSAGE = '한 번에 변경할 수 있는 업무는 1000개입니다. 범위를 나누어 미리 확인해 주세요.';
+
+export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar, workflow, anchor }: {
+  issues: readonly Issue[];
+  dependencies: readonly Dependency[];
+  calendar: WorkCalendar;
+  workflow: ProjectWorkflow;
+  anchor: AutomaticScheduleMutation;
+}): { changes: ScheduleChange[]; warnings: string[]; blocking: string[]; issueIds: string[] } {
+  if (issues.length > 10000) fail('자동 일정은 프로젝트 업무 10,000개 이하에서 계산해 주세요.');
+  const byId = new Map(issues.map(issue => [issue.id, issue]));
+  const fixed = readSeedChange(anchor, byId);
+  const workflowData = { workflows: [workflow] };
+  const { changes, warnings, blocking, issueIds } = calculateProjectSchedule({
+    issues: byId, dependencies, math: createCalendarMath(calendar), selected: new Set([fixed.issue.id]), anchor: fixed,
+    terminal: issue => isTerminalStatus(workflowData, issue.projectId, issue.status), preserveSatisfied: true,
+  });
+  if (changes.length > 1000) blocking.push(CHANGE_LIMIT_MESSAGE);
+  return { changes, warnings: [...new Set(warnings)], blocking: [...new Set(blocking)], issueIds: issueIds.sort() };
+}
+
 function prepareWorkloadPreview<T extends WorkloadLevelPlan>(plan: T, issues: ReadonlyMap<string, Issue>,
   calendarVersions: Record<string, number>, validateChange: WorkloadHooks['validateChange']) {
   const blocking: string[] = [];
@@ -164,80 +363,16 @@ export class AutomaticScheduleService{
         selected.add(issue.id);
       }
     }
-    const successors=new Map<string,Dependency[]>(),predecessors=new Map<string,Dependency[]>();
-    for(const dependency of dependencies){successors.set(dependency.predecessorId,[...(successors.get(dependency.predecessorId)||[]),dependency]);predecessors.set(dependency.successorId,[...(predecessors.get(dependency.successorId)||[]),dependency]);}
-    const pending=[...selected];while(pending.length){const id=pending.pop()!;for(const dependency of successors.get(id)||[])if(!selected.has(dependency.successorId)){if(!byId.has(dependency.successorId))fail('프로젝트를 벗어난 의존성이 있습니다.');selected.add(dependency.successorId);pending.push(dependency.successorId);}}
-    const indegree=new Map([...selected].map(id=>[id,(predecessors.get(id)||[]).filter(d=>selected.has(d.predecessorId)).length]));const queue=[...selected].filter(id=>indegree.get(id)===0).sort();const order:string[]=[];
-    for(let index=0;index<queue.length;index++){const id=queue[index];order.push(id);for(const dependency of successors.get(id)||[])if(selected.has(dependency.successorId)){const remaining=indegree.get(dependency.successorId)!-1;indegree.set(dependency.successorId,remaining);if(remaining===0)queue.push(dependency.successorId);}}
-    const warnings:string[]=[],blocking:string[]=[],blocked=new Set<string>(),effective=new Map<string,ScheduleDates>();
     const workflowTable=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'").get();const workflows=workflowTable?this.store.all<ProjectWorkflow>('workflows'):[];
-    const block=(issue:Issue,message:string)=>{blocked.add(issue.id);blocking.push(`${issue.key}: ${message}`);};
-    const changes:ScheduleChange[]=[];
-    const propose = (issue: Issue, { startDate, endDate }: ScheduleDates) => {
-      if(startDate!==issue.startDate||endDate!==issue.endDate)changes.push({id:issue.id,key:issue.key,title:issue.title,version:issue.version,fromStart:issue.startDate,fromEnd:issue.endDate,toStart:startDate,toEnd:endDate});
-    };
-    for(const id of order){
-      const issue=byId.get(id)!;
-      const terminal=isTerminalStatus({workflows},issue.projectId,issue.status);
-      const fixed=anchor?.issue.id===id?anchor.dates:null;
-      const seed=fixed??seeds.get(id),basis=terminal?{startDate:issue.startDate,endDate:issue.endDate}:seed||{startDate:issue.startDate,endDate:issue.endDate};effective.set(id,basis);
-      if(terminal&&seed&&(seed.startDate!==issue.startDate||seed.endDate!==issue.endDate))block(issue,'완료·취소 업무는 고정 일정입니다. 초기 일정 변경을 적용할 수 없습니다.');
-      const required: { startDate: string | null; endDate: string | null } = { startDate: null, endDate: null };
-      for(const dependency of predecessors.get(id)||[]){
-        const predecessor=byId.get(dependency.predecessorId);if(!predecessor){block(issue,'프로젝트 밖의 선행 업무를 확인해 주세요.');continue;}
-        if(!isDependencyType(dependency.type)||!isDependencyLag(dependency.lagDays)){block(issue,`${predecessor.key} 연결의 종류와 간격을 확인해 주세요.`);continue;}
-        if(blocked.has(predecessor.id)){block(issue,`${predecessor.key}의 일정이 막혀 후속 일정을 계산할 수 없습니다.`);continue;}
-        try {
-          const bound = dependencyBound(dependency, effective.get(predecessor.id) || predecessor, math);
-          if (!bound) {
-            const label = SCHEDULE_DATE_LABELS[DEPENDENCY_ENDPOINTS[dependency.type].predecessor];
-            block(issue, `${predecessor.key}의 ${label}이 없어 선후행 조건을 계산할 수 없습니다.`);
-            continue;
-          }
-          const prior = required[bound.endpoint];
-          if (!prior || bound.date > prior) required[bound.endpoint] = bound.date;
-        } catch (error) {
-          if (!(error instanceof CalendarError)) throw error;
-          block(issue, `${predecessor.key} · ${error.message}`);
-        }
-      }
-      if(terminal||fixed){
-        for (const endpoint of ['startDate', 'endDate'] as const) {
-          const bound = required[endpoint];
-          const actual = basis[endpoint];
-          if (bound && (!actual || actual < bound)) {
-            const label = terminal ? '고정' : '입력한';
-            block(issue, `${label} ${SCHEDULE_DATE_LABELS[endpoint]} ${actual || '미정'}과 선후행 조건 ${bound}이 충돌합니다.`);
-          }
-        }
-        if(terminal&&(!basis.startDate||!basis.endDate))warnings.push(`${issue.key}: 완료·취소 업무의 미정 일정은 변경하지 않습니다.`);
-        if(!terminal&&!blocked.has(id))propose(issue,basis);
-        continue;
-      }
-      if(blocked.has(id))continue;
-      let start=basis.startDate,end=basis.endDate,duration:number;
-      if((start===null)!==(end===null)){block(issue,'시작일과 종료일 중 하나만 있어 기간을 계산하지 않았습니다.');continue;}
-      if(!start&&!end){if(!anchorDate||defaultDuration===null){block(issue,'일정이 없습니다. 기준일과 기본 작업 기간을 명시하거나 날짜를 먼저 입력해 주세요.');continue;}start=anchorDate;duration=defaultDuration;end=null;}
-      else{try{duration=math.count(start!,end!);}catch(error){if(!(error instanceof CalendarError))throw error;block(issue,error.message);continue;}if(duration<1){block(issue,'기존 일정에 작업일이 없어 기간을 임의로 만들지 않았습니다.');continue;}if(duration>3650){block(issue,'기존 작업 기간이 3650 작업일을 초과합니다. 범위를 나누어 계획해 주세요.');continue;}}
-      try{
-        const originalStart=start,originalEnd=end;start=math.onOrAfter(start!);if(start!==originalStart)warnings.push(`${issue.key}: 비작업 시작일 ${originalStart}을 다음 작업일 ${start}로 조정합니다.`);
-        if(required.startDate&&required.startDate>start)start=math.onOrAfter(required.startDate);
-        if(end===null||start!==originalStart){end=math.shift(start,duration-1);if(originalEnd&&end<originalEnd)end=originalEnd;}
-        if (required.endDate && end < required.endDate) {
-          end = math.onOrAfter(required.endDate);
-          start = math.shift(end, 1 - duration);
-        }
-        effective.set(id,{startDate:start,endDate:end});
-        propose(issue,{startDate:start,endDate:end});
-      }catch(error){if(!(error instanceof CalendarError))throw error;block(issue,error.message);}
+    const { changes, warnings, blocking } = calculateProjectSchedule({
+      issues: byId, dependencies, math, selected, anchor, seeds, anchorDate, defaultDuration,
+      terminal: issue => isTerminalStatus({ workflows }, issue.projectId, issue.status),
+    });
+    if (anchor && validateChange) for (const change of changes) {
+      const reason = validateChange(byId.get(change.id)!, toMutation(change));
+      if (reason) blocking.push(`${change.key}: ${reason}`);
     }
-    for(const id of selected)if(!order.includes(id))block(byId.get(id)!,'의존성 순환으로 일정을 계산할 수 없습니다.');
-    if(anchor&&validateChange)for(const change of changes){
-      const issue=byId.get(change.id)!;
-      const reason=validateChange(issue,toMutation(change));
-      if(reason)block(issue,reason);
-    }
-    if(changes.length>1000)blocking.push('한 번에 변경할 수 있는 업무는 1000개입니다. 범위를 나누어 미리 확인해 주세요.');
+    if (changes.length > 1000) blocking.push(CHANGE_LIMIT_MESSAGE);
     const createdAt=new Date().toISOString(),expiresAt=new Date(Date.now()+AUTO_PREVIEW_TTL_MS).toISOString(),previewId=randomUUID();
     const preview:AutomaticSchedulePreview={previewId,changes,warnings:[...new Set(warnings)],blocking:[...new Set(blocking)],calendarVersions:{[projectId]:calendar.version},expiresAt};
     const proposal:Proposal={id:previewId,projectId,actorId,createdAt,expiresAt,issueVersions:readset(issues),calendarVersion:calendar.version,workflowVersion:workflows.find(workflow=>workflow.projectId===projectId)?.version||1,issueSchemaVersion:this.issueSchemaVersion(projectId),dependencyHash:dependencyHash(dependencies),preview,used:false};this.store.put('automatic_schedule_previews',proposal);return preview;

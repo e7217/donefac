@@ -264,3 +264,70 @@ test('여러 연결 중 하나가 바뀌면 전체 적용을 멈추고 날짜와
     expect(after.links.some(link => link.id === remove.id)).toBe(false);
   } finally { await f.close(); }
 });
+
+test('360px에서 새 연결을 기준으로 숨겨진 후행 일정까지 검토하고 날짜와 연결을 한 번에 되돌린다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  try {
+    const anchor = await f.issue('연결과 후행 일정의 기준 업무', { startDate: date(23), endDate: date(24) });
+    const successor = await f.issue('가려진 직접 후행 업무', { startDate: date(25), endDate: date(26) });
+    const last = await f.issue('가려진 간접 후행 업무', { startDate: date(27), endDate: date(27) });
+    const originalLink = await f.link(successor, last);
+    const { dialog, opener } = await openRow(page, anchor, f.actor.id);
+    for (const hidden of [successor, last]) await expect(page.locator(`[data-issue-id="${hidden.id}"]`)).toHaveCount(0);
+    const cascade = dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
+    await expect(cascade).not.toBeChecked();
+    await dialog.getByLabel('종료일', { exact: true }).fill(date(25));
+    const add = row(dialog, 1);
+    await action(add).selectOption('add');
+    await add.getByRole('textbox', { name: '연결할 업무 검색', exact: true }).fill(successor.key);
+    await button(add, `${successor.key} · ${successor.title}`).click();
+    await add.getByLabel('연결 방향', { exact: true }).selectOption('successor');
+
+    const before = await workspace(request);
+    const manual = await preview(page, dialog);
+    expect(manual.input).not.toHaveProperty('rescheduleSuccessors');
+    expect(manual.result.changes.map(change => change.id)).toEqual([anchor.id]);
+    await cascade.check();
+    const apply = button(dialog, '일정과 연결 적용');
+    await expect(apply).toBeDisabled();
+    const planned = await preview(page, dialog);
+    expect(planned.input).toMatchObject({ rescheduleSuccessors: true, changes: { endDate: date(25) },
+      dependency: { action: 'add', direction: 'successor', relatedIssue: version(successor) } });
+    expect(planned.result.previewId).not.toBe(manual.result.previewId);
+    expect(planned.result.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: anchor.id, toStart: date(23), toEnd: date(25) }),
+      expect.objectContaining({ id: successor.id, toStart: date(26), toEnd: date(27) }),
+      expect.objectContaining({ id: last.id, toStart: date(30), toEnd: date(30) }),
+    ]));
+    expect(planned.result.changes).toHaveLength(3);
+    const details = dialog.getByRole('region', { name: '일정과 연결 미리보기', exact: true });
+    for (const issue of [anchor, successor, last]) {
+      await expect(details.getByRole('heading', { name: `${issue.key} · ${issue.title}`, exact: true })).toBeVisible();
+    }
+    await expect(details.getByRole('heading', { name: `${anchor.key} → ${successor.key}`, exact: true })).toBeVisible();
+    expect(await workspace(request)).toEqual(before);
+
+    const applying = waitPost(page, applyPath);
+    await apply.click();
+    const applied = await json<SchedulePasteApplyResult>(await applying);
+    expect(applied.dependencyChanges).toBe(1);
+    expect(applied.updated).toHaveLength(3);
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await expect(page.getByLabel(`${anchor.key} 종료일`, { exact: true })).toHaveValue(date(25));
+    const committed = await workspace(request);
+    expect(committed.issues.filter(value => value.id === last.id)).toEqual([expect.objectContaining({ startDate: date(30), endDate: date(30) })]);
+    expect(committed.dependencies).toContainEqual(expect.objectContaining({ predecessorId: anchor.id, successorId: successor.id }));
+
+    const undoing = waitPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await json<SchedulePasteApplyResult>(await undoing);
+    expect(undone.dependencyChanges).toBe(1);
+    expect(new Map(undone.updated.map(issue => [issue.id, dates(issue)])))
+      .toEqual(new Map([anchor, successor, last].map(issue => [issue.id, dates(issue)])));
+    const restored = await workspace(request);
+    expect(restored.dependencies.some(link => link.predecessorId === anchor.id && link.successorId === successor.id)).toBe(false);
+    expect(restored.dependencies).toContainEqual(originalLink);
+  } finally { await f.close(); }
+});

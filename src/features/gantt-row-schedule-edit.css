@@ -116,6 +116,29 @@
 
 .gantt-row-edit-append { margin-top: 0.55rem; }
 
+.gantt-row-edit-cascade {
+  border-top: 1px solid #dce7e1;
+  margin-top: 1rem;
+}
+
+.gantt-row-edit-cascade > label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
+  min-height: 44px;
+  margin: 0;
+}
+
+.gantt-row-edit-cascade input {
+  flex: none;
+  accent-color: #177c72;
+}
+
+.gantt-row-edit-cascade > p {
+  margin-top: 0;
+}
+
 .gantt-row-edit-existing li span,
 .gantt-row-edit-review dl dt,
 .gantt-row-schedule-edit .gantt-row-edit-hint {
@@ -164,7 +187,21 @@
   padding-inline-start: 1.7rem;
 }
 
-.gantt-row-edit-diff > div {
+.gantt-row-edit-diff-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.6rem;
+  padding-bottom: 0.3rem;
+}
+
+.gantt-row-edit-diff-title h4,
+.gantt-row-edit-diff dl {
+  margin: 0;
+}
+
+.gantt-row-edit-diff dl > div {
   display: grid;
   grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);
   gap: 0.3rem;
