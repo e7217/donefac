@@ -1082,6 +1082,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 새 `issue-status-changed`의 `detail`은 변경 전후 상태명이고, 새 `issue-comment`의 `commentId`는 해당 업무에 저장된 댓글 ID다. 이전 알림에서 이 필드들은 생략될 수 있다. 알림에는 티켓 식별 정보와 댓글 위치가 들어가며 본문은 티켓에서 읽는다. 자체 백업 형식 86은 상태 상세와 일반 댓글 위치를 보존한다. 복원할 댓글이 있으면 업무와 작성자가 알림의 대상·작업자와 일치해야 한다.
 
+## 개인 즐겨찾기
+
+브라우저의 `GET /api/favorites`는 `X-Actor-Id`로 선택한 작업자가 표시한 활성 항목의 `{resourceType,resourceId,createdAt}` 배열을 최근 추가 순서로 반환한다. `resourceType`은 `issue` 또는 `document`다. `PUT /api/favorites/:resourceType/:resourceId`는 해당 작업자의 즐겨찾기를 등록하고 같은 항목 객체를 반환한다. 반복 등록은 최초 등록 시각을 유지한다. `DELETE`는 같은 경로에서 `{ok:true}`를 반환하며 재호출할 수 있다. 대상 ID는 URL 경로 한 구간으로 인코딩한다.
+
+휴지통에 있는 항목은 조회에서 숨기고 `PUT`·`DELETE`에는 `404`를 반환한다. 해당 항목을 복원하면 즐겨찾기를 다시 조회할 수 있다. 영구 삭제는 모든 작업자의 해당 표시를 제거한다. 자체 백업 형식 94의 `favorites`에는 `userId`와 기존 항목 필드가 포함되며 활성 항목과 휴지통 항목을 함께 복원한다. 형식 1~93에서 가져오면 즐겨찾기는 빈 목록으로 초기화한다.
+
 ## 알림 구독
 
 브라우저의 `GET /api/notifications/subscriptions/:targetType/:targetId`는 `X-Actor-Id`로 선택한 작업자의 `{ "subscribed": true }` 또는 `{ "subscribed": false }`를 반환한다. 같은 경로의 `PUT`에 `subscribed` 불리언을 보내 구독 상태를 지정한다.

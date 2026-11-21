@@ -82,6 +82,7 @@ import { registerDocumentExportRoutes } from './document-export.js';
 import { NotificationsService, TeamNotificationError } from './notifications.js';
 import { DeadlineReminderError, DeadlineRemindersService } from './deadline-reminders.js';
 import { documentNotificationSpaceProject, NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
+import { FavoriteError, FavoritesService } from './favorites.js';
 import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
@@ -248,6 +249,7 @@ export function createApp(options: {
     options.deadlineReminderClock,
   );
   const subscriptions=new NotificationSubscriptionsService(store);
+  const favorites = new FavoritesService(store);
   const projectSubscribers=(issue: Issue)=>subscriptions.recipients('project',issue.projectId);
   const issueSubscribers=(issue: Issue)=>[...subscriptions.recipients('issue',issue.id),...projectSubscribers(issue)];
   const spaceSubscribers=(document: DocPage)=>subscriptions.recipients('space',documentNotificationSpaceId(document.projectId));
@@ -1097,28 +1099,49 @@ export function createApp(options: {
       if(!controller.signal.aborted)throw error;
     } finally { res.off('close',disconnect); }
   });
-  const notificationRecipient = (req: Request) => {
+  const requireSelectedActor = (req: Request) => {
     const recipientId = req.header('X-Actor-Id');
     if (!recipientId || !store.get('users',recipientId)) return fail('등록된 작업자를 선택해 주세요.');
     return recipientId;
   };
+  function favoriteTarget(req: Request) {
+    const { resourceType, resourceId } = req.params;
+    if ((resourceType !== 'issue' && resourceType !== 'document') || typeof resourceId !== 'string' || !resourceId || Object.keys(req.query).length ||
+        (req.body !== undefined && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length))) {
+      return fail('즐겨찾기 대상을 확인해 주세요.');
+    }
+    return { resourceType, resourceId } as const;
+  }
+  app.get('/api/favorites', (req, res) => {
+    if (Object.keys(req.query).length) return fail('즐겨찾기 조회 조건을 확인해 주세요.');
+    res.set('Cache-Control', 'no-store').json(favorites.list(requireSelectedActor(req)));
+  });
+  app.put('/api/favorites/:resourceType/:resourceId', (req, res) => {
+    const userId = requireSelectedActor(req), { resourceType, resourceId } = favoriteTarget(req);
+    res.set('Cache-Control', 'no-store').json(favorites.add(userId, resourceType, resourceId));
+  });
+  app.delete('/api/favorites/:resourceType/:resourceId', (req, res) => {
+    const userId = requireSelectedActor(req), { resourceType, resourceId } = favoriteTarget(req);
+    favorites.remove(userId, resourceType, resourceId);
+    res.set('Cache-Control', 'no-store').json({ ok: true });
+  });
   app.get('/api/notifications/count',(req,res)=>{
     if (Object.keys(req.query).length) return fail('알림 수에 조회 조건을 지정할 수 없습니다.');
-    res.set('Cache-Control','no-store').json({unreadCount:notifications.count(notificationRecipient(req))});
+    res.set('Cache-Control','no-store').json({unreadCount:notifications.count(requireSelectedActor(req))});
   });
   app.get('/api/notifications',(req,res)=>{
     const {filter='all',before}=req.query;
     if (Object.keys(req.query).some(key=>key!=='filter'&&key!=='before') || (filter!=='all'&&filter!=='unread') ||
       (before!==undefined&&(typeof before!=='string'||!before))) return fail('알림 조회 조건을 확인해 주세요.');
-    res.set('Cache-Control','no-store').json(notifications.list(notificationRecipient(req),filter,before));
+    res.set('Cache-Control','no-store').json(notifications.list(requireSelectedActor(req),filter,before));
   });
   app.get('/api/notifications/deadline-reminders', (req, res) => {
     if (Object.keys(req.query).length) return fail('마감 알림의 조회 조건을 확인해 주세요.');
-    res.set('Cache-Control', 'no-store').json(deadlineReminders.get(notificationRecipient(req)));
+    res.set('Cache-Control', 'no-store').json(deadlineReminders.get(requireSelectedActor(req)));
   });
   app.put('/api/notifications/deadline-reminders', (req, res) => {
     if (Object.keys(req.query).length) return fail('마감 알림의 변경 조건을 확인해 주세요.');
-    res.set('Cache-Control', 'no-store').json(deadlineReminders.update(notificationRecipient(req), req.body));
+    res.set('Cache-Control', 'no-store').json(deadlineReminders.update(requireSelectedActor(req), req.body));
   });
   function subscriptionTarget(req: Request) {
     const {targetType,targetId}=req.params;
@@ -1134,21 +1157,21 @@ export function createApp(options: {
     return {targetType,targetId} as const;
   }
   app.get('/api/notifications/subscriptions/:targetType/:targetId',(req,res)=>{
-    const userId=notificationRecipient(req), {targetType,targetId}=subscriptionTarget(req);
+    const userId=requireSelectedActor(req), {targetType,targetId}=subscriptionTarget(req);
     res.set('Cache-Control','no-store').json({subscribed:subscriptions.isSubscribed(userId,targetType,targetId)});
   });
   app.put('/api/notifications/subscriptions/:targetType/:targetId',(req,res)=>{
-    const userId=notificationRecipient(req), {targetType,targetId}=subscriptionTarget(req);
+    const userId=requireSelectedActor(req), {targetType,targetId}=subscriptionTarget(req);
     if (Object.keys(req.body).length!==1 || typeof req.body.subscribed!=='boolean') return fail('구독 여부를 확인해 주세요.');
     res.set('Cache-Control','no-store').json(subscriptions.setSubscribed(userId,targetType,targetId,req.body.subscribed));
   });
   app.patch('/api/notifications/read-all',(req,res)=>{
-    const recipientId=notificationRecipient(req), throughId=text(req.body.throughId,'알림 ID',200);
+    const recipientId=requireSelectedActor(req), throughId=text(req.body.throughId,'알림 ID',200);
     if (!notifications.markAllRead(recipientId,throughId)) return fail('알림을 찾을 수 없습니다.',404);
     res.set('Cache-Control','no-store').json({unreadCount:notifications.count(recipientId)});
   });
   app.patch('/api/notifications/:id/read',(req,res)=>{
-    const recipientId=notificationRecipient(req);
+    const recipientId=requireSelectedActor(req);
     if (!notifications.markRead(recipientId,req.params.id)) return fail('알림을 찾을 수 없습니다.',404);
     res.set('Cache-Control','no-store').json({unreadCount:notifications.count(recipientId)});
   });
@@ -1909,6 +1932,7 @@ export function createApp(options: {
       const entry=trash.get(String(req.params.id));
       if(trash.hasChildren(entry.resourceType,entry.resourceId))fail('휴지통의 하위 항목을 먼저 처리해 주세요.',409);
       subscriptions.removeTarget(entry.resourceType,entry.resourceId);
+      favorites.removeTarget(entry.resourceType, entry.resourceId);
       atlassianLinks.removeTarget(entry.resourceType,entry.resourceId);
       if(entry.resourceType==='issue') {
         timeReservations.purgeIssue(entry.resourceId);
@@ -2415,7 +2439,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),favorites:favorites.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2798,6 +2822,10 @@ export function createApp(options: {
       projectIds:new Set((data.projects as Project[]).map(project=>project.id)),
     };
     for(const entry of importedTrash) (entry.resourceType==='issue'?subscriptionRefs.issueIds:subscriptionRefs.documentIds).add(entry.resourceId);
+    if (data.schemaVersion < 94 && data.favorites !== undefined && (!Array.isArray(data.favorites) || data.favorites.length)) {
+      fail('개인 즐겨찾기를 포함한 백업은 schemaVersion 94가 필요합니다.');
+    }
+    const importedFavorites = data.schemaVersion >= 94 ? favorites.validateRestore(data.favorites, subscriptionRefs) : [];
     const binaries=[...new Map<string,Attachment>([...(data.attachments as Attachment[]),...archiveAttachments,...importedSources.versions].map(file=>[file.id,file])).values()];
     const archivedAttachmentIds=new Set(archiveAttachments.map(file=>file.id));
     const liveSources={...importedSources,versions:importedSources.versions.filter(version=>!archivedAttachmentIds.has(version.attachmentId))};
@@ -2867,6 +2895,7 @@ export function createApp(options: {
         data.schemaVersion>=71 ? new Map(allImportedComments.map(comment => [comment.id, comment])) : undefined);
       deadlineReminders.restore(data.schemaVersion >= 70 ? data.deadlineReminderPreferences : [], subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
+      favorites.restore(importedFavorites);
       atlassianLinks.restore(data.schemaVersion>=27?data.atlassianLinks:[],subscriptionRefs);
       issueSchemas.replaceImported(importedSchemas,previousSchemas);
       workflows.replaceImported(importedWorkflows.map(w=>({...w,version:Math.max(w.version,(previousWorkflows.get(w.projectId)||0)+1)})));savedViews.replaceImported(importedViews,previousViews);
@@ -2954,6 +2983,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
+    if(error instanceof FavoriteError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueKeyLookupError)return res.status(error.status).json({error:error.message});
     if(error instanceof RecurringIssueError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});

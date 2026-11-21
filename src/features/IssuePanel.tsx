@@ -33,6 +33,7 @@ import { IssueProjectMove } from './IssueProjectMove';
 import { IssueReporterSelect } from './IssueReporterSelect';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
+import { FavoriteAction } from './FavoritesState';
 import { AtlassianLinks } from './AtlassianLinks';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
@@ -757,6 +758,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           aria-label="업무 복제" title="업무 복제" disabled={saving || dependencyBusy} onClick={() => setCloneCreation(issue)}>
           <Copy size={14} aria-hidden="true" /><span>업무 복제</span>
         </button>
+        <FavoriteAction type="issue" id={issue.id} />
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
         <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>

@@ -1,0 +1,71 @@
+.page.favorites-page {
+  max-width: 1120px;
+}
+
+.favorite-button.btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  justify-content: center;
+  align-items: center;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  color: #536b60;
+}
+
+.favorite-button.btn.is-favorite {
+  color: #805e22;
+  background: #fff4d9;
+}
+
+.favorite-button.btn:focus-visible,
+.favorites-page .page-heading h1:focus-visible {
+  outline: 2px solid #247b65;
+  outline-offset: 2px;
+}
+
+.favorites-groups {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.favorites-group {
+  min-width: 0;
+}
+
+.favorite-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding-inline-end: 12px;
+}
+
+.favorites-message {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 16px;
+  color: #52655e;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.favorites-message p {
+  margin: 0;
+}
+
+@media (max-width: 520px) {
+  .favorite-row {
+    padding-inline-end: 8px;
+  }
+
+  .favorite-row > .favorite-button.btn {
+    width: 44px;
+    min-height: 44px;
+  }
+}

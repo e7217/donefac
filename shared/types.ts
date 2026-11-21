@@ -1129,6 +1129,13 @@ export interface NotificationSubscription {
   targetId: string;
 }
 export interface NotificationSubscriptionState { subscribed: boolean }
+export type FavoriteResourceType = 'issue' | 'document';
+export interface Favorite {
+  resourceType: FavoriteResourceType;
+  resourceId: string;
+  createdAt: string;
+}
+export interface FavoriteRecord extends Favorite { userId: string }
 export type GitlabMergeReadinessState = 'ready' | 'checking' | 'draft' | 'conflict' | 'approval_required' | 'changes_requested' |
   'discussions_unresolved' | 'ci_required' | 'ci_running' | 'rebase_required' | 'dependency' | 'policy' | 'blocked' | 'unknown';
 export interface GitlabMergeReadiness {

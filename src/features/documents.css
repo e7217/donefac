@@ -44,11 +44,8 @@
 .docs-breadcrumb { display:flex; align-items:center; gap:7px; font-size:10px; color:#99a2b3; min-width:0; }
 .docs-breadcrumb>span { max-width:140px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
 .docs-breadcrumb>svg { flex-shrink:0; }
-.docs-top-actions { display:flex; align-items:center; gap:5px; flex-shrink:0; }
+.docs-top-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:5px; min-width:0; }
 .docs-publication-button { font-size:11px; padding:6px 8px; white-space:nowrap; }
-@media(max-width:1100px) {
-  .docs-top-actions { flex-shrink:1; flex-wrap:wrap; justify-content:flex-end; }
-}
 .docs-save-state { font-size:10px; display:flex; align-items:center; color:#9aa5b8; gap:4px; margin-right:6px; white-space:nowrap; }
 .docs-save-state.is-dirty { color:#b8934c; }
 .docs-save-state.is-dirty>span { width:5px; height:5px; border-radius:50%; background:#c6a05e; }

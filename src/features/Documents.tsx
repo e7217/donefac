@@ -54,6 +54,7 @@ import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
 import { DocumentReplyComposer, DocumentReplyList, useDocumentCommentReply } from './DocumentCommentReplies';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
+import { FavoriteAction } from './FavoritesState';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
 import { hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
@@ -1540,6 +1541,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           <div className="docs-document-topbar">
             <div className="docs-breadcrumb"><FileText size={14} /><span>{selectedPage.projectId ? data.projects.find(project => project.id === selectedPage.projectId)?.name || '프로젝트' : '팀 공통'}</span><ChevronRight size={12} /><span>{draft.title || '제목 없는 문서'}</span></div>
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
+              <FavoriteAction type="document" id={selectedPage.id} />
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               <button type="button" className="btn btn-ghost docs-icon-button" title="팀 템플릿으로 저장" aria-label="팀 템플릿으로 저장"
