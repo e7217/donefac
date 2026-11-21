@@ -9,6 +9,7 @@ const PAGE_SIZE = 20;
 const MAX_OFFSET = 1_000_000;
 const invalidControl = /[\u0000-\u001f\u007f]/u;
 export const DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['status', 'assigneeId', 'q', 'offset'] as const;
+export const TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['projectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS] as const;
 
 export class DecisionFollowUpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -25,6 +26,7 @@ type Dependencies = {
 type Row = {
   linkId: string;
   issueId: string;
+  issueProjectId: string;
   issueKey: string;
   issueTitle: string;
   issueStatus: string;
@@ -69,8 +71,8 @@ function searchable(value: string) {
   return value.normalize('NFC').toLowerCase();
 }
 
-function parseQuery(query: Record<string, unknown>) {
-  if (Object.keys(query).some(key => !(DECISION_FOLLOW_UP_QUERY_PARAMETERS as readonly string[]).includes(key))) {
+function parseQuery(query: Record<string, unknown>, allowed: readonly string[] = DECISION_FOLLOW_UP_QUERY_PARAMETERS) {
+  if (Object.keys(query).some(key => !allowed.includes(key))) {
     throw new DecisionFollowUpError(400, '결정 후속 업무의 조회 조건을 확인해 주세요.');
   }
   const { status = 'open', assigneeId, q, offset = '0' } = query;
@@ -109,12 +111,10 @@ function compare(left: DecisionFollowUpItem, right: DecisionFollowUpItem) {
   return sourceOrder || (left.linkId < right.linkId ? -1 : left.linkId > right.linkId ? 1 : 0);
 }
 
-function listDecisions({ store, workflow }: Dependencies, projectId: string, scope: ProjectScope,
+function listDecisions({ store, workflow }: Dependencies, projectId: string | null, scope: ProjectScope,
   filters: ReturnType<typeof parseQuery>): DecisionFollowUpPage {
   return readSnapshot(store, () => {
-    requireProject(store, projectId, scope);
     const conditions = [
-      'i.project_id=?',
       "json_type(l.json,'$.documentSource')='object'",
       "json_type(r.json,'$.confluenceSourceVersion') IS NULL",
       "json_type(r.json,'$.version')='integer'",
@@ -123,17 +123,27 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string, sco
       "json_type(l.json,'$.documentSource.from')='integer'",
       "json_type(l.json,'$.documentSource.to')='integer'",
     ];
-    const params = [projectId];
+    const params: string[] = [];
+    if (projectId !== null) {
+      requireProject(store, projectId, scope);
+      conditions.push('i.project_id=?');
+      params.push(projectId);
+    }
     if (scope !== null) {
+      const projects = JSON.stringify(scope);
+      if (projectId === null) {
+        conditions.push('i.project_id IN (SELECT value FROM json_each(?))');
+        params.push(projects);
+      }
       conditions.push('d.project_id IN (SELECT value FROM json_each(?))');
-      params.push(JSON.stringify(scope));
+      params.push(projects);
     }
     if (filters.assigneeId === 'unassigned') conditions.push('i.assignee_id IS NULL');
     else if (filters.assigneeId !== null) {
       conditions.push('i.assignee_id=?');
       params.push(filters.assigneeId);
     }
-    const rows = store.db.prepare(`SELECT l.id AS linkId, i.id AS issueId,
+    const rows = store.db.prepare(`SELECT l.id AS linkId, i.id AS issueId, i.project_id AS issueProjectId,
       json_extract(i.json,'$.key') AS issueKey, json_extract(i.json,'$.title') AS issueTitle,
       json_extract(i.json,'$.status') AS issueStatus, i.assignee_id AS assigneeId,
       json_extract(i.json,'$.dueDate') AS dueDate, json_extract(i.json,'$.endDate') AS endDate,
@@ -144,14 +154,20 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string, sco
       FROM issues i JOIN resource_links l ON l.issue_id=i.id JOIN documents d ON d.id=l.document_id
       JOIN revisions r ON r.id=json_extract(l.json,'$.documentSource.revisionId') AND r.document_id=d.id
       WHERE ${conditions.join(' AND ')}`);
-    const workflowData = { workflows: [workflow(projectId)] };
+    const workflows = new Map<string, ProjectWorkflow>();
     const items: DecisionFollowUpItem[] = [];
     for (const value of rows.iterate(...params)) {
       const row = value as unknown as Row;
       if (!Number.isSafeInteger(row.version) || row.version < 1 || !Number.isFinite(Date.parse(row.createdAt)) ||
           !Number.isSafeInteger(row.sourceFrom) || !Number.isSafeInteger(row.sourceTo) ||
           row.sourceFrom < 0 || row.sourceTo <= row.sourceFrom) continue;
-      const status = statusMeta(workflowData, projectId, row.issueStatus);
+      const issueProjectId = row.issueProjectId;
+      let issueWorkflow = workflows.get(issueProjectId);
+      if (!issueWorkflow) {
+        issueWorkflow = workflow(issueProjectId);
+        workflows.set(issueProjectId, issueWorkflow);
+      }
+      const status = statusMeta({ workflows: [issueWorkflow] }, issueProjectId, row.issueStatus);
       const closed = status.category === 'done' || status.category === 'cancelled';
       if ((filters.status === 'open' && closed) || (filters.status === 'closed' && !closed)) continue;
       if (filters.query && ![row.issueKey, row.issueTitle, row.sourceTitle, row.documentTitle]
@@ -160,7 +176,7 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string, sco
       items.push({
         linkId: row.linkId,
         issue: {
-          id: row.issueId, projectId, key: row.issueKey, title: row.issueTitle, status: row.issueStatus,
+          id: row.issueId, projectId: issueProjectId, key: row.issueKey, title: row.issueTitle, status: row.issueStatus,
           statusLabel: status.label, statusColor: status.color, statusCategory: status.category,
           assigneeId: row.assigneeId, deadline: deadline?.value ?? null, deadlineSource: deadline?.source ?? null,
         },
@@ -204,6 +220,11 @@ function readDecisionSource({ store, authorizeDocumentBody }: Dependencies, requ
 
 export function registerDecisionFollowUpRoutes(app: Express, dependencies: Dependencies): void {
   const project = (value: unknown) => identifier(value, '프로젝트 ID를 확인해 주세요.');
+  app.get('/api/decision-follow-ups', (request, response) => {
+    const filters = parseQuery(request.query, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS);
+    const projectId = request.query.projectId === undefined ? null : project(request.query.projectId);
+    response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, projectId, dependencies.projectScope(request), filters));
+  });
   app.get('/api/projects/:id/decision-follow-ups', (request, response) => {
     response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, project(request.params.id),
       dependencies.projectScope(request), parseQuery(request.query)));

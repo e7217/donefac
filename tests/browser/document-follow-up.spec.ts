@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
-import type { DocPage, DocRevision, DocumentFollowUpResult, DocumentIssueLinkResult, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentFollowUpResult, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
@@ -693,6 +693,154 @@ test('360px에서 프로젝트의 결정 후속 업무를 찾아 고정 원문�
         const { trashEntryId } = await deleted.json() as { trashEntryId: string };
         await request.delete(`/api/trash/${trashEntryId}`);
       }
+    }
+  }
+});
+
+test('360px 팀 결정 후속 업무에서 여러 프로젝트와 공통 문서의 근거를 읽고 업무 변경 뒤 필터를 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const { projects: [base, other], users: [actor, nextAssignee] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const query = `팀 결정 ${suffix}`;
+  const statusId = `team_decision_${suffix}`;
+  const statusLabel = '팀 보고서에서 검토 중';
+  const workflowPath = `/api/projects/${other.id}/workflow`;
+  const originalWorkflow = await (await request.get(workflowPath)).json() as ProjectWorkflow;
+  const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+  const documents: DocPage[] = [];
+  const issues: Issue[] = [];
+  let configured: ProjectWorkflow | undefined;
+  async function createIssue(projectId: string, label: string, dates: { dueDate?: string; endDate?: string }, status?: string) {
+    const response = await request.post('/api/issues', { data: {
+      projectId, title: `${query} ${label}`, assigneeId: actor.id, ...dates, status,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    issues.push(issue);
+    return issue;
+  }
+  async function connect(issue: Issue, source: DocPage, text: string) {
+    const response = await request.post(`/api/documents/${source.id}/decision-links`, { data: {
+      issueId: issue.id, expectedDocumentVersion: source.version, requestId: randomUUID(), sourceSelection: { from: 1, to: text.length + 1, text },
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    return (await response.json() as DocumentIssueLinkResult).link;
+  }
+  const path = `#/${base.id}/reports/decision-follow-ups`;
+  const urlQuery = () => Object.fromEntries(new URLSearchParams(new URL(page.url()).hash.split('?')[1]));
+  const report = page.getByRole('tabpanel', { name: '결정 후속 업무', exact: true });
+  const projectPicker = report.getByRole('combobox', { name: '결정 후속 업무 프로젝트', exact: true });
+  const status = report.getByRole('combobox', { name: '결정 후속 업무 상태', exact: true });
+  const search = report.getByRole('searchbox', { name: '결정 후속 업무 검색', exact: true });
+  const apply = report.getByRole('button', { name: '조건 적용', exact: true });
+  const row = (issue: Issue) => report.getByRole('article', { name: `${issue.key} 결정 후속 업무`, exact: true });
+
+  try {
+    const patch = await request.patch(workflowPath, { data: {
+      ...originalWorkflow, expectedVersion: originalWorkflow.version,
+      statuses: [...originalWorkflow.statuses, { id: statusId, label: statusLabel, category: 'review', color: '#497993' }],
+    } });
+    expect(patch.ok(), await patch.text()).toBeTruthy();
+    configured = await patch.json() as ProjectWorkflow;
+    const originalText = '첫 회의에서 합의한 검증 절차를 보존한다.';
+    const currentText = '개정 회의에서 현재 문장만 바꾼다.';
+    const commonText = '공통 문서의 실행 조건을 기록한다.';
+    const crossSource = await createDecision(request, base.id, `${query} 원래 저장본`, content(originalText));
+    const commonSource = await createDecision(request, null, `${query} 공통 문서`, content(commonText));
+    documents.push(crossSource, commonSource);
+    const first = await createIssue(base.id, '첫 프로젝트 업무', { endDate: '2027-08-21' });
+    const second = await createIssue(other.id, '둘째 프로젝트 업무', { dueDate: '2027-08-14', endDate: '2027-08-25' }, statusId);
+    await connect(first, commonSource, commonText);
+    const crossed = await connect(second, crossSource, originalText);
+    const currentTitle = `${query} 개정 회의록`;
+    const changedSource = await request.patch(`/api/documents/${crossSource.id}`, { data: {
+      expectedVersion: crossSource.version, title: currentTitle, content: content(currentText),
+    } });
+    expect(changedSource.ok(), await changedSource.text()).toBeTruthy();
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${base.id}/overview`);
+    await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
+    await page.getByRole('button', { name: '팀 결정 후속 업무', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === `${path}?scope=team`);
+    await expect(projectPicker).toHaveValue('team');
+    await search.fill(query);
+    await status.selectOption('all');
+    await apply.click();
+    await expect.poll(urlQuery).toEqual({ scope: 'team', status: 'all', q: query });
+    await expect(report.getByRole('article').first()).toHaveAccessibleName(`${second.key} 결정 후속 업무`);
+    await expect(report.getByRole('article').last()).toHaveAccessibleName(`${first.key} 결정 후속 업무`);
+    await expect(row(first).locator(`[data-decision-issue-project="${base.id}"]`)).toHaveText(base.name);
+    await expect(row(first).locator('[data-decision-document-space]')).toContainText('팀 공통 문서');
+    await expect(row(second).locator(`[data-decision-issue-project="${other.id}"]`)).toHaveText(other.name);
+    await expect(row(second).locator('[data-decision-document-space]')).toContainText(base.name);
+    await expect(row(second).getByText(statusLabel, { exact: true })).toBeVisible();
+    await expect(row(second)).toContainText(currentTitle);
+
+    await projectPicker.selectOption(`project:${other.id}`);
+    const addressed = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/decision-follow-ups' && url.searchParams.get('projectId') === other.id;
+    });
+    await apply.click();
+    const pageResult = await addressed;
+    expect(pageResult.ok(), await pageResult.text()).toBeTruthy();
+    expect(await pageResult.json() as DecisionFollowUpPage).toMatchObject({ projectId: other.id, total: 1 });
+    const selected = { scope: 'team', decisionProject: other.id, status: 'all', q: query };
+    await expect.poll(urlQuery).toEqual(selected);
+    await expect(row(first)).toHaveCount(0);
+    await page.reload();
+    await expect(projectPicker).toHaveValue(`project:${other.id}`);
+    await expect(search).toHaveValue(query);
+    await expect(status).toHaveValue('all');
+    await expect.poll(urlQuery).toEqual(selected);
+
+    const evidence = row(second).getByRole('button', { name: `${second.key} 결정 근거 열기`, exact: true });
+    const sourcePath = `/api/projects/${other.id}/decision-follow-ups/${crossed.id}/source`;
+    const revisionPath = `/api/documents/${crossSource.id}/include-revisions/${crossed.documentSource!.revisionId}`;
+    const sourceRead = page.waitForResponse(response => new URL(response.url()).pathname === sourcePath);
+    const revisionRead = page.waitForResponse(response => new URL(response.url()).pathname === revisionPath);
+    await evidence.click();
+    expect((await sourceRead).ok()).toBeTruthy();
+    expect((await revisionRead).ok()).toBeTruthy();
+    await expect(row(second).locator('[data-document-excerpt-start]')).toHaveText(originalText);
+    await expect(row(second)).not.toContainText(currentText);
+    await row(second).getByRole('button', { name: `${second.key} 결정 근거 접기`, exact: true }).click();
+
+    const opener = row(second).getByRole('button', { name: `${second.key} 업무 열기`, exact: true });
+    await opener.click();
+    const detail = page.getByRole('dialog', { name: second.title, exact: true });
+    await expect(detail.locator('.issue-panel-breadcrumb')).toContainText(other.name);
+    await expect.poll(urlQuery).toEqual({ ...selected, issue: second.id });
+    await detail.getByRole('combobox', { name: '담당자', exact: true }).selectOption(nextAssignee.id);
+    await detail.getByLabel('목표 마감일', { exact: true }).fill('2027-08-29');
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${second.id}` && response.request().method() === 'PATCH');
+    await detail.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    expect((await saved).ok()).toBeTruthy();
+    await detail.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect.poll(urlQuery).toEqual(selected);
+    await expect(opener).toBeFocused();
+    await expect(row(second).getByText(nextAssignee.name, { exact: true })).toBeVisible();
+    await expect(row(second).locator('time[datetime="2027-08-29"]')).toBeVisible();
+    await projectPicker.selectOption('team');
+    await apply.click();
+    await expect.poll(urlQuery).toEqual({ scope: 'team', status: 'all', q: query });
+    await expect(report.getByRole('article').first()).toHaveAccessibleName(`${first.key} 결정 후속 업무`);
+    const bounds = await report.boundingBox();
+    expect(bounds?.x).toBeGreaterThanOrEqual(0);
+    expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(360);
+  } finally {
+    try {
+      for (const path of [...issues.map(issue => `issues/${issue.id}`), ...documents.map(document => `documents/${document.id}`)]) {
+        const deleted = await request.delete(`/api/${path}`);
+        if (deleted.ok()) {
+          const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+          await request.delete(`/api/trash/${trashEntryId}`);
+        }
+      }
+    } finally {
+      if (configured) await request.patch(workflowPath, { data: { ...originalWorkflow, expectedVersion: configured.version } });
     }
   }
 });

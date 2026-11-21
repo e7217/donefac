@@ -24,7 +24,7 @@ curl --fail-with-body \
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
 | `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
-| `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
+| `GET /decision-follow-ups` · `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 팀·프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 사용자 정의 필드의 현재 값별 집계와 그룹 업무 조회 |
 | `GET /users` | 담당자 지정에 필요한 팀원 ID·이름·색상 |
@@ -312,6 +312,12 @@ curl --fail-with-body \
 `{projectId,total,offset,limit,items}`에 조건을 통과한 연결을 20건씩 반환한다. 목표 마감일 또는 계획 종료일이 이른 업무를 먼저 보여준다. 날짜가 없는 업무는 뒤에 두고 같은 날짜에서는 원문 저장 시각 내림차순, 연결 ID 오름차순으로 정렬한다. 각 행에는 `linkId`, 현재 `issue`와 `document`, 고정 `source`의 버전 ID·버전·당시 제목·시각·선택 위치를 제공한다. 휴지통에서 업무나 문서를 복원하면 현재 활성 연결을 다시 조회할 수 있다.
 
 `GET /api/projects/:id/decision-follow-ups/:linkId/source`와 `/api/v1`의 같은 경로는 현재 연결과 고정 저장본의 발췌를 다시 대조해 `{linkId,documentId,source}`를 반환한다. `source`의 `{revisionId,from,to,text}`를 기존 고정 원문 뷰어에 전달할 수 있다. 범위 제한 키는 업무와 원본 문서 양쪽 프로젝트를 포함해야 한다. 공통 문서는 전체 프로젝트 키로 읽는다. 목록과 합계에는 허용된 행만 포함되며, 발췌 조회에는 원문 저장본의 본문 접근 범위도 적용한다.
+
+## 팀 결정 후속 업무
+
+`GET /api/decision-follow-ups`와 `/api/v1/decision-follow-ups`는 프로젝트 보고서와 같은 조건으로 여러 프로젝트를 조회한다. `projectId`를 생략하면 권한이 있는 전체 프로젝트의 결과를 함께 정렬하고 응답의 `projectId`는 `null`이다. 특정 프로젝트 ID를 보내면 해당 프로젝트의 업무를 대상으로 하고 응답에 그 ID가 표시된다. 상태 분류와 이름은 각 업무가 현재 속한 프로젝트의 워크플로를 사용한다. 범위 제한 키에서는 업무와 문서의 프로젝트가 모두 허용된 항목만 합계와 목록에 포함한다. 팀 공통 문서는 전체 프로젝트 키에서 조회한다.
+
+저장된 발췌는 각 행의 `issue.projectId`와 `linkId`를 사용해 프로젝트 보고서의 원문 경로에서 연다. 팀 보고서 화면 주소에는 `scope=team`과 선택한 경우의 `decisionProject`가 들어간다.
 
 ## 문장 댓글
 

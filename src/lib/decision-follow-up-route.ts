@@ -1,4 +1,5 @@
 export type DecisionFollowUpScope = {
+  projectId?: string | null;
   status: 'open' | 'closed' | 'all';
   assigneeId: string;
   q: string;
@@ -8,7 +9,7 @@ export type DecisionFollowUpScope = {
 export const MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH = 160;
 export const DEFAULT_DECISION_FOLLOW_UP_SCOPE: DecisionFollowUpScope = { status: 'open', assigneeId: '', q: '', offset: 0 };
 
-export function decisionFollowUpParameters(scope: DecisionFollowUpScope): URLSearchParams {
+export function decisionFollowUpQuery(scope: DecisionFollowUpScope): URLSearchParams {
   const parameters = new URLSearchParams();
   if (scope.status !== 'open') parameters.set('status', scope.status);
   if (scope.assigneeId) parameters.set('assigneeId', scope.assigneeId);
@@ -17,13 +18,26 @@ export function decisionFollowUpParameters(scope: DecisionFollowUpScope): URLSea
   return parameters;
 }
 
-export function readDecisionFollowUpScope(parameters: URLSearchParams, isKnownAssignee: (id: string) => boolean): DecisionFollowUpScope {
+export function decisionFollowUpParameters(scope: DecisionFollowUpScope): URLSearchParams {
+  const parameters = decisionFollowUpQuery(scope);
+  if (scope.projectId !== undefined) {
+    parameters.set('scope', 'team');
+    if (scope.projectId !== null) parameters.set('decisionProject', scope.projectId);
+  }
+  return parameters;
+}
+
+export function readDecisionFollowUpScope(parameters: URLSearchParams, isKnownAssignee: (id: string) => boolean,
+  isKnownProject: (id: string) => boolean): DecisionFollowUpScope {
   const { status, assigneeId, q, offset } = DEFAULT_DECISION_FOLLOW_UP_SCOPE;
   const requestedStatus = parameters.get('status');
   const requestedAssignee = parameters.get('assigneeId');
+  const requestedProject = parameters.get('decisionProject');
+  const team = parameters.get('scope') === 'team';
   const query = parameters.get('q')?.trim() ?? '';
   const position = parameters.get('offset') ?? '';
   return {
+    ...(team ? { projectId: requestedProject && isKnownProject(requestedProject) ? requestedProject : null } : {}),
     status: requestedStatus === 'closed' || requestedStatus === 'all' ? requestedStatus : status,
     assigneeId: requestedAssignee && (requestedAssignee === 'unassigned' || isKnownAssignee(requestedAssignee)) ? requestedAssignee : assigneeId,
     q: query.length <= MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH && query.isWellFormed() && !/[\u0000-\u001f\u007f]/u.test(query) ? query : q,
@@ -32,5 +46,6 @@ export function readDecisionFollowUpScope(parameters: URLSearchParams, isKnownAs
 }
 
 export function sameDecisionFollowUpScope(left?: DecisionFollowUpScope | null, right?: DecisionFollowUpScope | null): boolean {
-  return left?.status === right?.status && left?.assigneeId === right?.assigneeId && left?.q === right?.q && left?.offset === right?.offset;
+  return left?.projectId === right?.projectId && left?.status === right?.status && left?.assigneeId === right?.assigneeId &&
+    left?.q === right?.q && left?.offset === right?.offset;
 }

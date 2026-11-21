@@ -5,7 +5,7 @@ import { BookOpen, ChevronRight, RefreshCw, Search } from 'lucide-react';
 import type { DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, FeatureProps } from '../../shared/types';
 import { api } from '../lib/api';
 import {
-  decisionFollowUpParameters, MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH, sameDecisionFollowUpScope, type DecisionFollowUpScope,
+  decisionFollowUpQuery, MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH, sameDecisionFollowUpScope, type DecisionFollowUpScope,
 } from '../lib/decision-follow-up-route';
 import './decision-follow-ups-report.css';
 
@@ -20,7 +20,7 @@ type Result = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage | null;
 const numberLabel = (count: number) => count.toLocaleString('ko-KR');
 const workspacePath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/decision-follow-ups`;
 function sameOptions(left: Options, right: Options): boolean {
-  return left.status === right.status && left.assigneeId === right.assigneeId && left.q === right.q;
+  return left.projectId === right.projectId && left.status === right.status && left.assigneeId === right.assigneeId && left.q === right.q;
 }
 
 export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onScopeChange, issueOverlayOpen, openIssue, refresh, notify }: Props) {
@@ -46,8 +46,10 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     const controller = new AbortController();
     request.current = controller;
     setResult(previous => ({ scope, page: sameDecisionFollowUpScope(previous?.scope, scope) ? previous?.page ?? null : null, loading: true }));
-    const parameters = decisionFollowUpParameters(scope);
-    const path = `${workspacePath(projectId)}${parameters.size ? `?${parameters}` : ''}`;
+    const projectPath = scope.projectId === undefined ? workspacePath(projectId) : '/decision-follow-ups';
+    const parameters = decisionFollowUpQuery(scope);
+    if (typeof scope.projectId === 'string') parameters.set('projectId', scope.projectId);
+    const path = `${projectPath}${parameters.size ? `?${parameters}` : ''}`;
     try {
       const page = await api<DecisionFollowUpPage>(path, { signal: controller.signal, cache: 'no-store', headers: { 'X-Actor-Id': actorId } });
       if (!controller.signal.aborted) setResult({ scope, page, loading: false });
@@ -72,6 +74,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
   const page = current?.page;
   const loading = current?.loading ?? true;
   const openingIssue = opening !== null && sameDecisionFollowUpScope(opening.scope, scope);
+  const projectSelection = options.projectId === undefined ? 'current' : options.projectId === null ? 'team' : `project:${options.projectId}`;
   useLayoutEffect(() => {
     if (!page || loading || issueOverlayOpen) return;
     const removedOpener = issueOpener.current && !issueOpener.current.isConnected;
@@ -128,6 +131,19 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
             maxLength={MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH} value={options.q}
             onChange={event => setOptions({ ...options, q: event.target.value })} />
         </label>
+        <label className="decision-follow-ups-project">프로젝트
+          <select className="field" aria-label="결정 후속 업무 프로젝트" value={projectSelection}
+            onChange={event => {
+              const selection = event.currentTarget.value;
+              const projectId = selection === 'team' ? null : selection.startsWith('project:') ? selection.slice('project:'.length) : undefined;
+              setOptions({ ...options, projectId });
+            }}>
+            <option value="current">현재 프로젝트</option>
+            <option value="team">전체 프로젝트</option>
+            {data.projects.filter(project => project.id !== projectId || options.projectId === projectId)
+              .map(project => <option key={project.id} value={`project:${project.id}`}>{project.name}</option>)}
+          </select>
+        </label>
         <label>업무 상태
           <select className="field" aria-label="결정 후속 업무 상태" value={options.status}
             onChange={event => setOptions({ ...options, status: event.target.value as Options['status'] })}>
@@ -152,7 +168,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
       <h3 ref={resultsHeading} tabIndex={-1}>결정 근거 {numberLabel(page.total)}건</h3>
       {page.items.length ? <ul className="decision-follow-ups-list" aria-label="결정 후속 업무 목록">
         {page.items.map(item => <li key={item.linkId}><DecisionFollowUpCard key={`${item.source.revisionId}:${item.source.from}:${item.source.to}`}
-          item={item} data={data} loading={openingIssue} open={showIssue} /></li>)}
+          item={item} data={data} showIssueProject={scope.projectId !== undefined} loading={openingIssue} open={showIssue} /></li>)}
       </ul> : <p className="card decision-follow-ups-empty">{page.total && page.offset ? '이 페이지에 표시할 결정 근거가 없습니다.' : '조건에 맞는 결정 후속 업무가 없습니다.'}</p>}
       {(page.total > page.limit || page.offset > 0) && <nav className="reports-pagination" aria-label="결정 후속 업무 페이지">
         <span>{page.items.length ? `${numberLabel(page.offset + 1)}–${numberLabel(page.offset + page.items.length)} / ` : ''}{numberLabel(page.total)}건</span>
@@ -166,9 +182,10 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
   </div>;
 }
 
-function DecisionFollowUpCard({ item, data, loading, open }: {
+function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
   item: DecisionFollowUpItem;
   data: Props['data'];
+  showIssueProject: boolean;
   loading: boolean;
   open: (issue: DecisionFollowUpItem['issue'], opener: HTMLButtonElement) => Promise<void>;
 }) {
@@ -183,21 +200,25 @@ function DecisionFollowUpCard({ item, data, loading, open }: {
     return value.source;
   }, [documentId, from, linkId, path, revisionId, to]);
   const assignee = data.users.find(user => user.id === issue.assigneeId);
+  const issueProject = showIssueProject ? data.projects.find(project => project.id === issue.projectId) : undefined;
   const documentProject = data.projects.find(project => project.id === document.projectId);
+  const documentSpace = document.projectId === null ? '팀 공통 문서' : documentProject?.name ?? '프로젝트 정보 없음';
 
   return <article className="card decision-follow-up" aria-label={`${issue.key} 결정 후속 업무`}>
     <h4><button className="decision-follow-up-issue" type="button" aria-label={`${issue.key} 업무 열기`} aria-disabled={loading}
       onClick={event => { if (!loading) void open(issue, event.currentTarget); }}>
       <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><ChevronRight size={15} aria-hidden="true" />
     </button></h4>
-    <dl className="decision-follow-up-details">
+    <dl className="decision-follow-up-details" data-show-issue-project={showIssueProject || undefined}>
+      {showIssueProject && <div><dt>업무 프로젝트</dt><dd data-decision-issue-project={issue.projectId}>{issueProject?.name ?? '프로젝트 정보 없음'}</dd></div>}
       <div><dt>상태</dt><dd><i style={{ backgroundColor: issue.statusColor }} aria-hidden="true" />{issue.statusLabel}</dd></div>
       <div><dt>담당자</dt><dd>{assignee?.name ?? '미지정'}</dd></div>
       <div><dt>{issue.deadlineSource === 'endDate' ? '계획 종료일' : '목표 마감일'}</dt>
         <dd>{issue.deadline ? <time dateTime={issue.deadline}>{issue.deadline}</time> : '미정'}</dd></div>
     </dl>
     <p className="decision-follow-up-document"><BookOpen size={16} aria-hidden="true" />
-      <span>{document.title || '제목 없는 문서'}<small>{documentProject?.name ?? '팀 공통 문서'}</small></span>
+      <span>{document.title || '제목 없는 문서'}<small data-decision-document-space={document.projectId ?? ''}>
+        {showIssueProject && '문서 공간 · '}{documentSpace}</small></span>
     </p>
     <Suspense fallback={<p role="status">결정 근거 보기를 준비하고 있습니다.</p>}>
       <DocumentDecisionRevision data={data} documentId={documentId} revisionId={revisionId} expectedVersion={version}

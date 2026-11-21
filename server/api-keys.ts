@@ -4,7 +4,7 @@ import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Commen
 import { Store } from './store.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { listIssueRelations } from './issue-relations.js';
-import { DECISION_FOLLOW_UP_QUERY_PARAMETERS } from './decision-follow-ups.js';
+import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS } from './decision-follow-ups.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelLists } from '../shared/document-label-list.js';
@@ -251,6 +251,11 @@ export class ApiKeyService {
     if (request.method === 'GET' && deliveryBlockers) {
       this.query(request, ['savedViewId', 'reason', 'offset', 'revision']);
       this.allowedProject(key, this.decode(deliveryBlockers[1]));
+      this.used(key);
+      return next();
+    }
+    if (request.method === 'GET' && path === '/api/decision-follow-ups') {
+      this.query(request, [...TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS]);
       this.used(key);
       return next();
     }

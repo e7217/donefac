@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, ClipboardList, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Trash2, Users, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
@@ -15,7 +15,7 @@ import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from 
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
-import { decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
+import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
@@ -232,8 +232,10 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     ...(isRelationId(blockerView) ? { savedViewId: blockerView } : {}),
     ...(blockerReason ? { reason: blockerReason } : {}),
   } : null;
-  const decisionFollowUpScope = view === 'reports' && projectId === parts[0] && parts[2] === 'decision-follow-ups'
-    ? readDecisionFollowUpScope(parameters, id => snapshot.users.some(user => user.id === id)) : null;
+  const decisionFollowUpScope = view === 'reports' && parts[2] === 'decision-follow-ups' &&
+    (projectId === parts[0] || parameters.get('scope') === 'team')
+    ? readDecisionFollowUpScope(parameters, id => snapshot.users.some(user => user.id === id),
+      id => snapshot.projects.some(project => project.id === id)) : null;
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
@@ -597,6 +599,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null, decisionFollowUpScope: scope });
   };
+  const openTeamDecisionFollowUps = () => {
+    const scope = decisionFollowUpScope?.projectId !== undefined ? decisionFollowUpScope : { ...DEFAULT_DECISION_FOLLOW_UP_SCOPE, projectId: null };
+    requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, decisionFollowUpScope: scope });
+  };
   const previewIssueDocument = (id: string) => {
     const current = acceptedRouteRef.current;
     const snapshot = dataRef.current;
@@ -722,7 +728,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openedIssue = data.issues.find(issue => issue.id === issueId);
   const teamGantt = view === 'gantt' && ganttScope === 'team';
   const teamBoard = view === 'teamboard';
-  const teamPageLabel = teamBoard ? '전체 프로젝트 보드' : teamGantt ? '전체 프로젝트 간트' : view === 'teamoverview' ? '팀 개요' : null;
+  const teamDecisions = view === 'reports' && decisionFollowUpScope?.projectId !== undefined;
+  const teamPageLabel = teamBoard ? '전체 프로젝트 보드' : teamGantt ? '전체 프로젝트 간트' :
+    teamDecisions ? '팀 결정 후속 업무' : view === 'teamoverview' ? '팀 개요' : null;
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
   const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
@@ -743,13 +751,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onPointerDown={view === 'gantt' ? keepGanttDateFocus : undefined} onClick={() => navigate('teamboard')}><Columns3 size={18}/><span>전체 프로젝트 보드</span></button>
         <button type="button" className={`nav-item ${teamGantt ? 'active' : ''}`} aria-current={teamGantt ? 'page' : undefined} disabled={!project}
           data-gantt-focus-control="" onPointerDown={keepGanttDateFocus} onClick={openTeamGantt}><SquareChartGantt size={18}/><span>전체 프로젝트 간트</span></button>
+        <button type="button" className={`nav-item ${teamDecisions ? 'active' : ''}`} aria-current={teamDecisions ? 'page' : undefined} disabled={!project}
+          data-gantt-focus-control={view === 'gantt' ? '' : undefined} onPointerDown={view === 'gantt' ? keepGanttDateFocus : undefined}
+          onClick={openTeamDecisionFollowUps}><ClipboardList size={18}/><span>팀 결정 후속 업무</span></button>
         <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId)}</span></button>
         <button className={`nav-item ${view === 'trash' ? 'active' : ''}`} onClick={() => navigate('trash')}><Trash2 size={17}/><span>휴지통</span></button>
       </nav>
       <div className="sidebar-section-title"><span>프로젝트</span><button className="icon-btn" title="프로젝트 만들기" aria-label="프로젝트 만들기" onClick={() => setProjectModal(true)}><Plus size={15}/></button></div>
       <div className="project-list">{data.projects.map(p => <button key={p.id} className={`project-item ${p.id === projectId ? 'selected' : ''}`} onClick={() => navigate('overview', p.id)}><span className="project-symbol" style={{background: p.color + '17', color: p.color}}>{p.key.slice(0,1)}</span><span>{p.name}</span>{p.id === projectId && <ChevronDown size={14}/>}</button>)}</div>
       {project && <nav className="project-navigation">{navigation.map(item => {
-        const active = view === item.id && (item.id !== 'gantt' || !teamGantt);
+        const active = view === item.id && (item.id !== 'gantt' || !teamGantt) && (item.id !== 'reports' || !teamDecisions);
         const exitsTeamGantt = item.id === 'gantt' && teamGantt;
         return <button key={item.id} className={`nav-item ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined}
           data-gantt-focus-control={exitsTeamGantt ? '' : undefined} onPointerDown={exitsTeamGantt ? keepGanttDateFocus : undefined}

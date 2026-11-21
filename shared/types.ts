@@ -873,7 +873,7 @@ export interface DecisionFollowUpItem {
 }
 
 export interface DecisionFollowUpPage {
-  projectId: string;
+  projectId: string | null;
   total: number;
   offset: number;
   limit: number;

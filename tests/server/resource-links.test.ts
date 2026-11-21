@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocumentIssueLinkResult, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const project = 'project-neo';
 const outsideProject = 'project-team';
@@ -276,4 +276,85 @@ test('decision follow-up pages use deadline priority and stable link ordering at
   assert.deepEqual([page.limit, page.offset, page.total, next.offset, next.total], [20, 0, 22, 20, 22]);
   assert.deepEqual([...page.items, ...next.items].map(row => row.linkId), [firstId, ...ids.sort(), lastId]);
   assert.deepEqual((await f.call<DecisionFollowUpPage>(route)).items, page.items);
+});
+
+test('team decision follow-ups aggregate actual project workflows and enforce both endpoint scopes', async t => {
+  const f = await fixture(t);
+  const statusId = 'shared_decision_review';
+  for (const [projectId, label, category] of [
+    [project, '첫 프로젝트 확인 중', 'review'], [outsideProject, '둘째 프로젝트 확인 완료', 'done'],
+  ] as const) {
+    const path = `/projects/${projectId}/workflow`;
+    const current = await f.call<ProjectWorkflow>(path);
+    await f.call(path, 200, 'PATCH', {
+      ...current, expectedVersion: current.version, statuses: [...current.statuses, { id: statusId, label, category, color: '#4b8374' }],
+    });
+  }
+
+  const text = '팀 보고서에 원문을 보내지 않는 합성 발췌';
+  const query = 'Synthetic team decision';
+  const first = await f.issue(`${query} first`, project, { status: statusId, endDate: '2027-03-06', assigneeId: owner });
+  const second = await f.issue(`${query} second`, outsideProject, { status: statusId, dueDate: '2027-03-03', endDate: '2027-03-20', assigneeId: owner });
+  const localSecond = await f.issue(`${query} local second`, outsideProject, { endDate: '2027-03-05', assigneeId: owner });
+  const unassigned = await f.issue(`${query} unassigned`, outsideProject);
+  const plain = await f.issue(`${query} ordinary link`);
+  const ownDocument = await f.document('첫 프로젝트 회의록', project, paragraph(text));
+  const crossDocument = await f.document('다른 프로젝트에 남긴 기존 근거', project, paragraph(text));
+  const secondDocument = await f.document('둘째 프로젝트 회의록', outsideProject, paragraph(text));
+  const commonDocument = await f.document('팀 공통 회의록', null, paragraph(text));
+  const firstLink = await f.cite(first, ownDocument, text);
+  const crossLink = await f.cite(second, crossDocument, text);
+  const localLink = await f.cite(localSecond, secondDocument, text);
+  const commonLink = await f.cite(unassigned, commonDocument, text);
+  await f.connect(plain, ownDocument);
+  const revised = await f.call<DocPage>(`/documents/${crossDocument.id}`, 200, 'PATCH', {
+    expectedVersion: crossDocument.version, title: '변경된 원문 제목', content: paragraph('다시 편집한 현재 본문'),
+  });
+
+  const path = '/decision-follow-ups';
+  const page = (filters: Record<string, string> = {}, token?: string) => f.call<DecisionFollowUpPage>(
+    `${token ? '/v1' : ''}${path}?${new URLSearchParams({ q: query, status: 'all', ...filters })}`, 200, 'GET', undefined, token);
+  const links = (result: DecisionFollowUpPage) => result.items.map(item => item.linkId);
+  const all = await page();
+  assert.equal(all.projectId, null);
+  assert.equal(all.total, 4);
+  assert.deepEqual(links(all), [crossLink.id, localLink.id, firstLink.id, commonLink.id]);
+  assert.deepEqual(all.items.map(({ issue, document }) => [issue.projectId, issue.deadline, issue.deadlineSource, document.projectId]), [
+    [outsideProject, '2027-03-03', 'dueDate', project], [outsideProject, '2027-03-05', 'endDate', outsideProject],
+    [project, '2027-03-06', 'endDate', project], [outsideProject, null, null, null],
+  ]);
+  assert.equal(all.items[0].issue.statusLabel, '둘째 프로젝트 확인 완료');
+  assert.equal(all.items[0].issue.statusCategory, 'done');
+  assert.equal(all.items[2].issue.statusLabel, '첫 프로젝트 확인 중');
+  assert.equal(all.items[2].issue.statusCategory, 'review');
+  assert.equal(all.items[0].document.title, revised.title);
+  assert.equal(all.items[0].source.title, crossDocument.title);
+  assert.ok(!JSON.stringify(all).includes(text));
+  assert.deepEqual(links(await page({ status: 'open' })), [localLink.id, firstLink.id, commonLink.id]);
+  assert.deepEqual(links(await page({ status: 'closed' })), [crossLink.id]);
+  assert.deepEqual(links(await page({ assigneeId: 'unassigned' })), [commonLink.id]);
+  assert.deepEqual(links(await page({ assigneeId: owner, offset: '1' })), [localLink.id, firstLink.id]);
+  const filtered = await page({ projectId: outsideProject, q: crossDocument.title });
+  assert.equal(filtered.projectId, outsideProject);
+  assert.deepEqual(links(filtered), [crossLink.id]);
+
+  const firstScope = await f.key('read');
+  const secondScope = await f.key('read', [outsideProject]);
+  const both = await f.key('read', [project, outsideProject]);
+  const unrestricted = await f.key('read', null);
+  await f.call(`/v1${path}`, 401);
+  assert.deepEqual(links(await page({}, firstScope)), [firstLink.id]);
+  assert.deepEqual(links(await page({}, secondScope)), [localLink.id]);
+  assert.deepEqual(links(await page({}, both)), [crossLink.id, localLink.id, firstLink.id]);
+  assert.deepEqual(await page({}, unrestricted), all);
+  assert.deepEqual(links(await page({ projectId: outsideProject }, both)), [crossLink.id, localLink.id]);
+  await f.call(`/v1${path}?projectId=${outsideProject}`, 403, 'GET', undefined, firstScope);
+  await f.call(`${path}?projectId=absent-project`, 404);
+  await f.call(`${path}?projectId=${project}&projectId=${outsideProject}`, 400);
+  await f.call(`/projects/${project}${path}?projectId=${outsideProject}`, 400);
+  const sourcePath = `/projects/${outsideProject}${path}/${crossLink.id}/source`;
+  await f.call(`/v1${sourcePath}`, 403, 'GET', undefined, secondScope);
+  assert.deepEqual(await f.call<DecisionFollowUpSource>(`/v1${sourcePath}`, 200, 'GET', undefined, both), {
+    linkId: crossLink.id, documentId: crossDocument.id, source: crossLink.documentSource,
+  });
 });

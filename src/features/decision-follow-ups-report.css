@@ -14,12 +14,13 @@
 
 .decision-follow-ups-controls {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)) auto;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto;
   align-items: end;
   gap: 0.75rem;
 }
 
 .decision-follow-ups-controls label { min-width: 0; }
+.decision-follow-ups-controls .field { box-sizing: border-box; min-width: 0; }
 .decision-follow-ups-results > h3 { margin: 1rem 0 0.65rem; }
 .decision-follow-ups-list {
   display: grid;
@@ -61,6 +62,8 @@
   overflow-wrap: anywhere;
 }
 
+.decision-follow-up-details[data-show-issue-project] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
 .decision-follow-up-details dt,
 .decision-follow-up-document small { color: #526c65; }
 .decision-follow-up-details dd { margin: 0; }
@@ -96,12 +99,14 @@
 
 @media (max-width: 780px) {
   .decision-follow-ups-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .decision-follow-ups-controls label:first-child { grid-column: 1 / -1; }
+  .decision-follow-ups-controls label:first-child,
+  .decision-follow-ups-project { grid-column: 1 / -1; }
   .decision-follow-ups-controls .btn { grid-column: 1 / -1; justify-self: end; }
 }
 
 @media (max-width: 420px) {
   .decision-follow-ups-query,
   .decision-follow-up { padding: 0.8rem; }
-  .decision-follow-up-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .decision-follow-up-details,
+  .decision-follow-up-details[data-show-issue-project] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

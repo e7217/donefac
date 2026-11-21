@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -197,6 +197,35 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'POST', repositorySearchPath, 401, { headers: { ...bearer, Origin: origin }, data: searchWithoutQuery });
   await call(anonymous, 'POST', '/api/v1/integrations/gitlab/repository-search', 403, { headers: bearer, data: searchWithoutQuery });
 
+  const title = 'HTTPS 팀 결정 조회 검증';
+  const text = '외부 전송 없이 저장할 합성 결정 근거입니다.';
+  const document = await (await call(session, 'POST', '/api/documents', 201, {
+    headers: { Origin: origin }, data: { projectId: 'project-neo', title,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] } },
+  })).json();
+  const linked = [];
+  for (const issueId of ['issue-2', 'issue-9']) {
+    const reply = await call(session, 'POST', `/api/documents/${document.id}/decision-links`, 201, {
+      headers: { Origin: origin }, data: { requestId: randomUUID(), expectedDocumentVersion: document.version, issueId,
+        sourceSelection: { from: 1, to: text.length + 1, text } },
+    });
+    linked.push((await reply.json()).link);
+  }
+  const decisionQuery = new URLSearchParams({ status: 'all', q: title });
+  const teamDecisions = `/decision-follow-ups?${decisionQuery}`;
+  await call(anonymous, 'GET', `/api${teamDecisions}`, 401);
+  const decisionResponse = await call(session, 'GET', `/api${teamDecisions}`, 200);
+  assert.equal(decisionResponse.headers()['cache-control'], 'no-store');
+  const teamResult = await decisionResponse.json();
+  assert.equal(teamResult.projectId, null);
+  assert.equal(teamResult.total, 2);
+  assert.deepEqual(new Set(teamResult.items.map(item => item.linkId)), new Set(linked.map(link => link.id)));
+  const restricted = await (await call(anonymous, 'GET', `/api/v1${teamDecisions}`, 200, { headers: bearer })).json();
+  assert.equal(restricted.total, 1);
+  assert.equal(restricted.items[0].linkId, linked[0].id);
+  assert.equal(restricted.items[0].source.text, undefined);
+  await call(anonymous, 'GET', `/api/v1${teamDecisions}&projectId=project-team`, 403, { headers: bearer });
+
   const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
   await call(anonymous, 'GET', `/api${findings}`, 401);
   await call(anonymous, 'GET', `/api${findings}`, 401, { headers: bearer });
@@ -356,7 +385,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups and integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();
