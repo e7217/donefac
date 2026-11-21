@@ -317,6 +317,17 @@ export class ApiKeyService {
       this.allowedProject(key, this.decode(projectResource[1]));
       this.used(key); return next();
     }
+    const recurringIssues = /^\/api\/projects\/([^/]+)\/recurring-issues(?:\/([^/]+))?$/.exec(path);
+    if (recurringIssues) {
+      const read = request.method === 'GET' && !recurringIssues[2];
+      const write = recurringIssues[2] ? request.method === 'PATCH' : request.method === 'POST';
+      if (!read && !write) fail(403, '공개 API에서 지원하지 않는 반복 업무 작업입니다.');
+      if (write && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
+      this.query(request, read ? ['includeArchived'] : []);
+      this.allowedProject(key, this.decode(recurringIssues[1]));
+      if (recurringIssues[2]) this.decode(recurringIssues[2]);
+      this.used(key); return next();
+    }
     if (request.method === 'GET') {
       const issueHistory = /^\/api\/issues\/([^/]+)\/change-history$/.exec(path);
       if (issueHistory) {

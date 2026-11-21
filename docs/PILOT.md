@@ -17,6 +17,7 @@ TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" npm run start:pilot
 - 별도의 예시 데이터 디렉터리에서 `TEAMSPACE_PILOT_DEMO=1`을 지정하면 합성 자료로 시작한다.
 - 포트는 `TEAMSPACE_PILOT_PORT`로 바꾼다. 포트 `0`을 지정하면 운영체제가 고른 루프백 포트를 시작 로그에서 확인할 수 있다.
 - 격리 복원 테스트는 `TEAMSPACE_PILOT_OUTBOUND=0`으로 시작한다. 이 값은 보관된 외부 웹훅의 자동 전송을 일시 중지한다.
+- 복원 직후의 티켓 건수와 예약을 대조할 때 `TEAMSPACE_PILOT_RECURRING_ISSUES=0`으로 실행하면 반복 업무의 예약 확인을 일시 중지할 수 있다. 예약 규칙과 실행 기록은 조회할 수 있다.
 
 ## 팀 접속 주소
 
@@ -90,7 +91,7 @@ npm run pilot:restore -- \
   "$HOME/teamspace-pilot/backup-2026-11-19" \
   "$HOME/teamspace-pilot/restore-drill"
 TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/restore-drill" \
-TEAMSPACE_PILOT_PORT=5191 TEAMSPACE_PILOT_OUTBOUND=0 npm run start:pilot
+TEAMSPACE_PILOT_PORT=5191 TEAMSPACE_PILOT_OUTBOUND=0 TEAMSPACE_PILOT_RECURRING_ISSUES=0 npm run start:pilot
 ```
 
 복원 리허설은 별도 주소와 새 브라우저 프로필에서 수행한다. 물리 복원은 기존 API 키·연동 설정·공동 편집 세대도 복원한다. 실제 팀 주소로 전환할 때는 이전 브라우저의 미전송 공동 편집과 외부 웹훅 전송 대기를 확인한다. 전체 JSON 내보내기·가져오기는 별도의 데이터 이동 기능이다.

@@ -650,6 +650,29 @@ export interface IssueTemplate {
   createdAt: string;
   updatedAt: string;
 }
+export interface RecurringIssueConfig {
+  name: string;
+  templateId: string;
+  weekday: number;
+  time: string;
+  assigneeId: string | null;
+  enabled: boolean;
+}
+export type RecurringIssueRun = { scheduledAt: string; processedAt: string } & (
+  { outcome: 'created'; issueId: string; issueKey: string } |
+  { outcome: 'blocked'; reason: string }
+);
+export interface RecurringIssueRule extends RecurringIssueConfig {
+  id: string;
+  projectId: string;
+  authorId: string;
+  version: number;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string | null;
+  recentRuns: RecurringIssueRun[];
+}
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export interface IssueCloneResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
 export interface IssuePasteDiagnostic { line: number | null; message: string }

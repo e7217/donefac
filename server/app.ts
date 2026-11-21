@@ -39,6 +39,7 @@ import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
 import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
+import { RecurringIssueError, RecurringIssueService } from './recurring-issues.js';
 import { IssuePasteError, IssuePasteService } from './issue-paste.js';
 import { IssueRelationError, IssueRelationsService } from './issue-relations.js';
 import { IssueBlockerNotifications } from './issue-blocker-notifications.js';
@@ -177,6 +178,9 @@ export function createApp(options: {
   deadlineReminderWorker?: boolean;
   deadlineReminderClock?: () => Date;
   deadlineReminderIntervalMs?: number;
+  recurringIssueWorker?: boolean;
+  recurringIssueClock?: () => Date;
+  recurringIssueIntervalMs?: number;
   atlassianEnv?: NodeJS.ProcessEnv;
   browserOrigin?: string;
   gitlabWebhookPublicOrigin?: string;
@@ -223,6 +227,7 @@ export function createApp(options: {
     issueSchemas.validateIssue(candidate, undefined, { checkFields: false });
     return { ...defaults, customFields: candidate.customFields };
   });
+  const recurringIssueRules = new RecurringIssueService(store, options.recurringIssueClock);
   const documentCreation = new DocumentCreationService(store);
   const documentTemplateAssets = new DocumentTemplateAssetsService(store, files);
   const documentTemplates = new DocumentTemplatesService(store, documentTemplateAssets);
@@ -300,7 +305,10 @@ export function createApp(options: {
     return store.all<User>('users')[0]?.id ?? null;
   };
   const actor = (req: Request) => resolveActor(req) ?? fail('먼저 팀원을 등록해 주세요.');
-  const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') => store.put('activities',{id:uid(),resourceType,resourceId,actorId:actor(req),action,detail,createdAt:now()});
+  const recordActivity = (actorId: string, resourceType: string, resourceId: string, action: string, detail = '', createdAt = now()) =>
+    store.put('activities', { id: uid(), resourceType, resourceId, actorId, action, detail, createdAt });
+  const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') =>
+    recordActivity(actor(req), resourceType, resourceId, action, detail);
   const notifyIssue = (issue: Issue, actorId: string, kind: Extract<TeamNotificationKind, `issue-${string}`>, recipientIds: (string | null | undefined)[], createdAt: string, detail?: string) =>
     notifications.notify({kind,actorId,recipientIds,projectId:issue.projectId,targetId:issue.id,targetLabel:`${issue.key} ${issue.title}`,createdAt,...(detail===undefined?{}:{detail})});
   const notifyIssueRisk = (issue: Issue, actorId: string, kind: typeof ISSUE_RISK_NOTIFICATION_KINDS[number], createdAt: string, detail: string) =>
@@ -1293,8 +1301,8 @@ export function createApp(options: {
     });
     res.json(result);
   });
-  const prepareIssueCreation=(input:Record<string,unknown>):Issue=>{
-    const timestamp=now();const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
+  const prepareIssueCreation=(input:Record<string,unknown>,timestamp=now()):Issue=>{
+    const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
     const projectId=text(input.projectId,'프로젝트',200);
     const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
     const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
@@ -1302,20 +1310,23 @@ export function createApp(options: {
     return validateIssue(i);
   };
   // The caller owns the transaction, including any links created with the issue.
-  const commitIssueCreation=(req:Request,i:Issue):Issue=>{
-    const timestamp=i.createdAt, actorId=actor(req);
+  const commitIssueCreation=(actorId:string,i:Issue,recurringName?:string):Issue=>{
+    const timestamp=i.createdAt;
     if (i.reporterId === undefined) i.reporterId = actorId;
     const p=get<Project>('projects',i.projectId), row=store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(i.projectId) as {next_number:number}|undefined;
     const num=row?.next_number||1;i.key=`${p.key}-${num}`;
     store.db.prepare('INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET next_number=excluded.next_number').run(i.projectId,num+1);
     if(done(i))i.completedAt=timestamp;
-    store.put('issues',i);activity(req,'issue',i.id,'티켓 생성',`${i.key} ${i.title}`);
+    store.put('issues',i);
+    const detail = `${i.key} ${i.title}`;
+    recordActivity(actorId, 'issue', i.id, '티켓 생성', recurringName ? `${detail} · 반복 업무 ${recurringName}` : detail,
+      recurringName ? timestamp : undefined);
     if(i.assigneeId)notifyIssue(i,actorId,'issue-assigned',[i.assigneeId],timestamp);
     notifyIssue(i,actorId,'issue-created',projectSubscribers(i).filter(id=>id!==i.assigneeId),timestamp);
     return i;
   };
   const createIssueInTransaction=(req:Request,input:Record<string,unknown>):Issue=>
-    commitIssueCreation(req,prepareIssueCreation(input));
+    commitIssueCreation(actor(req),prepareIssueCreation(input));
 
   const issueTemplatesPath = '/api/projects/:projectId/issue-templates';
   app.get(issueTemplatesPath, (req, res) => {
@@ -1340,6 +1351,33 @@ export function createApp(options: {
       return updated;
     });
     res.json(template);
+  });
+
+  const recurringIssuesPath = '/api/projects/:projectId/recurring-issues';
+  app.get(recurringIssuesPath, (req, res) => {
+    const includeArchived = req.query.includeArchived;
+    if (includeArchived !== undefined && includeArchived !== '1') fail('보관된 반복 업무를 보려면 includeArchived=1을 사용해 주세요.');
+    res.set('Cache-Control', 'no-store').json(recurringIssueRules.list(req.params.projectId, includeArchived === '1'));
+  });
+  app.post(recurringIssuesPath, (req, res) => {
+    const actorId = actor(req);
+    let created = false;
+    const rule = recurringIssueRules.create(req.params.projectId, req.body, actorId, saved => {
+      recordActivity(actorId, 'project', saved.projectId, '반복 업무 추가', saved.name, saved.createdAt);
+      created = true;
+    });
+    res.set('Cache-Control', 'no-store').status(created ? 201 : 200).json(rule);
+  });
+  app.patch(`${recurringIssuesPath}/:ruleId`, (req, res) => {
+    const actorId = actor(req);
+    const rule = store.transaction(() => {
+      const saved = recurringIssueRules.patch(req.params.projectId, req.params.ruleId, req.body, actorId);
+      if (saved.version !== req.body.expectedVersion) {
+        recordActivity(actorId, 'project', saved.projectId, '반복 업무 변경', saved.name, saved.updatedAt);
+      }
+      return saved;
+    });
+    res.set('Cache-Control', 'no-store').json(rule);
   });
 
   const issueCreationInput = (input: Record<string, unknown>): Record<string, unknown> => {
@@ -1369,6 +1407,27 @@ export function createApp(options: {
     return merged;
   };
 
+  function runRecurringIssues() {
+    return recurringIssueRules.sweep({
+      prepare(rule, processedAt, template) {
+        try {
+          const input = issueCreationInput({ projectId: rule.projectId, templateId: template.id,
+            expectedTemplateVersion: template.version, assigneeId: rule.assigneeId, reporterId: rule.authorId });
+          return { issue: prepareIssueCreation(input, processedAt) };
+        } catch (error) {
+          if ((error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
+               error instanceof PlanningError || error instanceof WorkloadError || error instanceof IssueTemplateError) && error.status < 500) {
+            return { blocked: error.message };
+          }
+          throw error;
+        }
+      },
+      commit: (rule, issue) => store.withMutationContext({ actorId: rule.authorId, origin: 'automation' },
+        () => commitIssueCreation(rule.authorId, issue, rule.name)),
+      onError: error => console.error('[teamspace recurring issues]', error instanceof Error ? error.message : error),
+    });
+  }
+
   const issuePaste = new IssuePasteService(store, {
     schema: projectId => issueSchemas.get(projectId),
     workflow: projectId => workflows.get(projectId),
@@ -1384,7 +1443,7 @@ export function createApp(options: {
   });
   app.post('/api/projects/:projectId/issues/paste-apply', (req, res) => {
     const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
-    const result = issuePaste.apply(scope, req.body.previewId, issue => commitIssueCreation(req, issue));
+    const result = issuePaste.apply(scope, req.body.previewId, issue => commitIssueCreation(scope.actorId, issue));
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.post('/api/issues',(req,res)=>{
@@ -2209,7 +2268,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -2227,6 +2286,11 @@ export function createApp(options: {
     }
     const importedIssueTemplates = data.schemaVersion >= 87
       ? issueTemplates.validateRestore(data.issueTemplates, data.projects, data.users, data.exportedAt) : [];
+    if (data.schemaVersion < 90 && data.recurringIssueRules !== undefined && (!Array.isArray(data.recurringIssueRules) || data.recurringIssueRules.length)) {
+      fail('반복 업무를 포함한 백업은 schemaVersion 90이 필요합니다.');
+    }
+    const importedRecurringIssueRules = data.schemaVersion >= 90
+      ? recurringIssueRules.validateRestore(data.recurringIssueRules, data.projects, data.users, importedIssueTemplates, data.exportedAt) : [];
     if(data.schemaVersion<63&&data.documentTemplates!==undefined&&(!Array.isArray(data.documentTemplates)||data.documentTemplates.length)){
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
@@ -2634,6 +2698,7 @@ export function createApp(options: {
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
       issueTemplates.restore(importedIssueTemplates);
+      recurringIssueRules.restore(importedRecurringIssueRules);
       documentTemplates.restore(importedTemplates);
       documentTemplateAssets.restore(importedTemplateAssets);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[], subscriptionRefs.users,
@@ -2726,6 +2791,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
+    if(error instanceof RecurringIssueError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
@@ -2749,11 +2815,20 @@ export function createApp(options: {
   const deadlineReminderTimer = options.deadlineReminderWorker === false ? undefined
     : setInterval(sweepDeadlineReminders, options.deadlineReminderIntervalMs ?? 60_000).unref();
   if (deadlineReminderTimer) sweepDeadlineReminders();
+  function sweepRecurringIssues() {
+    try { runRecurringIssues(); }
+    catch (error) { console.error('[teamspace recurring issues]', error instanceof Error ? error.message : error); }
+  }
+  const recurringIssueTimer = options.recurringIssueWorker === false ? undefined
+    : setInterval(sweepRecurringIssues, options.recurringIssueIntervalMs ?? 60_000).unref();
+  if (recurringIssueTimer) sweepRecurringIssues();
   return {
     app,
+    runRecurringIssues,
     attachWebSocket: (server: import('node:http').Server, authorize?: CollaborationUpgradeGuard) => collaboration.attachWebSocket(server, authorize),
     close: () => {
       if (deadlineReminderTimer) clearInterval(deadlineReminderTimer);
+      if (recurringIssueTimer) clearInterval(recurringIssueTimer);
       migrations.close(); legacyImport.close(); outbound.close(); collaboration.close(); reportLedger.close(); issueChangeHistory.close(); stopIssueWatch(); store.db.close();
     },
   };

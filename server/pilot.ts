@@ -35,6 +35,7 @@ const api = createApp({
   gitlabWebhookPublicOrigin: access?.origin,
   seed: process.env.TEAMSPACE_PILOT_DEMO === '1',
   outboundWorker: process.env.TEAMSPACE_PILOT_OUTBOUND !== '0',
+  recurringIssueWorker: process.env.TEAMSPACE_PILOT_RECURRING_ISSUES !== '0',
 });
 const web = express();
 web.disable('x-powered-by');
