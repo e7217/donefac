@@ -5,7 +5,7 @@ import { BookOpen, ChevronLeft, ChevronRight, CircleDot, Search } from 'lucide-r
 import type { FeatureProps, WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import {
-  DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchQuery,
+  DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput,
   searchWorkspace, workspaceSearchLabels, type WorkspaceSearchFilters,
 } from '../../shared/workspace-search';
 
@@ -53,7 +53,7 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const next = { ...draft, query: normalizeWorkspaceSearchQuery(draft.query), page: DEFAULT_WORKSPACE_SEARCH_FILTERS.page };
+    const next = { ...draft, query: normalizeWorkspaceSearchInput(draft.query), page: DEFAULT_WORKSPACE_SEARCH_FILTERS.page };
     if (onChange(next)) {
       setDraft(criteria(next));
       focusResults();
@@ -74,7 +74,8 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
     <div className="page-heading"><h1>업무·문서 검색</h1></div>
     <form className="card workspace-search-filters" aria-label="업무·문서 검색 조건" onSubmit={submit}>
       <label className="workspace-search-query">검색어
-        <input className="field" type="search" value={draft.query} maxLength={WORKSPACE_SEARCH_QUERY_LIMIT}
+        <input className="field" type="search" value={draft.query} maxLength={WORKSPACE_SEARCH_INPUT_LIMIT}
+          placeholder="업무 번호, 제목, 문서 내용, GitLab 링크·참조"
           onChange={event => setDraft({ ...draft, query: event.currentTarget.value })} />
       </label>
       <label>검색 대상
@@ -117,7 +118,7 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
         {results.items.map((result, index) => {
           const detailId = `${resultsId}-${index}`;
           if (result.kind === 'issue') {
-            const { issue, excerpt, matchedAliases } = result;
+            const { issue, excerpt, matchedAliases, matchedGitlab } = result;
             const project = projectsById.get(issue.projectId);
             const status = statusMeta(data, issue.projectId, issue.status);
             return <li key={`issue:${issue.id}`}>
@@ -127,8 +128,9 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
                 <span className="workspace-search-result-content" id={detailId}>
                   <span className="workspace-search-result-title"><span className="workspace-search-issue-key">{issue.key}</span><strong>{issue.title}</strong></span>
                   <span className="workspace-search-result-path">{project?.name ?? '프로젝트'} · {status.label}</span>
-                  {matchedAliases && <span className="workspace-search-result-labels">
-                    {matchedAliases.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+                  {(matchedAliases || matchedGitlab) && <span className="workspace-search-result-labels">
+                    {matchedAliases?.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+                    {matchedGitlab && <span className="workspace-search-label">{matchedGitlab}</span>}
                   </span>}
                   {excerpt && <span className="workspace-search-excerpt">{excerpt}</span>}
                 </span>

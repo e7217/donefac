@@ -109,6 +109,7 @@ import { fieldApplies, hasCustomValue, issueSearchText, visibleIssueFieldIds } f
 import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
 import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
+import { matchingGitlabSearchLinks, normalizeGitlabSearchInput } from '../shared/gitlab-search.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
@@ -2341,7 +2342,10 @@ export function createApp(options: {
   });
   app.get('/api/search',(req,res)=>{
     const query=String(req.query.q||'').trim(), q=query.toLocaleLowerCase();
-    if(q.length>500)fail('검색어가 너무 깁니다.');
+    const gitlabQuery = normalizeGitlabSearchInput(query);
+    if(q.length>500 && !gitlabQuery)fail('검색어가 너무 깁니다.');
+    const gitlabMatches = gitlabQuery ? matchingGitlabSearchLinks(store.all<GitlabLink>('gitlab_links'), gitlabQuery) : null;
+    if(q.length>500 && !gitlabMatches?.size && !/^https?:\/\//u.test(gitlabQuery ?? ''))fail('검색어가 너무 깁니다.');
     const documentQuery=documentLabelKey(query);
     const issues = store.all<Issue>('issues');
     const issueAliases = q ? readIssueSearchAliases(store, issues) : {};
@@ -2350,9 +2354,10 @@ export function createApp(options: {
     const issueResults = issues.flatMap(issue => {
       const aliases = matchingIssueSearchAliases(searchData, issue.id, keyQuery);
       const exactCurrent = Boolean(keyQuery) && normalizeWorkspaceSearchQuery(issue.key).toLowerCase() === keyQuery;
-      if (!exactCurrent && !aliases.length && !issueSearchText(searchData, issue).toLocaleLowerCase().includes(q)) return [];
+      const exactGitlab = gitlabMatches?.has(issue.id);
+      if (!exactCurrent && !aliases.length && !exactGitlab && !issueSearchText(searchData, issue).toLocaleLowerCase().includes(q)) return [];
       const exactAlias = aliases.some(alias => normalizeWorkspaceSearchQuery(alias.key).toLowerCase() === keyQuery);
-      return [{ issue, rank: exactCurrent ? 0 : exactAlias ? 1 : 2 }];
+      return [{ issue, rank: exactCurrent ? 0 : exactAlias ? 1 : exactGitlab ? 2 : 3 }];
     }).sort((left, right) => left.rank - right.rank).map(({ issue }) => issue);
     res.json({issues:issueResults,
       documents:store.all<DocPage>('documents').filter(d=>documentSearchText(d).includes(documentQuery))});

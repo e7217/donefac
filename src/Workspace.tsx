@@ -11,7 +11,7 @@ import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
-import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchQuery, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
@@ -1010,7 +1010,6 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
 }) {
   const [query, setQuery] = useState('');
   const trimmed = query.trim();
-  const normalized = normalizeWorkspaceSearchQuery(query);
   const issues = searchQuickIssues(data, query);
   const projectNames = new Map(data.projects.map(project => [project.id, project.name]));
   const documentQuery = documentLabelKey(trimmed);
@@ -1019,23 +1018,24 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
     <div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색">
       <form className="search-input-wrap" onSubmit={event => {
         event.preventDefault();
-        onShowAll(normalized);
+        onShowAll(normalizeWorkspaceSearchInput(query));
       }} id="workspace-quick-search">
         <Search size={21} aria-hidden="true"/>
-        <input autoFocus value={query} maxLength={WORKSPACE_SEARCH_QUERY_LIMIT} onChange={event => setQuery(event.target.value)}
-          aria-label="통합 검색어" placeholder="현재·이전 티켓 번호, 업무 제목, 문서 내용 검색…"/>
+        <input autoFocus value={query} maxLength={WORKSPACE_SEARCH_INPUT_LIMIT} onChange={event => setQuery(event.target.value)}
+          aria-label="통합 검색어" placeholder="업무 번호, 제목, 문서 내용, GitLab 링크·참조"/>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="검색 닫기"><X size={19}/></button>
       </form>
       <div className="search-results">
         {!trimmed ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>
           {issues.length > 0 && <div className="search-label">업무</div>}
-          {issues.map(({issue, matchedAliases}) => <button type="button" className="search-result search-result-issue" key={issue.id} onClick={() => openIssue(issue.id)}>
+          {issues.map(({issue, matchedAliases, matchedGitlab}) => <button type="button" className="search-result search-result-issue" key={issue.id} onClick={() => openIssue(issue.id)}>
             <CircleDot size={17} style={{color:statusMeta(data, issue.projectId, issue.status).color}} aria-hidden="true"/>
             <span className="search-result-issue-content">
               <span className="search-result-issue-title"><span className="workspace-search-issue-key">{issue.key}</span><span>{issue.title}</span></span>
               <span className="workspace-search-result-path">{projectNames.get(issue.projectId) ?? '프로젝트'}</span>
-              {matchedAliases && <span className="workspace-search-result-labels">
-                {matchedAliases.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+              {(matchedAliases || matchedGitlab) && <span className="workspace-search-result-labels">
+                {matchedAliases?.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
+                {matchedGitlab && <span className="workspace-search-label">{matchedGitlab}</span>}
               </span>}
             </span>
             <ChevronRight size={15} aria-hidden="true"/>

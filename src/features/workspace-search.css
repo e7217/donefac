@@ -141,6 +141,8 @@
 
 .workspace-search-label {
   max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 2px 6px;
   border-radius: 4px;
   background: #edf4ef;

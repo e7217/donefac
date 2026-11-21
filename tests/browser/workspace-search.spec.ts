@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { DocPage, Issue, ProjectIssueSchema, ProjectWorkflow, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, GitlabLink, Issue, ProjectIssueSchema, ProjectWorkflow, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   const data = await response.text();
@@ -154,6 +154,77 @@ test('360px 검색에서 업무·공통 문서를 함께 찾고 검색 페이지
     await expect(result.label).toHaveValue(label);
   } finally {
     for (const id of trash) await request.delete(`/api/trash/${id}`);
+    await f.close();
+  }
+});
+
+test('GitLab MR 주소로 빠른 검색에서 통합 검색까지 연결 업무를 찾고 안전한 검색 주소를 공유한다', async ({ page, request }) => {
+  const f = await fixture(request);
+  try {
+    const first = await f.issue(f.first.id, `검토할 문서 변경 ${f.token}`);
+    const second = await f.issue(f.second.id, `운영 적용 확인 ${f.token}`);
+    const decoy = await f.issue(f.first.id, `다른 저장소의 변경 ${f.token}`);
+    const host = 'gitlab.search.invalid';
+    const nestedRepository = `${'division/'.repeat(24)}group/product-${f.token}`;
+    const canonical = `https://${host}/scm/${nestedRepository}/-/merge_requests/91`;
+    expect(canonical.length).toBeGreaterThan(200);
+    const pasted = new URL(canonical);
+    pasted.username = 'synthetic-reviewer';
+    pasted.password = 'synthetic-user-secret';
+    pasted.searchParams.set('token', 'synthetic-query-secret');
+    pasted.hash = 'note_244';
+    const links: GitlabLink[] = [first, second, decoy].map(({ id }, index) => ({
+      id: `synthetic-${id}`, issueId: id, projectId: index === 2 ? 4 : 5, iid: 91, kind: 'merge_request',
+      title: '합성 문서 변경 검토', webUrl: index === 2 ? `https://${host}/scm/group/elsewhere/-/merge_requests/91` : canonical,
+      state: 'opened', updatedAt: '2026-11-21T00:00:00.000Z',
+    }));
+    const external: string[] = [];
+    await page.route(`https://${host}/**`, async route => { external.push(route.request().url()); await route.abort(); });
+    await page.route('**/api/workspace', async route => {
+      const response = await route.fetch();
+      if (!response.ok()) return route.fulfill({ response });
+      const snapshot = await response.json() as WorkspaceSnapshot;
+      await route.fulfill({ response, json: { ...snapshot, gitlabLinks: [...snapshot.gitlabLinks, ...links] } });
+    });
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${f.first.id}/overview`);
+    await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+    const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+    const term = quick.getByRole('textbox', { name: '통합 검색어', exact: true });
+    await term.fill(pasted.href);
+    await expect(quick.getByText(first.title, { exact: true })).toBeVisible();
+    await expect(quick.getByText(second.title, { exact: true })).toBeVisible();
+    await expect(quick.getByText(decoy.title, { exact: true })).toHaveCount(0);
+    await expect(quick.getByText(/^GitLab MR /u)).toHaveCount(2);
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+
+    const result = search(page);
+    const path = `#/${f.first.id}/search`;
+    await expect.poll(() => route(page)).toEqual({ path, query: { q: canonical } });
+    await expect(result.term).toHaveValue(canonical);
+    await expect(result.rows).toHaveCount(2);
+    await expect(result.issue(second)).toBeVisible();
+    await expect(result.results.getByText(/^GitLab MR /u)).toHaveCount(2);
+    await expect(result.results).not.toContainText(/synthetic-user-secret|synthetic-query-secret|note_244/u);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const scope = `project:${f.second.id}`;
+    await result.scope.selectOption(scope);
+    await result.submit.click();
+    await expect.poll(() => route(page)).toEqual({ path, query: { q: canonical, space: scope } });
+    await expect(result.rows).toHaveCount(1);
+    await expect(result.issue(first)).toHaveCount(0);
+    await page.reload();
+    await expect(result.term).toHaveValue(canonical);
+    await expect(result.scope).toHaveValue(scope);
+    await result.issue(second).click();
+    await expect(page.getByRole('dialog', { name: second.title, exact: true })).toBeVisible();
+
+    await page.goto(`/${path}?${new URLSearchParams({ q: pasted.href, space: scope })}`);
+    await expect.poll(() => route(page)).toEqual({ path, query: { q: canonical, space: scope } });
+    await expect(result.issue(second)).toBeVisible();
+    expect(external).toEqual([]);
+  } finally {
     await f.close();
   }
 });
