@@ -23,6 +23,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issues: readonly Issue[];
   dependencies: readonly Dependency[];
   calendar?: WorkCalendar;
+  focusDate?: 'dueDate';
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
@@ -117,7 +118,7 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, actorId, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, dependencies, calendar, focusDate, actorId, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>({});
@@ -133,7 +134,7 @@ export function GanttRowScheduleEdit({
   const [notice, setNotice] = useState('');
   const [clock, setClock] = useState(currentTime);
   const modal = useRef<HTMLElement>(null);
-  const startInput = useRef<HTMLInputElement>(null);
+  const initialDateInput = useRef<HTMLInputElement>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
   const recoverButton = useRef<HTMLButtonElement>(null);
@@ -209,11 +210,11 @@ export function GanttRowScheduleEdit({
     onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, dirty, Boolean(pending));
   }, [dirty, onDraftChange, pending]);
   useEffect(() => {
-    startInput.current?.focus({ preventScroll: true });
-    return () => {
-      request.current?.abort();
-      onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, false);
-    };
+    initialDateInput.current?.focus({ preventScroll: focusDate !== 'dueDate' });
+  }, [focusDate]);
+  useEffect(() => () => {
+    request.current?.abort();
+    onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, false);
   }, [onDraftChange]);
   useEffect(() => {
     if (!result?.previewId) return;
@@ -425,7 +426,7 @@ export function GanttRowScheduleEdit({
             {dates.map(({ field, label }) => <div className="gantt-row-edit-control" key={field}>
               <label htmlFor={`${uid}-${field}`}>{label}</label>
               <div className="gantt-row-edit-date">
-                <input id={`${uid}-${field}`} className="field" type="date" ref={field === 'startDate' ? startInput : undefined}
+                <input id={`${uid}-${field}`} className="field" type="date" ref={field === (focusDate ?? 'startDate') ? initialDateInput : undefined}
                   value={nextDates[field] ?? ''} max={MAX_CALENDAR_DATE} onChange={event => changeDate(field, event.currentTarget.value)} />
                 {nextDates[field] && <button className="btn btn-ghost" aria-label={`${label} 비우기`} title={`${label} 비우기`}
                   type="button" onClick={() => changeDate(field, '')}><X size={15} aria-hidden="true" /></button>}

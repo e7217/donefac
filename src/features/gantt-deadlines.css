@@ -1,0 +1,198 @@
+.gantt-deadlines {
+  min-width: 0;
+  margin: 16px 0;
+  padding: 16px;
+  color: #365046;
+}
+
+.gantt-deadlines-header,
+.gantt-deadlines-item-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 8px;
+}
+
+.gantt-deadlines-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 16px;
+}
+
+.gantt-deadlines-header h2 svg {
+  color: #6b4b83;
+}
+
+.gantt-deadlines-header p,
+.gantt-deadlines-empty {
+  margin: 4px 0 0;
+  color: #53685e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gantt-deadlines-header .issue-icon-button {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.gantt-deadlines-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.gantt-deadlines-filters .btn {
+  justify-content: space-between;
+  gap: 4px 8px;
+  min-width: 0;
+  min-height: 40px;
+  text-align: start;
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.gantt-deadlines-filters .btn[aria-pressed='true'] {
+  border-color: #736285;
+  background: #f5f0f9;
+  color: #513968;
+}
+
+.gantt-deadlines-filters strong {
+  white-space: nowrap;
+}
+
+.gantt-deadlines-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-deadlines-list > li {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 10px;
+  border: 1px solid #e4eae5;
+  border-radius: 6px;
+}
+
+.gantt-deadlines-item-heading {
+  flex-wrap: wrap;
+}
+
+.gantt-deadlines-item-heading h3 {
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-deadlines-kind {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #edf3ef;
+  color: #41594a;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.gantt-deadlines-kind[data-kind='late'] {
+  background: #ffebe7;
+  color: #873622;
+}
+
+.gantt-deadlines-kind[data-kind='missing'] {
+  background: #fff3de;
+  color: #795222;
+}
+
+.gantt-deadlines-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin: 8px 0;
+}
+
+.gantt-deadlines-dates dt {
+  color: #53685e;
+  font-size: 11px;
+}
+
+.gantt-deadlines-dates dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.gantt-deadlines-delay dd {
+  color: #873622;
+}
+
+.gantt-deadlines-actions,
+.gantt-deadlines-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.gantt-deadlines-actions {
+  margin-top: auto;
+}
+
+.gantt-deadlines-actions .btn,
+.gantt-deadlines-pagination .btn {
+  min-width: 0;
+  min-height: 36px;
+  padding-inline: 7px;
+  color: #2d6251;
+  font-size: 11px;
+  white-space: normal;
+}
+
+.gantt-deadlines-actions .btn svg {
+  flex: none;
+}
+
+.gantt-deadlines-pagination {
+  justify-content: end;
+  margin-top: 6px;
+  color: #53685e;
+  font-size: 11px;
+}
+
+.gantt-deadlines button:focus-visible {
+  outline: 2px solid #736285;
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .gantt-deadlines-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .gantt-deadlines {
+    padding: 11px;
+  }
+
+  .gantt-deadlines-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gantt-deadlines button {
+    min-height: 44px;
+  }
+}
