@@ -1,10 +1,10 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../shared/schedule-dependencies.js';
+import { SCHEDULE_PASTE_COLUMNS as columnLabels, SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../shared/schedule-paste-format.js';
 import type { DependencyType, SchedulePasteDiagnostic } from '../shared/types.js';
 import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from './delimited-paste.js';
 
-export const SCHEDULE_PASTE_MAX_ROWS = 500;
-export const SCHEDULE_PASTE_MAX_BYTES = 128 * 1024;
+export { SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../shared/schedule-paste-format.js';
 
 export interface SchedulePasteRow {
   line: number;
@@ -37,23 +37,15 @@ interface SeenIssueRows {
   dates: Partial<Record<'startDate' | 'endDate', { value: string | null; line: number }>>;
 }
 
-const columnLabels = {
-  key: '업무 키',
-  start: '시작일',
-  end: '종료일',
-  predecessor: '선행 업무',
-  dependencyType: '연결 유형',
-  lag: '근무일 간격',
-};
 type Column = keyof typeof columnLabels;
+const normalizeColumn = (label: string) => label.toLowerCase().replace(/\s+/g, '');
 
 const columnAliases = new Map<string, Column>([
-  ['업무키', 'key'], ['티켓', 'key'], ['issuekey', 'key'], ['key', 'key'],
-  ['시작일', 'start'], ['startdate', 'start'],
-  ['종료일', 'end'], ['enddate', 'end'],
-  ['선행업무', 'predecessor'], ['predecessor', 'predecessor'], ['predecessorkey', 'predecessor'],
-  ['연결유형', 'dependencyType'], ['dependencytype', 'dependencyType'],
-  ['근무일간격', 'lag'], ['lagdays', 'lag'],
+  ...(Object.keys(columnLabels) as Column[]).map(column => [normalizeColumn(columnLabels[column]), column] as const),
+  ['티켓', 'key'], ['issuekey', 'key'], ['key', 'key'],
+  ['startdate', 'start'], ['enddate', 'end'],
+  ['predecessor', 'predecessor'], ['predecessorkey', 'predecessor'],
+  ['dependencytype', 'dependencyType'], ['lagdays', 'lag'],
 ]);
 
 const requiredHeader = '업무 키와 시작일·종료일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
@@ -75,7 +67,7 @@ function inspectHeader(parsed: DelimitedText): Candidate {
       errors.push({ line: record.line, message: `${index + 1}번째 열의 헤더가 비어 있습니다. 사용하지 않는 열에도 헤더를 지정해 주세요.` });
       continue;
     }
-    const column = columnAliases.get(label.toLowerCase().replace(/\s+/g, ''));
+    const column = columnAliases.get(normalizeColumn(label));
     // Only explicitly headed unrelated columns may be ignored.
     if (!column) continue;
     candidate.recognized++;

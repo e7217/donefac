@@ -19,7 +19,7 @@ export type SchedulePasteDialogProps = {
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
-} & ({ projectId: string; bulkDates?: never } | { projectId: string | null; bulkDates: BulkDates });
+} & ({ projectId: string; projectLabel?: string; bulkDates?: never } | { projectId: string | null; projectLabel?: never; bulkDates: BulkDates });
 
 type Review = { input: string; targets: string; projects?: IssueProjects; result: SchedulePastePreview };
 type DateField = 'startDate' | 'endDate' | 'dueDate';
@@ -66,6 +66,7 @@ export function bulkDateResultMessage(updated: readonly Issue[], team: boolean) 
 
 function ProjectScheduleEditDialog({
   projectId,
+  projectLabel,
   notify,
   onClose,
   onDraftChange,
@@ -382,7 +383,7 @@ function ProjectScheduleEditDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="schedule-paste-title"
-        aria-describedby="schedule-paste-description"
+        aria-describedby={projectLabel ? 'schedule-paste-project schedule-paste-description' : 'schedule-paste-description'}
         tabIndex={-1}
       >
         <header>
@@ -391,6 +392,7 @@ function ProjectScheduleEditDialog({
               {bulkDates ? <CalendarRange size={21} /> : <ClipboardList size={21} />}
               {title}
             </h2>
+            {projectLabel && <p id="schedule-paste-project">대상 프로젝트 {projectLabel}</p>}
             <p id="schedule-paste-description">
               {bulkDates
                 ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
