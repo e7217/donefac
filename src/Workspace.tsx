@@ -12,11 +12,13 @@ import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_QUERY_LIMIT, normalizeWorkspaceSearchQuery, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
+import { appendWorkspaceSearchFilters, readWorkspaceSearchFilters, sameWorkspaceSearchFilters } from './lib/workspace-search-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
@@ -42,8 +44,9 @@ const DocumentPublicationLibrary = lazy(() => import('./features/DocumentPublica
 const TeamOverview = lazy(() => import('./features/TeamOverview').then(module => ({default: module.TeamOverview})));
 const TeamBoard = lazy(() => import('./features/TeamBoard'));
 const Trash = lazy(() => import('./features/Trash').then(module => ({default: module.Trash})));
+const WorkspaceSearch = lazy(() => import('./features/WorkspaceSearch').then(module => ({default: module.WorkspaceSearch})));
 
-type View = 'overview' | 'issues' | 'backlog' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash' | 'teamoverview' | 'teamboard';
+type View = 'overview' | 'issues' | 'backlog' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'trash' | 'teamoverview' | 'teamboard' | 'search';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
@@ -70,6 +73,7 @@ type WorkspaceRoute = {
   documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
   teamBoardFilters?: TeamBoardFilters;
+  searchFilters?: WorkspaceSearchFilters;
 };
 type WorkspaceCommentFocus = {
   targetType: 'issue' | 'document';
@@ -85,7 +89,7 @@ const refreshScopes = {
 type RefreshScope = keyof typeof refreshScopes;
 type WorkspaceRevisions = Record<RefreshScope, string | null>;
 type WorkspaceRead = { request: number; snapshot: WorkspaceSnapshot | null; revisions: WorkspaceRevisions };
-const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview','teamboard'];
+const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','trash','teamoverview','teamboard','search'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
 function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
@@ -145,6 +149,7 @@ function routeHash(route: WorkspaceRoute) {
     if (search) query.set('boardQuery', search);
     if (gitlab) query.set('boardGitlab', gitlab);
   }
+  if (route.view === 'search' && route.searchFilters) appendWorkspaceSearchFilters(query, route.searchFilters);
   if (route.issueId && route.documentPreviewId) query.set('documentPreview', route.documentPreviewId);
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
 }
@@ -180,10 +185,12 @@ function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRou
   const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
     previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
     previous.ganttFocusIssueId === next.ganttFocusIssueId && previous.ganttFocusDate === next.ganttFocusDate;
-  return sameTeamGantt || hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
+  const sameSearch = previous.view === 'search' && next.view === 'search' && previous.projectId === next.projectId &&
+    sameWorkspaceSearchFilters(previous.searchFilters, next.searchFilters);
+  return sameTeamGantt || sameSearch || hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
 }
-function hasReportIssueOverlay(route: WorkspaceRoute | null): boolean {
-  return Boolean(route?.view === 'reports' && route.issueId);
+function hasReportOrSearchIssueOverlay(route: WorkspaceRoute | null): boolean {
+  return Boolean((route?.view === 'reports' || route?.view === 'search') && route.issueId);
 }
 function hasTeamBoardIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'teamboard' && route.issueId);
@@ -226,7 +233,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
     issueId = issue.id;
-    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && !ganttScope && !documentId) projectId = issue.projectId;
+    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && !ganttScope && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
   const requestedDocumentPreview = parameters.get('documentPreview');
@@ -293,8 +300,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     query: boardQuery || undefined,
     gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
+  const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
-    ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters, teamBoardFilters };
+    ganttScope, ganttProject, ganttFocusIssueId, ganttFocusDate, publicationTab, publication, sectionId, documentCommentId, documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -325,6 +333,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [sectionId, setSectionId] = useState<string | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [teamBoardFilters, setTeamBoardFilters] = useState(emptyTeamBoardFilters);
+  const [searchFilters, setSearchFilters] = useState(DEFAULT_WORKSPACE_SEARCH_FILTERS);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
   const [toast, setToast] = useState<{message: string; kind: string} | null>(null);
@@ -400,7 +409,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const handler = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (!document.querySelector('dialog:modal') && !hasDocumentIssueOverlay(acceptedRouteRef.current) && !hasReportIssueOverlay(acceptedRouteRef.current) &&
+        if (!document.querySelector('dialog:modal') && !hasDocumentIssueOverlay(acceptedRouteRef.current) && !hasReportOrSearchIssueOverlay(acceptedRouteRef.current) &&
             !hasTeamBoardIssueOverlay(acceptedRouteRef.current) &&
             !acceptedRouteRef.current?.documentPreviewId && !boardIssueOpener.current) {
           setSearchOpen(value => !value);
@@ -448,15 +457,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       } else if (previous.issueId && !route.issueId) {
         const opener = overlayIssueOpener.current;
         overlayIssueOpener.current = null;
-        if (!boardTrigger && (opener || route.view === 'teamboard')) requestAnimationFrame(() => {
+        if (!boardTrigger && (opener || route.view === 'teamboard' || route.view === 'search')) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
           if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-          else if (route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
+          else if (route.view === 'teamboard' || route.view === 'search') workspaceMain.current?.focus({ preventScroll: true });
         });
       }
     }
-    if (hasDocumentIssueOverlay(route) || hasReportIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
+    if (hasDocumentIssueOverlay(route) || hasReportOrSearchIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
     if (mode === 'push') history.pushState(state, '', hash);
@@ -490,6 +499,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       previous.date === filters.date && previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
+    const search = route.searchFilters ?? DEFAULT_WORKSPACE_SEARCH_FILTERS;
+    setSearchFilters(previous => sameWorkspaceSearchFilters(previous, search) ? previous : search);
   }, []);
   const processLocation = useCallback(() => {
     const snapshot = dataRef.current;
@@ -583,7 +594,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       }
       return;
     }
-    if (current?.view === 'gantt' && current.ganttScope === 'team') {
+    if (current?.view === 'search' || current?.view === 'gantt' && current.ganttScope === 'team') {
       if (requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
     }
@@ -609,6 +620,14 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const closeIssuePanel = (id: string) => {
     const current = acceptedRouteRef.current;
     if (current?.issueId === id) requestRoute({ ...current, issueId: null, documentPreviewId: null });
+  };
+  const showSearchResults = (query: string) => {
+    if (requestRoute({ projectId, view: 'search', documentId: null, issueId: null,
+      searchFilters: { ...DEFAULT_WORKSPACE_SEARCH_FILTERS, query } })) setSearchOpen(false);
+  };
+  const changeSearchFilters = (filters: WorkspaceSearchFilters) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'search' && !current.issueId && requestRoute({ ...current, searchFilters: filters });
   };
   const changeDecisionFollowUpScope = (scope: DecisionFollowUpScope | null) => {
     const current = acceptedRouteRef.current;
@@ -760,14 +779,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const teamBoard = view === 'teamboard';
   const teamDecisions = view === 'reports' && decisionFollowUpScope?.projectId !== undefined;
   const teamPageLabel = teamBoard ? '전체 프로젝트 보드' : teamGantt ? '전체 프로젝트 간트' :
-    teamDecisions ? '팀 결정 후속 업무' : view === 'teamoverview' ? '팀 개요' : null;
+    teamDecisions ? '팀 결정 후속 업무' : view === 'teamoverview' ? '팀 개요' : view === 'search' ? '검색 결과' : null;
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
   const reportIssueOpen = view === 'reports' && Boolean(openedIssue);
+  const searchIssueOpen = view === 'search' && Boolean(openedIssue);
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
   const activeCommentFocus = commentFocus && (commentFocus.actorId === null || commentFocus.actorId === actorId) ? commentFocus : undefined;
   const boardIssueFocus = Boolean(openedIssue && (teamBoard || openedIssue.id === boardDialogIssueId));
-  const workspaceObscured = documentIssueOpen || reportIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
+  const workspaceObscured = documentIssueOpen || reportIssueOpen || searchIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
 
   return <div className="workspace">
     {sidebarOpen && !workspaceObscured && <button className="sidebar-scrim" aria-label="메뉴 닫기" onClick={() => setSidebarOpen(false)}/>}
@@ -816,7 +836,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
-      <main className={`main-content view-${view}`} ref={workspaceMain} tabIndex={teamBoard ? -1 : undefined}>
+      <main className={`main-content view-${view}`} ref={workspaceMain} tabIndex={teamBoard || view === 'search' ? -1 : undefined}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
@@ -828,6 +848,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
+        {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
+          <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} openIssue={openIssue} openDocument={openDocument}/>
+        </Suspense>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}
           onOpenBoardCapacityIssue={openIssue}
           onOpenCycleBoard={() => openPlanIn('backlog')}
@@ -868,14 +891,14 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'development' && <Development {...props}/>}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}
         {view === 'trash' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>휴지통을 불러오는 중입니다.</p></div>}><Trash key={actorId} {...props}/></Suspense>}
-        {!project && view !== 'trash' && view !== 'teamoverview' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
+        {!project && view !== 'trash' && view !== 'teamoverview' && view !== 'search' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || reportIssueOpen}
+    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || reportIssueOpen || searchIssueOpen}
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onClose={() => closeIssuePanel(openedIssue.id)}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
-    {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)}/>}
+    {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
   </div>;
@@ -947,13 +970,48 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
 
-function SearchDialog(props: FeatureProps & {onClose:()=>void}) {
-  const [query,setQuery] = useState('');
-  const q = query.toLocaleLowerCase().trim();
-  const issues = q ? props.data.issues.filter(i => issueSearchText(props.data,i).toLocaleLowerCase().includes(q)).slice(0,12) : [];
-  const documentQuery = documentLabelKey(query.trim());
-  const docs = documentQuery ? props.data.documents.filter(d => documentSearchText(d).includes(documentQuery)).slice(0,8) : [];
-  return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && props.onClose()}><div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색"><div className="search-input-wrap"><Search size={21}/><input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="티켓 번호, 업무 제목, 문서 내용 검색…"/><button className="icon-btn" onClick={props.onClose} aria-label="검색 닫기"><X size={19}/></button></div><div className="search-results">{!q ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>{issues.length > 0 && <div className="search-label">업무</div>}{issues.map(i => <button className="search-result" key={i.id} onClick={() => props.openIssue(i.id)}><CircleDot size={17} style={{color:statusMeta(props.data,i.projectId,i.status).color}}/><span className="issue-key">{i.key}</span><span>{i.title}</span><ChevronRight size={15}/></button>)}{docs.length > 0 && <div className="search-label">문서</div>}{docs.map(d => <button className="search-result" key={d.id} onClick={() => props.openDocument(d.id)}><BookOpen size={17}/><span>{d.title}</span><ChevronRight size={15}/></button>)}{!issues.length && !docs.length && <div className="empty-state"><Search/><p>검색 결과가 없습니다.</p></div>}</>}</div><div className="search-footer"><span>업무 · 문서 · 프로젝트</span><kbd>ESC 닫기</kbd></div></div></div>;
+function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: FeatureProps & {
+  onClose: () => void;
+  onShowAll: (query: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const trimmed = query.trim();
+  const normalized = normalizeWorkspaceSearchQuery(query);
+  const q = trimmed.toLocaleLowerCase();
+  const issues = q ? data.issues.filter(issue => issueSearchText(data, issue).toLocaleLowerCase().includes(q)).slice(0, 12) : [];
+  const documentQuery = documentLabelKey(trimmed);
+  const docs = documentQuery ? data.documents.filter(doc => documentSearchText(doc).includes(documentQuery)).slice(0, 8) : [];
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}>
+    <div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색">
+      <form className="search-input-wrap" onSubmit={event => {
+        event.preventDefault();
+        onShowAll(normalized);
+      }} id="workspace-quick-search">
+        <Search size={21} aria-hidden="true"/>
+        <input autoFocus value={query} maxLength={WORKSPACE_SEARCH_QUERY_LIMIT} onChange={event => setQuery(event.target.value)}
+          aria-label="통합 검색어" placeholder="티켓 번호, 업무 제목, 문서 내용 검색…"/>
+        <button type="button" className="icon-btn" onClick={onClose} aria-label="검색 닫기"><X size={19}/></button>
+      </form>
+      <div className="search-results">
+        {!q ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>
+          {issues.length > 0 && <div className="search-label">업무</div>}
+          {issues.map(issue => <button type="button" className="search-result" key={issue.id} onClick={() => openIssue(issue.id)}>
+            <CircleDot size={17} style={{color:statusMeta(data, issue.projectId, issue.status).color}}/>
+            <span className="issue-key">{issue.key}</span><span>{issue.title}</span><ChevronRight size={15}/>
+          </button>)}
+          {docs.length > 0 && <div className="search-label">문서</div>}
+          {docs.map(doc => <button type="button" className="search-result" key={doc.id} onClick={() => openDocument(doc.id)}>
+            <BookOpen size={17}/><span>{doc.title}</span><ChevronRight size={15}/>
+          </button>)}
+          {!issues.length && !docs.length && <div className="empty-state"><Search/><p>빠른 검색 결과가 없습니다.</p></div>}
+        </>}
+      </div>
+      <div className="search-footer">
+        <button type="submit" form="workspace-quick-search" className="btn">전체 검색 결과</button>
+        <kbd>ESC 닫기</kbd>
+      </div>
+    </div>
+  </div>;
 }
 
 function ProjectDialog({refresh,notify,onClose,onCreated}:{refresh:()=>Promise<void>;notify:FeatureProps['notify'];onClose:()=>void;onCreated:(id:string)=>void}) {

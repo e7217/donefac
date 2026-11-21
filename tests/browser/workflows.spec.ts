@@ -13,8 +13,8 @@ test('업무 생성과 상태·댓글·검색이 API에 저장된다', async ({ 
     const form = page.getByRole('dialog', {name:'새 업무 만들기'});
     await form.getByLabel('업무 제목').fill(title);
     await form.getByLabel('설명', {exact:true}).fill('실제 저장과 상태 변경을 검증하는 합성 업무');
-    await form.getByLabel('시작일').fill('2026-11-16');
-    await form.getByLabel('종료일').fill('2026-11-20');
+    await form.getByLabel('시작일', {exact:true}).fill('2026-11-16');
+    await form.getByLabel('종료일', {exact:true}).fill('2026-11-20');
     const createdResponse = page.waitForResponse(r => r.url().endsWith('/api/issues') && r.request().method() === 'POST');
     await form.getByRole('button',{name:'업무 만들기', exact:true}).click();
     const created = await (await createdResponse).json();
@@ -28,10 +28,17 @@ test('업무 생성과 상태·댓글·검색이 API에 저장된다', async ({ 
       const snapshot = await (await request.get('/api/workspace')).json();
       return snapshot.issues.find((i: {id:string})=>i.id===id)?.status;
     }).toBe('in_progress');
-    await panel.getByLabel('댓글 내용').fill('UI에서 남긴 검증 댓글');
+    const commentDraft = panel.getByLabel('댓글 내용', {exact:true});
+    await commentDraft.fill('UI에서 남긴 검증 댓글');
+    const savedComment = page.waitForResponse(response => response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/comments');
     await panel.getByRole('button',{name:'댓글 등록'}).click();
-    await expect(panel.getByText('UI에서 남긴 검증 댓글',{exact:true})).toBeVisible();
+    expect((await savedComment).status()).toBe(201);
+    await expect(panel.getByRole('article').getByText('UI에서 남긴 검증 댓글',{exact:true})).toBeVisible();
+    await expect(commentDraft).toHaveValue('');
+    await expect(commentDraft).toBeEditable();
     await panel.getByRole('button',{name:'업무 상세 닫기'}).click();
+    await expect(panel).toHaveCount(0);
     await page.getByRole('button',{name:'통합 검색',exact:true}).click();
     await page.getByPlaceholder('티켓 번호, 업무 제목, 문서 내용 검색…').fill(title);
     await expect(page.locator('.search-result').filter({hasText:title})).toBeVisible();
