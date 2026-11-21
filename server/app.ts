@@ -129,6 +129,13 @@ function nextDependencyVersion(dependency: Dependency, previousVersion = 0): num
   if(!Number.isSafeInteger(version))fail('업무 연결의 버전 범위를 초과했습니다.',409);
   return version;
 }
+function normalizeIssueDescription(issue: Pick<Issue, 'description' | 'descriptionFormat'>, backupVersion?: number): void {
+  if (typeof issue.description !== 'string' || issue.description.length > 200000) fail('설명을 확인해 주세요.');
+  if (!Object.hasOwn(issue, 'descriptionFormat')) return;
+  if (backupVersion !== undefined && backupVersion < 78) fail('업무 설명 서식을 포함한 백업은 schemaVersion 78이 필요합니다.');
+  if (issue.descriptionFormat === 'plain') delete issue.descriptionFormat;
+  else if (issue.descriptionFormat !== 'markdown') fail('업무 설명 서식을 텍스트 또는 Markdown으로 지정해 주세요.');
+}
 const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
@@ -313,7 +320,7 @@ export function createApp(options: {
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
   const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
-    if(typeof i.description!=='string'||i.description.length>200000)fail('설명을 확인해 주세요.');
+    normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
     if(typeof i.status!=='string'||!Object.hasOwn(PRIORITY,i.priority))fail('상태 또는 우선순위가 올바르지 않습니다.');
     if(i.assigneeId!==null)get('users',i.assigneeId);
@@ -518,7 +525,12 @@ export function createApp(options: {
     if (!before || before.projectId !== projectId || before.version !== update.expectedVersion) {
       return fail('이관을 검토하는 동안 업무가 변경되었습니다. 미리보기를 다시 만들어 주세요.', 409);
     }
-    const { customFields, ...changes } = update.changes;
+    const { customFields, descriptionFormat, ...changes } = update.changes;
+    const hasDescriptionFormat = Object.hasOwn(update.changes, 'descriptionFormat');
+    if (hasDescriptionFormat !== Object.hasOwn(changes, 'description') ||
+        (hasDescriptionFormat && descriptionFormat !== 'plain' && descriptionFormat !== 'markdown')) {
+      fail('Jira 설명과 표시 서식을 함께 확인해 주세요. 새 미리보기를 만들어 주세요.', 409);
+    }
     const fields = Object.keys(changes);
     if (fields.length && (!allowStandard || fields.some(field => !jiraRefreshFields.has(field)))) {
       fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
@@ -530,7 +542,8 @@ export function createApp(options: {
     if (!fields.length && !customIds.length) fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
     const mergedFields = customIds.length ? { ...before.customFields, ...customFields } : before.customFields;
     let after: Issue;
-    try { after = validateIssue({ ...before, ...changes, customFields: mergedFields, version: before.version + 1, updatedAt: now() }, before); }
+    try { after = validateIssue({ ...before, ...changes, ...(hasDescriptionFormat ? { descriptionFormat } : {}),
+      customFields: mergedFields, version: before.version + 1, updatedAt: now() }, before); }
     catch (error) {
       if (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
           error instanceof PlanningError || error instanceof WorkloadError) return fail(`${before.key} · ${error.message}`, error.status);
@@ -1006,7 +1019,7 @@ export function createApp(options: {
   app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
   const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('프로젝트 이동은 아직 지원하지 않습니다.');
-    const fields=['title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
+    const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
     const proposed={...old,...Object.fromEntries(fields.map(k=>[k,values[k]])),...planning.resolveIssueFields(values,old.projectId,old),version:old.version+1,updatedAt:now()};
     return {...prepareIssueChange(old,proposed,options),fields};
   };
@@ -1126,7 +1139,7 @@ export function createApp(options: {
     res.json(result);
   });
   const prepareIssueCreation=(input:Record<string,unknown>):Issue=>{
-    const timestamp=now();const fields=['projectId','title','description','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
+    const timestamp=now();const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
     const projectId=text(input.projectId,'프로젝트',200);
     const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
     const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
@@ -2053,14 +2066,17 @@ export function createApp(options: {
     const importedReservations=data.schemaVersion>=30?timeReservations.validateRestore(data.timeReservations,{
       issues:data.issues,archivedIssues,users:data.users,
     },data.exportedAt):[];
-    const effortIssues=[...(data.issues as Issue[]),...archivedIssues];
+    const allImportedIssues=[...(data.issues as Issue[]),...archivedIssues];
     if(data.schemaVersion<18){
       const capacities:unknown=data.workloadCapacities;
       const hasCustomCapacity=capacities!==undefined&&(!Array.isArray(capacities)||capacities.some(entry=>
         !entry||entry.defaultDailyMinutes!==DEFAULT_DAILY_WORKLOAD_MINUTES||!Array.isArray(entry.members)||entry.members.length||!Array.isArray(entry.exceptions)||entry.exceptions.length));
-      if(hasCustomCapacity||effortIssues.some(issue=>issue.plannedEffortMinutes!=null))fail('계획 작업 시간과 가용 시간 설정은 schemaVersion 18이 필요합니다.');
+      if(hasCustomCapacity||allImportedIssues.some(issue=>issue.plannedEffortMinutes!=null))fail('계획 작업 시간과 가용 시간 설정은 schemaVersion 18이 필요합니다.');
     }
-    for(const issue of effortIssues)validatePlannedEffortMinutes(issue.plannedEffortMinutes);
+    for(const issue of allImportedIssues){
+      normalizeIssueDescription(issue,data.schemaVersion);
+      validatePlannedEffortMinutes(issue.plannedEffortMinutes);
+    }
     const importedCapacity=workload.validateImport(data.schemaVersion>=18?data.workloadCapacities:[],data.projects,data.users,{legacy:data.schemaVersion<18});
     const importedTeamCapacity=teamCapacity.validateImport(data.teamWorkloadCapacity,data.users,{legacy:data.schemaVersion<19});
     const archiveAttachments=[...importedTrash.flatMap(entry=>entry.attachments),...importedTrashItems.flatMap(entry=>entry.itemType==='attachment'?[entry.item]:[])];

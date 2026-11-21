@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueStatus, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
 import { hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
@@ -14,6 +14,7 @@ import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CustomFields, initialIssueType, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect } from './PlanningSelectors';
+import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-schedule-successor.css';
@@ -103,6 +104,8 @@ function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagD
 export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, predecessorIssue, onSuccessorCreated, cloneIssue, onCloneCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [description, setDescription] = useState(cloneIssue?.description ?? '');
+  const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
     if (parentIssue) return parentIssue.projectId;
     if (predecessorIssue) return predecessorIssue.projectId;
@@ -246,7 +249,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     const labels = cloneIssue && labelInput.replace(/\r\n?/g, '\n') === cloneLabels ? cloneIssue.labels
       : labelInput.split(cloneMode ? /\r?\n/ : ',').map(value => value.trim()).filter(Boolean);
     return {
-      projectId: selectedProject, title: String(form.get('title') || '').trim(), description: form.get('description'),
+      projectId: selectedProject, title: String(form.get('title') || '').trim(), description,
+      ...(descriptionFormat === 'markdown' || cloneIssue?.descriptionFormat === 'markdown' ? { descriptionFormat } : {}),
       type: selectedType, status: selectedStatus, priority: form.get('priority'), assigneeId: form.get('assigneeId') || null,
       startDate: form.get('startDate') || null, endDate: form.get('endDate') || null, dueDate: form.get('dueDate') || null,
       estimate: form.get('estimate') ? Number(form.get('estimate')) : null,
@@ -590,7 +594,9 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               {proposal.warning && <p className="issue-successor-warning" role="status">{proposal.warning}</p>}
               <div className="issue-form-grid">{dateFields}</div>
             </section>}
-            <label className="issue-form-label">설명<textarea className="field" name="description" placeholder="배경, 목표, 완료 조건을 적어주세요." rows={4} defaultValue={cloneIssue?.description} /></label>
+            <IssueDescriptionEditor value={description} format={descriptionFormat} name="description" disabled={fieldsLocked}
+              onChange={value => { dirtyRef.current = true; setDescription(value); }}
+              onFormatChange={format => { dirtyRef.current = true; setDescriptionFormat(format); }} />
             <div className="issue-form-grid">
               <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={selectedType} onChange={setSelectedType} name="type" /></label>
               <label className="issue-form-label">상태<select name="status" aria-label="새 업무 상태" className="field" value={selectedStatus} onChange={event => setSelectedStatus(event.target.value)}>{states.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></label>

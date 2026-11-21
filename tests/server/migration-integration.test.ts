@@ -47,6 +47,60 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
 
+test('Jira rich descriptions survive initial HTTP apply and an accepted plain source refresh clears the format', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const rich = { type: 'doc', version: 1, content: [
+    { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: '장비 검증' }] },
+    { type: 'paragraph', content: [
+      { type: 'text', text: '필수 조건', marks: [{ type: 'strong' }] },
+      { type: 'text', text: ' · ' },
+      { type: 'text', text: '사양', marks: [{ type: 'link', attrs: { href: 'https://docs.example.test/check?part=a&rev=2' } }] },
+    ] },
+  ] };
+  const plain = '승인된 단일 평문 요약';
+  const source = (description: unknown, updated: string) => Buffer.from(JSON.stringify({ issues: [{ id: '100', key: 'OLD-1', fields: {
+    project: { id: '42', key: 'OLD', name: 'Jira 표현 테스트' }, summary: '가상 업무',
+    issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' },
+    created: '2020-01-01T00:00:00Z', updated, description,
+  } }] }));
+  const instance = 'synthetic-jira-rich-description';
+  const original = await f.upload(source(rich, '2020-01-02T00:00:00Z'), 'original-rich.json', 'jira', instance);
+  const first = await f.preview(await f.configuration(original, 'RICH'));
+  assert.equal(first.canApply, true, JSON.stringify(first.notices));
+  const applied = await f.apply(first);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  const readIssue = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.projectId === projectId)!;
+  const imported = await readIssue();
+  assert.equal(imported.descriptionFormat, 'markdown');
+  assert.equal(imported.description, '## 장비 검증\n\n**필수 조건** · [사양](https://docs.example.test/check?part=a&rev=2)');
+
+  const incoming = await f.upload(source(plain, '2020-01-03T00:00:00Z'), 'newer-plain.json', 'jira', instance);
+  const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${incoming.id}`);
+  const target = options.appendTarget;
+  assert.ok(target);
+  const update = await f.preview({ ...options.defaultConfiguration, appendTo: {
+    projectId, refreshExisting: true,
+    statuses: Object.fromEntries(options.statuses.map(item => [item.id, target.statuses.find(status => status.label === item.label)!.id])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(item => [item.id, target.issueTypes.find(type => type.name === item.label)!.id])),
+    fields: {},
+  } });
+  assert.equal(update.canApply, true, JSON.stringify(update.notices));
+  assert.deepEqual(update.issueRefresh?.[0].fields.map(({ field, decision }) => ({ field, decision })), [{ field: 'description', decision: 'apply' }]);
+  const refreshed = await f.apply(update);
+  assert.equal(refreshed.status, 201, JSON.stringify(refreshed.data));
+  const current = await readIssue();
+  assert.equal(current.id, imported.id);
+  assert.equal(current.version, imported.version + 1);
+  assert.equal(current.description, plain);
+  assert.equal(Object.hasOwn(current, 'descriptionFormat'), false);
+  const backup = await f.call<WorkspaceSnapshot & { sourceRecords: SourceRecordArchive[] }>('/export');
+  assert.equal(backup.status, 200);
+  assert.deepEqual(backup.data.sourceRecords.filter(row => row.targetId === imported.id).map(row => row.record.text).sort(),
+    [JSON.stringify(rich), plain].sort());
+});
+
 test('incremental Jira imports append only new issues to the bound project and reuse active source parents', async t => {
   const f = await fixture();
   t.after(() => f.close());

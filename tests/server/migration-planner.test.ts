@@ -26,7 +26,7 @@ test('options are stable opaque IDs scoped by package and include an explicit ed
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
 });
 
-test('initial Jira and Confluence text-only fields keep annotation labels while documents retain native nodes', () => {
+test('Jira descriptions retain Markdown annotations while comments stay plain and documents retain native nodes', () => {
   const taskSource = jira(), documentSource = confluence();
   const adf = JSON.stringify({ type: 'doc', version: 1, content: [
     { type: 'panel', attrs: { panelType: 'warning' }, content: [
@@ -43,7 +43,11 @@ test('initial Jira and Confluence text-only fields keep annotation labels while 
   const plan = buildMigrationPlan(input([taskSource, documentSource]));
   assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
   const taskText = '[warning]\n업무 상태 [상태: 진행 중]';
-  assert.equal(plan.issues.find(row => row.title === '업무 1')?.description, taskText);
+  const importedIssue = plan.issues.find(row => row.title === '업무 1');
+  assert.equal(importedIssue?.descriptionFormat, 'markdown');
+  assert.ok(importedIssue?.description.startsWith('> **경고**'));
+  assert.ok(importedIssue?.description.includes('진행 중'));
+  assert.equal(plan.issues.find(row => row.title === '업무 2')?.descriptionFormat, undefined);
   assert.equal(plan.comments.find(row => row.resourceType === 'issue')?.body, taskText);
   assert.equal(plan.comments.find(row => row.resourceType === 'document')?.body, '[note] 운영\n[상태: 확인 완료]');
   for (const document of [...plan.documents, ...plan.revisions]) {
@@ -265,17 +269,22 @@ test('Jira refresh clears explicit blank CSV fields while protecting malformed v
     '1,OLD-1,42,OLD,남길 제목,2020-01-02T00:00:00Z,,,beta,alpha,Unrecognized,Open';
   const clear = refresh(snapshot('csv', 'csv', csv), { ...canonical, status: workflow.statuses[1].id });
   assert.equal(clear.preview.canApply, true, JSON.stringify(clear.preview.notices));
-  assert.deepEqual(clear.issueUpdates?.[0].changes, { description: '', assigneeId: null });
+  assert.deepEqual(clear.issueUpdates?.[0].changes, { description: '', descriptionFormat: 'plain', assigneeId: null });
   assert.deepEqual(clear.preview.issueRefresh?.[0].fields.map(field => field.field), ['description', 'assigneeId']);
   assert.equal(clear.sourceRecords.find(row => row.targetId === canonical.id)?.jiraIssueFieldHashes?.status, archive.jiraIssueFieldHashes?.status);
   assert.ok(notices(clear).has('JIRA_REFRESH_FIELD_UNAVAILABLE'));
   const legacy = { ...archive };
   delete legacy.jiraIssueFieldHashes;
-  const annotated = refresh(snapshot('revised-description', 'json', JSON.stringify({ issues: [
+  const revision = snapshot('revised-description', 'json', JSON.stringify({ issues: [
     issueJson('1', 'OLD-1', '2020-01-02T00:00:00Z', '남길 제목', { status: open, description: description('변경한 설명') }),
-  ] })), canonical, legacy);
+  ] }));
+  const annotated = refresh(revision, { ...canonical, description: '[info]\n[상태: 비울 설명]', descriptionFormat: undefined }, legacy);
   assert.equal(annotated.preview.issueRefresh?.[0].fields.find(field => field.field === 'description')?.decision, 'apply');
-  assert.equal(annotated.issueUpdates?.[0].changes.description, '[info]\n[상태: 변경한 설명]');
+  assert.match(annotated.issueUpdates?.[0].changes.description ?? '', /^> \*\*정보\*\*[\s\S]*변경한 설명/u);
+  assert.equal(annotated.issueUpdates?.[0].changes.descriptionFormat, 'markdown');
+  const formatOnlyEdit = refresh(revision, { ...canonical, descriptionFormat: undefined });
+  assert.equal(formatOnlyEdit.preview.issueRefresh?.[0].fields.find(field => field.field === 'description')?.decision, 'conflict');
+  assert.equal(formatOnlyEdit.issueUpdates?.[0]?.changes.description, undefined);
   const bad = refresh(snapshot('malformed', 'json', JSON.stringify({ issues: [
     issueJson('1', 'OLD-1', '2020-01-02T00:00:00Z', '남길 제목', {
       status: open, description: { type: 'unrecognized' }, labels: { malformed: true }, priority: 'Unrecognized',

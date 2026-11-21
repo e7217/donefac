@@ -242,7 +242,7 @@ test('anchored comment replies survive individual and document trash, backup, an
   const archivedOwner = await archive(f, 'document', current);
   await restoreItem(rootEntry, 409);
   const mixed = await backup();
-  assert.equal(mixed.schemaVersion, 77);
+  assert.equal(mixed.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const bundled = mixed.trashItems.find(item => item.id === rootEntry);
   assert.ok(bundled);
   assert.deepEqual(bundled.item, root);

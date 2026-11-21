@@ -10,7 +10,7 @@ const fail = (status: number, message: string): never => { throw new OutboundWeb
 export const OUTBOUND_EVENT_TYPES: OutboundEventType[] = ['issue.created', 'issue.updated', 'issue.deleted', 'document.created', 'document.updated', 'document.deleted', 'comment.created'];
 export const WEBHOOK_MAX_ENDPOINTS = 20, WEBHOOK_MAX_ATTEMPTS = 5, WEBHOOK_RETENTION_DAYS = 30;
 const GENERATION_SETTING = 'outboundWebhookGeneration', BATCH_SIZE = 4, MAX_DELIVERIES = 50000;
-const issueFields = ['projectId', 'title', 'description', 'type', 'status', 'priority', 'assigneeId', 'collaboratorIds', 'parentId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate', 'plannedEffortMinutes', 'cycle', 'module', 'release', 'cycleId', 'moduleId', 'releaseId', 'customFields', 'completedAt'];
+const issueFields = ['projectId', 'title', 'description', 'descriptionFormat', 'type', 'status', 'priority', 'assigneeId', 'collaboratorIds', 'parentId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate', 'plannedEffortMinutes', 'cycle', 'module', 'release', 'cycleId', 'moduleId', 'releaseId', 'customFields', 'completedAt'];
 const documentFields = ['projectId', 'parentId', 'title', 'content', 'icon', 'status'];
 type Hooks = { actor: (request: Request) => string; activity: (request: Request, type: string, id: string, action: string, detail?: string) => unknown };
 export interface OutboundWebhookOptions { autoStart?: boolean; pollIntervalMs?: number; timeoutMs?: number; leaseMs?: number; maxAttempts?: number; now?: () => number; retryBaseMs?: number }

@@ -21,6 +21,7 @@ import { CommentMentionInput, CommentMentionText, commentDraftPayload, emptyComm
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
+import { IssueDescriptionEditor } from './IssueDescriptionEditor';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
 import { IssueDocumentPreview } from './IssueDocumentPreview';
@@ -52,7 +53,7 @@ type IssuePanelProps = FeatureProps & {
 };
 
 function editableIssue(issue: Issue, labels: string) {
-  return { title: issue.title.trim(), description: issue.description, type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
+  return { title: issue.title.trim(), description: issue.description, descriptionFormat: issue.descriptionFormat ?? 'plain', type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
 export function IssuePanel(props: IssuePanelProps) {
@@ -378,7 +379,10 @@ function IssuePanelContent(props: IssuePanelProps) {
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError('');
     try {
-      const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...editableIssue(draft, labels) });
+      const { descriptionFormat, ...fields } = editableIssue(draft, labels);
+      const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
+      const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
+        ...(changedFormat ? { descriptionFormat } : {}) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
     } catch (err) { setError(errorMessage(err)); if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); } } finally { savingRef.current = false; setSaving(false); }
@@ -564,7 +568,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       {(conflict || issue.version > draft.version) && <div className="issue-conflict-banner" role="alert"><div><strong>다른 변경사항이 있습니다</strong><p>작성 중인 내용은 유지됩니다. 편집 시작 버전은 {draft.version}, 현재 버전은 {issue.version}입니다. 최신 내용을 확인한 뒤 다시 편집하세요.</p></div><button className="btn" onClick={reloadLatest} disabled={saving}>최신 버전 불러오기</button></div>}
       <form className="issue-detail-form" onSubmit={save} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <label className="issue-form-label">제목<input aria-label="제목" className="field issue-title-input" value={draft.title} onChange={e => update('title', e.target.value)} maxLength={300} required /></label>
-        <label className="issue-form-label">설명<textarea aria-label="설명" className="field issue-description-input" value={draft.description} onChange={e => update('description', e.target.value)} placeholder="배경, 목표, 완료 조건을 적어주세요." rows={5} /></label>
+        <IssueDescriptionEditor value={draft.description} format={draft.descriptionFormat ?? 'plain'} disabled={saving} initialPreview
+          onChange={value => update('description', value)} onFormatChange={format => update('descriptionFormat', format)} />
         <div className="issue-properties"><div className="issue-section-caption">속성</div><div className="issue-form-grid">
           <label className="issue-form-label">상태<select ref={statusField} aria-label="상태" className="field" value={draft.status} onChange={e => update('status', e.target.value as Issue['status'])}>{!nextStatuses.some(status => status.id === draft.status) && <option value={draft.status} disabled>{statusMeta(data,draft.projectId,draft.status).label} (현재 허용되지 않음)</option>}{nextStatuses.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}</select></label>
           <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={draft.projectId} value={draft.type} existingType={baseDraft?.type} onChange={value => update('type', value)} /></label>

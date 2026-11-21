@@ -19,6 +19,11 @@ export interface DocumentMarkdownExportResolvers {
   attachment(id: string, kind: AttachmentKind): string | undefined;
 }
 
+export interface TicketMarkdownLinks {
+  href(href: string): string | undefined;
+  reference(kind: 'issue' | 'document', id: string): string | undefined;
+}
+
 const diagnosticMessages = {
   attachment_unavailable: '이 문서에 포함된 첨부파일을 오프라인 경로에 연결하지 못했습니다.',
   document_outside_export: '문서 또는 절이 이번 내보내기 범위에 없습니다.',
@@ -55,6 +60,10 @@ function localHref(href: string | undefined): string | undefined {
   if (!href || href.startsWith('/') || /^[a-z][a-z0-9+.-]*:/iu.test(href) ||
       /[\\\u0000-\u001f\u007f]/u.test(href) || href.trim() !== href) return undefined;
   return href.replace(/[ !"&'()<>[\]`{}|]/gu, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function ticketHref(href: string | undefined): string | undefined {
+  return href?.replace(/[ !"'()<>`{}|]/gu, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function link(body: string, href: string, title?: string): string {
@@ -166,7 +175,7 @@ class DocumentMarkdownRenderer {
   private readonly headings: Map<RichContent, Heading>;
   private readonly anchors: Set<string>;
 
-  constructor(content: RichContent, private readonly resolve: DocumentMarkdownExportResolvers) {
+  constructor(content: RichContent, private readonly resolve: DocumentMarkdownExportResolvers, private readonly ticket?: TicketMarkdownLinks) {
     this.headings = outline(content);
     this.anchors = new Set([...this.headings.values()].map(heading => heading.anchor));
   }
@@ -176,6 +185,7 @@ class DocumentMarkdownRenderer {
   }
 
   private destination(raw: unknown, node: RichContent): string | undefined {
+    if (this.ticket) return ticketHref(this.ticket.href(literal(raw)));
     const href = sameOriginAddress(literal(raw), this.resolve.browserOrigin);
     const attachment = attachmentTarget(href);
     if (attachment) {
@@ -196,19 +206,20 @@ class DocumentMarkdownRenderer {
   }
 
   private inlineNode(node: RichContent, table: boolean, joined: boolean): string {
-    if (node.type === 'hardBreak') return table ? '<br>' : '  \n';
+    if (node.type === 'hardBreak') return table ? this.ticket ? ' ' : '<br>' : '  \n';
     const attrs = node.attrs;
     const text = singleLine(node.type === 'statusBadge'
       ? `[${isStatusBadgeTone(attrs?.tone) && attrs.tone !== 'neutral' ? `${STATUS_BADGE_TONE_LABELS[attrs.tone]} · ` : ''}${literal(attrs?.label) || '상태'}]`
       : node.text ?? '');
     const marks = node.marks ?? [];
-    const wrappers = marks.filter(mark => Object.hasOwn(inlineWrappers, mark.type));
+    const wrappers = marks.filter(mark => Object.hasOwn(inlineWrappers, mark.type) && (!this.ticket || mark.type !== 'underline'));
     const hasCode = marks.some(mark => mark.type === 'code');
     const [leading, interior, trailing] = /^( *)(.*?)( *)$/u.exec(text)!.slice(1);
-    let body = hasCode ? inlineCode(text, table) : escapeMarkdownText(wrappers.length ? interior : text);
+    const codeText = this.ticket && table ? text.replaceAll('|', '\\|') : text;
+    let body = hasCode && (!this.ticket || codeText.trim()) ? inlineCode(codeText, table && !this.ticket) : escapeMarkdownText(wrappers.length ? interior : text);
     if (body) for (const mark of wrappers) {
       const [marker, tag] = inlineWrappers[mark.type];
-      body = marker && !joined && wrappers.length === 1 && !hasCode ? `${marker}${body}${marker}` : `<${tag}>${body}</${tag}>`;
+      body = this.ticket || (marker && !joined && wrappers.length === 1 && !hasCode) ? `${marker}${body}${marker}` : `<${tag}>${body}</${tag}>`;
     }
     const target = marks.find(mark => mark.type === 'link');
     if (target && body) {
@@ -231,6 +242,11 @@ class DocumentMarkdownRenderer {
     const attrs = node.attrs;
     const id = literal(attrs?.documentId);
     const label = escapeMarkdownText(literal(attrs?.label) || id || literal(attrs?.issueId) || '참조');
+    if (this.ticket) {
+      const href = node.type === 'issueReference' ? this.ticket.reference('issue', literal(attrs?.issueId)) : this.ticket.reference('document', id);
+      const destination = ticketHref(href);
+      return destination ? link(label, destination) : label;
+    }
     if (node.type === 'issueReference') {
       this.warn('issue_reference', node);
       return `**업무 참조** · ${label}`;
@@ -256,6 +272,10 @@ class DocumentMarkdownRenderer {
     const src = sameOriginAddress(literal(node.attrs?.src), this.resolve.browserOrigin);
     const title = literal(node.attrs?.title);
     const alt = escapeMarkdownText(literal(node.attrs?.alt) || title || '첨부 이미지');
+    if (this.ticket) {
+      const href = ticketHref(this.ticket.href(src));
+      return href ? link(alt, href) : alt;
+    }
     const attachment = attachmentTarget(src);
     const id = inlineAttachmentIdFromUrl(src) ?? attachment?.id;
     const href = id ? localHref(this.resolve.attachment(id, 'inline-image')) : undefined;
@@ -315,6 +335,17 @@ class DocumentMarkdownRenderer {
       });
       return [values[0], rowText(separators), ...values.slice(1)].join('\n');
     }
+    if (this.ticket) {
+      const width = Math.max(...rows.map(row => row.length));
+      const rowText = (values: string[]) => `| ${values.join(' | ')} |`;
+      const values = rows.map(row => rowText(Array.from({ length: width }, (_, index) => {
+        const cell = row[index];
+        if (!cell) return '';
+        return cell.content?.length === 1 && cell.content[0].type === 'paragraph'
+          ? this.inline(cell.content[0].content ?? [], true) : escapeMarkdownText(documentPlainText(cell));
+      })));
+      return [values[0], rowText(Array.from({ length: width }, () => '---')), ...values.slice(1)].join('\n');
+    }
     const body = rows.map(row => '<tr>' + row.map(cell => {
       const tag = cell.type === 'tableHeader' ? 'th' : 'td';
       const span = (field: 'colspan' | 'rowspan') => cellSpan(cell.attrs?.[field]) > 1 ? ` ${field}="${cellSpan(cell.attrs?.[field])}"` : '';
@@ -329,7 +360,7 @@ class DocumentMarkdownRenderer {
     const attrs = node.attrs;
     const ordered = node.type === 'orderedList';
     const start = typeof attrs?.start === 'number' && Number.isSafeInteger(attrs.start) && attrs.start >= 0 && attrs.start <= 999_999_999 ? attrs.start : 1;
-    if (ordered && typeof attrs?.type === 'string' && /^[aAiI]$/u.test(attrs.type)) {
+    if (!this.ticket && ordered && typeof attrs?.type === 'string' && /^[aAiI]$/u.test(attrs.type)) {
       const items = (node.content ?? []).map(item => `<li>${compactHtml(this.blocks(item.content))}</li>`);
       return `<ol start="${start}" type="${attrs.type}">\n${items.join('\n')}\n</ol>`;
     }
@@ -348,7 +379,8 @@ class DocumentMarkdownRenderer {
       case 'paragraph': case 'detailsSummary': return this.inline(node.content ?? []);
       case 'heading': {
         const heading = this.headings.get(node)!;
-        return `${anchorTag(heading.anchor)}\n\n${'#'.repeat(heading.level)} ${this.inline(node.content ?? [], true)}`;
+        const title = `${'#'.repeat(heading.level)} ${this.inline(node.content ?? [], true)}`;
+        return this.ticket ? title : `${anchorTag(heading.anchor)}\n\n${title}`;
       }
       case 'horizontalRule': return '---';
       case 'blockquote': return quote(this.blocks(node.content));
@@ -364,6 +396,7 @@ class DocumentMarkdownRenderer {
       case 'details': {
         const summary = this.inline(node.content?.find(item => item.type === 'detailsSummary')?.content ?? [], true) || '접기';
         const body = this.blocks(node.content?.filter(item => item.type !== 'detailsSummary'));
+        if (this.ticket) return quote([`**${summary}**`, body].filter(Boolean).join('\n\n'));
         return `<details>\n<summary>${parseInline(summary, { async: false, gfm: true })}</summary>\n\n${body}\n\n</details>`;
       }
       case 'documentExcerpt': {
@@ -391,4 +424,8 @@ export function renderDocumentExportMarkdown(source: Pick<DocPage, 'id' | 'title
   const renderer = new DocumentMarkdownRenderer(source.content, resolve);
   const body = renderer.blocks([source.content]);
   return { markdown: `# ${escapeMarkdownText(source.title)}${body ? `\n\n${body}` : ''}\n`, diagnostics: renderer.diagnostics };
+}
+
+export function renderTicketDescriptionMarkdown(content: RichContent, links: TicketMarkdownLinks): string {
+  return new DocumentMarkdownRenderer(content, { document: () => undefined, attachment: () => undefined }, links).blocks([content]);
 }

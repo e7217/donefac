@@ -175,6 +175,12 @@ curl --fail-with-body \
 
 두 노드가 있는 본문을 바꾸는 `PATCH`에는 `contentSchemaVersion: 11`을 보낸다. 공동 편집 프로토콜 11, 문서 JSON 형식 11, 자체 백업 형식 69가 두 노드를 보존한다.
 
+## 티켓 설명의 서식
+
+일반 업무 생성·수정과 복제·하위 업무 양식에서 `description`은 최대 200,000자의 원문 문자열이다. `descriptionFormat`을 `markdown`으로 지정하면 저장된 설명을 Markdown으로 표시한다. `plain`을 보내면 원문 문자열을 유지하면서 서식 설정을 해제한다. 생성 시 생략하면 평문이며, 수정 시 생략하면 현재 설정을 유지한다. 응답은 Markdown일 때 `descriptionFormat`을 포함한다. `/api/v1/issues`의 프로젝트 범위 읽기·쓰기에도 같은 규칙을 적용한다.
+
+본래 업무의 버전 검사와 생성 요청 재확인 규칙은 설명 서식에도 적용된다. 백업 형식 78은 활성·휴지통 업무의 설명과 Markdown 설정을 보존한다. 이전 형식에서 읽은 설명은 평문으로 표시한다. 발신 웹훅은 변경한 필드 이름으로 `descriptionFormat`을 표시할 수 있다.
+
 ## 업무 복제
 
 `POST /api/issues/:id/clone`과 쓰기 키의 `POST /api/v1/issues/:id/clone`은 `{requestId,expectedSourceVersion,issue}`를 받는다. `requestId`는 UUID v4다. `issue`에는 검토한 업무 생성 값을 보낸다. 새 업무의 프로젝트는 원본에서 결정되며, 명시한 프로젝트가 다르면 요청을 거절한다. 현재 워크플로, 업무 유형·필수 입력, 날짜와 같은 프로젝트의 상위 업무·계획 항목 검증을 적용한다.

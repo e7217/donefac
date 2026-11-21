@@ -234,7 +234,10 @@ export interface MigrationAppendConfiguration {
 }
 export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
-export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>> & { customFields?: Record<string, CustomFieldValue> };
+export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>> & {
+  descriptionFormat?: IssueDescriptionFormat;
+  customFields?: Record<string, CustomFieldValue>;
+};
 export type JiraMigrationIssueFieldHashes = Partial<Record<JiraMigrationIssueField, string>>;
 export type JiraMigrationCustomFieldHashes = Record<string, { sourceFieldId: string; hash: string }>;
 export interface JiraMigrationIssueReview {
@@ -545,8 +548,10 @@ export interface CustomFieldVisibility {
 export interface CustomFieldDefinition { id: string; name: string; description: string; kind: CustomFieldKind; required: boolean; issueTypes: string[]; options: CustomFieldOption[]; archived: boolean; visibleWhen?: CustomFieldVisibility }
 export type CustomFieldValue = string | number | boolean | string[] | null;
 export interface ProjectIssueSchema { id: string; projectId: string; version: number; issueTypes: IssueTypeDefinition[]; fields: CustomFieldDefinition[]; updatedAt: string }
+export type IssueDescriptionFormat = 'plain' | 'markdown';
 export interface Issue {
   id: string; key: string; projectId: string; title: string; description: string;
+  descriptionFormat?: IssueDescriptionFormat;
   type: string; status: IssueStatus; priority: Priority; assigneeId: string | null;
   collaboratorIds: string[]; parentId: string | null; labels: string[];
   startDate: string | null; endDate: string | null; dueDate: string | null;

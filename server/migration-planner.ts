@@ -15,6 +15,7 @@ import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,M
 import { isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
+import { jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
@@ -200,7 +201,9 @@ function sourceCalendarDate(raw: string, timezone: string): string | null {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function jiraFieldDigest(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField]): string {
+function jiraFieldDigest(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
+  // Text-only descriptions keep the same digest as checkpoints written by older versions.
+  if (field === 'description' && format === 'markdown') return hash(field, JSON.stringify(['markdown', value]));
   return hash(field, JSON.stringify(Array.isArray(value) ? [...new Set(value)].sort() : value));
 }
 
@@ -208,7 +211,7 @@ function jiraFieldDigests(values: JiraMigrationIssueValues): JiraMigrationIssueF
   const result: JiraMigrationIssueFieldHashes = {};
   for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
     const value = values[field];
-    if (value !== undefined) result[field] = jiraFieldDigest(field, value);
+    if (value !== undefined) result[field] = jiraFieldDigest(field, value, values.descriptionFormat);
   }
   return result;
 }
@@ -258,7 +261,7 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
   const identity = (row: LegacyRecord): unknown => {
     switch (field) {
       case 'title': return row.title.trim();
-      case 'description': return [row.textFormat, row.text];
+      case 'description': return [row.textFormat, jiraRenderedHtmlDescription(row), row.text];
       case 'priority': {
         const raw = scalar(sourceField(row, 'priority'));
         const item = object(raw);
@@ -496,7 +499,16 @@ class Planner{
     values.estimate = estimate !== null && Number.isFinite(estimate) && estimate >= 0 && estimate <= 100000 ? estimate : null;
     return jiraFieldDigests(values);
   }
-  private jiraRefreshValues(entry: Entry): JiraMigrationIssueValues {
+  private jiraDescription(entry: Entry, issueId: string) {
+    return projectJiraDescription(entry.row, {
+      resolveReference: request => this.resolve(entry, request),
+      ownsAttachment: id => {
+        const attachment = this.attachmentVersionsById.get(id);
+        return attachment?.resourceType === 'issue' && attachment.resourceId === issueId;
+      },
+    });
+  }
+  private jiraRefreshValues(entry: Entry, issueId: string): JiraMigrationIssueValues {
     const { row, pkg } = entry;
     const mapping = this.configuration.appendTo!;
     const { schema, workflow } = this.input.append!;
@@ -509,10 +521,11 @@ class Planner{
     if (title && title.length <= 300) values.title = title;
     else if (title) unavailable('제목');
     if (explicit.includes('description') || !hasSnapshotFields && (row.text || sourceField(row, 'description') !== undefined)) {
-      const description = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations: true });
-      if (description.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK') || description.plainText.length > 200000) unavailable('설명');
+      const description = this.jiraDescription(entry, issueId);
+      if (!description.reliable || description.description.length > 200000) unavailable('설명');
       else {
-        values.description = description.plainText;
+        values.description = description.description;
+        values.descriptionFormat = description.descriptionFormat ?? 'plain';
         for (const item of description.diagnostics) this.notice(item.code, item.message, item.severity, entry, item.severity === 'warning');
       }
     }
@@ -570,7 +583,7 @@ class Planner{
     }
     return values;
   }
-  private jiraReviewValue(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField]): string {
+  private jiraReviewValue(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
     if (value === null || value === '' || Array.isArray(value) && value.length === 0) return '비어 있음';
     const append = this.input.append!;
     let label = Array.isArray(value) ? value.join(', ') : String(value);
@@ -578,6 +591,7 @@ class Planner{
     if (field === 'type') label = append.schema.issueTypes.find(type => type.id === value)?.name ?? label;
     if (field === 'assigneeId') label = this.input.users.find(user => user.id === value)?.name ?? label;
     if (field === 'priority') label = PRIORITY[value as Issue['priority']];
+    if (field === 'description' && format === 'markdown') label = `[Markdown]\n${label}`;
     return label.length > 300 ? `${label.slice(0, 297)}…` : label;
   }
   private jiraCustomSourceOptions(entry: Entry, explicitEmpty = false): JiraCustomFieldOption[] {
@@ -789,7 +803,7 @@ class Planner{
         entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
         this.notice('DATE_TWO_DIGIT_CENTURY','Jira 두 자리 연도를2000~2099년으로 해석했습니다. 세기 가정을 확인해야 하며 원본 날짜 문자열은 그대로 보관합니다.','warning',entry,true);
       }
-      const values = reviewStandard ? this.jiraRefreshValues(entry) : {};
+      const values = reviewStandard ? this.jiraRefreshValues(entry, issue.id) : {};
       const hashes = reviewStandard ? { ...this.originalJiraIssueDigests(previous) } : {};
       const accepted: JiraMigrationIssueValues = {};
       const fields: JiraMigrationIssueReview['fields'] = [];
@@ -798,8 +812,8 @@ class Planner{
         const next = values[field];
         if (next === undefined) continue;
         const current = issue[field];
-        const incomingHash = jiraFieldDigest(field, next);
-        const currentHash = jiraFieldDigest(field, current);
+        const incomingHash = jiraFieldDigest(field, next, values.descriptionFormat);
+        const currentHash = jiraFieldDigest(field, current, issue.descriptionFormat);
         if (sameJiraSourceField(field, entry.row, previous.archive.record)) {
           canCheckpoint = true;
           continue;
@@ -814,9 +828,11 @@ class Planner{
           continue;
         }
         const decision = currentHash === hashes[field] ? 'apply' : 'conflict';
-        fields.push({ field, current: this.jiraReviewValue(field, current), incoming: this.jiraReviewValue(field, next), decision });
+        fields.push({ field, current: this.jiraReviewValue(field, current, issue.descriptionFormat),
+          incoming: this.jiraReviewValue(field, next, values.descriptionFormat), decision });
         if (decision === 'apply') {
           Object.assign(accepted, { [field]: next });
+          if (field === 'description') accepted.descriptionFormat = values.descriptionFormat ?? 'plain';
           hashes[field] = incomingHash;
           canCheckpoint = true;
           updatedFields++;
@@ -2330,8 +2346,11 @@ class Planner{
       const binding = this.bindings.get(entry.key);
       if (binding?.type === 'issue') {
         const issue = this.issueById.get(binding.id)!;
-        issue.description = this.converted(entry, { legacyAnnotations: true }).plainText;
-        if (issue.description.length > 200000) this.notice('ISSUE_DESCRIPTION_LIMIT', '일반 텍스트 설명이 현재200000자 제한을 넘습니다.', 'error', entry);
+        const description = this.jiraDescription(entry, issue.id);
+        issue.description = description.description;
+        if (description.descriptionFormat) issue.descriptionFormat = description.descriptionFormat;
+        for (const diagnostic of description.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
+        if (issue.description.length > 200000) this.notice('ISSUE_DESCRIPTION_LIMIT', '업무 설명이 현재 200000자 제한을 넘습니다.', 'error', entry);
       } else if (binding?.type === 'document') {
         const document = this.documentById.get(binding.id)!;
         const converted = this.converted(entry, { documentId: document.id });
