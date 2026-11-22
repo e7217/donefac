@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
-import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, dependencyScheduleWarning, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
+import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { renderGanttExport } from '../../shared/gantt-export';
 import { buildGanttExportReport } from '../../shared/gantt-export-model';
@@ -58,6 +58,15 @@ import './gantt.css';
 import './gantt-deadline-markers.css';
 
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
+type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
+type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin };
+type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
+function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
+  return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
+}
+function isUncertainScheduleResponse(cause: unknown): boolean {
+  return !(cause instanceof ApiError) || cause.status >= 500 || [408, 425, 429, 499].includes(cause.status);
+}
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingCreationResult?: boolean) => void;
@@ -189,8 +198,9 @@ function ProjectGantt(props: GanttProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scheduleFocus, setScheduleFocus] = useState<ScheduleFocus | null>(null);
   const [selectionViewId, setSelectionViewId] = useState(ganttViewId);
-  const [preview, setPreview] = useState<SchedulePreview | null>(null);
-  const [previewError, setPreviewError] = useState('');
+  const [manualReview, setManualReview] = useState<ManualReview | null>(null);
+  const [manualProblem, setManualProblem] = useState<ManualReviewProblem | null>(null);
+  const preview = manualReview?.preview ?? null;
   const [datePreviewFocusTarget, setDatePreviewFocusTarget] = useState<HTMLButtonElement | null>(null);
   const [cascade, setCascade] = useState<CascadeReview | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -280,6 +290,7 @@ function ProjectGantt(props: GanttProps) {
   const pasteTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const previewDialog = useRef<HTMLElement>(null);
+  const manualReviewAction = useRef<HTMLButtonElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingCreationResult: boolean }>());
@@ -342,8 +353,13 @@ function ProjectGantt(props: GanttProps) {
     return () => clearTimeout(timer);
   });
   useLayoutEffect(() => {
-    if (preview && datePreviewFocusTarget) previewDialog.current?.focus();
-  }, [preview, datePreviewFocusTarget]);
+    if (preview) previewDialog.current?.focus();
+  }, [preview]);
+  useLayoutEffect(() => {
+    if (!busy && (manualProblem?.kind === 'stale' || manualProblem?.kind === 'uncertain')) {
+      manualReviewAction.current?.focus({ preventScroll: true });
+    }
+  }, [busy, manualProblem?.kind]);
   useLayoutEffect(() => {
     if (createOpen || !restoreCreateFocus.current) return;
     restoreCreateFocus.current = false;
@@ -375,7 +391,9 @@ function ProjectGantt(props: GanttProps) {
       if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingCreationResult;
-        const confirmation = awaitingCreationResult
+        const awaitingScheduleResult = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
+        const confirmation = awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
+          : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
         if (!window.confirm(confirmation)) event.preventDefault();
@@ -387,7 +405,7 @@ function ProjectGantt(props: GanttProps) {
             setDatePreviewFocusTarget(null);
             draftsRef.current.clear();
             setHasDraft(false);
-            setPreview(null); setPreviewError(''); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
+            setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setPasteProject(null);
             if (discardPlanShift) setPlanShift(null);
@@ -407,6 +425,7 @@ function ProjectGantt(props: GanttProps) {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
       setPasteProject(null);
+      setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setSelected(new Set());
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
@@ -416,7 +435,7 @@ function ProjectGantt(props: GanttProps) {
       window.removeEventListener('beforeunload', unload);
       window.removeEventListener('teamspace:workspace-imported', importReset);
     };
-  }, [notify, refresh, trackDraft]);
+  }, [notify, refresh, trackDraft, manualProblem?.kind]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
     if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
@@ -997,40 +1016,100 @@ function ProjectGantt(props: GanttProps) {
     });
   }
   async function requestPreview(ids: string[], offset: number, skipWeekends: boolean, opener?: HTMLButtonElement) {
+    if (busyRef.current) return;
     if (!ids.length) { notify('이동할 업무를 먼저 선택하세요.', 'error'); return; }
     if (!Number.isInteger(offset) || offset === 0) { notify('0이 아닌 정수 일수를 입력하세요.', 'error'); return; }
+    const input = { issueIds: ids, days: offset, workingDays: skipWeekends };
     markBusy(true);
-    try { const result = await post<SchedulePreview>('/schedule/preview', { issueIds: ids, days: offset, workingDays: skipWeekends }); setDatePreviewFocusTarget(opener ?? null); setPreview(result); setPreviewError(''); setShiftOpen(false); }
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      setDatePreviewFocusTarget(opener ?? null);
+      setManualReview({ input, preview });
+      setManualProblem(null);
+      setShiftOpen(false);
+    }
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
-  async function applyChanges(value: SchedulePreview, returnToMissingRow = true) {
-    if (!value.changes.length || busyRef.current) return null; markBusy(true); setPreviewError('');
-    const focusOrigin = document.activeElement;
+  async function commitManualReview(review: ManualReview, checking = false) {
+    const { previewId } = review.preview;
+    if (!previewId) return;
+    const focusOrigin = review.inline?.focus ?? document.activeElement;
+    let result: ApplyResult;
     try {
-      const result = await post<ApplyResult>('/schedule/apply', { changes: value.changes.map(change => ({ id: change.id, expectedVersion: change.version, startDate: change.toStart, endDate: change.toEnd })), ...(value.calendarVersions ? { calendarVersions: value.calendarVersions } : {}) });
-      setUndoId(result.undoId); setPreview(null); setScheduleWarnings(result.warnings || []);
-      let completedFocus = false;
-      try {
-        await refresh();
-        if (returnToMissingRow) completedFocus = focusAfterCompletingMissingRows(result.updated, focusOrigin);
-      } finally { restoreDatePreviewFocus(!completedFocus); }
-      notify(`${value.changes.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 의존성 경고를 확인하세요.' : ''}`);
-      return result;
-    } catch (err) {
-      if (preview) {
-        setPreviewError(errorMessage(err));
-        if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => {});
+      result = await post<ApplyResult>('/schedule/manual-apply', { previewId });
+    } catch (cause) {
+      setManualReview(review);
+      if (isUncertainScheduleResponse(cause)) {
+        setManualProblem({ kind: 'uncertain', message: '일정 적용 응답을 받지 못했습니다. 같은 요청의 결과를 다시 확인해 주세요.' });
+      } else {
+        setManualProblem(checking
+          ? { kind: 'unavailable', message: '이전 적용 결과를 확인할 수 없습니다. 최신 일정을 확인해 주세요.' }
+          : { kind: 'stale', message: errorMessage(cause) });
+        await refresh().catch(() => undefined);
       }
-      notify(errorMessage(err), 'error');
-      return null;
+      return;
+    }
+    const inlineIssue = result.updated.find(issue => issue.id === review.inline?.issueId);
+    if (inlineIssue) review.inline?.accept?.(inlineIssue);
+    setUndoId(result.undoId);
+    setManualReview(null);
+    setManualProblem(null);
+    setScheduleWarnings(result.warnings ?? []);
+    let completedFocus = false;
+    try {
+      await refresh();
+      if (review.inline?.returnToMissingRow ?? true) completedFocus = focusAfterCompletingMissingRows(result.updated, focusOrigin);
+      notify(`${result.updated.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 의존성 경고를 확인하세요.' : ''}`);
+    } catch {
+      notify('일정을 저장했습니다. 간트 목록을 다시 불러와 주세요.', 'error');
+    } finally { restoreDatePreviewFocus(!completedFocus); }
+  }
+  async function applyManualReview() {
+    if (busyRef.current || !manualReview?.preview.previewId ||
+        (manualProblem && manualProblem.kind !== 'uncertain')) return;
+    markBusy(true);
+    try { await commitManualReview(manualReview, manualProblem?.kind === 'uncertain'); }
+    finally { markBusy(false); }
+  }
+  async function reviewManualAgain() {
+    if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale') return;
+    let input = manualReview.input;
+    if ('changes' in input) {
+      const issues = new Map(data.issues.map(issue => [issue.id, issue]));
+      input = { changes: input.changes.map(change => ({ ...change, expectedVersion: issues.get(change.id)?.version ?? change.expectedVersion })) };
+    }
+    markBusy(true);
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      setManualReview({ ...manualReview, input, preview });
+      setManualProblem(null);
+    } catch (cause) {
+      setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+      await refresh().catch(() => undefined);
     } finally { markBusy(false); }
   }
-  async function saveDates(issue: Issue, startDate: string | null, endDate: string | null, returnToMissingRow = true) {
-    if (startDate === issue.startDate && endDate === issue.endDate) return issue;
-    if (startDate && endDate && startDate > endDate) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return null; }
-    if (busyRef.current) { notify('진행 중인 일정 변경이 끝난 뒤 다시 시도하세요.', 'error'); return null; }
-    const result = await applyChanges({ changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version, fromStart: issue.startDate, fromEnd: issue.endDate, toStart: startDate, toEnd: endDate }], warnings: [] }, returnToMissingRow);
-    return result?.updated.find(value => value.id === issue.id) || null;
+  async function saveDates(issue: Issue, startDate: string | null, endDate: string | null, inline: InlineScheduleOrigin) {
+    if (startDate === issue.startDate && endDate === issue.endDate) return;
+    if (startDate && endDate && startDate > endDate) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
+    if (busyRef.current || manualReview) { notify('진행 중인 일정 변경이 끝난 뒤 다시 시도하세요.', 'error'); return; }
+    const input = manualDates(issue, startDate, endDate);
+    markBusy(true);
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      if (!preview.previewId) {
+        notify(preview.blocking?.join(' · ') || '변경할 일정이 없습니다.', 'error');
+        return;
+      }
+      await commitManualReview({ input, preview, inline });
+    } catch (cause) {
+      notify(errorMessage(cause), 'error');
+      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) await refresh().catch(() => undefined);
+    } finally { markBusy(false); }
+  }
+  function completeMissingDates(issue: Issue, opener: HTMLButtonElement) {
+    const startDate = issue.startDate ?? (issue.endDate ? moveDate(issue.endDate, -2) : todayDate());
+    const endDate = issue.endDate ?? moveDate(startDate, 2);
+    void saveDates(issue, startDate, endDate, { issueId: issue.id, returnToMissingRow: true, focus: opener });
   }
   function reviewSuccessors(anchorChange: CascadeAnchorChange, origin: CascadeOrigin) {
     const issue = projectIssues.find(value => value.id === anchorChange.id);
@@ -1063,8 +1142,8 @@ function ProjectGantt(props: GanttProps) {
     if (anchor && origin.kind === 'inline') origin.accept(anchor);
     setUndoId(result.undoId);
     setScheduleWarnings(result.warnings ?? []);
-    setPreview(null);
-    setPreviewError('');
+    setManualReview(null);
+    setManualProblem(null);
     await refresh();
     trackDraft(CASCADE_DRAFT, false);
     setCascade(null);
@@ -1205,26 +1284,34 @@ function ProjectGantt(props: GanttProps) {
     if (outside(date)) showDate(date);
     else scrollToDate(dayNumber(date), range.start, 'smooth');
   }
-  function previewIssueDates(issue: Issue, toStart: string, toEnd: string) {
+  async function previewIssueDates(issue: Issue, toStart: string, toEnd: string, opener: HTMLButtonElement) {
+    if (busyRef.current) return;
     if (toStart > toEnd) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
-    const warnings: string[] = [];
-    const changed = { ...issue, startDate: toStart, endDate: toEnd };
-    const issueMath = issue.projectId === timelineProjectId && calendarMath ? calendarMath : createCalendarMath(calendarFor(issue.projectId));
-    for (const dependency of data.dependencies.filter(value => value.predecessorId === issue.id || value.successorId === issue.id)) {
-      const predecessor = dependency.predecessorId === issue.id ? changed : data.issues.find(value => value.id === dependency.predecessorId);
-      const successor = dependency.successorId === issue.id ? changed : data.issues.find(value => value.id === dependency.successorId);
-      if (!predecessor || !successor) continue;
-      const warning = dependencyScheduleWarning(dependency, predecessor, successor, issueMath);
-      if (warning) warnings.push(warning);
-    }
-    setPreview({ changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version, fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings }); setPreviewError('');
+    const input = manualDates(issue, toStart, toEnd);
+    markBusy(true);
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      setDatePreviewFocusTarget(opener);
+      setManualReview({ input, preview });
+      setManualProblem(null);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) {
+        setDatePreviewFocusTarget(opener);
+        setManualReview({ input, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+          fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings: [] } });
+        setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+        await refresh().catch(() => undefined);
+      } else {
+        notify(errorMessage(cause), 'error');
+        focusAfterDatePicking(opener);
+      }
+    } finally { markBusy(false); }
   }
   function previewResize(issue: Issue, edge: 'start' | 'end', delta: number, opener: HTMLButtonElement) {
     if (!issue.startDate || !issue.endDate || !delta) return;
     const startDate = edge === 'start' ? moveDate(issue.startDate, delta) : issue.startDate;
     const endDate = edge === 'end' ? moveDate(issue.endDate, delta) : issue.endDate;
-    if (startDate <= endDate) setDatePreviewFocusTarget(opener);
-    previewIssueDates(issue, startDate, endDate);
+    void previewIssueDates(issue, startDate, endDate, opener);
   }
   function focusAfterDatePicking(opener: HTMLButtonElement) {
     requestAnimationFrame(() => {
@@ -1241,8 +1328,12 @@ function ProjectGantt(props: GanttProps) {
     if (restore && datePreviewFocusTarget) focusAfterDatePicking(datePreviewFocusTarget);
   }
   function closePreview() {
-    setPreview(null);
+    const unresolved = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
+    if (unresolved && !window.confirm('일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫을까요?')) return;
+    setManualReview(null);
+    setManualProblem(null);
     restoreDatePreviewFocus();
+    if (unresolved) void refresh().catch(() => undefined);
   }
   function startDatePicking(issue: Issue, opener: HTMLButtonElement) {
     if (busyRef.current || !canLeave()) return;
@@ -1264,16 +1355,6 @@ function ProjectGantt(props: GanttProps) {
     if (!activeDatePicker) return;
     setDatePicker({ ...activeDatePicker, firstDate: null });
   }
-  function datePickerTrigger(issue: Issue, className: string, iconOnly = false) {
-    const label = '차트에서 날짜 선택';
-    return <button type="button" className={className} aria-label={`${issue.key} ${label}`} title={iconOnly ? label : undefined}
-      data-date-picker-issue={issue.id} data-schedule-owner={issue.id} disabled={busy || Boolean(linkPicker || activeDatePicker)}
-      onPointerDown={event => {
-        if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
-      }} onClick={event => startDatePicking(issue, event.currentTarget)}>
-      <CalendarRange size={iconOnly ? 16 : 13} aria-hidden="true" />{!iconOnly && label}
-    </button>;
-  }
   function chooseIssueDate(day: number) {
     if (!activeDatePicker || busyRef.current) return;
     const { issue, fixedEdge, firstDate, opener } = activeDatePicker;
@@ -1291,8 +1372,7 @@ function ProjectGantt(props: GanttProps) {
       notify('현재 일정과 같은 날짜입니다.');
       return;
     }
-    setDatePreviewFocusTarget(opener);
-    previewIssueDates(issue, toStart, toEnd);
+    void previewIssueDates(issue, toStart, toEnd, opener);
   }
   function beginDrag(event: PointerEvent<HTMLButtonElement>, issue: Issue, mode: DragMode) {
     if (event.button !== 0 || busy || activeDatePicker) return;
@@ -1315,6 +1395,7 @@ function ProjectGantt(props: GanttProps) {
   }
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
+  const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
   return <><div className="gantt-feature" inert={Boolean(schedulePredecessor || teamFollowUp)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
@@ -1326,7 +1407,7 @@ function ProjectGantt(props: GanttProps) {
     }
   }} onKeyDown={event => {
     if (cascade || event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape') return;
-    if (preview && datePreviewFocusTarget && !busy) closePreview();
+    if (preview && !busy) closePreview();
     else if (activeDatePicker) cancelDatePicking();
     else if (linkPicker) cancelLinkPicking();
     else return;
@@ -1652,7 +1733,8 @@ function ProjectGantt(props: GanttProps) {
                 onPointerDown={event => {
                   if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
                 }} onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><Pencil size={15} aria-hidden="true" /></button>}
-              {hasSchedule && !linkPicker && datePickerTrigger(issue, 'issue-icon-button gantt-row-date-picker', true)}
+              {hasSchedule && !linkPicker && <GanttDatePickerButton issue={issue} className="issue-icon-button gantt-row-date-picker"
+                disabled={datePickingDisabled} iconOnly onOpen={startDatePicking} />}
               <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
                 aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
                 onClick={() => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssue(issue.id)}>
@@ -1673,7 +1755,7 @@ function ProjectGantt(props: GanttProps) {
                 childSchedule={{ label: `${issue.key} 하위 업무 일정 보기`, disabled: Boolean(scheduleFocus),
                   onOpen: opener => openScheduleFocus('hierarchy', issue, opener), onPointerDown: keepInlineDateFocus }} />
             </div>
-            <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy || Boolean(cascade || linkPicker || activeDatePicker)}
+            <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
               onReview={outgoingIssueIds.has(issue.id) ? (change, origin) => reviewSuccessors(change, origin) : undefined} />
           </div>
@@ -1688,12 +1770,16 @@ function ProjectGantt(props: GanttProps) {
           : visibleSchedule ? <div className={`gantt-task-range ${dragging ? 'is-dragging' : ''}`} style={{ left: (visibleStart - range.start) * dayWidth + BAR_EDGE_INSET, width: (visibleEnd - visibleStart + 1) * dayWidth - 2 * BAR_EDGE_INSET, '--bar-color': status.color } as CSSProperties}>
             {linkPicker ? <span className={`${barClass} gantt-link-bar`} data-analysis-critical={critical || undefined} aria-hidden="true"><span>{chartZoom !== 'month' && issue.title}</span></span>
               : <button className={barClass} disabled={busy || Boolean(activeDatePicker)} data-analysis-critical={critical || undefined} aria-label={`${issue.key} 일정 이동`} aria-describedby={critical ? 'gantt-editing-help gantt-analysis-critical-help' : 'gantt-editing-help'} title={`${issue.key}: ${issue.startDate} ~ ${issue.endDate} · 끌어서 이동, 선택해서 상세 보기`} onPointerDown={event => beginDrag(event, issue, 'move')} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={() => setDrag(null)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openIssue(issue.id); } }}><span>{chartZoom !== 'month' && issue.title}</span></button>}
-            {!linkPicker && (['start', 'end'] as const).filter(edge => edge === 'start' ? !outside(isoDay(start! + startOffset)) : !outside(isoDay(end! + endOffset))).map(edge => <button key={edge} type="button" className={`gantt-resize-handle is-${edge}`} aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'} 조정`} aria-describedby="gantt-editing-help" title={`${edge === 'start' ? '시작일' : '종료일'} 조정 · 드래그 또는 좌우 방향키 · Enter로 날짜 입력`} disabled={busy || Boolean(activeDatePicker)} onPointerDown={event => beginDrag(event, issue, edge)} onPointerMove={moveDrag} onPointerUp={finishDrag} onPointerCancel={() => setDrag(null)} onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); previewResize(issue, edge, event.key === 'ArrowRight' ? 1 : -1, event.currentTarget); } }} onClick={event => { if (event.detail === 0) focusDateFromControl(event.currentTarget, issue, edge); }}><span /></button>)}
+            {!linkPicker && (['start', 'end'] as const).filter(edge => edge === 'start' ? !outside(isoDay(start! + startOffset)) : !outside(isoDay(end! + endOffset))).map(edge =>
+              <GanttResizeHandle key={edge} issue={issue} edge={edge} disabled={busy || Boolean(activeDatePicker)}
+                onBegin={beginDrag} onMove={moveDrag} onFinish={finishDrag} onCancel={() => setDrag(null)}
+                onResize={previewResize} onFocusDate={focusDateFromControl} />)}
             {dragging && offset !== 0 && <small className="gantt-drag-label">{drag.mode === 'move' ? `${offset > 0 ? '+' : ''}${offset}일` : `${moveDate(issue.startDate!, startOffset)} ~ ${moveDate(issue.endDate!, endOffset)}`}</small>}
           </div> : hasSchedule ? <button className="gantt-jump-date" onClick={() => showDate(issue.startDate!)}>{issue.startDate} — {issue.endDate} · 일정으로 이동 →</button> : !linkPicker && <div className="gantt-date-range-actions">
             <button type="button" className="gantt-no-schedule gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
               disabled={busy || Boolean(activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}><Plus size={12} aria-hidden="true" />날짜 입력</button>
-            {datePickerTrigger(issue, 'gantt-no-schedule gantt-missing-date-action')}
+            <GanttDatePickerButton issue={issue} className="gantt-no-schedule gantt-missing-date-action"
+              disabled={datePickingDisabled} onOpen={startDatePicking} />
           </div>}
           {linkPicker && <GanttLinkEndpoints issueKey={issue.key} step={linkStep} startPosition={startPosition} endPosition={endPosition}
             timelineWidth={timelineWidth} disabled={!canPickRow} onPick={endpoint => pickLink(issue.id, endpoint, true)} />}
@@ -1715,8 +1801,9 @@ function ProjectGantt(props: GanttProps) {
       <button type="button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
         disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
-      {datePickerTrigger(issue, 'btn gantt-missing-date-action')}
-      <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)} onClick={() => saveDates(issue, issue.startDate || (issue.endDate ? moveDate(issue.endDate, -2) : todayDate()), issue.endDate || (issue.startDate ? moveDate(issue.startDate, 2) : moveDate(todayDate(), 2)))}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>
+      <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
+      <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)}
+        onClick={event => completeMissingDates(issue, event.currentTarget)}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>
     </div>) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
       <section className="gantt-bottom-card" aria-label="업무 연결 목록">
         <div className="gantt-bottom-heading">
@@ -1741,14 +1828,24 @@ function ProjectGantt(props: GanttProps) {
         )) : <div className="gantt-bottom-empty">선행 업무를 연결해 일정의 흐름을 확인하세요.</div>}
       </section>
     </div>
-    {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
+    {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
       <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
-      {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}{previewError && <div className="issue-form-error gantt-preview-error" role="alert">{previewError}<br />미리보기와 입력 내용은 유지됩니다. 취소 후 최신 일정을 확인하고 다시 조정하세요.</div>}<div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div>
+      {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
+      {(manualProblem || Boolean(preview.blocking?.length)) && <div className="issue-form-error gantt-preview-error" role="alert">
+        {manualProblem ? manualProblem.message : preview.blocking?.map((message, index) => <p key={index}>{message}</p>)}
+      </div>}
+      <div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && !preview.blocking?.length && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div>
       <footer><span className="muted">적용 후 마지막 변경을 되돌릴 수 있습니다.</span><button className="btn btn-ghost" onClick={closePreview} disabled={busy}>취소</button>
-        {previewCascade && <button ref={cascadePreviewButton} type="button" className="btn" disabled={busy} onClick={() => reviewSuccessors({
+        {previewCascade && <button ref={cascadePreviewButton} type="button" className="btn" disabled={busy || Boolean(manualProblem) || !preview.previewId} onClick={() => reviewSuccessors({
           id: previewCascade.id, expectedVersion: previewCascade.version, startDate: previewCascade.toStart, endDate: previewCascade.toEnd,
         }, { kind: 'preview' })}>후행 일정 검토</button>}
-        <button className="btn btn-primary" disabled={busy || !preview.changes.length} onClick={() => applyChanges(preview)}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button></footer></section></div>}
+        {manualProblem?.kind === 'stale' && <button ref={manualReviewAction} type="button" className="btn" disabled={busy} onClick={() => void reviewManualAgain()}>다시 미리보기</button>}
+        {manualProblem?.kind === 'uncertain'
+          ? <button ref={manualReviewAction} type="button" className="btn btn-primary" disabled={busy}
+            onClick={() => void applyManualReview()}>{busy ? '확인 중…' : '적용 결과 다시 확인'}</button>
+          : <button type="button" className="btn btn-primary" disabled={busy || Boolean(manualProblem) || !preview.previewId}
+            onClick={() => void applyManualReview()}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button>}
+      </footer></section></div>}
     {cascade && <GanttCascadeDialog projectId={cascade.projectId} anchorChange={cascade.anchorChange}
       onClose={closeCascade} onApplied={applyCascade} onBusyChange={markBusy} />}
     {autoOpen && automaticProjectId && !automaticNeedsSelection && <AutomaticScheduleDialog {...props} projectId={automaticProjectId} selectedIssueIds={automaticScheduleIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)} onApplied={async result => { setUndoId(result.undoId); setScheduleWarnings(result.warnings || []); await refresh(); setAutoOpen(false); focusAfterCompletingMissingRows(result.updated); notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`); }} />}
@@ -1812,6 +1909,46 @@ function ProjectGantt(props: GanttProps) {
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
       onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}
   </>;
+}
+
+function GanttDatePickerButton({ issue, className, iconOnly = false, disabled, onOpen }: {
+  issue: Issue;
+  className: string;
+  iconOnly?: boolean;
+  disabled: boolean;
+  onOpen: (issue: Issue, opener: HTMLButtonElement) => void;
+}) {
+  const label = '차트에서 날짜 선택';
+  return <button type="button" className={className} aria-label={`${issue.key} ${label}`} title={iconOnly ? label : undefined}
+    data-date-picker-issue={issue.id} data-schedule-owner={issue.id} disabled={disabled}
+    onPointerDown={event => {
+      if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
+    }} onClick={event => onOpen(issue, event.currentTarget)}>
+    <CalendarRange size={iconOnly ? 16 : 13} aria-hidden="true" />{!iconOnly && label}
+  </button>;
+}
+
+function GanttResizeHandle({ issue, edge, disabled, onBegin, onMove, onFinish, onCancel, onResize, onFocusDate }: {
+  issue: Issue;
+  edge: 'start' | 'end';
+  disabled: boolean;
+  onBegin: (event: PointerEvent<HTMLButtonElement>, issue: Issue, edge: 'start' | 'end') => void;
+  onMove: (event: PointerEvent<HTMLButtonElement>) => void;
+  onFinish: (event: PointerEvent<HTMLButtonElement>) => void;
+  onCancel: () => void;
+  onResize: (issue: Issue, edge: 'start' | 'end', delta: number, opener: HTMLButtonElement) => void;
+  onFocusDate: (opener: HTMLButtonElement, issue: Issue, edge: 'start' | 'end') => void;
+}) {
+  const label = edge === 'start' ? '시작일' : '종료일';
+  return <button type="button" className={`gantt-resize-handle is-${edge}`} disabled={disabled}
+    aria-label={`${issue.key} ${label} 조정`} aria-describedby="gantt-editing-help"
+    title={`${label} 조정 · 드래그 또는 좌우 방향키 · Enter로 날짜 입력`}
+    onPointerDown={event => onBegin(event, issue, edge)} onPointerMove={onMove} onPointerUp={onFinish} onPointerCancel={onCancel}
+    onKeyDown={event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      onResize(issue, edge, event.key === 'ArrowRight' ? 1 : -1, event.currentTarget);
+    }} onClick={event => { if (event.detail === 0) onFocusDate(event.currentTarget, issue, edge); }}><span /></button>;
 }
 
 function GanttConnector({ dependency, predecessor, successor, range, dayWidth, drag, critical, conflict }: {
@@ -2045,7 +2182,7 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
 
 function DateCells({ issue, onSave, onReview, disabled, onDraftChange }: {
   issue: Issue;
-  onSave: (source: Issue, start: string | null, end: string | null, returnToMissingRow: boolean) => Promise<Issue | null>;
+  onSave: (source: Issue, start: string | null, end: string | null, origin: InlineScheduleOrigin) => Promise<void>;
   onReview?: (anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
   disabled: boolean;
   onDraftChange: TrackDraft;
@@ -2065,7 +2202,11 @@ function DateCells({ issue, onSave, onReview, disabled, onDraftChange }: {
     if (disabled || pendingRef.current || !dirty || (nextFocus instanceof HTMLElement &&
       (nextFocus.dataset.scheduleOwner === issue.id || nextFocus.dataset.ganttExport || nextFocus.hasAttribute('data-gantt-focus-control')))) return;
     pendingRef.current = true; setPending(true); onDraftChange(`dates:${issue.id}`, dirty, true);
-    try { const saved = await onSave(source, start || null, end || null, nextFocus === null); if (saved) accept(saved); }
+    try {
+      await onSave(source, start || null, end || null, {
+        issueId: issue.id, accept, returnToMissingRow: nextFocus === null, focus: document.activeElement,
+      });
+    }
     finally { pendingRef.current = false; setPending(false); }
   }
   const title = conflict ? '다른 변경이 있습니다. 입력은 보존됩니다. Esc로 최신 날짜 불러오기' : 'Enter로 저장 · Esc로 최신 날짜 불러오기';

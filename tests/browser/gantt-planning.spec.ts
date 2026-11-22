@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import type { AutomaticSchedulePreview, Dependency, Issue, Milestone, ScheduleBaseline, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Dependency, Issue, Milestone, ScheduleBaseline, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const snapshot = async (request: APIRequestContext) => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
 const addDays = (date: string, amount: number) => new Date(Date.parse(`${date}T00:00:00Z`) + amount * 86_400_000).toISOString().slice(0, 10);
@@ -110,16 +110,23 @@ test('업무 달력의 날짜 예외를 저장하고 근무일 이동은 달력 
     await page.getByRole('checkbox', { name: `${item.key} 선택`, exact: true }).check();
     await page.locator('.gantt-toolbar').getByRole('button', { name: /일정 이동$/ }).click();
     await page.getByLabel('이동 일수', { exact: true }).fill('2');
+    const previewResponse = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-preview') && value.request().method() === 'POST');
     await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const reviewed = await previewResponse;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ issueIds: [item.id], days: 2, workingDays: true });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     const preview = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
     await expect(preview.locator('.gantt-new-dates')).toContainText(tuesday);
     expect((await request.patch(`/api/projects/${project.id}/calendar`, { data: { ...calendar, expectedVersion: calendar.version, exceptions: [...calendar.exceptions, { date: tuesday, isWorking: false, label: '추가 휴무' }] } })).ok()).toBeTruthy();
-    const apply = page.waitForResponse(value => value.url().endsWith('/schedule/apply') && value.request().method() === 'POST');
+    const apply = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-apply') && value.request().method() === 'POST');
     await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
     const rejected = await apply;
     expect(rejected.status()).toBe(409);
-    expect(rejected.request().postDataJSON().calendarVersions[project.id]).toBe(calendar.version);
-    await expect(preview.getByRole('alert')).toContainText('미리보기와 입력 내용은 유지됩니다');
+    expect(rejected.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
+    await expect(preview.getByRole('alert')).toBeVisible();
+    await expect(preview.locator('.gantt-new-dates')).toContainText(tuesday);
     expect((await snapshot(request)).issues.find(value => value.id === item.id)?.startDate).toBe(friday);
     await preview.getByRole('button', { name: '취소', exact: true }).click();
     await page.locator('.gantt-toolbar').getByRole('button', { name: /일정 이동$/ }).click();
@@ -269,7 +276,7 @@ test('간트 초안의 작업자 탐색을 보호하고 외부 갱신 후 날짜
     // Dispatch without focus to refresh the workspace while the date draft remains active.
     await page.getByRole('button', { name: '되돌리기', exact: true }).dispatchEvent('click');
     await expect(end).toBeEnabled(); await expect(end).toHaveValue(addDays(monday, 3)); await expect(end).toHaveAttribute('aria-invalid', 'true');
-    const rejected = page.waitForResponse(value => value.url().endsWith('/schedule/apply') && value.request().method() === 'POST');
+    const rejected = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-preview') && value.request().method() === 'POST');
     await end.press('Enter'); const result = await rejected; expect(result.status()).toBe(409); expect(result.request().postDataJSON().changes[0].expectedVersion).toBe(first.version);
     await expect(end).toHaveValue(addDays(monday, 3)); await expect(end).toBeEnabled();
     await end.press('Escape'); await expect(end).toHaveValue(addDays(monday, 1)); await expect(end).not.toHaveAttribute('aria-invalid', 'true');

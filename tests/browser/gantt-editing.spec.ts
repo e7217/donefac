@@ -1,5 +1,5 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import type { Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 const dateAt = (offset: number) => { const date = new Date(); date.setUTCDate(date.getUTCDate() + offset); return date.toISOString().slice(0, 10); };
 const snapshot = async (request: APIRequestContext) => (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
@@ -103,17 +103,23 @@ test('기간 조정 미리보기의 버전이 오래되면409로 거절하고 �
   try {
     await page.goto(`/#/${issue.projectId}/gantt`);
     await page.getByLabel('간트 업무 검색').fill(issue.title);
+    const previewResponse = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-preview') && value.request().method() === 'POST');
     await page.getByRole('button', { name: `${issue.key} 종료일 조정`, exact: true }).press('ArrowRight');
+    const reviewed = await previewResponse;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{ id: issue.id, expectedVersion: issue.version, startDate: dateAt(0), endDate: dateAt(5) }] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     const preview = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
     await expect(preview.locator('.gantt-new-dates')).toContainText(dateAt(5));
     const remote = await request.patch(`/api/issues/${issue.id}`, { data: { expectedVersion: issue.version, endDate: dateAt(9), description: '동시에 저장한 내용' } });
     expect(remote.ok()).toBeTruthy();
-    const applyResponse = page.waitForResponse(value => value.url().endsWith('/api/schedule/apply') && value.request().method() === 'POST');
+    const applyResponse = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-apply') && value.request().method() === 'POST');
     await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
     const response = await applyResponse;
     expect(response.status()).toBe(409);
-    expect(response.request().postDataJSON().changes[0].expectedVersion).toBe(issue.version);
-    await expect(preview.getByRole('alert')).toContainText('미리보기와 입력 내용은 유지됩니다');
+    expect(response.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
+    await expect(preview.getByRole('alert')).toBeVisible();
     await expect(preview.locator('.gantt-new-dates')).toContainText(dateAt(5));
     const latest = (await snapshot(request)).issues.find(value => value.id === issue.id)!;
     expect(latest.endDate).toBe(dateAt(9)); expect(latest.description).toBe('동시에 저장한 내용');

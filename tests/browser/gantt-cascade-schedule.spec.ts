@@ -211,7 +211,7 @@ test('360px 막대 조정에서 잃어버린 적용 응답을 확인하고 중�
     expect(undone.request().postDataJSON()).toEqual({ undoId: recovered.undoId });
     await payload(undone);
     expect(await stored()).toEqual(expectedDates(created, original, 2));
-    expect(scheduleRequests).toEqual(['/api/schedule/auto-preview', '/api/schedule/auto-apply', '/api/schedule/undo']);
+    expect(scheduleRequests).toEqual(['/api/schedule/manual-preview', '/api/schedule/auto-preview', '/api/schedule/auto-apply', '/api/schedule/undo']);
   } finally { await removeIssues(request, created); }
 });
 

@@ -70,7 +70,7 @@ function gantt(page: Page) {
 }
 
 function scheduleApply(page: Page) {
-  return page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+  return page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
 }
 
 test('360px 간트에서 가려진 선후행 업무를 단계별로 보고 일정을 수정한 뒤 공유 보기로 돌아간다', async ({ page, request }, testInfo) => {
@@ -209,7 +209,7 @@ test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연�
     let linkDeletes = 0;
     page.on('request', work => {
       const path = new URL(work.url()).pathname;
-      if (path === '/api/schedule/apply' && work.method() === 'POST') dateWrites++;
+      if ((path === '/api/schedule/manual-apply' || path === '/api/schedule/apply') && work.method() === 'POST') dateWrites++;
       if (path === `/api/dependencies/${removed.id}` && work.method() === 'DELETE') linkDeletes++;
     });
     await page.goto(`/#/${f.project.id}/gantt`);

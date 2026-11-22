@@ -121,7 +121,7 @@ test('360px 간트에서 공유 보기에 가려진 날짜를 찾아 일정 충�
     await expect(start).toHaveValue(holiday);
     await start.fill(nextWorkingDay);
     const applying = page.waitForResponse(response =>
-      new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+      new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await start.press('Enter');
     const applied = await applying;
     expect(applied.ok(), await applied.text()).toBeTruthy();

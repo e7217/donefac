@@ -83,7 +83,7 @@ test('360px 선택 업무에 날짜가 없으면 첫 빈 칸에 포커스하고 
     await expectVisibleFocus(start(partial));
     await expect(start(partial)).toHaveValue('');
     await expect(end(partial)).toHaveValue(endDate);
-    const applying = page.waitForResponse(reply => new URL(reply.url()).pathname === '/api/schedule/apply' && reply.request().method() === 'POST');
+    const applying = page.waitForResponse(reply => new URL(reply.url()).pathname === '/api/schedule/manual-apply' && reply.request().method() === 'POST');
     await start(partial).fill(savedStart);
     await start(partial).press('Enter');
     const applied = await applying;

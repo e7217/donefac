@@ -1507,6 +1507,8 @@ export interface ScheduleChange {
   toDue?: string | null;
 }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
+export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
+  { changes: { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }[] };
 export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number }
 export interface AutomaticSchedulePreview extends SchedulePreview {
   previewId: string;

@@ -1,6 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
-import type { Dependency, Issue, Project, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, Project, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 function addDays(date: string, offset: number) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -87,11 +87,20 @@ test('360px 간트에서 프로젝트 일정 여유와 주공정을 읽고 날�
     expect(mutations).toEqual([]);
 
     const endDate = page.getByLabel(`${successor.key} 종료일`, { exact: true });
-    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+    const reviewing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-preview' && response.request().method() === 'POST');
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await endDate.fill(wednesday);
     await endDate.press('Enter');
+    const reviewed = await reviewing;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{
+      id: successor.id, expectedVersion: successor.version, startDate: monday, endDate: wednesday,
+    }] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     const saved = await saving;
     expect(saved.ok(), await saved.text()).toBeTruthy();
+    expect(saved.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
     await expect(finish).toHaveAttribute('datetime', friday);
     await expect(task(separate.id)).toContainText('여유 4근무일');
     await expect(bar(successor)).toHaveAttribute('data-analysis-critical', 'true');
@@ -100,7 +109,7 @@ test('360px 간트에서 프로젝트 일정 여유와 주공정을 읽고 날�
     await expect(panel).toHaveCount(0);
     await expect(bar(predecessor)).not.toHaveAttribute('data-analysis-critical', 'true');
     await expect(connector).not.toHaveAttribute('data-analysis-critical', 'true');
-    expect(mutations).toEqual(['POST /api/schedule/apply']);
+    expect(mutations).toEqual(['POST /api/schedule/manual-preview', 'POST /api/schedule/manual-apply']);
     const after = await savedIssues(request, project.id);
     expect(after.find(issue => issue.id === successor.id)).toMatchObject({ startDate: monday, endDate: wednesday, version: successor.version + 1 });
     expect(after.filter(issue => issue.id !== successor.id)).toEqual(before.filter(issue => issue.id !== successor.id));

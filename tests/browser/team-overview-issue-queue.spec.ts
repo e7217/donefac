@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator } from '@playwright/test';
-import type { Issue, Project, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, Project, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'America/Los_Angeles' });
 
@@ -139,10 +139,19 @@ test('360px 팀 개요에서 업무 지표를 열고 간트의 날짜를 채운 
     await expect(field).toBeInViewport({ ratio: 0.9 });
     await expect(field).toHaveValue('');
     await field.fill('2041-04-24');
-    const apply = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+    const review = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-preview' && response.request().method() === 'POST');
+    const apply = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await field.press('Enter');
+    const reviewed = await review;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{
+      id: repair.id, expectedVersion: repair.version, startDate: repair.startDate, endDate: '2041-04-24',
+    }] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     const applied = await apply;
     expect(applied.ok(), await applied.text()).toBeTruthy();
+    expect(applied.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
     await expect.poll(async () => (await workspace(request)).issues.find(issue => issue.id === repair.id)?.endDate).toBe('2041-04-24');
 
     await page.goBack();

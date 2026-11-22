@@ -843,6 +843,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 자체 백업 schema10 이상은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
 
 
+## 간트 수동 일정 변경
+
+브라우저의 `POST /api/schedule/manual-preview`에 `{issueIds,days,workingDays}`를 보내 여러 업무를 이동하거나 `{changes:[{id,expectedVersion,startDate,endDate}]}`로 날짜를 직접 지정한다. 대상은 1~1,000개이며, 이동 일수의 범위는 −3,650~3,650이다. 날짜를 직접 지정할 때는 두 날짜에 각각 `YYYY-MM-DD` 또는 `null`을 보낸다. 여러 프로젝트가 포함된 근무일 이동은 각 업무가 속한 프로젝트의 달력을 사용한다.
+
+응답은 `changes`, 관련 업무의 `warnings`와 적용 가능한 경우 `previewId`·`expiresAt`을 반환한다. 변경할 날짜가 없거나 `blocking`에 확인할 이유가 있으면 적용 ID를 발급하지 않는다. `POST /api/schedule/manual-apply`에는 `{previewId}`를 보내며, 같은 작업자의 미리보기와 선택 업무·관련 업무·선후행 연결·프로젝트 규칙을 확인한다. 검토한 조건이 달라지면 `409`로 응답하고 날짜는 유지한다.
+
+성공 시 `{undoId,updated,warnings}`를 반환한다. 날짜와 되돌리기 정보, 적용 결과는 한 트랜잭션으로 저장한다. 미사용 미리보기는 30분간 유효하며, 같은 미리보기의 적용 결과는 7일 안에 다시 조회할 수 있다. `POST /api/schedule/undo`에 `{undoId}`를 보내 해당 날짜 변경을 되돌린다.
+
 ## 기준 업무와 후행 일정 함께 적용
 
 브라우저의 `POST /api/schedule/auto-preview`에 `{projectId, anchorChange: {id, expectedVersion, startDate, endDate}}`를 보낸다. 양쪽 날짜는 `YYYY-MM-DD` 또는 `null`이다. 기준 날짜를 그대로 사용해 프로젝트 안의 직접·간접 후행 업무를 계산한다. 이 모드에는 일반 자동 일정의 `issueIds`, `anchorDate`, `defaultDuration`, `seedChanges`를 함께 보내지 않는다. 반환값의 `changes`는 검토할 날짜이고 `blocking`은 함께 적용하기 전에 해결할 항목이다.

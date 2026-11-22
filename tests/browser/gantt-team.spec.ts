@@ -93,8 +93,7 @@ async function narrow(page: Page, prefix: string) {
 test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달력으로 함께 일정을 이동한다', async ({ page, request }) => {
   const data = await fixture(request);
   try {
-    const firstCalendar = await data.readCalendar(data.first);
-    const secondCalendar = await data.mondayOff();
+    await data.mondayOff();
     const first = await data.issue(data.first, '첫 프로젝트 업무');
     const second = await data.issue(data.second, '둘째 프로젝트 업무');
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
@@ -146,10 +145,12 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     await button(page, '2개 일정 이동').click();
     await page.getByRole('spinbutton', { name: '이동 일수', exact: true }).fill('1');
     await page.getByRole('checkbox', { name: '근무일 기준', exact: true }).check();
-    const preview = waitPost(page, '/api/schedule/preview');
+    const preview = waitPost(page, '/api/schedule/manual-preview');
     await button(page, '변경 미리보기').click();
-    const proposed = await json<SchedulePreview>(await preview);
-    expect(proposed.calendarVersions).toMatchObject({ [data.first.id]: firstCalendar.version, [data.second.id]: secondCalendar.version });
+    const previewResponse = await preview;
+    expect(previewResponse.request().postDataJSON()).toEqual({ issueIds: expect.arrayContaining([first.id, second.id]), days: 1, workingDays: true });
+    const proposed = await json<SchedulePreview>(previewResponse);
+    expect(proposed.previewId).toBeTruthy();
     expect(proposed.changes).toHaveLength(2);
     expect(proposed.changes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: first.id, fromStart: friday, fromEnd: friday, toStart: monday, toEnd: monday }),
@@ -160,11 +161,11 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     await expect(comparison.getByRole('option', { name: projectOption(data.first), exact: true })).toHaveAttribute('value', data.first.id);
     await comparison.selectOption(data.second.id);
     await expect(review.getByRole('region', { name: '일정 미리보기 업무량 비교', exact: true })).toBeVisible();
-    const applied = waitPost(page, '/api/schedule/apply');
+    const applied = waitPost(page, '/api/schedule/manual-apply');
     await button(review, '변경 적용').click();
     const saved = await applied;
     expect(saved.ok(), await saved.text()).toBeTruthy();
-    expect(saved.request().postDataJSON().calendarVersions).toEqual(proposed.calendarVersions);
+    expect(saved.request().postDataJSON()).toEqual({ previewId: proposed.previewId });
     await expect(review).toHaveCount(0);
     const current = (await workspace(request)).issues;
     expect(current.find(issue => issue.id === first.id)).toMatchObject({ startDate: monday, endDate: monday });

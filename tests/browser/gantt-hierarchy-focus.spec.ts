@@ -148,7 +148,7 @@ test('360px 프로젝트 간트에서 검색 밖의 하위 일정을 고치고 �
 
     const end = g.date(missing, '종료일');
     await end.fill(d(7));
-    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await end.press('Enter');
     const saved = await saving;
     expect(saved.ok(), await saved.text()).toBeTruthy();
@@ -209,7 +209,8 @@ test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하�
     const dependencyTrigger = page.getByRole('button', { name: '선후행 흐름 보기', exact: true });
     let scheduleWrites = 0;
     page.on('request', sent => {
-      if (new URL(sent.url()).pathname === '/api/schedule/apply' && sent.method() === 'POST') scheduleWrites++;
+      const path = new URL(sent.url()).pathname;
+      if ((path === '/api/schedule/manual-apply' || path === '/api/schedule/apply') && sent.method() === 'POST') scheduleWrites++;
     });
     await g.search.fill(`${f.prefix} 선택한 팀 업무`);
     await expect(g.rows).toHaveCount(1);

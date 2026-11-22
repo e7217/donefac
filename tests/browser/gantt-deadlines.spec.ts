@@ -5,7 +5,7 @@ import type { Issue, Project, SchedulePasteApplyResult, ScheduleRowEditInput, Wo
 const previewPath = '/api/schedule/row-edit/preview';
 const applyPath = '/api/schedule/row-edit/apply';
 const undoPath = '/api/schedule/undo';
-const scheduleWritePaths = new Set(['/api/schedule/apply', applyPath, undoPath]);
+const scheduleWritePaths = new Set(['/api/schedule/manual-apply', '/api/schedule/apply', applyPath, undoPath]);
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);

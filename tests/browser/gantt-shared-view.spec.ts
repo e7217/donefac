@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { test, expect, type APIRequestContext } from '@playwright/test';
-import type { DocPage, Issue, PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewState, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, Issue, PlanningItem, Project, ProjectIssueSchema, SavedView, SavedViewState, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function createView(request: APIRequestContext, projectId: string, name: string, filters: SavedViewState['filters']) {
   const response = await request.post('/api/views', { data: { projectId, name, layout: 'list', filters } });
@@ -109,14 +109,21 @@ test('360px에서 업무 공유 보기의 조건을 간트에 적용하고 주�
     const plannedEnd = changed.toISOString().slice(0, 10);
     const endDate = matchedRow.getByLabel(`${matched.key} 종료일`, { exact: true });
     await endDate.fill(plannedEnd);
+    const review = page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/api/schedule/manual-preview' && response.request().method() === 'POST');
     const apply = page.waitForResponse(response =>
-      new URL(response.url()).pathname === '/api/schedule/apply' && response.request().method() === 'POST');
+      new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await endDate.press('Enter');
+    const previewResponse = await review;
+    expect(previewResponse.ok(), await previewResponse.text()).toBeTruthy();
+    expect(previewResponse.request().postDataJSON()).toEqual({ changes: [
+      { id: matched.id, expectedVersion: matched.version, startDate: null, endDate: plannedEnd },
+    ] });
+    const proposal = await previewResponse.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     const update = await apply;
     expect(update.ok(), await update.text()).toBeTruthy();
-    expect(update.request().postDataJSON().changes).toEqual([
-      { id: matched.id, expectedVersion: matched.version, startDate: null, endDate: plannedEnd },
-    ]);
+    expect(update.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
     const savedWorkspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
     expect(savedWorkspace.issues.find(issue => issue.id === matched.id)).toMatchObject({ endDate: plannedEnd, version: matched.version + 1 });
     await expect(endDate).toHaveValue(plannedEnd);
@@ -272,7 +279,7 @@ test('릴리스와 일정 조건을 공유 보기에 저장해 보드·간트·�
     await expect(incompleteRow).toBeVisible();
     const endDate = incompleteRow.getByLabel(`${incomplete.key} 종료일`, {exact: true});
     await endDate.fill('2020-03-16');
-    const scheduleSaved = page.waitForResponse(response => response.url().endsWith('/api/schedule/apply') && response.request().method() === 'POST');
+    const scheduleSaved = page.waitForResponse(response => response.url().endsWith('/api/schedule/manual-apply') && response.request().method() === 'POST');
     await endDate.press('Enter');
     const scheduled = await scheduleSaved;
     expect(scheduled.ok(), await scheduled.text()).toBe(true);

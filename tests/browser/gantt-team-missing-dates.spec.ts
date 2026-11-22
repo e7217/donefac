@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Issue, Project, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, Project, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -59,7 +59,8 @@ test('360px 전체 프로젝트 간트에서 담당자의 미정 일정을 찾�
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), owner.id);
     await page.setViewportSize({ width: 360, height: 820 });
     page.on('request', sent => {
-      if (new URL(sent.url()).pathname === '/api/schedule/apply' && sent.method() === 'POST') {
+      const path = new URL(sent.url()).pathname;
+      if ((path === '/api/schedule/manual-apply' || path === '/api/schedule/apply') && sent.method() === 'POST') {
         scheduleRequests.push(sent.postDataJSON());
       }
     });
@@ -140,13 +141,20 @@ test('360px 전체 프로젝트 간트에서 담당자의 미정 일정을 찾�
     expect(await stored(anchor.id)).toMatchObject({ version: anchor.version, endDate: null });
     expect(scheduleRequests).toHaveLength(0);
 
-    const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/apply'
+    const review = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-preview'
+      && response.request().method() === 'POST');
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply'
       && response.request().method() === 'POST');
     await anchorEnd.press('Enter');
+    const previewResponse = await review;
+    expect(previewResponse.ok(), await previewResponse.text()).toBeTruthy();
+    expect(previewResponse.request().postDataJSON()).toEqual({ changes: [{ id: anchor.id, expectedVersion: anchor.version, startDate, endDate }] });
+    const preview = await previewResponse.json() as SchedulePreview;
+    expect(preview.previewId).toBeTruthy();
     const response = await saved;
     expect(response.ok(), await response.text()).toBeTruthy();
     expect(await response.json()).toMatchObject({ updated: [{ id: anchor.id, projectId: second.id, startDate, endDate, dueDate }] });
-    expect(scheduleRequests).toEqual([{ changes: [{ id: anchor.id, expectedVersion: anchor.version, startDate, endDate }] }]);
+    expect(scheduleRequests).toEqual([{ previewId: preview.previewId }]);
     await expect(row(anchor)).toHaveCount(0);
     await expect(nextStart).toBeFocused();
     await expect(nextStart).toBeInViewport({ ratio: 0.95 });

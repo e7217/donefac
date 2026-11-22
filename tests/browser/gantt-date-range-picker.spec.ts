@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import type { Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ hasTouch: true });
 
@@ -259,7 +259,13 @@ test('다른 탭에서 바꾼 일정은 덮어쓰지 않고 다시 선택할 때
     };
     const row = preview.getByRole('row').filter({ hasText: issue.key });
     const calendarRange = (dates: typeof original) => new RegExp(`^${dates.startDate}\\s*${dates.endDate}$`);
+    const previewResponse = page.waitForResponse(response => response.url().endsWith('/api/schedule/manual-preview') && response.request().method() === 'POST');
     await openProposal();
+    const reviewed = await previewResponse;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{ id: issue.id, expectedVersion: issue.version, ...proposed }] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.previewId).toBeTruthy();
     await expect(row.getByRole('cell').nth(1)).toHaveText(calendarRange(original));
 
     const otherTab = await page.context().newPage();
@@ -274,11 +280,11 @@ test('다른 탭에서 바꾼 일정은 덮어쓰지 않고 다시 선택할 때
       await expect.poll(stored).toMatchObject(competing);
     } finally { await otherTab.close(); }
 
-    const conflict = page.waitForResponse(response => response.url().endsWith('/api/schedule/apply') && response.request().method() === 'POST');
+    const conflict = page.waitForResponse(response => response.url().endsWith('/api/schedule/manual-apply') && response.request().method() === 'POST');
     await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
     const result = await conflict;
     expect(result.status()).toBe(409);
-    expect(result.request().postDataJSON()).toMatchObject({ changes: [{ id: issue.id, expectedVersion: issue.version, ...proposed }] });
+    expect(result.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
     await expect(preview.getByRole('alert')).toBeVisible();
     await expect(row.getByRole('cell').nth(1)).toHaveText(calendarRange(original));
     await expect(row.locator('.gantt-new-dates')).toHaveText(calendarRange(proposed));
