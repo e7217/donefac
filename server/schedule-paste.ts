@@ -42,11 +42,14 @@ interface ScheduleState {
   dependencies: Dependency[];
 }
 
+type ScheduleKeyBinding = Pick<Issue, 'id' | 'projectId' | 'key'>;
+
 interface PasteProposal extends ScheduleScope {
   id: string;
   actorId: string;
   removeAfter: string;
   issueIds: string[];
+  keyBindings?: ScheduleKeyBinding[];
   hierarchyId?: string;
   guard: string;
   changes: ScheduleDateMutation[];
@@ -58,7 +61,7 @@ interface PasteProposal extends ScheduleScope {
   result?: SchedulePasteApplyResult;
 }
 
-type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
+type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'keyBindings' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
 
 type DependencyAddition = { line: number; predecessor: Issue; successor: Issue };
 
@@ -366,6 +369,20 @@ export class SchedulePasteService {
     return { projectId: null, projectIds: rows.map(({ id }) => id) };
   }
 
+  private workspaceKeys(keys: ReadonlySet<string>): Map<string, ScheduleKeyBinding | null> {
+    const matches = new Map<string, ScheduleKeyBinding | null>();
+    if (!keys.size) return matches;
+    // Compare with the parser's case folding, including legacy keys outside ASCII.
+    const rows = this.store.db.prepare("SELECT id, project_id AS projectId, json_extract(json, '$.key') AS key FROM issues")
+      .iterate() as Iterable<ScheduleKeyBinding>;
+    for (const issue of rows) {
+      if (typeof issue.key !== 'string') continue;
+      const key = issue.key.toUpperCase();
+      if (keys.has(key)) matches.set(key, matches.has(key) ? null : { ...issue, key });
+    }
+    return matches;
+  }
+
   private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind' | 'hierarchyId'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: PasteHooks) {
     const links = incidentLinks(dependencies, targetIds);
     const related = new Set([...targetIds, ...links.flatMap(link => [link.predecessorId, link.successorId])]);
@@ -522,23 +539,34 @@ export class SchedulePasteService {
   }
 
   private preview(projectId: unknown, raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    if (typeof projectId !== 'string' || !projectId || projectId.length > 200) {
+    if (projectId !== null && (typeof projectId !== 'string' || !projectId || projectId.length > 200)) {
       throw new SchedulePasteError(400, '붙여넣을 프로젝트를 선택해 주세요.');
     }
     const parsed = parseSchedulePaste(raw);
     return this.store.transaction(() => {
-      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      if (projectId !== null && !this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
-      const state = this.projectState(projectId);
+      const keys = projectId === null
+        ? this.workspaceKeys(new Set(parsed.rows.flatMap(({ key, dependency }) => dependency ? [key, dependency.predecessorKey] : [key])))
+        : null;
+      const projectIds = keys && [...new Set([...keys.values()].flatMap(binding => binding ? [binding.projectId] : []))].sort();
+      const scope = { projectId, ...(projectIds ? { projectIds } : {}) };
+      const state = this.scopeState(scope);
       const {issues, dependencies} = state;
       const byKey = new Map<string, Issue | null>();
-      for (const issue of issues) {
-        const key = issue.key.toUpperCase();
-        byKey.set(key, byKey.has(key) ? null : issue);
+      if (keys) {
+        const byId = new Map(issues.map(issue => [issue.id, issue]));
+        for (const [key, binding] of keys) byKey.set(key, binding ? byId.get(binding.id) ?? null : null);
+      } else {
+        for (const issue of issues) {
+          const key = issue.key.toUpperCase();
+          byKey.set(key, byKey.has(key) ? null : issue);
+        }
       }
+      const scopeLabel = projectId === null ? '전체 프로젝트에' : '이 프로젝트에';
       const dependencyChanges: SchedulePasteDependencyChange[] = [];
       const preview: SchedulePastePreview = {
-        projectId, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
+        ...scope, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
       };
       const changes = new Map<string, ScheduleDateMutation>();
       const linkChanges: ScheduleDependencyMutation[] = [];
@@ -549,7 +577,7 @@ export class SchedulePasteService {
       for (const row of parsed.rows) {
         const issue = byKey.get(row.key);
         if (!issue) {
-          const message = issue === null ? '이 프로젝트에 동일한 업무 키가 두 개 이상 있습니다.' : '이 프로젝트에 해당 업무 키가 없습니다.';
+          const message = issue === null ? `${scopeLabel} 동일한 업무 키가 두 개 이상 있습니다.` : `${scopeLabel} 해당 업무 키가 없습니다.`;
           preview.errors.push({line:row.line,key:row.key,message});
           continue;
         }
@@ -587,7 +615,7 @@ export class SchedulePasteService {
           continue;
         }
         changes.set(issue.id, change);
-        preview.changes.push(omitUnchangedDueDate(summary));
+        preview.changes.push(omitUnchangedDueDate(projectId === null ? { ...summary, projectId: issue.projectId } : summary));
       }
 
       for (const { row, issue, datesChanged } of resolvedRows) {
@@ -597,9 +625,13 @@ export class SchedulePasteService {
         if (input) {
           const predecessor = byKey.get(input.predecessorKey);
           if (!predecessor || predecessor.id === issue.id) {
-            const message = predecessor === null ? `선행 업무 키 ${input.predecessorKey}가 이 프로젝트에 중복되어 있습니다.`
-              : predecessor ? '자기 자신에게 의존할 수 없습니다.' : `이 프로젝트에 선행 업무 키 ${input.predecessorKey}가 없습니다.`;
+            const message = predecessor === null ? `선행 업무 키 ${input.predecessorKey}가 ${scopeLabel} 중복되어 있습니다.`
+              : predecessor ? '자기 자신에게 의존할 수 없습니다.' : `${scopeLabel} 선행 업무 키 ${input.predecessorKey}가 없습니다.`;
             preview.errors.push({line:row.line,key:row.key,message});
+            continue;
+          }
+          if (predecessor.projectId !== issue.projectId) {
+            preview.errors.push({ line: row.line, key: row.key, message: `선행 업무 ${predecessor.key}는 같은 프로젝트에 있어야 합니다.` });
             continue;
           }
           targetIds.add(predecessor.id);
@@ -616,6 +648,7 @@ export class SchedulePasteService {
               line:row.line,predecessorKey:predecessor.key,predecessorTitle:predecessor.title,successorKey:issue.key,successorTitle:issue.title,
               before:before ? {type:before.type,lagDays:before.lagDays} : null,
               after:after ? {type:after.type,lagDays:after.lagDays} : null,
+              ...(projectId === null ? { projectId: issue.projectId } : {}),
             });
             continue;
           }
@@ -637,7 +670,10 @@ export class SchedulePasteService {
         });
         preview.warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
       }
-      return this.savePreview(preview, state, { actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges }, hooks);
+      const keyBindings = keys && [...keys.values()].filter((binding): binding is ScheduleKeyBinding => Boolean(binding && targetIds.has(binding.id)));
+      return this.savePreview(preview, state, {
+        actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges, ...(keyBindings ? { keyBindings } : {}),
+      }, hooks);
     });
   }
 
@@ -893,6 +929,13 @@ export class SchedulePasteService {
       if (proposal.actorId !== actorId) throw new SchedulePasteError(409, '미리보기를 만든 작업자가 적용해 주세요.');
       if (proposal.removeAfter <= after(0)) throw new SchedulePasteError(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
+      if (proposal.keyBindings) {
+        const keys = this.workspaceKeys(new Set(proposal.keyBindings.map(({ key }) => key)));
+        if (proposal.keyBindings.some(binding => {
+          const current = keys.get(binding.key);
+          return current?.id !== binding.id || current.projectId !== binding.projectId;
+        })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
+      }
       if (kind === 'blocker-links') {
         const reviewed = proposal.blockerRelations ?? [];
         const current = new Map((proposal.projectId === null ? [] : hooks.projectBlockers(proposal.projectId)).map(relation => [relation.id, relation]));

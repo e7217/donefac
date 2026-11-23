@@ -4,11 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
   Dependency, Issue, Project, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview,
-  WorkspaceSnapshot,
+  WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 type LinkShape = Pick<Dependency, 'type' | 'lagDays'>;
@@ -41,7 +43,13 @@ async function fixture(t: TestContext) {
   }
   const project = await createProject('PASTELINK');
   return {
-    call, createProject,
+    call, createProject, project,
+    setLegacyKey(issue: Issue, key: string) {
+      const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+      try {
+        db.prepare("UPDATE issues SET json = json_set(json, '$.key', ?) WHERE id=?").run(key, issue.id);
+      } finally { db.close(); }
+    },
     async issue(title: string, { projectId = project.id, dueDate = null }: { projectId?: string; dueDate?: string | null } = {}) {
       const result = await call<Issue>('/issues', 'POST', {
         projectId, title, startDate: '2026-11-19', endDate: '2026-11-20', dueDate,
@@ -61,13 +69,14 @@ async function fixture(t: TestContext) {
       assert.equal(result.status, 200);
       return result.data;
     },
-    async preview(rows: string[][], { korean = false, includeDueDate = false }: { korean?: boolean; includeDueDate?: boolean } = {}) {
+    async preview(rows: string[][], { korean = false, includeDueDate = false, projectId = project.id }:
+      { korean?: boolean; includeDueDate?: boolean; projectId?: string | null } = {}) {
       const header = korean
         ? ['업무 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격']
         : ['key', 'startDate', 'endDate', 'predecessor', 'dependency type', 'lag days'];
       if (includeDueDate) header.push(korean ? '목표 마감일' : 'dueDate');
       const text = [header, ...rows].map(row => row.join('\t')).join('\n');
-      const result = await call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId: project.id, text });
+      const result = await call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId, text });
       assert.equal(result.status, 200, JSON.stringify(result.data));
       return result.data;
     },
@@ -424,6 +433,166 @@ test('paste rejects a combined cycle, a late indirect cycle, and a cross-project
   assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
   assert.match(JSON.stringify(rejected.data), /순환/u);
   assert.deepEqual(await f.workspace(), beforeApply);
+});
+
+test('team CSV uses each project calendar and replays and undoes one batch of dates and links', async t => {
+  const f = await fixture(t);
+  const second = await f.createProject('TEAMPASTE');
+  const firstPredecessor = await f.issue('첫 프로젝트 선행');
+  const firstSuccessor = await f.issue('첫 프로젝트 후행');
+  const secondPredecessor = await f.issue('둘째 프로젝트 선행', { projectId: second.id });
+  const secondSuccessor = await f.issue('둘째 프로젝트 후행', { projectId: second.id, dueDate: '2026-11-26' });
+  const existing = await f.link(secondPredecessor, secondSuccessor, 'SS', 0);
+  const calendarPath = `/projects/${second.id}/calendar`;
+  const calendar = (await f.call<WorkCalendar>(calendarPath)).data;
+  const closed = await f.call<WorkCalendar>(calendarPath, 'PATCH', {
+    ...calendar, expectedVersion: calendar.version,
+    exceptions: [...calendar.exceptions, { date: '2026-11-23', isWorking: false, label: '둘째 프로젝트 휴무' }],
+  });
+  assert.equal(closed.status, 200, JSON.stringify(closed.data));
+  const before = await f.workspace();
+  const text = [
+    'key,startDate,endDate,predecessor,dependency type,lag days,dueDate',
+    `${firstSuccessor.key.toLowerCase()},2026-11-23,2026-11-24,${firstPredecessor.key},FS,0,2026-11-25`,
+    `${secondSuccessor.key},2026-11-23,2026-11-24,${secondPredecessor.key},FS,0,-`,
+  ].join('\n');
+  const response = await f.call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId: null, text });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const preview = response.data;
+  assert.deepEqual(preview.errors, []);
+  assert.equal(preview.projectId, null);
+  assert.deepEqual(preview.projectIds, [f.project.id, second.id].sort());
+  assert.deepEqual(preview.changes.map(({ id, projectId, toDue }) => [id, projectId, toDue]), [
+    [firstSuccessor.id, f.project.id, '2026-11-25'], [secondSuccessor.id, second.id, null],
+  ]);
+  assert.deepEqual(preview.dependencyChanges, [
+    { ...expectedChange(2, firstPredecessor, firstSuccessor, null, { type: 'FS', lagDays: 0 }), projectId: f.project.id },
+    { ...expectedChange(3, secondPredecessor, secondSuccessor, { type: 'SS', lagDays: 0 }, { type: 'FS', lagDays: 0 }), projectId: second.id },
+  ]);
+  assert.equal(preview.warnings.length, 1, JSON.stringify(preview.warnings));
+  assert.ok(preview.warnings[0].includes(`${secondPredecessor.key} → ${secondSuccessor.key}`));
+  assert.deepEqual(await f.workspace(), before);
+
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.dependencyChanges, 2);
+  assert.deepEqual(applied.data.warnings, preview.warnings);
+  assert.deepEqual(applied.data.updated.map(({ projectId, startDate, endDate, dueDate }) => [projectId, startDate, endDate, dueDate]), [
+    [f.project.id, '2026-11-23', '2026-11-24', '2026-11-25'], [second.id, '2026-11-23', '2026-11-24', null],
+  ]);
+  const after = await f.workspace();
+  assert.ok(byPair(after, firstPredecessor, firstSuccessor));
+  assert.equal(byPair(after, secondPredecessor, secondSuccessor)?.id, existing.id);
+  assert.deepEqual(await f.apply(preview), applied);
+  assert.deepEqual(await f.workspace(), after);
+
+  const undone = await f.undo(applied.data.undoId);
+  assert.equal(undone.status, 200, JSON.stringify(undone.data));
+  const restored = await f.workspace();
+  assert.equal(byPair(restored, firstPredecessor, firstSuccessor), undefined);
+  const restoredLink = byPair(restored, secondPredecessor, secondSuccessor);
+  assert.deepEqual([restoredLink?.id, restoredLink?.type, restoredLink?.lagDays], [existing.id, 'SS', 0]);
+  for (const original of [firstSuccessor, secondSuccessor]) {
+    const current = restored.issues.find(issue => issue.id === original.id);
+    assert.deepEqual([current?.startDate, current?.endDate, current?.dueDate], [original.startDate, original.endDate, original.dueDate]);
+  }
+});
+
+test('team TSV requires exact unique current keys and refuses cross-project links without any writes', async t => {
+  const f = await fixture(t);
+  const second = await f.createProject('TEAMPASTE');
+  const predecessor = await f.issue('선행');
+  const first = await f.issue('첫 프로젝트 일정');
+  const other = await f.issue('둘째 프로젝트 일정', { projectId: second.id });
+  const rows = [
+    [first.key, '2026-11-23', '2026-11-24', predecessor.key, 'FS', ''],
+    [other.key, '2026-11-23', '2026-11-24', '', '', ''],
+  ];
+  const scope = { projectId: null };
+  const before = await f.workspace();
+  const invalid = await f.preview([
+    rows[0], [other.key, '2026-11-23', '2026-11-24', predecessor.key, 'FS', ''],
+    ['MISSING-1', '2026-11-23', '2026-11-24', '', '', ''],
+  ], scope);
+  assert.equal(invalid.previewId, null);
+  assert.deepEqual(invalid.errors.map(({ line, message }) => [line, message]), [
+    [3, `선행 업무 ${predecessor.key}는 같은 프로젝트에 있어야 합니다.`],
+    [4, '전체 프로젝트에 해당 업무 키가 없습니다.'],
+  ]);
+  assert.deepEqual(await f.workspace(), before);
+  assert.equal((await f.call('/schedule/paste-preview', 'POST', { text: 'key,startDate\nMISSING-1,2026-11-23' })).status, 400);
+  assert.equal((await f.call('/schedule/paste-preview', 'POST', { projectId: '', text: 'key,startDate\nMISSING-1,2026-11-23' })).status, 400);
+
+  const calendarReview = await f.preview(rows, scope);
+  assert.ok(calendarReview.previewId);
+  const calendarPath = `/projects/${second.id}/calendar`;
+  const calendar = (await f.call<WorkCalendar>(calendarPath)).data;
+  assert.equal((await f.call(calendarPath, 'PATCH', {
+    ...calendar, expectedVersion: calendar.version,
+    exceptions: [...calendar.exceptions, { date: '2026-11-23', isWorking: false, label: '둘째 프로젝트만 휴무' }],
+  })).status, 200);
+  const afterCalendar = await f.workspace();
+  assert.equal((await f.apply(calendarReview)).status, 409);
+  assert.deepEqual(await f.workspace(), afterCalendar);
+
+  const keyReview = await f.preview(rows, scope);
+  assert.ok(keyReview.previewId);
+  const third = await f.createProject('LEGACYKEY');
+  const legacy = await f.issue('구형 키가 저장된 업무', { projectId: third.id });
+  f.setLegacyKey(legacy, predecessor.key.toLowerCase().replace('s', 'ſ'));
+  const afterDuplicate = await f.workspace();
+  const rejected = await f.apply(keyReview);
+  assert.equal(rejected.status, 409);
+  assert.match(JSON.stringify(rejected.data), /업무 키/u);
+  assert.deepEqual(await f.workspace(), afterDuplicate);
+
+  const duplicate = await f.preview(rows, scope);
+  assert.equal(duplicate.previewId, null);
+  assert.deepEqual(duplicate.errors.map(({ line, message }) => [line, message]), [
+    [2, `선행 업무 키 ${predecessor.key}가 전체 프로젝트에 중복되어 있습니다.`],
+  ]);
+  const projectReview = await f.preview([rows[0]]);
+  assert.ok(projectReview.previewId);
+  assert.equal(projectReview.projectIds, undefined);
+  assert.equal(projectReview.changes[0].projectId, undefined);
+  assert.equal(projectReview.dependencyChanges?.[0].projectId, undefined);
+});
+
+test('a team paste is stale after an issue moves and its old key cannot start a new proposal', async t => {
+  const f = await fixture(t);
+  const second = await f.createProject('TEAMPASTE');
+  const third = await f.createProject('THIRDP');
+  const first = await f.issue('첫 프로젝트 일정');
+  const other = await f.issue('다른 프로젝트로 옮길 업무', { projectId: second.id });
+  const rows = [
+    [first.key, '2026-11-23', '2026-11-24', '', '', ''],
+    [other.key, '2026-11-23', '2026-11-24', '', '', ''],
+  ];
+  const scope = { projectId: null };
+  const review = await f.preview(rows, scope);
+  assert.ok(review.previewId, JSON.stringify(review.errors));
+
+  const path = `/issues/${other.id}/project-move`;
+  const move = { expectedVersion: other.version, projectId: third.id, includeConnected: false, mappings: [] };
+  const plan = await f.call<IssueProjectMovePreview>(`${path}/preview`, 'POST', move);
+  assert.equal(plan.status, 200, JSON.stringify(plan.data));
+  assert.ok(plan.data.token, JSON.stringify(plan.data.blockers));
+  const moved = await f.call<IssueProjectMoveResult>(`${path}/apply`, 'POST', { ...move, token: plan.data.token });
+  assert.equal(moved.status, 200, JSON.stringify(moved.data));
+  const [current] = moved.data.issues;
+  assert.equal(current.id, other.id);
+  assert.equal(current.projectId, third.id);
+  assert.notEqual(current.key, other.key);
+  const afterMove = await f.workspace();
+
+  assert.equal((await f.apply(review)).status, 409);
+  const oldKey = await f.preview(rows, scope);
+  assert.equal(oldKey.previewId, null);
+  assert.deepEqual(oldKey.errors.map(({ line, key }) => [line, key]), [[3, other.key]]);
+  assert.deepEqual(await f.workspace(), afterMove);
+  const newKey = await f.preview([rows[0], [current.key, ...rows[1].slice(1)]], scope);
+  assert.ok(newKey.previewId);
+  assert.deepEqual(newKey.projectIds, [f.project.id, third.id].sort());
 });
 
 test('undo preserves dates after intervening link edits, a replacement deletion, or a new cycle', async t => {

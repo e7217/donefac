@@ -31,12 +31,23 @@ function quoteKey(key: string) {
 export function buildGanttScheduleSheet(
   issues: readonly Issue[], projectIssues: readonly Issue[], dependencies: readonly Dependency[],
 ): ScheduleSheet {
+  return buildScheduleSheet(issues, projectIssues, dependencies, issues[0]?.projectId);
+}
+
+export function buildTeamGanttScheduleSheet(
+  issues: readonly Issue[], workspaceIssues: readonly Issue[], dependencies: readonly Dependency[],
+): ScheduleSheet {
+  return buildScheduleSheet(issues, workspaceIssues, dependencies);
+}
+
+function buildScheduleSheet(
+  issues: readonly Issue[], availableIssues: readonly Issue[], dependencies: readonly Dependency[], projectId?: string,
+): ScheduleSheet {
   if (!issues.length) return { ok: false, error: '내려받을 업무가 없습니다.' };
-  const projectId = issues[0].projectId;
   const byId = new Map<string, Issue | null>();
   const byKey = new Map<string, Issue | null>();
-  for (const issue of projectIssues) {
-    if (issue.projectId !== projectId) continue;
+  for (const issue of availableIssues) {
+    if (projectId !== undefined && issue.projectId !== projectId) continue;
     const key = issue.key.toUpperCase();
     byId.set(issue.id, byId.has(issue.id) ? null : issue);
     byKey.set(key, byKey.has(key) ? null : issue);
@@ -54,9 +65,11 @@ export function buildGanttScheduleSheet(
 
   const rows: string[] = [];
   for (const selected of issues) {
-    if (selected.projectId !== projectId) return { ok: false, error: '한 프로젝트의 업무만 내려받을 수 있습니다.' };
+    if (projectId !== undefined && selected.projectId !== projectId) {
+      return { ok: false, error: '한 프로젝트의 업무만 내려받을 수 있습니다.' };
+    }
     const issue = byId.get(selected.id);
-    if (!issue || issue.key !== selected.key) {
+    if (!issue || issue.key !== selected.key || issue.projectId !== selected.projectId) {
       return { ok: false, error: '업무 정보를 새로고침한 뒤 다시 내려받아 주세요.' };
     }
     if (!isSheetKey(issue.key) || byKey.get(issue.key.toUpperCase()) !== issue) {
@@ -73,7 +86,7 @@ export function buildGanttScheduleSheet(
     const predecessors: { key: string; link: Dependency }[] = [];
     for (const link of links) {
       const predecessor = byId.get(link.predecessorId);
-      if (!predecessor || predecessor.id === issue.id || seen.has(predecessor.id) ||
+      if (!predecessor || predecessor.projectId !== issue.projectId || predecessor.id === issue.id || seen.has(predecessor.id) ||
           !isSheetKey(predecessor.key) || byKey.get(predecessor.key.toUpperCase()) !== predecessor ||
           !isDependencyType(link.type) || !isDependencyLag(link.lagDays)) {
         return { ok: false, error: '내려받을 업무의 선행 연결을 확인해 주세요.' };

@@ -1784,6 +1784,7 @@ export interface ProjectScheduleAnalysis {
 export interface SchedulePasteDiagnostic { line: number | null; key?: string; issueId?: string; message: string }
 export interface SchedulePasteDependencyChange {
   line: number;
+  projectId?: string;
   predecessorKey: string;
   predecessorTitle: string;
   successorKey: string;

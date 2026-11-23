@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseSchedulePaste } from '../../server/schedule-paste-parser.js';
-import { buildGanttScheduleSheet, SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../../shared/schedule-paste-format.js';
+import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet, SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../../shared/schedule-paste-format.js';
 import type { Dependency, Issue } from '../../shared/types.js';
 
 const stamp = '2026-11-21T00:00:00Z';
@@ -76,6 +76,46 @@ test('schedule sheet fails explicitly for ambiguous keys, invalid dates or links
   }
 });
 
+test('team schedule sheet roundtrips several projects and filter-hidden predecessors in their own projects', () => {
+  const first = makeIssue('TEAM-1', { endDate: '2026-11-23' });
+  const firstPredecessor = makeIssue('TEAM-8');
+  const second = makeIssue('OPS-1', { projectId: 'ops', startDate: '2026-11-24', dueDate: '2026-11-30' });
+  const secondPredecessor = makeIssue('OPS-8', { projectId: 'ops' });
+  const unrelated = makeIssue('OPS-9', { projectId: 'ops' });
+  const selected = [second, first];
+  const issues = [first, firstPredecessor, second, secondPredecessor, unrelated];
+  const links = [dependency(firstPredecessor, first, 'FF', -1), dependency(secondPredecessor, second, 'SS', 2),
+    dependency(secondPredecessor, unrelated, 'FS', 0)];
+  const exported = sheetText(buildTeamGanttScheduleSheet(selected, issues, links));
+  assert.equal(exported, sheetText(buildTeamGanttScheduleSheet(selected, issues.toReversed(), links.toReversed())));
+  assert.deepEqual(parseSchedulePaste(exported), {
+    rows: [
+      { line: 2, key: 'OPS-1', startDate: '2026-11-24', endDate: undefined, dueDate: '2026-11-30',
+        dependency: { predecessorKey: 'OPS-8', type: 'SS', lagDays: 2 } },
+      { line: 3, key: 'TEAM-1', startDate: undefined, endDate: '2026-11-23',
+        dependency: { predecessorKey: 'TEAM-8', type: 'FF', lagDays: -1 } },
+    ],
+    errors: [],
+  });
+});
+
+test('team schedule sheet rejects stale project ownership and unsafe or ambiguous endpoints across the workspace', () => {
+  const first = makeIssue('TEAM-1');
+  const predecessor = makeIssue('TEAM-2');
+  const link = dependency(predecessor, first, 'FS', 0);
+  const other = makeIssue('OPS-1', { projectId: 'ops' });
+  const issues = [first, predecessor, other];
+  const duplicateKey = makeIssue('team-1', { projectId: 'ops' });
+  assert.match(sheetError(buildTeamGanttScheduleSheet([first], [...issues, duplicateKey], [])), /업무의 키/);
+  assert.equal(sheetText(buildGanttScheduleSheet([first], [...issues, duplicateKey], [])),
+    sheetText(buildGanttScheduleSheet([first], issues, [])));
+  assert.match(sheetError(buildTeamGanttScheduleSheet([first], [...issues, makeIssue('team-2', { projectId: 'ops' })], [link])), /선행 연결/);
+  assert.match(sheetError(buildTeamGanttScheduleSheet([first], issues, [dependency(other, first, 'FS', 0)])), /선행 연결/);
+  assert.match(sheetError(buildTeamGanttScheduleSheet([{ ...first, projectId: 'ops' }], issues, [])), /새로고침/);
+  const unsafe = makeIssue('\u200b=UNSAFE()');
+  assert.match(sheetError(buildTeamGanttScheduleSheet([first], [...issues, unsafe], [dependency(unsafe, first, 'FS', 0)])), /선행 연결/);
+});
+
 test('schedule sheet applies the paste row limit to the number of dependency rows', () => {
   const successor = makeIssue('TEAM-1');
   const predecessors = Array.from({ length: SCHEDULE_PASTE_MAX_ROWS }, (_, index) => makeIssue(`TEAM-${index + 2}`));
@@ -86,6 +126,8 @@ test('schedule sheet applies the paste row limit to the number of dependency row
   assert.deepEqual(result.errors, []);
   assert.equal(result.rows.length, SCHEDULE_PASTE_MAX_ROWS);
   assert.match(sheetError(buildGanttScheduleSheet([successor, predecessors[0]], issues, links)), /500행/);
+  const other = makeIssue('OPS-1', { projectId: 'ops' });
+  assert.match(sheetError(buildTeamGanttScheduleSheet([successor, other], [...issues, other], links)), /500행/);
 });
 
 test('schedule sheet counts UTF-8 exactly at the parser byte limit, including BOM', () => {

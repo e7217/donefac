@@ -74,8 +74,9 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const row = (issue: Issue) => chart.locator(`[data-issue-id="${issue.id}"]`);
     await expect(row(other)).toBeVisible();
-    await expect(scheduleDownload(page)).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '일정 붙여넣기', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '일정 붙여넣기', exact: true })).toBeEnabled();
+    const team = await downloadSheet(page, 'all');
+    expect([...new Set(team.rows.map(([key]) => key))].sort()).toEqual([visible.key, successor.key, partial.key, other.key].sort());
     const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
     await projectFilter.selectOption(targetProject.id);
     for (const issue of [visible, successor, partial]) await expect(row(issue)).toBeVisible();
@@ -181,5 +182,128 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     await expectStored(originalEnd, -1);
   } finally {
     for (const issue of created.reverse()) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
+
+test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 연결을 함께 적용하고 되돌린다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [first, second] } = await workspace();
+  const prefix = `팀 일정표 ${randomUUID().slice(0, 8)}`;
+  const originalStart = '2026-12-01', originalEnd = '2026-12-04';
+  const updatedStart = '2026-12-03', updatedEnd = '2026-12-08';
+  const created: Issue[] = [];
+  async function issue(projectId: string, title: string) {
+    const value = await json<Issue>(await request.post('/api/issues', {
+      data: { projectId, title, startDate: originalStart, endDate: originalEnd },
+    }), 201);
+    created.push(value);
+    return value;
+  }
+  async function link(predecessor: Issue, successor: Issue, type: Dependency['type']) {
+    return json<Dependency>(await request.post('/api/dependencies', {
+      data: { predecessorId: predecessor.id, successorId: successor.id, type, lagDays: 0 },
+    }), 201);
+  }
+
+  try {
+    const firstLead = await issue(first.id, `숨은 선행 ${randomUUID()}`);
+    const secondLead = await issue(second.id, `숨은 선행 ${randomUUID()}`);
+    const left = await issue(first.id, `${prefix} 첫 번째`);
+    const right = await issue(second.id, `${prefix} 두 번째`);
+    const skipped = await issue(second.id, `${prefix} 선택 안 함`);
+    const oldFirstLink = await link(firstLead, left, 'SS');
+    const oldSecondLink = await link(secondLead, right, 'FF');
+
+    await page.goto(`/#/${first.id}/gantt?scope=team`);
+    const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    await expect(projectFilter).toHaveValue('');
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(prefix);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(chart.locator(`[data-issue-id="${skipped.id}"]`)).toBeVisible();
+    await expect(chart.locator(`[data-issue-id="${firstLead.id}"]`)).toHaveCount(0);
+    for (const task of [left, right]) await chart.getByRole('checkbox', { name: `${task.key} 선택`, exact: true }).check();
+    const sheet = await downloadSheet(page, 'all');
+    expect(sheet.rows).toHaveLength(2);
+    expect(sheet.rows).toEqual(expect.arrayContaining([
+      [left.key, originalStart, originalEnd, '', firstLead.key, 'SS', '0'],
+      [right.key, originalStart, originalEnd, '', secondLead.key, 'FF', '0'],
+    ]));
+    const edited = [sheet.header, ...sheet.rows.map(([key, start, end, , predecessor, type]) => [
+      key, key === left.key ? updatedStart : start, key === right.key ? updatedEnd : end,
+      '', predecessor, key === right.key ? '-' : type, key === right.key ? '' : '2',
+    ].join('\t'))].join('\n');
+
+    const opener = page.getByRole('button', { name: '일정 붙여넣기', exact: true });
+    await opener.click();
+    const dialog = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    await expect(dialog).toContainText('전체 프로젝트');
+    await expect(projectFilter).toBeDisabled();
+    const textarea = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
+    const apply = dialog.getByRole('button', { name: '검토한 일정 적용', exact: true });
+    const waitPost = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+    async function review(text: string) {
+      await textarea.fill(text);
+      const pending = waitPost('/api/schedule/paste-preview');
+      await dialog.getByRole('button', { name: '붙여넣기 미리보기', exact: true }).click();
+      const response = await pending;
+      expect(response.request().postDataJSON()).toEqual({ projectId: null, text });
+      return json<SchedulePastePreview>(response);
+    }
+
+    const crossProject = [left.key, '', '', '', secondLead.key, 'FS', '0'].join('\t');
+    const rejected = await review(`${edited}\n${crossProject}`);
+    expect(rejected.previewId).toBeNull();
+    expect(rejected.errors).toEqual(expect.arrayContaining([expect.objectContaining({ key: left.key, line: 4, message: expect.stringMatching(/프로젝트/) })]));
+    await expect(apply).toBeDisabled();
+
+    const preview = await review(edited);
+    expect(preview).toMatchObject({ projectId: null, projectIds: [first.id, second.id].sort(), errors: [], previewId: expect.any(String) });
+    const dates = dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
+    const links = dialog.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록' });
+    for (const project of [first, second]) {
+      await expect(dates).toContainText(`${project.key} · ${project.name}`);
+      await expect(links).toContainText(`${project.key} · ${project.name}`);
+    }
+    const before = await workspace();
+    expect(before.issues.find(item => item.id === left.id)).toEqual(left);
+    expect(before.issues.find(item => item.id === right.id)).toEqual(right);
+
+    const appliedIds: string[] = [];
+    await page.route('**/api/schedule/paste-apply', async route => {
+      appliedIds.push(route.request().postDataJSON().previewId);
+      const result = await route.fetch();
+      if (appliedIds.length === 1 && result.ok()) await route.fulfill({ status: 408, json: { error: '합성 응답 유실' } });
+      else await route.fulfill({ response: result });
+    });
+    const firstApply = waitPost('/api/schedule/paste-apply');
+    await apply.click();
+    expect((await firstApply).status()).toBe(408);
+    const retry = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    await expect(textarea).toBeDisabled();
+    await retry.click();
+    await expect(dialog).toHaveCount(0);
+    expect(appliedIds).toEqual([preview.previewId, preview.previewId]);
+    await expect(projectFilter).toHaveValue('');
+
+    const after = await workspace();
+    expect(after.issues.find(item => item.id === left.id)).toMatchObject({ startDate: updatedStart, version: left.version + 1 });
+    expect(after.issues.find(item => item.id === right.id)).toMatchObject({ endDate: updatedEnd, version: right.version + 1 });
+    expect(after.issues.find(item => item.id === skipped.id)).toEqual(skipped);
+    expect(after.dependencies.find(value => value.id === oldFirstLink.id)?.lagDays).toBe(2);
+    expect(after.dependencies.find(value => value.id === oldSecondLink.id)).toBeUndefined();
+
+    const undo = waitPost('/api/schedule/undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    expect((await undo).status()).toBe(200);
+    const restored = await workspace();
+    expect(restored.issues.find(item => item.id === left.id)).toMatchObject({ startDate: originalStart, version: left.version + 2 });
+    expect(restored.issues.find(item => item.id === right.id)).toMatchObject({ endDate: originalEnd, version: right.version + 2 });
+    expect(restored.dependencies.find(value => value.id === oldFirstLink.id)?.lagDays).toBe(0);
+    expect(restored.dependencies.find(value => value.id === oldSecondLink.id)).toMatchObject({ type: 'FF', lagDays: 0 });
+  } finally {
+    for (const task of created.reverse()) await request.delete(`/api/issues/${task.id}`);
   }
 });

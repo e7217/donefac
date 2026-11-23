@@ -10,7 +10,7 @@ import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDepe
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { renderGanttExport } from '../../shared/gantt-export';
 import { buildGanttExportReport } from '../../shared/gantt-export-model';
-import { buildGanttScheduleSheet } from '../../shared/schedule-paste-format';
+import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -33,7 +33,7 @@ import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
-import { bulkDateResultMessage, SchedulePasteDialog } from './SchedulePasteDialog';
+import { bulkDateResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { GanttPlanningControls } from './GanttPlanningControls';
@@ -113,6 +113,7 @@ type GanttProps = FeatureProps & {
   onOpenIssueForReview?: OpenIssueForReview;
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
+type ScheduleSheetScope = Project | 'team';
 type BulkLinkSelection = { project: Project; issues: Issue[] };
 type DependencyEditor = {
   dependency?: Dependency;
@@ -274,7 +275,7 @@ function ProjectGantt(props: GanttProps) {
   const [drag, setDrag] = useState<DragState | null>(null);
   const [hideDone, setHideDone] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
-  const [pasteProject, setPasteProject] = useState<Project | null>(null);
+  const [pasteScope, setPasteScope] = useState<ScheduleSheetScope | null>(null);
   const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
   const [bulkLinkSelection, setBulkLinkSelection] = useState<BulkLinkSelection | null>(null);
   const [blockerLinksProject, setBlockerLinksProject] = useState<Project | null>(null);
@@ -378,7 +379,7 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
-    shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || blockerLinksProject || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
+    shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksProject || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -529,7 +530,8 @@ function ProjectGantt(props: GanttProps) {
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
-        const awaitingScheduleResult = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
+        const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
+        const awaitingScheduleResult = awaitingPasteResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
         const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
@@ -548,19 +550,19 @@ function ProjectGantt(props: GanttProps) {
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setTeamFollowUpHandoff(null);
-            setPasteProject(null);
+            setPasteScope(null);
             setBulkLinkSelection(null);
             setBlockerLinksProject(null);
             if (discardPlanShift) setPlanShift(null);
             if (discardBulkDates) setBulkDateSelection(null);
             setRowScheduleEdit(null);
             setDraftEpoch(value => value + 1);
-            if (awaitingCreationResult || awaitingLinkResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
+            if (awaitingCreationResult || awaitingLinkResult || awaitingPasteResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
           });
         }
       } else afterAcceptedNavigation(event, () => {
         setRowScheduleEdit(null);
-        setPasteProject(null);
+        setPasteScope(null);
         setBulkLinkSelection(null);
       });
     };
@@ -573,7 +575,7 @@ function ProjectGantt(props: GanttProps) {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
       setTeamFollowUpHandoff(null);
-      setPasteProject(null);
+      setPasteScope(null);
       setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
@@ -736,6 +738,7 @@ function ProjectGantt(props: GanttProps) {
   const project = allProjects ? undefined : projectsById.get(projectId);
   const hasProject = Boolean(project);
   const sheetProject = project ?? filteredProject;
+  const sheetScope: ScheduleSheetScope | null = sheetProject ?? (allProjects && !chartProjectFilter && data.projects.length ? 'team' : null);
   const sharedViews = useMemo(() => allProjects ? [] : (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [allProjects, data.savedViews, projectId]);
   const { sharedView, matchSharedView } = useMemo(() => {
@@ -927,8 +930,8 @@ function ProjectGantt(props: GanttProps) {
     return () => cancelAnimationFrame(frame);
   }, [dateRecoveryReady, dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
-  const sheetIssues = sheetProject ? (selectedIssues.length ? selectedIssues : issues)
-    .filter(issue => issue.projectId === sheetProject.id) : [];
+  const sheetIssues = (selectedIssues.length ? selectedIssues : issues)
+    .filter(issue => sheetScope === 'team' || issue.projectId === sheetScope?.id);
   const firstSelectedProject = selectedIssues[0]?.projectId;
   const selectedProjectId = firstSelectedProject && selectedIssues.every(issue => issue.projectId === firstSelectedProject) ? firstSelectedProject : undefined;
   const bulkLinkProject = selectedProjectId ? projectsById.get(selectedProjectId) : undefined;
@@ -942,7 +945,8 @@ function ProjectGantt(props: GanttProps) {
   const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
   const schedulePasteTarget = bulkDateIssues
     ? { projectId: allProjects ? null : projectId, bulkDates: { issues: bulkDateIssues, projects: data.projects, refresh } }
-    : pasteProject ? { projectId: pasteProject.id, projectLabel: `${pasteProject.key} · ${pasteProject.name}` } : null;
+    : pasteScope === 'team' ? { projectId: null, teamPaste: { projects: data.projects } }
+      : pasteScope ? { projectId: pasteScope.id, projectLabel: `${pasteScope.key} · ${pasteScope.name}` } : null;
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
   const linkAnchor = selectedAnchor && projectIssues.some(issue => issue.projectId === selectedAnchor.projectId && issue.id !== selectedAnchor.id)
     ? selectedAnchor : null;
@@ -1061,11 +1065,12 @@ function ProjectGantt(props: GanttProps) {
     downloadText(`teamspace-gantt-${project?.key ?? 'all'}.html`, renderGanttExport(report), 'text/html;charset=utf-8');
   }
   function downloadScheduleSheet() {
-    if (!sheetProject || !sheetIssues.length || exportDisabled) return;
-    const projectRows = projectIssues.filter(issue => issue.projectId === sheetProject.id);
-    const result = buildGanttScheduleSheet(sheetIssues, projectRows, data.dependencies);
+    if (!sheetScope || !sheetIssues.length || exportDisabled) return;
+    const result = sheetScope === 'team'
+      ? buildTeamGanttScheduleSheet(sheetIssues, data.issues, data.dependencies)
+      : buildGanttScheduleSheet(sheetIssues, projectIssues, data.dependencies);
     if (!result.ok) { notify(result.error, 'error'); return; }
-    downloadText(`teamspace-schedule-${sheetProject.key}.tsv`, result.text, 'text/tab-separated-values;charset=utf-8');
+    downloadText(`teamspace-schedule-${sheetScope === 'team' ? 'all' : sheetScope.key}.tsv`, result.text, 'text/tab-separated-values;charset=utf-8');
   }
   function canHideRows(nextIssues: Issue[]) {
     const visibleIds = new Set(nextIssues.map(issue => issue.id));
@@ -1077,7 +1082,7 @@ function ProjectGantt(props: GanttProps) {
     setQuery(nextQuery); setHideDone(nextHideDone);
   }
   function changeTeamProjectFilter(id: string | null) {
-    if (pasteProject) return;
+    if (pasteScope) return;
     const candidates = id ? projectIssues.filter(issue => issue.projectId === id) : projectIssues;
     if (canHideRows(chartRows(query, hideDone, undefined, candidates).rows)) onChangeTeamProjectFilter?.(id);
   }
@@ -1228,15 +1233,15 @@ function ProjectGantt(props: GanttProps) {
 
   function toggleSelected(id: string) { setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
   function openSchedulePaste() {
-    if (busyRef.current || !sheetProject || !canLeave()) return;
+    if (busyRef.current || !sheetScope || !canLeave()) return;
     queueMicrotask(() => {
       setLinkPicker(null);
       setDatePicker(null);
-      setPasteProject(sheetProject);
+      setPasteScope(sheetScope);
     });
   }
   function closeSchedulePaste(updated?: readonly Issue[]) {
-    setPasteProject(null);
+    setPasteScope(null);
     if (updated && focusAfterCompletingMissingRows(updated)) return;
     requestAnimationFrame(() => pasteTrigger.current?.focus({ preventScroll: true }));
   }
@@ -1244,7 +1249,7 @@ function ProjectGantt(props: GanttProps) {
     if (busyRef.current || !canEditBulkDates || activeDatePicker || !selectedIssues.length || bulkDatesOverLimit || !canLeave()) return;
     queueMicrotask(() => {
       setLinkPicker(null);
-      setPasteProject(null);
+      setPasteScope(null);
       setBulkDateSelection(selectedIssues);
     });
   }
@@ -1827,7 +1832,7 @@ function ProjectGantt(props: GanttProps) {
         if (reservationsOpen && draftsRef.current.has(TIME_RESERVATIONS_DRAFT) && !canLeave()) return;
         setReservationsOpen(!reservationsOpen);
       }}><CalendarClock size={15} aria-hidden="true" />시간 배정</button>}
-      {sheetProject && <button ref={pasteTrigger} type="button" className="btn" disabled={busy || Boolean(pasteProject)}
+      {sheetScope && <button ref={pasteTrigger} type="button" className="btn" disabled={busy || Boolean(pasteScope)}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={openSchedulePaste}>
         <ClipboardPaste size={15} aria-hidden="true" />일정 붙여넣기
       </button>}
@@ -1845,7 +1850,7 @@ function ProjectGantt(props: GanttProps) {
     <div className="gantt-stats"><div><span className="gantt-stat-dot" /><strong>{scopedIssues.filter(i => i.startDate && i.endDate).length}</strong><span>일정이 잡힌 업무</span></div><div><span className="gantt-stat-dot is-empty" /><strong>{scopedIssues.filter(i => !i.startDate || !i.endDate).length}</strong><span>일정 미정</span></div><div><Link2 size={13} /><strong>{projectDependencyCount}</strong><span>업무 연결</span></div><span className="gantt-manual-badge">직접 계획 · 자동 제안</span></div>
     {allProjects && <div className="gantt-team-scope">
       <label>프로젝트 필터
-        <select className="field" value={chartProjectFilter ?? ''} disabled={busy || Boolean(scheduleFocus || pasteProject)}
+        <select className="field" value={chartProjectFilter ?? ''} disabled={busy || Boolean(scheduleFocus || pasteScope)}
           data-gantt-focus-control="" onChange={event => changeTeamProjectFilter(event.target.value || null)}>
           <option value="">전체 프로젝트</option>
           {data.projects.map(item => <option key={item.id} value={item.id}>{item.key} · {item.name}</option>)}
@@ -2108,7 +2113,7 @@ function ProjectGantt(props: GanttProps) {
       }}>보기 기간으로 이동</button>}
       <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled} title="저장된 일정으로 내려받기"
         onPointerDown={keepInlineDateFocus} onClick={downloadGantt}><ArrowDownToLine size={15} aria-hidden="true" />간트 HTML 내려받기</button>
-      {sheetProject && <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled || !sheetIssues.length}
+      {sheetScope && <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled || !sheetIssues.length}
         title={`${selectedIssues.length ? '선택한' : '표시된'} 업무의 저장된 일정, 목표 마감일, 선행 연결`}
         onPointerDown={keepInlineDateFocus} onClick={downloadScheduleSheet}>
         <ArrowDownToLine size={15} aria-hidden="true" />일정 편집용 TSV 내려받기
@@ -2369,7 +2374,11 @@ function ProjectGantt(props: GanttProps) {
       key={bulkDateIssues ? 'bulk-dates' : 'paste'}
       {...schedulePasteTarget}
       notify={notify} onDraftChange={trackDraft}
-      onClose={bulkDateIssues ? closeBulkDates : closeSchedulePaste}
+      onClose={awaitingResult => {
+        if (bulkDateIssues) closeBulkDates();
+        else closeSchedulePaste();
+        if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
+      }}
       onApplied={async result => {
         setUndoId(result.undoId);
         setScheduleWarnings(result.warnings);
