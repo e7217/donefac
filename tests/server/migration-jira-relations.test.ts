@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,8 +9,9 @@ import { test, type TestContext } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { createApp } from '../../server/app.js';
 import type {
-  Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
-  MigrationPreview, SourceImport, SourceReconciliationAudit, SourceRecordArchive, WorkspaceSnapshot,
+  AutomaticSchedulePreview, Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
+  MigrationOptions, MigrationPreview, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive,
+  TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const ACTOR = 'user-seo';
@@ -297,6 +299,120 @@ test('Jira relation-only follow-up links separately migrated projects using exac
   assert.equal(retained.canApply, false);
   assert.equal(retained.counts.newJiraRelations, 0);
   assert.equal(retained.counts.skippedJiraRelations, 1);
+});
+
+test('a selected proven Jira blocker schedules across project calendars without activating other imported relations', async t => {
+  const f = await fixture(t);
+  await f.importInitial([sourceIssue('100'), sourceIssue('300')], 'ALPHA');
+  await f.importInitial([sourceIssue('200', [], 'OTHER'), sourceIssue('400', [], 'OTHER')], 'BRAVO');
+  const delta = await f.upload('handoff-from-proven-inward-relations', [sourceIssue('200', [
+    link('801', '100', 'inward'), link('802', '300', 'inward'),
+  ], 'OTHER')]);
+  const config = await f.appendConfiguration(delta);
+  config.appendTo!.refreshRelations = true;
+  const migration = await f.apply(await f.preview(config));
+  assert.equal(migration.status, 201, JSON.stringify(migration.data));
+  const originalReceipt = migration.data.import;
+
+  const workspace = await f.workspace();
+  const schedule = (issue: Issue, startDate: string, endDate: string) => f.call<Issue>(`/issues/${issue.id}`, 'PATCH', {
+    expectedVersion: issue.version, startDate, endDate,
+  });
+  const source = await schedule(original(workspace, '100'), '2026-11-19', '2026-11-20');
+  const later = await schedule(original(workspace, '300'), '2026-11-26', '2026-11-27');
+  const target = await schedule(original(workspace, '200', 'OTHER'), '2026-11-16', '2026-11-17');
+  const successor = await schedule(original(workspace, '400', 'OTHER'), '2026-11-16', '2026-11-16');
+  const local = await f.call<Dependency>('/dependencies', 'POST', {
+    predecessorId: target.id, successorId: successor.id, type: 'FS', lagDays: 0,
+  }, 201);
+  const [selected] = await f.relations(source);
+  const [unselected] = await f.relations(later);
+  assert.deepEqual([selected.sourceIssueId, selected.targetIssueId], [source.id, target.id]);
+  const backup = await f.backup();
+  const unproven: IssueRelation = { id: randomUUID(), sourceIssueId: later.id, targetIssueId: successor.id,
+    type: 'Blocks', version: 1, createdAt: CREATED };
+  const stored = backup.issueRelations.find(relation => relation.id === selected.id)!;
+  // A compatible legacy backup can store the outward pair in the original inward row order.
+  [stored.sourceIssueId, stored.targetIssueId] = [target.id, source.id];
+  backup.issueRelations.push(unproven);
+  await f.call('/import', 'POST', { data: backup });
+  assert.deepEqual(await f.relations(source), [stored]);
+  const relationPath = `/issues/${source.id}/relations`;
+  const activeReceipt = (await f.call<SourceImport[]>('/source-imports')).find(row => row.id === originalReceipt.id)!;
+  const auditPath = `/source-imports/${activeReceipt.id}/reconciliation/audit?expectedVersion=${activeReceipt.version}`;
+  const sourceAudit = await f.call<SourceReconciliationAudit>(auditPath);
+  const calendar = async (projectId: string, exceptions: WorkCalendar['exceptions']) => {
+    const path = `/projects/${projectId}/calendar`;
+    const current = await f.call<WorkCalendar>(path);
+    return f.call<WorkCalendar>(path, 'PATCH', { ...current, expectedVersion: current.version, workingWeekdays: [1, 2, 3, 4, 5], exceptions });
+  };
+  const sourceHours = [{ date: '2026-11-23', isWorking: false, label: '선행 프로젝트 휴무' }];
+  const targetHours = [
+    { date: '2026-11-21', isWorking: true, label: '후행 프로젝트 토요일 근무' },
+    { date: '2026-11-23', isWorking: false, label: '후행 프로젝트 월요일 휴무' },
+  ];
+  let sourceCalendar = await calendar(source.projectId, sourceHours);
+  const targetCalendar = await calendar(target.projectId, targetHours);
+  const blockers = () => f.call<TeamScheduleBlocker[]>('/schedule/team-blockers');
+  assert.ok((await blockers()).some(row => row.id === unselected.id));
+  assert.ok(!(await blockers()).some(row => row.id === unproven.id));
+  const previewPath = '/schedule/team-follow-up-preview';
+  const applyPath = '/schedule/team-follow-up-apply';
+  await f.call(previewPath, 'POST', { relationId: unproven.id, expectedVersion: unproven.version }, 404);
+  const preview = (relation: IssueRelation) => f.call<AutomaticSchedulePreview>(previewPath, 'POST', {
+    relationId: relation.id, expectedVersion: relation.version,
+  });
+  const plannedDates = (proposal: AutomaticSchedulePreview) => proposal.changes.map(row => [row.id, row.toStart, row.toEnd]);
+  const expected = [[target.id, '2026-11-21', '2026-11-24'], [successor.id, '2026-11-25', '2026-11-25']];
+
+  const native = await f.call<IssueRelation>(relationPath, 'POST', { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }, 201);
+  const preferred = (await blockers()).filter(row => row.sourceIssueId === source.id && row.targetIssueId === target.id);
+  assert.deepEqual(preferred, [{ id: native.id, sourceIssueId: source.id, targetIssueId: target.id, version: native.version }]);
+  assert.deepEqual(plannedDates(await preview(native)), expected);
+  await f.call(`${relationPath}/${native.id}?expectedVersion=${native.version}`, 'DELETE');
+  assert.deepEqual((await blockers()).find(row => row.id === selected.id), {
+    id: selected.id, sourceIssueId: source.id, targetIssueId: target.id, version: selected.version, origin: 'jira',
+  });
+
+  const before = await f.workspace();
+  const archivedRelations = (await f.backup()).issueRelations;
+  const proposal = await preview(selected);
+  assert.deepEqual(proposal.blocking, []);
+  assert.equal(proposal.teamFollowUp?.sourceIssueId, source.id);
+  assert.equal(proposal.teamFollowUp?.sourceEndDate, source.endDate);
+  assert.equal(proposal.teamFollowUp?.targetIssueId, target.id);
+  assert.equal(proposal.calendarVersions?.[source.projectId], sourceCalendar.version);
+  assert.equal(proposal.calendarVersions?.[target.projectId], targetCalendar.version);
+  assert.deepEqual(plannedDates(proposal), expected);
+  assert.deepEqual(await f.workspace(), before);
+
+  sourceCalendar = await calendar(source.projectId, [...sourceHours, { date: '2026-11-30', isWorking: false, label: '달력 버전 검증' }]);
+  const beforeApply = await f.workspace();
+  await f.call(applyPath, 'POST', { previewId: proposal.previewId }, 409);
+  assert.deepEqual(await f.workspace(), beforeApply);
+  const reviewed = await preview(selected);
+  assert.equal(reviewed.calendarVersions?.[source.projectId], sourceCalendar.version);
+  const resultPath = `/schedule/team-follow-up-result/${reviewed.previewId}`;
+  assert.deepEqual(await f.call(resultPath), { applied: false });
+  const result = await f.call<SchedulePasteApplyResult>(applyPath, 'POST', { previewId: reviewed.previewId });
+  assert.deepEqual(await f.call(resultPath), result);
+  assert.deepEqual(result.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), expected);
+  const committed = await f.workspace();
+  for (const issue of [source, later, target, successor]) {
+    assert.equal(committed.issues.find(row => row.id === issue.id)?.status, issue.status);
+  }
+  assert.deepEqual(committed.dependencies, beforeApply.dependencies);
+  assert.deepEqual(await f.relations(source), [stored]);
+  await f.call('/schedule/undo', 'POST', { undoId: result.undoId });
+  const final = await f.workspace();
+  for (const issue of [source, later, target, successor]) {
+    const restored = final.issues.find(row => row.id === issue.id)!;
+    assert.deepEqual([restored.startDate, restored.endDate, restored.dueDate, restored.status], [issue.startDate, issue.endDate, issue.dueDate, issue.status]);
+  }
+  assert.deepEqual(final.dependencies, beforeApply.dependencies);
+  assert.ok(final.dependencies.some(dependency => dependency.id === local.id));
+  assert.deepEqual((await f.backup()).issueRelations, archivedRelations);
+  assert.deepEqual((await f.call<SourceReconciliationAudit>(auditPath)).targetContent.issueRelations, sourceAudit.targetContent.issueRelations);
 });
 
 test('relation-only Jira administrator XML needs a proven project to anchor a cross-project review', async t => {

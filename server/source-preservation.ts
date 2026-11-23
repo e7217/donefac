@@ -1,5 +1,5 @@
 import type { Express, Request } from 'express';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type User } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
 import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
@@ -327,6 +327,11 @@ interface AppliedJiraChildren {
   attachments: Map<string, string>;
 }
 interface JiraIssueOrigin { alias: string; issueId: string; projectId: string; sourceProjectId: string; archiveId: string }
+type JiraRelationAlias = { instanceKey: string; alias: string };
+type JiraRelationPackageAlias = JiraRelationAlias & { importId: string; packageSha256: string };
+const jiraRelationAliasKey = ({ instanceKey, alias }: JiraRelationAlias) => JSON.stringify([instanceKey, alias]);
+const jiraRelationPackageAliasKey = ({ instanceKey, importId, packageSha256, alias }: JiraRelationPackageAlias) =>
+  JSON.stringify([instanceKey, importId, packageSha256, alias]);
 interface JiraHistoryArchive { kind: 'comment' | 'worklog'; sourceId: string; issueId: string; archiveId: string }
 interface JiraAttachmentArchive { sourceId: string; issueId: string; archiveId: string }
 function jiraIssueAliases(record: LegacyRecord): string[] {
@@ -374,6 +379,9 @@ export class SourcePreservationService {
         ON source_records(source_instance,kind,source_id) WHERE product='confluence';
       CREATE INDEX IF NOT EXISTS source_records_jira_history
         ON source_records(source_instance,kind,source_id) WHERE product='jira';
+      CREATE INDEX IF NOT EXISTS source_records_jira_relation
+        ON source_records(json_extract(json,'$.jiraRelationId'))
+        WHERE product='jira' AND kind='relation' AND json_valid(json) AND json_type(json,'$.jiraRelationId')='text';
       CREATE INDEX IF NOT EXISTS source_records_jira_unowned_change_owner
         ON source_records(source_instance,json_extract(json,'$.record.containerId'))
         WHERE product='jira' AND kind='history' AND owner_type IS NULL AND owner_id IS NULL;
@@ -419,6 +427,115 @@ export class SourcePreservationService {
   }
 
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
+
+  jiraTeamScheduleBlockers(): TeamScheduleBlocker[] {
+    const rows = this.store.db.prepare(`SELECT relation.id,
+      relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
+      json_extract(relation.json,'$.version') AS version, json_extract(relation.json,'$.type') AS type,
+      source.project_id AS sourceProjectId, target.project_id AS targetProjectId,
+      archive.source_instance AS instanceKey, archive.import_id AS importId, archive.json AS archiveJson,
+      CASE WHEN json_valid(receipt.json) THEN
+        CASE WHEN json_type(receipt.json,'$.projectIds')='array' THEN json_extract(receipt.json,'$.projectIds') END
+      END AS receiptProjects
+      FROM source_records archive JOIN issue_relations relation ON relation.id=json_extract(archive.json,'$.jiraRelationId')
+      JOIN issues source ON source.id=relation.source_issue_id
+      JOIN issues target ON target.id=relation.target_issue_id
+      JOIN source_imports receipt ON receipt.id=archive.import_id
+      WHERE archive.product='jira' AND archive.kind='relation' AND json_valid(archive.json) AND json_type(archive.json,'$.jiraRelationId')='text'
+        AND json_type(relation.json,'$.origin') IS NULL AND source.project_id<>target.project_id
+      ORDER BY relation.id, archive.id`).all() as (Omit<TeamScheduleBlocker, 'origin'> & {
+        type: string; sourceProjectId: string; targetProjectId: string; instanceKey: string; importId: string;
+        archiveJson: string; receiptProjects: string | null;
+      })[];
+    const candidates = [];
+    for (const duplicates of Map.groupBy(rows, row => row.id).values()) {
+      if (duplicates.length !== 1) continue;
+      const { id, sourceIssueId, targetIssueId, version, type, sourceProjectId, targetProjectId, instanceKey, importId, archiveJson, receiptProjects } = duplicates[0];
+      const archive = JSON.parse(archiveJson) as SourceRecordArchive;
+      if (!receiptProjects || archive.excluded || archive.source?.product !== 'jira' || archive.source.instanceKey !== instanceKey ||
+          archive.sourceImportId !== importId || !archive.record?.metadata || typeof archive.record.title !== 'string' ||
+          !Array.isArray(archive.record.references) || archive.record.references.some(ref => !ref || typeof ref.sourceId !== 'string')) continue;
+      const link = jiraIssueRelationSource(archive.record);
+      if (link?.nativeType !== 'blocks' || type !== link.typeName) continue;
+      const projects: unknown = JSON.parse(receiptProjects);
+      if (!Array.isArray(projects) || !projects.includes(sourceProjectId) || !projects.includes(targetProjectId)) continue;
+      const scope = { instanceKey, importId, packageSha256: archive.packageSha256 };
+      candidates.push({ id, sourceIssueId, targetIssueId, version,
+        source: { ...scope, alias: link.sourceAlias }, target: { ...scope, alias: link.targetAlias } });
+    }
+    if (!candidates.length) return [];
+
+    const aliases = candidates.flatMap(({ source, target }) => [source, target]);
+    const retained = this.jiraRelationPackageAliases(aliases);
+    const packagedAliases = retained.flatMap(({ instanceKey, sourceAlias, keyAlias }) => [
+      { instanceKey, alias: sourceAlias }, { instanceKey, alias: keyAlias },
+    ]);
+    const bindings = this.jiraRelationAliasBindings([...aliases, ...packagedAliases]);
+    const retainedByAlias = Map.groupBy(retained, jiraRelationPackageAliasKey);
+    const resolve = (alias: JiraRelationPackageAlias) => {
+      const known = bindings.get(jiraRelationAliasKey(alias));
+      const rows = retainedByAlias.get(jiraRelationPackageAliasKey(alias));
+      if (!rows) return known;
+      if (rows.length !== 1 || !rows[0].eligible) return undefined;
+      const [{ instanceKey, sourceAlias, keyAlias }] = rows;
+      const targets = new Set([sourceAlias, keyAlias].map(alias => bindings.get(jiraRelationAliasKey({ instanceKey, alias })))
+        .filter(value => value !== undefined));
+      if (known) targets.add(known);
+      if (targets.size === 1) return [...targets][0];
+    };
+    return candidates.flatMap(({ id, sourceIssueId, targetIssueId, version, source, target }) => {
+      const first = resolve(source), second = resolve(target);
+      // An older backup may retain the original storage direction. The Jira
+      // aliases confirm orientation without rewriting the archived relation.
+      if ((first === sourceIssueId && second === targetIssueId) || (first === targetIssueId && second === sourceIssueId)) {
+        return [{ id, sourceIssueId: first, targetIssueId: second, version, origin: 'jira' as const }];
+      }
+      return [];
+    });
+  }
+
+  private jiraRelationAliasBindings(aliases: JiraRelationAlias[]): Map<string, string> {
+    if (!aliases.length) return new Map();
+    const selected = [...new Map(aliases.filter(alias => alias.alias).map(alias => [jiraRelationAliasKey(alias), alias])).values()];
+    const rows = this.store.db.prepare(`SELECT binding.source_instance AS instanceKey, binding.source_alias AS alias, binding.target_id AS issueId
+      FROM json_each(?) wanted JOIN source_bindings binding
+      ON binding.source_instance=json_extract(wanted.value,'$.instanceKey') AND binding.source_alias=json_extract(wanted.value,'$.alias')
+      WHERE binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue'`).all(JSON.stringify(selected)) as
+      (JiraRelationAlias & { issueId: string })[];
+    return new Map(rows.map(row => [jiraRelationAliasKey(row), row.issueId]));
+  }
+
+  private jiraRelationPackageAliases(aliases: JiraRelationPackageAlias[]) {
+    if (!aliases.length) return [];
+    const selected = [...new Map(aliases.map(alias => [jiraRelationPackageAliasKey(alias), alias])).values()];
+    // Read the compact issue identities for each involved receipt once, then
+    // open the archived body only for an issue matching a requested alias.
+    const rows = this.store.db.prepare(`WITH wanted AS MATERIALIZED (
+      SELECT json_extract(value,'$.instanceKey') AS instanceKey, json_extract(value,'$.importId') AS importId,
+        json_extract(value,'$.packageSha256') AS packageSha256, json_extract(value,'$.alias') AS alias FROM json_each(?)
+    ), packages AS (SELECT DISTINCT instanceKey, importId, packageSha256 FROM wanted),
+    named_issues AS MATERIALIZED (
+      SELECT archived.id, packages.instanceKey, packages.importId, packages.packageSha256, archived.source_id AS sourceAlias,
+        CASE WHEN json_valid(archived.json) THEN json_extract(archived.json,'$.record.metadata.key') END AS keyAlias
+      FROM packages JOIN source_records archived ON archived.import_id=packages.importId
+        AND archived.source_instance=packages.instanceKey
+        AND CASE WHEN json_valid(archived.json) THEN json_extract(archived.json,'$.packageSha256') END=packages.packageSha256
+      WHERE archived.product='jira' AND archived.kind='issue'
+    ), found AS (
+      SELECT wanted.*, issue.id FROM wanted JOIN named_issues issue USING (instanceKey,importId,packageSha256) WHERE issue.sourceAlias=wanted.alias
+      UNION
+      SELECT wanted.*, issue.id FROM wanted JOIN named_issues issue USING (instanceKey,importId,packageSha256) WHERE issue.keyAlias=wanted.alias
+    ) SELECT found.instanceKey, found.importId, found.packageSha256, found.alias, archived.json AS archiveJson
+      FROM found JOIN source_records archived ON archived.id=found.id`).all(JSON.stringify(selected)) as
+      (JiraRelationPackageAlias & { archiveJson: string })[];
+    return rows.map(({ archiveJson, ...alias }) => {
+      const archived = JSON.parse(archiveJson) as SourceRecordArchive;
+      const key = archived.record?.metadata?.key;
+      const eligible = !archived.excluded && Boolean(archived.record?.containerId) && Boolean(archived.record?.metadata) && !isRestrictedJiraHistoryOwner(archived.record);
+      return { ...alias, sourceAlias: archived.record?.sourceId ?? '', keyAlias: typeof key === 'string' ? key : '', eligible };
+    });
+  }
+
   jiraIssueOrigins(instanceKey: string, selected: string[], by: 'alias' | 'issue'): JiraIssueOrigin[] {
     if (!selected.length) return [];
     const selector = by === 'alias' ? 'binding.source_alias' : 'binding.target_id';

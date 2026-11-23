@@ -354,7 +354,7 @@ export interface AttachmentVersion extends Attachment { attachmentId:string;vers
 export type IssueRelationType = 'related' | 'blocks' | 'duplicates';
 export type IssueRelationDirection = 'outgoing' | 'incoming';
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string;origin?:'teamspace' }
-export type TeamScheduleBlocker = Pick<IssueRelation, 'id' | 'sourceIssueId' | 'targetIssueId' | 'version'>;
+export type TeamScheduleBlocker = Pick<IssueRelation, 'id' | 'sourceIssueId' | 'targetIssueId' | 'version'> & { origin?: 'jira' };
 export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
 export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};
 export interface SourceRecordPage { records:SourceRecordSummary[];total:number;offset:number;limit:number }

@@ -280,7 +280,7 @@ export function createApp(options: {
   const planScheduleShift=new PlanScheduleShiftService(store);
   const legacyImport=new LegacyImportService(store,dataDir);
   const sourcePreservation=new SourcePreservationService(store);
-  const issueRelations=new IssueRelationsService(store);
+  const issueRelations=new IssueRelationsService(store,sourcePreservation);
   const workspaceRevisions = new WorkspaceRevisions(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);

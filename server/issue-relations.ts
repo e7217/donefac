@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isIssueRelationDirection, isIssueRelationType, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, type TeamspaceIssueRelation } from '../shared/issue-relations.js';
 import type { Issue, IssueRelation, TeamScheduleBlocker } from '../shared/types.js';
 import { findTeamspaceIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
+import type { SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 
 type RelationChange = '업무 관계 추가' | '업무 관계 수정' | '업무 관계 해제';
@@ -47,7 +48,7 @@ const labels = {
 } as const;
 
 export class IssueRelationsService {
-  constructor(private readonly store: Store) {}
+  constructor(private readonly store: Store, private readonly sources: Pick<SourcePreservationService, 'jiraTeamScheduleBlockers'>) {}
 
   list(issueId: string): IssueRelation[] {
     this.requireIssue(issueId);
@@ -55,7 +56,7 @@ export class IssueRelationsService {
   }
 
   teamScheduleBlockers(): TeamScheduleBlocker[] {
-    return this.store.db.prepare(`SELECT relation.id,
+    const blockers = this.store.db.prepare(`SELECT relation.id,
       relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
       json_extract(relation.json, '$.version') AS version
       FROM issue_relations AS relation
@@ -65,6 +66,15 @@ export class IssueRelationsService {
         AND json_extract(relation.json, '$.type')='blocks'
         AND source.project_id<>target.project_id
       ORDER BY relation.source_issue_id, relation.target_issue_id`).all() as TeamScheduleBlocker[];
+    const pair = ({ sourceIssueId, targetIssueId }: TeamScheduleBlocker) => JSON.stringify([sourceIssueId, targetIssueId]);
+    const seen = new Set(blockers.map(pair));
+    for (const imported of this.sources.jiraTeamScheduleBlockers()) {
+      const key = pair(imported);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      blockers.push(imported);
+    }
+    return blockers;
   }
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {

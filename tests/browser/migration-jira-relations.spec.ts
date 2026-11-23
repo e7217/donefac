@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type {
-  Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, WorkspaceSnapshot,
+  AutomaticSchedulePreview, Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
+  SchedulePasteApplyResult, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 
 async function read<T>(request: APIRequestContext, path: string): Promise<T> {
@@ -205,7 +206,7 @@ test('360px에서 기존 Jira 업무의 새 관계를 이관해 일정 연결을
   }
 });
 
-test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 검토하고 상대 업무를 연다', async ({ page, request }) => {
+test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행 일정을 검토한다', async ({ page, request }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const suffix = randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -309,6 +310,100 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 검토하고 
     const unchanged = after.issues.filter(issue => tickets.some(ticket => ticket.projectId === issue.projectId));
     expect(unchanged).toHaveLength(tickets.length);
     for (const ticket of tickets) expect(unchanged.find(issue => issue.id === ticket.id)).toEqual(ticket);
+
+    const linksPath = `/api/issues/${blocked.id}/relations`;
+    const [restoredLink] = await read<IssueRelation[]>(request, linksPath);
+    expect(restoredLink).toMatchObject({ sourceIssueId: blocker.id, targetIssueId: blocked.id, type: 'Blocks' });
+    const dates = [
+      { issue: blocker, startDate: '2026-11-19', endDate: '2026-11-20' },
+      { issue: blocked, startDate: '2026-11-16', endDate: '2026-11-17' },
+    ];
+    for (const { issue, startDate, endDate } of dates) {
+      const response = await request.patch(`/api/issues/${issue.id}`, { data: { expectedVersion: issue.version, startDate, endDate } });
+      expect(response.status(), await response.text()).toBe(200);
+    }
+    const schedule = async () => {
+      const snapshot = await read<WorkspaceSnapshot>(request, '/api/workspace');
+      return {
+        dates: dates.map(({ issue }) => {
+          const current = snapshot.issues.find(item => item.id === issue.id)!;
+          return { id: current.id, startDate: current.startDate, endDate: current.endDate, dueDate: current.dueDate, status: current.status };
+        }),
+        dependencies: snapshot.dependencies.filter(item => [blocker.id, blocked.id].includes(item.predecessorId) ||
+          [blocker.id, blocked.id].includes(item.successorId)),
+      };
+    };
+    const beforeReview = await schedule();
+    const candidate = (await read<TeamScheduleBlocker[]>(request, '/api/schedule/team-blockers')).find(item => item.id === restoredLink.id);
+    expect(candidate).toMatchObject({ sourceIssueId: blocker.id, targetIssueId: blocked.id, origin: 'jira' });
+    await page.goto(`/#/${blocked.projectId}/gantt?scope=team&ganttProject=${blocked.projectId}`);
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(suffix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-16');
+    await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
+    const blockersPanel = page.getByRole('region', { name: '프로젝트 간 차단', exact: true });
+    const pair = blockersPanel.locator(`[data-team-blocker-id="${restoredLink.id}"]`);
+    await expect(pair.getByText('Jira 이관 관계', { exact: true })).toBeVisible();
+    await expect(pair).toContainText(`차단하는 업무 · ${projects[0].name}`);
+    await expect(pair).toContainText(`차단되는 업무 · ${projects[1].name}`);
+    const scheduleReview = pair.getByRole('button', { name: `${blocker.key} → ${blocked.key} 프로젝트 간 일정 검토`, exact: true });
+    await expect(scheduleReview).toHaveAccessibleDescription('Jira 이관 관계');
+    const scheduleDialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const mutation = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === `/api/schedule/${path}` &&
+      response.request().method() === 'POST');
+
+    const previewing = mutation('team-follow-up-preview');
+    await scheduleReview.click();
+    const scheduleResponse = await previewing;
+    expect(scheduleResponse.status(), await scheduleResponse.text()).toBe(200);
+    const proposed = await scheduleResponse.json() as AutomaticSchedulePreview;
+    expect(proposed.teamFollowUp).toMatchObject({ relationId: restoredLink.id, sourceIssueId: blocker.id, targetIssueId: blocked.id });
+    expect(proposed.blocking).toEqual([]);
+    expect(proposed.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([[blocked.id, '2026-11-23', '2026-11-24']]);
+    await expect(scheduleDialog.getByText('Jira 이관 관계', { exact: true })).toBeVisible();
+    await expect(scheduleDialog).toContainText(`${blocker.key} → ${blocked.key}`);
+    expect(await schedule()).toEqual(beforeReview);
+    await scheduleDialog.getByRole('button', { name: '돌아가기', exact: true }).click();
+    await expect(scheduleReview).toBeFocused();
+    expect(await schedule()).toEqual(beforeReview);
+
+    await scheduleReview.click();
+    const savingSchedule = mutation('team-follow-up-apply');
+    await scheduleDialog.getByRole('button', { name: '함께 적용', exact: true }).click();
+    const savedSchedule = await savingSchedule;
+    expect(savedSchedule.status(), await savedSchedule.text()).toBe(200);
+    const { undoId } = await savedSchedule.json() as SchedulePasteApplyResult;
+    await expect(scheduleDialog).toHaveCount(0);
+    expect(await schedule()).toEqual({ ...beforeReview, dates: [beforeReview.dates[0],
+      { ...beforeReview.dates[1], startDate: '2026-11-23', endDate: '2026-11-24' }] });
+    expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
+    const undoing = mutation('undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.status(), await undone.text()).toBe(200);
+    expect(undone.request().postDataJSON()).toEqual({ undoId });
+    expect(await schedule()).toEqual(beforeReview);
+    expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
+
+    await blockersPanel.getByRole('button', { name: '차단 관계 추가', exact: true }).click();
+    const form = blockersPanel.getByRole('form', { name: '프로젝트 간 차단 관계 추가', exact: true });
+    await form.getByLabel('원인 업무 검색', { exact: true }).fill(blocker.key);
+    await form.getByRole('combobox', { name: '차단하는 업무', exact: true }).selectOption(blocker.id);
+    await form.getByLabel('차단 대상 업무 검색', { exact: true }).fill(blocked.key);
+    await form.getByRole('combobox', { name: '차단되는 업무', exact: true }).selectOption(blocked.id);
+    const saveBlock = form.getByRole('button', { name: '차단 관계 저장', exact: true });
+    const senderPath = `/api/issues/${blocker.id}/relations`;
+    await page.route(url => url.pathname === senderPath, route => route.abort('failed'), { times: 1 });
+    await saveBlock.click();
+    await expect(form.getByRole('alert')).toBeVisible();
+    expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
+    const savingBlock = page.waitForResponse(response => new URL(response.url()).pathname === senderPath && response.request().method() === 'POST');
+    await saveBlock.click();
+    const savedBlock = await savingBlock;
+    expect(savedBlock.status(), await savedBlock.text()).toBe(201);
+    const nativeBlock = await savedBlock.json() as IssueRelation;
+    await expect(blockersPanel.locator(`[data-team-blocker-id="${nativeBlock.id}"]`)).toBeVisible();
+    await expect(pair).toHaveCount(0);
+    expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink, nativeBlock]);
   } finally {
     for (const issue of tickets) {
       const removed = await request.delete(`/api/issues/${issue.id}`);

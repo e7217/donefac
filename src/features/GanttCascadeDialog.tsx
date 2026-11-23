@@ -176,6 +176,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
     <header><div><h2 id={headingId}>{teamFollowUp ? '프로젝트 간 후행 일정 검토' : '후행 일정 미리보기'}</h2>
       {teamFollowUp ? <>
         <p><strong>{teamFollowUp.source.key} → {teamFollowUp.target.key}</strong></p>
+        {teamFollowUp.relation.origin === 'jira' && <p>Jira 이관 관계</p>}
         {preview?.teamFollowUp && <p>기준 업무 종료일 <strong>{preview.teamFollowUp.sourceEndDate ?? '미정'}</strong></p>}
         <p>차단하는 업무의 날짜를 유지하고, 후행 업무의 프로젝트 달력에 맞춰 필요한 만큼 일정을 미룹니다.</p>
       </> : <>

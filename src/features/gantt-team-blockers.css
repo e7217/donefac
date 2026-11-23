@@ -108,7 +108,8 @@
 }
 
 .gantt-team-blockers-endpoint small,
-.gantt-team-blockers-picker small {
+.gantt-team-blockers-picker small,
+.gantt-team-blockers-review small {
   color: #53685e;
   font-size: 11px;
   overflow-wrap: anywhere;

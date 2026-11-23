@@ -457,7 +457,9 @@ export class AutomaticScheduleService{
     if (chosen.version !== input.expectedVersion || terminal(source) || terminal(target)) {
       fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
     }
-    for (const { id, sourceIssueId, targetIssueId, version } of blockers) {
+    for (const { id, sourceIssueId, targetIssueId, version, origin } of blockers) {
+      // Imported relations only participate when explicitly chosen for this review.
+      if (origin === 'jira' && id !== chosen.id) continue;
       const predecessor = byId.get(sourceIssueId), successor = byId.get(targetIssueId);
       if (!predecessor || !successor || predecessor.projectId === successor.projectId || terminal(predecessor) || terminal(successor)) continue;
       dependencies.push({ id: `team-blocker:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId, type: 'FS', lagDays: 0, version });

@@ -422,10 +422,11 @@ async function applyPilotCrossProjectJiraRelation(url, actorId, sourceIssue) {
 }
 
 async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId, targetIssueId }) {
-  const [source, target, audit] = await Promise.all([
+  const [source, target, audit, blockers] = await Promise.all([
     call(url, `/issues/${sourceIssueId}/relations`),
     call(url, `/issues/${targetIssueId}/relations`),
     call(url, `/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`),
+    call(url, '/schedule/team-blockers'),
   ].map(response => response.then(item => item.json())));
   assert.equal(source.length, 1);
   assert.deepEqual(source, target);
@@ -434,7 +435,9 @@ async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId
   assert.equal(audit.integrity.status, 'verified');
   assert.equal(audit.targetContent.issueRelations.count, 1);
   assert.match(audit.targetContent.issueRelations.sha256, /^[a-f0-9]{64}$/);
-  return { relation, evidence: audit.targetContent.issueRelations };
+  const blocker = blockers.find(row => row.id === relation.id);
+  assert.deepEqual(blocker, { id: relation.id, sourceIssueId, targetIssueId, version: relation.version, origin: 'jira' });
+  return { relation, blocker, evidence: audit.targetContent.issueRelations };
 }
 
 async function browser(url, teamFixture, accessFile) {

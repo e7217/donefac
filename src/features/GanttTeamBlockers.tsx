@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEventHandler } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays, Link2, Plus, RefreshCw, X } from 'lucide-react';
 import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
-import type { FeatureProps, Issue, TeamScheduleBlocker } from '../../shared/types';
+import type { FeatureProps, Issue, IssueRelation, TeamScheduleBlocker } from '../../shared/types';
 import { isTerminalStatus } from '../../shared/workflow-helpers';
 import { api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
@@ -74,7 +74,7 @@ export function GanttTeamBlockers({
   const target = draft && activeById.get(draft.targetId);
   const dirty = Boolean(draft && (draft.sourceId || draft.targetId !== draft.initialTargetId ||
     draft.sourceQuery.trim() || draft.targetQuery.trim()));
-  const duplicate = Boolean(source && target && relations.some(relation =>
+  const duplicate = Boolean(source && target && relations.some(relation => relation.origin !== 'jira' &&
     relation.sourceIssueId === source.id && relation.targetIssueId === target.id));
   const invalidPair = Boolean(source && target && source.projectId === target.projectId);
   const unavailable = Boolean(draft && ((draft.sourceId && !source) || (draft.targetId && !target)));
@@ -180,15 +180,16 @@ export function GanttTeamBlockers({
     try {
       let relation: TeamScheduleBlocker | undefined;
       try {
-        relation = await api<TeamScheduleBlocker>(`/issues/${encodeURIComponent(source.id)}/relations`, {
+        const { id, sourceIssueId, targetIssueId, version } = await api<IssueRelation>(`/issues/${encodeURIComponent(source.id)}/relations`, {
           method: 'POST', signal: request.signal,
           body: JSON.stringify({ otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }),
         });
+        relation = { id, sourceIssueId, targetIssueId, version };
       } catch (cause) {
         if (request.signal.aborted) return;
         const current = await load();
         if (request.signal.aborted) return;
-        relation = current?.find(row => row.sourceIssueId === source.id && row.targetIssueId === target.id);
+        relation = current?.find(row => row.origin !== 'jira' && row.sourceIssueId === source.id && row.targetIssueId === target.id);
         if (!relation) {
           setSaveError(errorMessage(cause));
           return;
@@ -196,7 +197,8 @@ export function GanttTeamBlockers({
       }
       if (request.signal.aborted) return;
       const saved = relation;
-      setRelations(previous => [...previous.filter(row => row.id !== saved.id), saved]);
+      setRelations(previous => [...previous.filter(row => row.id !== saved.id &&
+        !(row.origin === 'jira' && row.sourceIssueId === saved.sourceIssueId && row.targetIssueId === saved.targetIssueId)), saved]);
       setPage(0);
       restoreAddFocus.current = true;
       setDraft(null);
@@ -266,12 +268,16 @@ export function GanttTeamBlockers({
           <ArrowRight className="gantt-team-blockers-arrow" size={16} aria-hidden="true" />
           <BlockerEndpoint issue={target} project={projectNames.get(target.projectId)} label="차단되는 업무"
             disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
-          <button type="button" className="btn gantt-team-blockers-review" aria-haspopup="dialog"
-            aria-label={`${source.key} → ${target.key} 프로젝트 간 일정 검토`} disabled={disabled || refreshing}
-            data-gantt-focus-control="" onPointerDown={onPointerDown}
-            onClick={event => onReviewSchedule(relation, source, target, event.currentTarget)}>
-            <CalendarDays size={15} aria-hidden="true" />프로젝트 간 일정 검토
-          </button>
+          <div className="gantt-team-blockers-actions gantt-team-blockers-review">
+            <button type="button" className="btn" aria-haspopup="dialog"
+              aria-label={`${source.key} → ${target.key} 프로젝트 간 일정 검토`} disabled={disabled || refreshing}
+              aria-describedby={relation.origin === 'jira' ? `${heading}-${relation.id}-origin` : undefined}
+              data-gantt-focus-control="" onPointerDown={onPointerDown}
+              onClick={event => onReviewSchedule(relation, source, target, event.currentTarget)}>
+              <CalendarDays size={15} aria-hidden="true" />프로젝트 간 일정 검토
+            </button>
+            {relation.origin === 'jira' && <small id={`${heading}-${relation.id}-origin`}>Jira 이관 관계</small>}
+          </div>
         </li>)}
       </ul>
       {lastPage > 0 && <nav className="gantt-team-blockers-actions gantt-team-blockers-pages" aria-label="차단 관계 페이지">

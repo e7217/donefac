@@ -100,7 +100,7 @@ curl --fail-with-body \
 
 ## 팀 간트의 프로젝트 간 차단
 
-브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 Teamspace 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
+브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 원본 방향과 양쪽 업무 연결이 확인된 Jira 차단 관계에는 `origin: 'jira'`가 추가된다. 같은 방향의 Teamspace 차단이 있으면 그 항목을 반환한다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. Teamspace 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
 
 ## 저장된 간트 데이터 갱신
 
@@ -865,7 +865,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 프로젝트 간 후행 일정 검토
 
-브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}`을 보낸다. 두 업무가 서로 다른 프로젝트에 있고 현재 진행 대상인 차단 관계를 선택한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 대상에서 이어지는 프로젝트별 선후행 연결과 열린 프로젝트 간 차단을 확인한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
+브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}`을 보낸다. 두 업무가 서로 다른 프로젝트에 있고 현재 진행 대상인 차단 관계를 선택한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 대상에서 이어지는 프로젝트별 선후행 연결과 열린 Teamspace 차단을 확인한다. Jira 이관 관계는 선택한 한 건을 이번 일정 계산에 포함한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
 
 미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 관련 업무의 버전·소속과 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
 
