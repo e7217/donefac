@@ -8,11 +8,13 @@ import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
 type RequestInput = { documentId: string; actorId: string; body: unknown };
-type CreationHooks = {
+type ResultAuthorization = { authorizeResult(issue: Issue, link: ResourceLink): void };
+type CreationHooks = ResultAuthorization & {
   create(documentId: string, expectedVersion: number, issueInput: IssueInput, selection?: DocumentSourceSelection): Pick<DocumentFollowUpResult, 'issue' | 'link'>;
 };
-type DecisionLinkHooks = {
+type DecisionLinkHooks = ResultAuthorization & {
   checkVersion(document: DocPage, expectedVersion: number): void;
+  authorizeSource(content: DocPage['content']): void;
   onLinked(issue: Issue, document: DocPage): void;
 };
 type Receipt = { documentId: string; actorId: string; fingerprint: string; issueId: string; linkId: string };
@@ -172,10 +174,12 @@ export class DocumentFollowUpService {
         if (!document || !issue || !link || link.documentId !== documentId || link.issueId !== issue.id) {
           throw new DocumentFollowUpError(409, '이전에 생성한 후속 업무 또는 문서 연결을 확인할 수 없습니다.');
         }
+        hooks.authorizeResult(issue, link);
         return { issue, link, duplicate: true };
       }
 
       const { issue, link } = hooks.create(documentId, expectedDocumentVersion, issueInput, selection);
+      hooks.authorizeResult(issue, link);
       this.store.db.prepare(`INSERT INTO document_follow_up_requests(id, document_id, actor_id, fingerprint, issue_id, link_id)
         VALUES (?, ?, ?, ?, ?, ?)`).run(requestId, documentId, actorId, fingerprint, issue.id, link.id);
       return { issue, link, duplicate: false };
@@ -202,11 +206,13 @@ export class DocumentFollowUpService {
             !source || source.revisionId !== receipt.revisionId || !sameSelection(source, selection)) {
           throw new DocumentFollowUpError(409, '이전에 저장한 결정 근거 연결을 확인할 수 없습니다.');
         }
+        hooks.authorizeResult(issue, link);
         return { issue, link, duplicate: true };
       }
 
       if (!document || !issue) throw new DocumentFollowUpError(404, '연결할 문서 또는 업무를 찾을 수 없습니다.');
       hooks.checkVersion(document, expectedDocumentVersion);
+      hooks.authorizeSource(document.content);
       const row = this.store.db.prepare('SELECT json FROM resource_links WHERE issue_id=? AND document_id=?')
         .get(issueId, documentId) as { json: string } | undefined;
       const existing = row && JSON.parse(row.json) as ResourceLink;
@@ -226,6 +232,9 @@ export class DocumentFollowUpService {
       } else {
         source = resolveDocumentDecisionSource(this.store, document, actorId, selection, '결정 근거 원문 저장');
         link = { ...(existing ?? { id: randomUUID(), documentId, issueId, kind: '결정 근거' }), documentSource: source };
+      }
+      hooks.authorizeResult(issue, link);
+      if (!pinned) {
         this.store.put('resource_links', link);
         hooks.onLinked(issue, document);
       }

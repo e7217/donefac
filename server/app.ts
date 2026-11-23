@@ -1573,10 +1573,12 @@ export function createApp(options: {
   app.post('/api/documents/:id/follow-up-issues',(req,res)=>{
     const actorId=actor(req);
     const result=documentFollowUp.create({documentId:String(req.params.id),actorId,body:req.body},{
+      authorizeResult: (issue, link) => apiKeys.authorizeDocumentDecisionResult(req, issue, link),
       create(documentId,expectedVersion,input,sourceSelection){
         const document=get<DocPage>('documents',documentId);
         checkVersion(document,expectedVersion);
         if(document.projectId!==null&&document.projectId!==input.projectId)fail('프로젝트 문서의 후속 업무는 같은 프로젝트에 만들어 주세요.');
+        if (sourceSelection) apiKeys.authorizeDocumentBody(req, document.content);
         const documentSource=sourceSelection && resolveDocumentDecisionSource(store,document,actorId,sourceSelection);
         const issue=createIssueInTransaction(req,input);
         const link:ResourceLink={id:uid(),issueId:issue.id,documentId,kind:'후속 업무',...(documentSource?{documentSource}:{})};
@@ -1585,15 +1587,17 @@ export function createApp(options: {
         return {issue,link};
       },
     });
-    res.status(result.duplicate?200:201).json(result);
+    res.set('Cache-Control', 'no-store').status(result.duplicate?200:201).json(result);
   });
   app.post('/api/documents/:id/decision-links', (req, res) => {
     const actorId = actor(req);
     const result = documentFollowUp.linkExisting({ documentId: String(req.params.id), actorId, body: req.body }, {
       checkVersion,
+      authorizeSource: content => apiKeys.authorizeDocumentBody(req, content),
+      authorizeResult: (issue, link) => apiKeys.authorizeDocumentDecisionResult(req, issue, link),
       onLinked: (issue, document) => { activity(req, 'issue', issue.id, '문서 결정 근거 연결', document.title); },
     });
-    res.status(result.duplicate ? 200 : 201).json(result);
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.post('/api/issues/:id/project-move/preview', (req, res) => {
     res.set('Cache-Control', 'no-store').json(issueProjectMove.preview(req.params.id, actor(req), req.body));

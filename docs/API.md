@@ -45,6 +45,7 @@ curl --fail-with-body \
 | `GET /issues/:id/gitlab-deployments` | 프로젝트 범위 안 업무의 연결된 GitLab 배포 조회 |
 | `GET /documents?projectId=...` · `GET /documents/:id` | 문서 조회 |
 | `GET /documents/:id/revisions` | 문서 버전 조회 |
+| `POST /documents/:id/follow-up-issues` · `POST /documents/:id/decision-links` | 문서에서 후속 업무 생성, 기존 업무에 고정한 결정 근거 추가 |
 | `GET /documents/:id/publication` · `GET /documents/:id/publication/snapshot` | 현재 검토·발행 상태와 고정 저장본 조회 |
 | `GET /comments?resourceType=issue&resourceId=...` | 업무 또는 문서 댓글 조회 |
 | `GET /comments/:id/edit` · `PATCH /comments/:id` | 작성자가 현재 댓글을 확인하고 수정 |
@@ -371,17 +372,19 @@ curl --fail-with-body \
 
 ## 문서에서 후속 업무 만들기
 
-브라우저의 `POST /api/documents/:id/follow-up-issues`에 `{requestId, expectedDocumentVersion, issue}`를 보낸다. `requestId`는 새 요청마다 생성하는 UUID v4이며 `issue`는 일반 티켓 생성과 같은 입력을 사용한다. 프로젝트 문서는 현재 문서의 프로젝트를 사용하고, 공통 문서는 `issue.projectId`를 지정한다. 신규 요청은 문서 버전을 검사하고 업무, 번호, 연결 및 활동 기록을 함께 저장한다. 최초 응답은 `201`과 `{issue, link, duplicate:false}`를 반환한다.
+`POST /api/v1/documents/:id/follow-up-issues`와 브라우저용 `POST /api/documents/:id/follow-up-issues`에 `{requestId, expectedDocumentVersion, issue}`를 보낸다. `requestId`는 새 요청마다 생성하는 UUID v4이며 `issue`는 일반 티켓 생성과 같은 입력을 사용한다. 프로젝트 문서라면 `issue.projectId`에 문서의 프로젝트를 지정한다. 공통 문서에서는 생성할 프로젝트를 지정한다. 신규 요청은 문서 버전을 검사하고 업무, 번호, 연결 및 활동 기록을 함께 저장한다. 최초 응답은 `201`과 `{issue, link, duplicate:false}`를 반환한다.
 
 선택한 원문을 연결하려면 `sourceSelection`에 저장 본문의 ProseMirror 위치 `{from,to,text}`를 보낸다. 텍스트는 선택 범위에서 구한 최대 2,000 UTF-16 단위의 발췌이며, 문단과 줄바꿈은 LF로 연결한다. 서버가 저장된 본문에서 같은 범위를 다시 읽고 텍스트가 다르면 `409`를 반환한다. 정확히 일치하면 `link.documentSource`에 `{revisionId,from,to,text}`를 기록한다. 저장본이 필요하면 업무와 함께 생성한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`에서 읽으며, 자체 백업 형식 36은 이 연결을 보존한다.
 
-응답을 받지 못하면 같은 작업자와 문서에서 같은 요청 ID와 본문으로 재시도한다. 기존 업무와 연결을 열 수 있으면 `200`과 `{issue, link, duplicate:true}`로 응답한다. 요청 내용이나 연결 상태가 바뀌면 `409`를 반환한다. 자체 백업은 업무와 `후속 업무` 연결을 보존하며 복원 시 재시도용 기록을 초기화한다. 이 경로는 브라우저 관리 API에서 제공한다.
+응답을 받지 못하면 같은 작업자와 문서에서 같은 요청 ID와 본문으로 재시도한다. 기존 업무와 연결을 열 수 있으면 `200`과 `{issue, link, duplicate:true}`로 응답한다. 요청 내용이나 연결 상태가 바뀌면 `409`를 반환한다. 자체 백업은 업무와 `후속 업무` 연결을 보존하며 복원 시 재시도용 기록을 초기화한다.
 
 ## 기존 업무에 문서 결정 근거 연결
 
-브라우저의 `POST /api/documents/:id/decision-links`에 `{requestId, expectedDocumentVersion, issueId, sourceSelection}`을 보낸다. `requestId`는 UUID v4다. `sourceSelection`은 후속 업무와 같은 `{from,to,text}` 형식이며, 서버는 현재 저장 버전의 선택 범위를 읽어 발췌를 확인한다. 기존 문서 연결이 있으면 ID와 관계 유형을 유지하면서 근거를 추가한다. 연결이 없으면 `결정 근거` 관계를 만들고, 원문 저장본이 필요하면 같은 트랜잭션에 기록한다.
+`POST /api/v1/documents/:id/decision-links`와 브라우저용 `POST /api/documents/:id/decision-links`에 `{requestId, expectedDocumentVersion, issueId, sourceSelection}`을 보낸다. `requestId`는 UUID v4다. `sourceSelection`은 후속 업무와 같은 `{from,to,text}` 형식이며, 서버는 현재 저장 버전의 선택 범위를 읽어 발췌를 확인한다. 기존 문서 연결이 있으면 ID와 관계 유형을 유지하면서 근거를 추가한다. 연결이 없으면 `결정 근거` 관계를 만들고, 원문 저장본이 필요하면 같은 트랜잭션에 기록한다.
 
 발췌를 처음 저장하면 `201`과 `{issue,link,duplicate:false}`를 반환한다. 작업자와 요청 내용이 같은 재시도, 또는 같은 저장본의 동일한 발췌는 `200`과 `duplicate:true`를 반환한다. 저장된 버전이나 선택한 텍스트가 다른 경우, 또는 문서와 티켓 사이에 다른 결정 근거가 이미 있는 경우 `409`를 반환한다. 연결을 해제한 뒤 이전 요청을 보내면 `409`를 반환한다. 자체 백업 형식 48은 기존 업무에 저장된 발췌와 원문 저장본을 보존하고, 복원할 때 재시도 기록을 초기화한다.
+
+두 `/api/v1` 요청에는 문서와 업무 프로젝트를 포함하는 쓰기 키가 필요하다. 공통 문서는 전체 프로젝트 쓰기 키로 연결한다. 발췌를 저장할 때는 선택한 문서 본문의 참조 범위를 확인한다. 결과를 반환하거나 재시도할 때는 문서와 현재 업무, 실제 고정 저장본을 다시 검사한다. 범위 밖 프로젝트 또는 원문이면 `403`을 반환한다. 허용된 고정 저장본은 문서의 `/api/v1/documents/:id/revisions`에서 읽을 수 있다.
 
 ## 프로젝트 결정 후속 업무
 

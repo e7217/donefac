@@ -236,6 +236,34 @@ async function verifyIntegrations(session, anonymous, origin) {
   assert.equal(restricted.items[0].source.text, undefined);
   await call(anonymous, 'GET', `/api/v1${teamDecisions}&projectId=project-team`, 403, { headers: bearer });
 
+  const writer = await (await call(session, 'POST', '/api/api-keys', 201, {
+    headers: { Origin: origin, 'X-Actor-Id': 'user-seo' },
+    data: { name: 'HTTPS 문서 후속 업무', access: 'write', projectIds: ['project-neo'], expiresAt: null },
+  })).json();
+  protectedValues.push(writer.token);
+  const writerHeaders = { Authorization: `Bearer ${writer.token}`, 'X-Actor-Id': 'user-min' };
+  const decisionInput = {
+    expectedDocumentVersion: document.version, actorId: 'user-min', sourceSelection: { from: 1, to: text.length + 1, text },
+  };
+  const followUp = `/api/v1/documents/${document.id}/follow-up-issues`;
+  const followUpInput = { ...decisionInput, requestId: randomUUID(), issue: { projectId: 'project-neo', title: 'HTTPS API 후속 업무' } };
+  await call(anonymous, 'POST', followUp, 403, { headers: bearer, data: followUpInput });
+  const created = await (await call(anonymous, 'POST', followUp, 201, { headers: writerHeaders, data: followUpInput })).json();
+  assert.equal(created.issue.reporterId, 'user-seo');
+  assert.equal(created.link.documentId, document.id);
+  assert.equal(created.link.issueId, created.issue.id);
+  assert.equal(created.link.documentSource.text, text);
+  const replay = await (await call(anonymous, 'POST', followUp, 200, { headers: writerHeaders, data: followUpInput })).json();
+  assert.deepEqual(replay, { ...created, duplicate: true });
+
+  const decision = `/api/v1/documents/${document.id}/decision-links`;
+  await call(anonymous, 'POST', decision, 403, { headers: writerHeaders, data: { ...decisionInput, requestId: randomUUID(), issueId: 'issue-9' } });
+  const decisionResult = await (await call(anonymous, 'POST', decision, 201, {
+    headers: writerHeaders, data: { ...decisionInput, requestId: randomUUID(), issueId: 'issue-1' },
+  })).json();
+  assert.equal(decisionResult.link.issueId, 'issue-1');
+  assert.equal(decisionResult.link.documentSource.revisionId, created.link.documentSource.revisionId);
+
   const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
   await call(anonymous, 'GET', `/api${findings}`, 401);
   await call(anonymous, 'GET', `/api${findings}`, 401, { headers: bearer });

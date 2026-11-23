@@ -8,8 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, DocPage, DocRevision, DocumentSourceSelection, Issue, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DocPage, DocRevision, DocumentSourceSelection, Issue, Project, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const commonTarget = 'project-team';
@@ -60,7 +62,11 @@ async function fixture(t: TestContext) {
     return JSON.parse(text) as T;
   }
   async function restart() { await stop(); service = await start(); }
-  return { call, directory, restart };
+  async function key(projectIds: string[] | null, access: 'read' | 'write' = 'write', owner = actorId) {
+    const { token } = await call<ApiKeyCreated>('/api-keys', 'POST', { name: '후속 업무 회귀 검사용 키', access, projectIds }, 201, { 'X-Actor-Id': owner });
+    return { Authorization: `Bearer ${token}`, 'X-Actor-Id': 'user-jun' };
+  }
+  return { call, directory, restart, key };
 }
 
 function followUp(document: DocPage, target: string, title: string): FollowUpInput {
@@ -73,8 +79,14 @@ function decisionLink(document: DocPage, issue: Issue, sourceSelection: Document
   return { requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id, sourceSelection };
 }
 
+function issueSummaryBody(project: string): RichContent {
+  return { ...content, content: [...content.content, { type: 'issueSummary', attrs: {
+    projectId: project, savedViewId: null, label: '다른 프로젝트의 업무 현황', groupBy: 'status',
+  } }] };
+}
+
 test('project documents enforce their project and common documents link to the explicit target without changing the document', async t => {
-  const { call } = await fixture(t);
+  const { call, key } = await fixture(t);
   const projectDocument = await call<DocPage>('/documents', 'POST', { projectId, title: '프로젝트 합성 결정', content }, 201);
   const commonDocument = await call<DocPage>('/documents', 'POST', { projectId: null, title: '공통 합성 결정', content }, 201);
   const projected = followUp(projectDocument, projectId, '프로젝트 문서의 합성 업무');
@@ -83,8 +95,7 @@ test('project documents enforce their project and common documents link to the e
   await call(pathFor('missing-document'), 'POST', projected, 404);
   await call(pathFor(projectDocument.id), 'POST', { ...projected, issue: { ...projected.issue, projectId: commonTarget } }, 400);
   await call(pathFor(commonDocument.id), 'POST', { ...projected, issue: { title: '프로젝트를 지정하지 않은 공통 문서 업무' } }, 400);
-  const key = await call<ApiKeyCreated>('/api-keys', 'POST', { name: '회귀 검사용 키', access: 'write', projectIds: [projectId] }, 201);
-  await call(`/v1${pathFor(projectDocument.id)}`, 'POST', projected, 403, { Authorization: `Bearer ${key.token}` });
+  await call(`/v1${pathFor(projectDocument.id)}`, 'POST', projected, 403, await key([projectId], 'read'));
 
   const created = await call<Created>(pathFor(projectDocument.id), 'POST', projected, 201);
   assert.equal(created.duplicate, false);
@@ -108,6 +119,112 @@ test('project documents enforce their project and common documents link to the e
   assert.equal(ordinary.title, '기존 업무 생성 계약');
   assert.equal(Object.hasOwn(ordinary, 'issue'), false);
   assert.equal((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.some(link => link.issueId === ordinary.id), false);
+});
+
+test('public follow-ups record the key owner and recheck the current issue and a later decision pin on replay', async t => {
+  const { call, key } = await fixture(t);
+  const narrow = await key([projectId]);
+  const wide = await key([projectId, commonTarget]);
+  const allProjects = await key(null);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: 'API 후속 업무 원문', content }, 201);
+  const common = await call<DocPage>('/documents', 'POST', { projectId: null, title: 'API 공통 문서', content }, 201);
+  const outside = await call<Project>('/projects', 'POST', { key: 'APIOUT', name: '키 범위 밖 이동 대상' }, 201);
+  const path = `/v1${pathFor(doc.id)}`;
+  const input = { ...followUp(doc, projectId, 'API에서 한 번만 만들 업무'), actorId: 'user-jun' };
+  const commonInput = followUp(common, commonTarget, '전체 범위 키로 만든 후속 업무');
+  const original = await call<WorkspaceSnapshot>('/workspace');
+  await call(`/v1${pathFor(common.id)}`, 'POST', commonInput, 403, wide);
+  await call(path, 'POST', { ...input, issue: { ...input.issue, parentId: 'issue-10' } }, 403, narrow);
+  await call(path, 'POST', { ...input, expectedDocumentVersion: doc.version + 1 }, 409, narrow);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), original);
+
+  const first = await call<Created>(path, 'POST', input, 201, narrow);
+  assert.equal(first.duplicate, false);
+  assert.equal(first.issue.reporterId, actorId);
+  assert.equal(first.link.documentSource, undefined);
+  const afterCreate = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, narrow), { ...first, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), afterCreate);
+  const creationLog = afterCreate.activities.filter(activity =>
+    (activity.resourceId === first.issue.id && activity.action === '티켓 생성') ||
+    (activity.resourceId === doc.id && activity.action === '후속 업무 생성'));
+  assert.deepEqual(creationLog.map(activity => activity.actorId), [actorId, actorId]);
+  const commonResult = await call<Created>(`/v1${pathFor(common.id)}`, 'POST', commonInput, 201, allProjects);
+  assert.equal(commonResult.issue.projectId, commonTarget);
+  assert.equal(commonResult.link.documentId, common.id);
+
+  const richer = await call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, content: issueSummaryBody(commonTarget) });
+  const selection = { from: 1, to: doc.plainText.length + 1, text: doc.plainText };
+  const beforePin = await call<WorkspaceSnapshot>('/workspace');
+  await call(path, 'POST', { ...followUp(richer, projectId, '범위를 벗어난 원문 업무'), sourceSelection: selection }, 403, narrow);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), beforePin);
+  const pinned = await call<Created>(`/v1${decisionPathFor(doc.id)}`, 'POST', decisionLink(richer, first.issue, selection), 201, wide);
+  assert.equal(pinned.link.id, first.link.id);
+  assert.equal(pinned.link.kind, '후속 업무');
+  assert.equal(pinned.link.documentSource?.text, selection.text);
+  const clean = await call<DocPage>(`/documents/${doc.id}`, 'PATCH', {
+    expectedVersion: richer.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
+  });
+  const beforeReplay = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(await call<DocPage>(`/v1/documents/${doc.id}`, 'GET', undefined, 200, narrow), clean);
+  await call(path, 'POST', input, 403, narrow);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, wide), { ...pinned, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), beforeReplay);
+
+  const moveInput: IssueProjectMoveInput = { expectedVersion: first.issue.version, projectId: outside.id, includeConnected: false, mappings: [] };
+  const move = `/issues/${first.issue.id}/project-move`;
+  const preview = await call<IssueProjectMovePreview>(`${move}/preview`, 'POST', moveInput);
+  assert.ok(preview.token, JSON.stringify(preview));
+  const result = await call<IssueProjectMoveResult>(`${move}/apply`, 'POST', { ...moveInput, token: preview.token });
+  const [moved] = result.issues;
+  assert.equal(moved.id, first.issue.id);
+  assert.equal(moved.projectId, outside.id);
+  const afterMove = await call<WorkspaceSnapshot>('/workspace');
+  await call(path, 'POST', input, 403, wide);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, allProjects), { issue: moved, link: pinned.link, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), afterMove);
+});
+
+test('public decision links require both projects and replay the exact readable pinned document body', async t => {
+  const { call, key } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: 'API 결정 원문', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId: commonTarget, title: '다른 프로젝트의 API 결정 업무' }, 201);
+  const outside = await call<Project>('/projects', 'POST', { key: 'APIBODY', name: '결정 본문 범위 밖 프로젝트' }, 201);
+  const sourceKey = await key([projectId]);
+  const targetKey = await key([commonTarget]);
+  const both = await key([projectId, commonTarget]);
+  const otherOwner = await key([projectId, commonTarget], 'write', 'user-min');
+  const path = `/v1${decisionPathFor(doc.id)}`;
+  const input = { ...decisionLink(doc, issue), actorId: 'user-jun' };
+  const original = await call<WorkspaceSnapshot>('/workspace');
+  const [revision] = await call<DocRevision[]>(`/documents/${doc.id}/revisions`);
+  await call(path, 'POST', input, 403, sourceKey);
+  await call(path, 'POST', input, 403, targetKey);
+  await call(path, 'POST', { ...input, expectedDocumentVersion: doc.version + 1 }, 409, both);
+  await call(path, 'POST', { ...input, sourceSelection: { ...input.sourceSelection, text: '선택이 바뀐 원문' } }, 409, both);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), original);
+  assert.deepEqual(await call<DocRevision[]>(`/documents/${doc.id}/revisions`), [revision]);
+
+  const attached = await call<Created>(path, 'POST', input, 201, both);
+  assert.deepEqual(attached.issue, issue);
+  assert.deepEqual(attached.link.documentSource, { ...input.sourceSelection, revisionId: revision.id });
+  assert.equal(attached.duplicate, false);
+  const saved = await call<WorkspaceSnapshot>('/workspace');
+  const beforeIds = new Set(original.activities.map(activity => activity.id));
+  assert.deepEqual(saved.activities.filter(activity => !beforeIds.has(activity.id))
+    .map(({ resourceId, actorId, action }) => ({ resourceId, actorId, action })),
+  [{ resourceId: issue.id, actorId, action: '문서 결정 근거 연결' }]);
+  assert.deepEqual(await call<Created>(path, 'POST', { ...input, requestId: randomUUID() }, 200, both), { ...attached, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), saved);
+
+  const edited = await call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, content: issueSummaryBody(outside.id) });
+  const unlinked = await call<Issue>('/issues', 'POST', { projectId: commonTarget, title: '범위 밖 본문 검증용 업무' }, 201);
+  const beforeReplay = await call<WorkspaceSnapshot>('/workspace');
+  await call(`/v1/documents/${doc.id}`, 'GET', undefined, 403, both);
+  await call(path, 'POST', decisionLink(edited, unlinked, input.sourceSelection), 403, both);
+  await call(path, 'POST', input, 409, otherOwner);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, both), { ...attached, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), beforeReplay);
 });
 
 test('follow-up links roll back with the issue number and retry safely across document edits and native restore', async t => {

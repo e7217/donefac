@@ -139,6 +139,20 @@ export class ApiKeyService {
     const context = this.contexts.get(request);
     if (context) this.requireDocumentBody(this.valid(this.get(context.id)), content);
   }
+  authorizeDocumentDecisionResult(request: Request, issue: Issue, link: ResourceLink): void {
+    const context = this.contexts.get(request);
+    if (!context) return;
+    const key = this.valid(this.get(context.id));
+    this.resource(key, 'issues', issue.id);
+    this.resource(key, 'documents', link.documentId);
+    if (link.documentSource) {
+      const revision = this.store.get<DocRevision>('revisions', link.documentSource.revisionId);
+      if (!revision || revision.documentId !== link.documentId || revision.confluenceSourceVersion !== undefined) {
+        return fail(404, '결정 근거의 원문 저장본을 찾을 수 없습니다.');
+      }
+      this.requireDocumentBody(key, revision.content);
+    }
+  }
   private resource(key: ApiKeyRecord, table: 'issues' | 'documents' | 'planning_items', id: unknown): Issue | DocPage | PlanningItem {
     if (typeof id !== 'string' || !id) fail(400, '대상 ID를 확인해 주세요.');
     const record = this.store.get<Issue | DocPage | PlanningItem>(table, id as string);
@@ -479,6 +493,7 @@ export class ApiKeyService {
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
     const issueClone = /^\/api\/issues\/([^/]+)\/clone$/.exec(path);
+    const documentDecision = /^\/api\/documents\/([^/]+)\/(follow-up-issues|decision-links)$/.exec(path);
     const closeAsDuplicate = /^\/api\/issues\/([^/]+)\/close-as-duplicate$/.exec(path);
     const cycleCompletion = /^\/api\/planning-items\/([^/]+)\/complete(\/preview)?$/.exec(path);
     const resourceLink = /^\/api\/resource-links\/([^/]+)$/.exec(path);
@@ -488,6 +503,16 @@ export class ApiKeyService {
       this.query(request, []);
       const type = path === '/api/issues' ? 'issue' : 'document';
       this.references(key, request.body, request.body.projectId ?? null, type);
+    } else if (request.method === 'POST' && documentDecision) {
+      this.query(request, []);
+      const document = this.resource(key, 'documents', this.decode(documentDecision[1]));
+      if (documentDecision[2] === 'decision-links') {
+        this.resource(key, 'issues', request.body?.issueId);
+      } else {
+        const issue = request.body?.issue;
+        if (!issue || typeof issue !== 'object' || Array.isArray(issue)) fail(400, '생성할 업무 정보를 확인해 주세요.');
+        this.references(key, issue, Object.hasOwn(issue, 'projectId') ? issue.projectId : document.projectId, 'issue');
+      }
     } else if (request.method === 'POST' && issueClone) {
       this.query(request, []);
       const source = this.store.get<Issue>('issues', this.decode(issueClone[1]));
