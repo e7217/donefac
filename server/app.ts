@@ -404,6 +404,7 @@ export function createApp(options: {
       workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
       baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
       issueOrders: issueOrders.snapshot(data.projects, issues),
+      ...(purpose === 'workspace' ? { teamScheduleBlockers: issueRelations.teamScheduleBlockers() } : {}),
       ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
       ...(issueAliases && Object.keys(issueAliases).length ? { issueAliases } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),

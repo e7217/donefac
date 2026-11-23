@@ -256,8 +256,18 @@ test('Gantt conditional reads detect schedule changes without invalidating the b
   const other = await f.call<Issue>('/issues', 201, 'POST', { projectId: 'project-team', title: '간트 갱신 차단 업무' });
   await advanced(true);
   const link = await f.call<IssueRelation>(`/issues/${first.id}/relations`, 201, 'POST', { otherIssueId: other.id, type: 'blocks', direction: 'outgoing' });
-  await advanced();
-  assert.ok((await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers')).some(item => item.id === link.id));
+  const blockers = (await advanced()).teamScheduleBlockers;
+  assert.deepEqual(blockers, await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers'));
+  assert.deepEqual(blockers?.find(item => item.id === link.id), {
+    id: link.id, sourceIssueId: first.id, targetIssueId: other.id, version: link.version,
+  });
+  await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
+  const reversed = await f.call<IssueRelation>(`/issues/${first.id}/relations/${link.id}`, 200, 'PATCH', {
+    expectedVersion: link.version, type: 'blocks', direction: 'incoming',
+  });
+  assert.deepEqual((await advanced()).teamScheduleBlockers?.find(item => item.id === link.id), {
+    id: link.id, sourceIssueId: other.id, targetIssueId: first.id, version: reversed.version,
+  });
   const reservationPath = `/issues/${first.id}/time-reservations`;
   const reservation = await f.call<IssueTimeReservationEntry>(reservationPath, 201, 'POST', { requestId: randomUUID(), userId: 'user-seo',
     startAt: '2026-11-23T10:00:00.000Z', endAt: '2026-11-23T11:00:00.000Z' });
@@ -268,8 +278,12 @@ test('Gantt conditional reads detect schedule changes without invalidating the b
   await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
   const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
   assert.ok(!Object.keys(backup).some(key => /(?:board|gantt)Revision/i.test(key)));
+  assert.equal(Object.hasOwn(backup, 'teamScheduleBlockers'), false);
   await f.call('/import', 200, 'POST', { data: backup });
   const restored = await advanced(true);
   assert.equal(restored.calendars?.find(item => item.projectId === projectId)?.name, calendar.name);
+  const restoredBlocker = restored.teamScheduleBlockers?.find(item => item.id === link.id);
+  assert.equal(restoredBlocker?.sourceIssueId, other.id);
+  assert.ok(restoredBlocker && restoredBlocker.version > reversed.version);
   await f.revisions({ query: 'ganttSince', token: current.ganttRevision }, 204);
 });

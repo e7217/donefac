@@ -1666,6 +1666,7 @@ export interface WorkspaceSnapshot {
   calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
   workloadCapacities?: ProjectWorkloadCapacity[];
   teamWorkloadCapacity?: TeamWorkloadCapacity;
+  teamScheduleBlockers?: TeamScheduleBlocker[];
   issueSchemas?: ProjectIssueSchema[];
   issueOrders?: ProjectIssueOrder[];
   issueMoveOrigins?: Record<string, string[]>;

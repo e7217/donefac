@@ -481,3 +481,184 @@ test('360px에서 선행 날짜를 편집하고 동시 수정 확인 후 모든 
     await expect(page).toHaveURL(url => url.hash === hash);
   } finally { await f.close(); }
 });
+
+test('360px 팀 간트에서 날짜 초안을 프로젝트 간 일정 검토에 넘기고 함께 저장한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request);
+  const previewPath = '/api/schedule/team-follow-up-preview';
+  const applyPath = '/api/schedule/team-follow-up-apply';
+  const undoPath = '/api/schedule/undo';
+  try {
+    const source = await f.issue(f.first, '종료일 초안을 가진 선행 업무', { startDate: '2026-11-19', endDate: '2026-11-20', dueDate: '2026-11-26' });
+    const target = await f.issue(f.second, '필터 밖 차단 대상', { startDate: '2026-11-16', endDate: '2026-11-17' });
+    const downstream = await f.issue(f.second, '필터 밖 후행 업무', { startDate: '2026-11-16', endDate: '2026-11-16' });
+    const handoff = await f.relation(source, target);
+    await f.dependency(target, downstream);
+    const before = await f.schedule();
+    const hash = `${gantt(f.first)}&ganttProject=${f.first.id}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/${hash}`);
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    await search.fill(f.prefix);
+    await expect(row(page, target)).toHaveCount(0);
+    await expect(row(page, downstream)).toHaveCount(0);
+    const paths: string[] = [];
+    page.on('request', sent => {
+      const path = new URL(sent.url()).pathname;
+      if (sent.method() === 'POST' && path.startsWith('/api/schedule/')) paths.push(path);
+    });
+
+    const sourceEnd = row(page, source).getByLabel(`${source.key} 종료일`, { exact: true });
+    const review = button(row(page, source), `${source.key} 프로젝트 간 일정 검토`);
+    const dialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const apply = button(dialog, '함께 적용');
+    const nextEnd = '2026-11-25';
+    const anchorChange = { id: source.id, expectedVersion: source.version, startDate: source.startDate, endDate: nextEnd };
+    await sourceEnd.fill(nextEnd);
+
+    async function openReview() {
+      await expect(review).toBeVisible();
+      const [response] = await Promise.all([waitMutation(page, previewPath), review.click()]);
+      expect(response.request().postDataJSON()).toEqual({ relationId: handoff.id, expectedVersion: handoff.version, anchorChange });
+      const preview = await json<AutomaticSchedulePreview>(response);
+      await expect(dialog.getByLabel('선행 업무 시작일', { exact: true })).toHaveValue(source.startDate!);
+      await expect(dialog.getByLabel('선행 업무 종료일', { exact: true })).toHaveValue(nextEnd);
+      await expect(apply).toBeEnabled();
+      return preview;
+    }
+
+    await openReview();
+    await button(dialog, '돌아가기').click();
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toBeFocused();
+    await expect(sourceEnd).toHaveValue(nextEnd);
+    expect(await f.schedule()).toEqual(before);
+    expect(paths).toEqual([previewPath]);
+
+    const preview = await openReview();
+    expect(preview.blocking).toEqual([]);
+    expect(preview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([
+      [source.id, source.startDate, nextEnd], [target.id, '2026-11-26', '2026-11-27'], [downstream.id, '2026-11-30', '2026-11-30'],
+    ]);
+    const [response] = await Promise.all([waitMutation(page, applyPath), apply.click()]);
+    expect(response.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    const applied = await json<SchedulePasteApplyResult>(response);
+    expect(applied.updated.map(({ id, version }) => [id, version])).toEqual(
+      [source, target, downstream].map(issue => [issue.id, issue.version + 1]),
+    );
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toHaveCount(0);
+    await expect(sourceEnd).toHaveValue(nextEnd);
+    expect(await f.schedule()).toEqual({ dates: { ...before.dates,
+      [source.id]: { ...before.dates[source.id], endDate: nextEnd },
+      [target.id]: { ...before.dates[target.id], startDate: '2026-11-26', endDate: '2026-11-27' },
+      [downstream.id]: { ...before.dates[downstream.id], startDate: '2026-11-30', endDate: '2026-11-30' },
+    }, dependencies: before.dependencies });
+
+    const [restored] = await Promise.all([waitMutation(page, undoPath), button(page, '되돌리기').click()]);
+    expect(restored.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    await json(restored);
+    expect(paths).toEqual([previewPath, previewPath, applyPath, undoPath]);
+    expect(await f.schedule()).toEqual(before);
+    expect((await teamBlockers(request)).find(item => item.id === handoff.id)).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id });
+    await expect(sourceEnd).toHaveValue(source.endDate!);
+    await expect(search).toHaveValue(f.prefix);
+    await expect(page).toHaveURL(url => url.hash === hash);
+
+    const restoredSource = (await workspace(request)).issues.find(issue => issue.id === source.id)!;
+    await sourceEnd.fill(nextEnd);
+    const peer = await json<Issue>(await request.patch(`/api/issues/${source.id}`, { headers: { 'X-Actor-Id': f.actor.id },
+      data: { expectedVersion: restoredSource.version, endDate: nextEnd },
+    }));
+    const [stale] = await Promise.all([waitMutation(page, previewPath), review.click()]);
+    expect(stale.status()).toBe(409);
+    await button(dialog, '최신 일정 기준으로 다시 검토').click();
+    const [recalculated] = await Promise.all([waitMutation(page, previewPath), button(dialog, '미리보기 다시 계산').click()]);
+    expect(recalculated.request().postDataJSON().anchorChange).toEqual({ ...anchorChange, expectedVersion: peer.version });
+    const followerPreview = await json<AutomaticSchedulePreview>(recalculated);
+    expect(followerPreview.changes.map(change => change.id)).toEqual([target.id, downstream.id]);
+    const [onlyFollowers] = await Promise.all([waitMutation(page, applyPath), apply.click()]);
+    expect((await json<SchedulePasteApplyResult>(onlyFollowers)).updated.map(issue => issue.id)).toEqual([target.id, downstream.id]);
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toHaveCount(0);
+    await expect(sourceEnd).toHaveValue(nextEnd);
+    const [followersUndone] = await Promise.all([waitMutation(page, undoPath), button(page, '되돌리기').click()]);
+    await json(followersUndone);
+    expect(await f.schedule()).toEqual({ ...before, dates: { ...before.dates, [source.id]: { ...before.dates[source.id], endDate: nextEnd } } });
+  } finally { await f.close(); }
+});
+
+test('360px 프로젝트 간트의 차트 날짜 미리보기에서 다른 프로젝트 후행 업무를 고를 수 있다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request);
+  const manualPath = '/api/schedule/manual-preview';
+  const teamPath = '/api/schedule/team-follow-up-preview';
+  try {
+    const source = await f.issue(f.first, '차트에서 날짜를 바꿀 선행', { startDate: '2026-11-19', endDate: '2026-11-20' });
+    const first = await f.issue(f.second, '첫 번째 차단 대상', { startDate: '2026-11-16', endDate: '2026-11-16' });
+    const second = await f.issue(f.second, '두 번째 차단 대상', { startDate: '2026-11-16', endDate: '2026-11-17' });
+    await f.relation(source, first);
+    const chosen = await f.relation(source, second);
+    const before = await f.schedule();
+    const hash = `#/${f.first.id}/gantt`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/${hash}`);
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-18');
+    await expect(row(page, first)).toHaveCount(0);
+    await expect(row(page, second)).toHaveCount(0);
+    const paths: string[] = [];
+    page.on('request', sent => {
+      const path = new URL(sent.url()).pathname;
+      if (sent.method() === 'POST' && path.startsWith('/api/schedule/')) paths.push(path);
+    });
+    const picker = button(row(page, source), `${source.key} 차트에서 날짜 선택`);
+    const startDate = '2026-11-23', endDate = '2026-11-25';
+    await picker.click();
+    await button(row(page, source), `${source.key} ${startDate} 선택`).click();
+    const [manualResponse] = await Promise.all([waitMutation(page, manualPath),
+      button(row(page, source), `${source.key} ${endDate} 선택`).click()]);
+    await json(manualResponse);
+
+    const manual = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const review = button(manual, '프로젝트 간 일정 검토');
+    const chooser = page.getByRole('dialog', { name: '후행 업무 선택', exact: true });
+    await review.click();
+    await expect(button(chooser, `${first.key} 일정 검토`)).toBeVisible();
+    await expect(button(chooser, `${second.key} 일정 검토`)).toBeVisible();
+    await expect(chooser).toContainText(f.second.name);
+    await button(chooser, '취소').click();
+    await expect(chooser).toHaveCount(0);
+    await expect(review).toBeFocused();
+    expect(paths).toEqual([manualPath]);
+    expect(await f.schedule()).toEqual(before);
+
+    await review.click();
+    const [response] = await Promise.all([waitMutation(page, teamPath), button(chooser, `${second.key} 일정 검토`).click()]);
+    expect(response.request().postDataJSON()).toEqual({ relationId: chosen.id, expectedVersion: chosen.version,
+      anchorChange: { id: source.id, expectedVersion: source.version, startDate, endDate } });
+    const preview = await json<AutomaticSchedulePreview>(response);
+    expect(preview.changes).toHaveLength(3);
+    expect(preview.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: source.id, toStart: startDate, toEnd: endDate }),
+      expect.objectContaining({ id: first.id, toStart: '2026-11-26', toEnd: '2026-11-26' }),
+      expect.objectContaining({ id: second.id, toStart: '2026-11-26', toEnd: '2026-11-27' }),
+    ]));
+    const dialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    await expect(dialog).toContainText(`${source.key} → ${second.key}`);
+    await expect(dialog.getByLabel('선행 업무 시작일', { exact: true })).toHaveValue(startDate);
+    await expect(dialog.getByLabel('선행 업무 종료일', { exact: true })).toHaveValue(endDate);
+    await expect(button(dialog, '함께 적용')).toBeEnabled();
+    await button(dialog, '돌아가기').click();
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toBeFocused();
+    await expect(manual.locator('.gantt-new-dates')).toHaveText(new RegExp(`${startDate}\\s*${endDate}`));
+    expect(paths).toEqual([manualPath, teamPath]);
+    expect(await f.schedule()).toEqual(before);
+    await button(manual, '취소').click();
+    await expect(picker).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === hash);
+  } finally { await f.close(); }
+});

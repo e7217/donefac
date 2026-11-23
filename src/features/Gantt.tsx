@@ -50,6 +50,7 @@ import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
+import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
@@ -112,7 +113,31 @@ type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolea
 type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
-type TeamFollowUpReview = TeamFollowUpSelection & { opener: HTMLButtonElement };
+type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement } | { kind: 'preview' } |
+  (Extract<CascadeOrigin, { kind: 'inline' }> & { source: Issue });
+type TeamFollowUpReview = TeamFollowUpSelection & { origin: TeamFollowUpOrigin };
+type TeamFollowUpHandoff = {
+  source: TeamFollowUpSelection['source'] & Pick<Issue, 'title'>;
+  initialChange: ScheduleAnchorChange;
+  origin: Exclude<TeamFollowUpOrigin, { kind: 'blockers' }>;
+  choices: readonly TeamFollowUpChoice[];
+};
+function findTeamBlockerChoices(data: FeatureProps['data'], projects: ReadonlyMap<string, Project>) {
+  const choices = new Map<string, TeamFollowUpChoice[]>();
+  if (!data.teamScheduleBlockers?.length) return choices;
+  const byId = new Map(data.issues.map(issue => [issue.id, issue]));
+  for (const relation of data.teamScheduleBlockers) {
+    const source = byId.get(relation.sourceIssueId), target = byId.get(relation.targetIssueId);
+    if (!source || !target || source.projectId === target.projectId ||
+        !projects.has(source.projectId) || !projects.has(target.projectId) ||
+        isTerminalStatus(data, source.projectId, source.status) || isTerminalStatus(data, target.projectId, target.status)) continue;
+    const current = choices.get(source.id);
+    if (current) current.push({ relation, target });
+    else choices.set(source.id, [{ relation, target }]);
+  }
+  for (const options of choices.values()) options.sort((a, b) => a.target.key.localeCompare(b.target.key, 'ko', { numeric: true }));
+  return choices;
+}
 type RowScheduleEdit = {
   issue: Issue;
   opener: HTMLButtonElement;
@@ -247,6 +272,7 @@ function ProjectGantt(props: GanttProps) {
   const [deadlinesOpen, setDeadlinesOpen] = useState(false);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
   const [teamFollowUp, setTeamFollowUp] = useState<TeamFollowUpReview | null>(null);
+  const [teamFollowUpHandoff, setTeamFollowUpHandoff] = useState<TeamFollowUpHandoff | null>(null);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
   const [draftEpoch, setDraftEpoch] = useState(0);
   const [previousFocusRequest, setPreviousFocusRequest] = useState(focusRequest);
@@ -318,6 +344,7 @@ function ProjectGantt(props: GanttProps) {
   const previewDialog = useRef<HTMLElement>(null);
   const manualReviewAction = useRef<HTMLButtonElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
+  const teamFollowUpPreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
   const inlineDateDrafts = useRef(new Map<string, InlineDateDraft>());
@@ -328,7 +355,7 @@ function ProjectGantt(props: GanttProps) {
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateIds, setInlineDateIds] = useState<ReadonlySet<string>>(() => new Set());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
-  const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
+  const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
     shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
@@ -449,6 +476,7 @@ function ProjectGantt(props: GanttProps) {
             setHasDraft(false);
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
+            setTeamFollowUpHandoff(null);
             setPasteProject(null);
             setBulkLinkSelection(null);
             if (discardPlanShift) setPlanShift(null);
@@ -468,6 +496,7 @@ function ProjectGantt(props: GanttProps) {
     const importReset = () => {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
+      setTeamFollowUpHandoff(null);
       setPasteProject(null);
       setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
@@ -497,25 +526,72 @@ function ProjectGantt(props: GanttProps) {
     }
     trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
     const { id, key, version, startDate, endDate } = source;
-    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key }, opener });
+    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key },
+      origin: { kind: 'blockers', opener } });
   }
-  function closeTeamFollowUp(updated?: readonly Issue[]) {
-    const opener = teamFollowUp?.opener;
-    trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
-    setTeamFollowUp(null);
-    if (updated && focusAfterCompletingMissingRows(updated)) return;
+  function reviewTeamSuccessors(source: TeamFollowUpHandoff['source'], initialChange: ScheduleAnchorChange, origin: TeamFollowUpHandoff['origin']) {
+    if (busyRef.current || teamFollowUp || teamFollowUpHandoff || issueOverlayOpen || cascade ||
+        [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
+    const choices = teamBlockerChoices.get(source.id);
+    if (!choices?.length) return;
+    const handoff = { source, initialChange, origin, choices };
+    trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
+    if (choices.length === 1) openTeamFollowUpChoice(handoff, choices[0]);
+    else setTeamFollowUpHandoff(handoff);
+  }
+  function openTeamFollowUpChoice({ source, initialChange, origin }: TeamFollowUpHandoff, { relation, target }: TeamFollowUpChoice) {
+    const { id, key, version, startDate, endDate } = source;
+    setTeamFollowUpHandoff(null);
+    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key },
+      initialChange, origin });
+  }
+  function restoreTeamFollowUpOrigin(origin: TeamFollowUpOrigin, sourceId: string, updated?: readonly Issue[]) {
+    const completed = Boolean(updated && focusAfterCompletingMissingRows(updated));
+    if (origin.kind === 'preview') {
+      if (updated) restoreDatePreviewFocus(!completed);
+      else requestAnimationFrame(() => (teamFollowUpPreviewButton.current ?? previewDialog.current)?.focus({ preventScroll: true }));
+      return;
+    }
+    if (completed) return;
     pendingScheduleFocus.current = () => {
-      const target = [opener, teamBlockersTrigger.current, scrollRef.current].find(element =>
-        element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
-      target?.focus({ preventScroll: true });
+      if (origin.kind === 'inline') restoreInlineCascadeFocus(origin, sourceId);
+      else {
+        const target = [origin.opener, teamBlockersTrigger.current, scrollRef.current].find(element =>
+          element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
+        target?.focus({ preventScroll: true });
+      }
     };
   }
-  async function applyTeamFollowUp(result: ApplyResult) {
+  function closeTeamFollowUp() {
+    const selection = teamFollowUp ?? teamFollowUpHandoff;
+    if (!selection) return;
+    trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
+    setTeamFollowUp(null);
+    setTeamFollowUpHandoff(null);
+    restoreTeamFollowUpOrigin(selection.origin, selection.source.id);
+  }
+  async function applyTeamFollowUp(result: ApplyResult, unchangedSource?: Pick<Issue, 'version' | 'startDate' | 'endDate'>) {
+    if (!teamFollowUp) return;
+    const { origin, source } = teamFollowUp;
     setUndoId(result.undoId);
     setScheduleWarnings(result.warnings ?? []);
     await refresh();
-    closeTeamFollowUp(result.updated);
-    const includesSource = result.updated.some(issue => issue.id === teamFollowUp?.source.id);
+    const savedSource = result.updated.find(issue => issue.id === source.id);
+    const accept = origin.kind === 'inline' ? origin.accept : origin.kind === 'preview' && manualReview?.inline?.issueId === source.id
+      ? manualReview.inline.accept : undefined;
+    if (savedSource) accept?.(savedSource);
+    else if (accept && unchangedSource) {
+      const original = origin.kind === 'inline' ? origin.source : data.issues.find(issue => issue.id === source.id);
+      if (original) accept({ ...original, ...unchangedSource });
+    }
+    if (origin.kind === 'preview') {
+      setManualReview(null);
+      setManualProblem(null);
+    }
+    trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
+    setTeamFollowUp(null);
+    restoreTeamFollowUpOrigin(origin, source.id, result.updated);
+    const includesSource = Boolean(savedSource);
     notify(`${result.updated.length}개 ${includesSource ? '업무' : '후행 업무'}의 일정을 변경했습니다.`);
   }
   function finishCreating() {
@@ -550,6 +626,7 @@ function ProjectGantt(props: GanttProps) {
     notify(`과부하를 줄이는 ${result.updated.length}개 업무의 일정을 적용했습니다.`);
   }
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
+  const teamBlockerChoices = findTeamBlockerChoices(data, projectsById);
   const projectIssues = useMemo(() => {
     if (!allProjects) return data.issues.filter(issue => issue.projectId === projectId);
     const byProject = new Map(data.projects.map(project => [project.id, [] as Issue[]]));
@@ -681,6 +758,8 @@ function ProjectGantt(props: GanttProps) {
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
   const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
   const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
+  const previewTeamFollowUp = manualReview && 'changes' in manualReview.input && manualReview.input.changes.length === 1 &&
+    singleChange && teamBlockerChoices.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
     if (!analysisOpen || !hasProject || !calendar) return null;
     try {
@@ -1601,7 +1680,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || bulkLinkSelection || rowScheduleEdit)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || teamFollowUpHandoff || bulkLinkSelection || rowScheduleEdit)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -2009,7 +2088,9 @@ function ProjectGantt(props: GanttProps) {
             <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} onInlineDraftChange={trackInlineDates}
               disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
-              onReview={outgoingIssueIds.has(issue.id) ? (change, origin) => reviewSuccessors(change, origin) : undefined} />
+              onReview={outgoingIssueIds.has(issue.id) ? reviewSuccessors : undefined}
+              onReviewTeam={teamBlockerChoices.has(issue.id) ? (source, change, origin) =>
+                reviewTeamSuccessors(source, change, { ...origin, source }) : undefined} />
           </div>
           <div className="gantt-row-timeline" style={{ width: timelineWidth }}>
           {captured?.startDate && captured.endDate && <div className="gantt-baseline-bar" role="img" aria-label={`${captured.key} 기준선 ${captured.startDate} ~ ${captured.endDate}`} title={`${baseline!.name}: ${captured.title} · ${captured.startDate} ~ ${captured.endDate}`} style={capturedStyle(captured.startDate, captured.endDate)} />}
@@ -2083,7 +2164,7 @@ function ProjectGantt(props: GanttProps) {
         )) : <div className="gantt-bottom-empty">선행 업무를 연결해 일정의 흐름을 확인하세요.</div>}
       </section>
     </div>
-    {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
+    {preview && !cascade && !teamFollowUp && !teamFollowUpHandoff && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
       if (event.defaultPrevented || event.nativeEvent.isComposing) return;
       if (manualReview?.inlineDates && event.key === 'Tab') {
         const controls = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
@@ -2120,6 +2201,12 @@ function ProjectGantt(props: GanttProps) {
         {previewCascade && <button ref={cascadePreviewButton} type="button" className="btn" disabled={busy || Boolean(manualProblem) || !preview.previewId} onClick={() => reviewSuccessors({
           id: previewCascade.id, expectedVersion: previewCascade.version, startDate: previewCascade.toStart, endDate: previewCascade.toEnd,
         }, { kind: 'preview' })}>후행 일정 검토</button>}
+        {previewTeamFollowUp && <button ref={teamFollowUpPreviewButton} type="button" className="btn"
+          disabled={busy || Boolean(manualProblem) || !preview.previewId} onClick={() => {
+            const { id, key, title, version, fromStart, fromEnd, toStart, toEnd } = previewTeamFollowUp;
+            reviewTeamSuccessors({ id, key, title, version, startDate: fromStart, endDate: fromEnd },
+              { id, expectedVersion: version, startDate: toStart, endDate: toEnd }, { kind: 'preview' });
+          }}>프로젝트 간 일정 검토</button>}
         {manualProblem?.kind === 'stale' && !missingHierarchyAnchor && <button ref={manualReviewAction} type="button" className="btn" disabled={busy} onClick={() => void reviewManualAgain()}>다시 미리보기</button>}
         {manualProblem?.kind === 'uncertain'
           ? <button ref={manualReviewAction} type="button" className="btn btn-primary" disabled={busy}
@@ -2209,6 +2296,8 @@ function ProjectGantt(props: GanttProps) {
       }}
     />}
     {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link} onClose={closeScheduleIssueCreation} />}
+    {teamFollowUpHandoff && <GanttTeamFollowUpChooser source={teamFollowUpHandoff.source} choices={teamFollowUpHandoff.choices}
+      projects={data.projects} onChoose={choice => openTeamFollowUpChoice(teamFollowUpHandoff, choice)} onClose={closeTeamFollowUp} />}
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
       onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}
   </>;
@@ -2483,10 +2572,11 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   </form>;
 }
 
-function DateCells({ issue, onSave, onReview, disabled, onDraftChange, onInlineDraftChange }: {
+function DateCells({ issue, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange }: {
   issue: Issue;
   onSave: (source: Issue, start: string | null, end: string | null, origin: InlineScheduleOrigin) => Promise<void>;
   onReview?: (anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
+  onReviewTeam?: (source: Issue, anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
   disabled: boolean;
   onDraftChange: TrackDraft;
   onInlineDraftChange: (id: string, draft: InlineDateDraft | null) => void;
@@ -2567,9 +2657,13 @@ function DateCells({ issue, onSave, onReview, disabled, onDraftChange, onInlineD
       <button type="button" aria-label={`${issue.key} 날짜 변경 취소`} disabled={disabled || pending}
         onClick={() => reset(true)}>취소</button>
       {onReview && !conflict && (!start || !end || start <= end) && <button type="button"
-        aria-label={`${issue.key} 후행 일정 검토`} disabled={disabled || pending}
+        aria-label={`${issue.key} 후행 일정 검토`} title="후행 일정 검토" disabled={disabled || pending}
         onClick={event => onReview({ id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
-          { kind: 'inline', opener: event.currentTarget, accept })}>후행 일정 검토</button>}
+          { kind: 'inline', opener: event.currentTarget, accept })}>{onReviewTeam ? '후행 검토' : '후행 일정 검토'}</button>}
+      {onReviewTeam && (!start || !end || start <= end) && <button type="button"
+        aria-label={`${issue.key} 프로젝트 간 일정 검토`} title="프로젝트 간 일정 검토" disabled={disabled || pending}
+        onClick={event => onReviewTeam(source, { id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
+          { kind: 'inline', opener: event.currentTarget, accept })}>{onReview && !conflict ? '프로젝트 간 검토' : '프로젝트 간 일정 검토'}</button>}
     </div>}
   </div>;
 }

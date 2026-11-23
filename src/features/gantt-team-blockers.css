@@ -206,6 +206,64 @@
   font-size: 12px;
 }
 
+.gantt-team-follow-up-chooser {
+  box-sizing: border-box;
+  width: min(28rem, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  margin: auto;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid #dce6df;
+  border-radius: 8px;
+  background: #fff;
+  color: #344d40;
+}
+
+.gantt-team-follow-up-chooser::backdrop {
+  background: #16392f66;
+}
+
+.gantt-team-follow-up-chooser h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.gantt-team-follow-up-chooser p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-follow-up-chooser ul {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-team-follow-up-chooser li .btn {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-follow-up-chooser li small {
+  display: block;
+  margin-top: 2px;
+  color: #53685e;
+}
+
+.gantt-team-follow-up-chooser footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
 @media (max-width: 550px) {
   .gantt-team-blockers-form fieldset,
   .gantt-team-blockers-list > li {

@@ -16,11 +16,12 @@ export type TeamFollowUpSelection = {
   relation: TeamScheduleBlocker;
   source: Pick<Issue, 'id' | 'key'> & SourceSchedule;
   target: Pick<Issue, 'id' | 'key'>;
+  initialChange?: ScheduleAnchorChange;
 };
 
 type Props = {
   onClose: () => void;
-  onApplied: (result: ScheduleApplyResult) => Promise<void> | void;
+  onApplied: (result: ScheduleApplyResult, unchangedSource?: SourceSchedule) => Promise<void> | void;
   onBusyChange: (value: boolean) => void;
 } & (
   | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never }
@@ -39,6 +40,13 @@ function datesMatch(left: SourceDates, right: SourceDates) {
 
 function dateValues({ startDate, endDate }: SourceDates): SourceDates {
   return { startDate, endDate };
+}
+
+function rebaseDates(dates: SourceDates, previous: SourceDates, latest: SourceDates): SourceDates {
+  return {
+    startDate: dates.startDate === previous.startDate ? latest.startDate : dates.startDate,
+    endDate: dates.endDate === previous.endDate ? latest.endDate : dates.endDate,
+  };
 }
 
 function currentSourceSchedule(cause: unknown): SourceSchedule | null {
@@ -61,8 +69,11 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   const [freshPreviewNeeded, setFreshPreviewNeeded] = useState(false);
   const [applied, setApplied] = useState<ScheduleApplyResult | null>(null);
+  const initialChange = teamFollowUp?.initialChange;
   const [sourceBaseline, setSourceBaseline] = useState<SourceSchedule | null>(teamFollowUp?.source ?? null);
-  const [sourceDates, setSourceDates] = useState<SourceDates>(() => teamFollowUp ? dateValues(teamFollowUp.source) : { startDate: null, endDate: null });
+  const [sourceDates, setSourceDates] = useState<SourceDates>(() => teamFollowUp
+    ? dateValues(initialChange ?? teamFollowUp.source) : { startDate: null, endDate: null });
+  const [handoffDates, setHandoffDates] = useState<SourceDates | null>(() => initialChange ? dateValues(initialChange) : null);
   const [reviewedSourceDates, setReviewedSourceDates] = useState<SourceDates | null>(null);
   const [staleSource, setStaleSource] = useState<SourceSchedule | null>(null);
   const route = teamFollowUp ? '/schedule/team-follow-up' : '/schedule/auto';
@@ -124,7 +135,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
     if (!dialog.current?.contains(active) || active?.matches(':disabled')) dialog.current?.focus({ preventScroll: true });
   }, [pending, outcomeUnknown, needsPreview, sourceDatesDirty, staleSource, applied]);
   useEffect(() => {
-    const scheduled = window.setTimeout(() => void load(), 0);
+    const scheduled = window.setTimeout(() => void load(initialChange, initialChange), 0);
     return () => {
       window.clearTimeout(scheduled);
       const active = request.current;
@@ -134,11 +145,11 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
         onBusyChange(false);
       }
     };
-  }, [load, onBusyChange]);
+  }, [load, onBusyChange, initialChange]);
 
   function reloadPreview() {
     if (staleSource || sourceDateOrderInvalid) return;
-    const change = teamFollowUp && sourceBaseline && sourceDatesDirty
+    const change = teamFollowUp && sourceBaseline && (sourceDatesDirty || initialChange)
       ? { id: teamFollowUp.source.id, expectedVersion: sourceBaseline.version, ...sourceDates }
       : undefined;
     void load(change, teamFollowUp ? sourceDates : undefined);
@@ -146,10 +157,8 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
 
   function rebaseSource() {
     if (!staleSource || !sourceBaseline) return;
-    setSourceDates({
-      startDate: sourceDates.startDate === sourceBaseline.startDate ? staleSource.startDate : sourceDates.startDate,
-      endDate: sourceDates.endDate === sourceBaseline.endDate ? staleSource.endDate : sourceDates.endDate,
-    });
+    setSourceDates(rebaseDates(sourceDates, sourceBaseline, staleSource));
+    if (handoffDates) setHandoffDates(rebaseDates(handoffDates, sourceBaseline, staleSource));
     setSourceBaseline(staleSource);
     setStaleSource(null);
     setError('');
@@ -158,7 +167,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
 
   async function reflect(result: ScheduleApplyResult) {
     setApplied(result);
-    try { await onApplied(result); }
+    try { await onApplied(result, preview?.teamFollowUp?.sourceSchedule); }
     catch { setError('일정이 저장되었습니다. 간트 화면을 다시 불러와 주세요.'); }
   }
 
@@ -206,10 +215,11 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
 
   function close() {
     if (request.current) return;
-    const returnTarget = teamFollowUp ? '차단 관계 목록' : '입력';
+    const returnTarget = initialChange ? '이전 일정 화면으로' : teamFollowUp ? '차단 관계 목록으로' : '입력으로';
+    const editedHere = handoffDates ? !datesMatch(sourceDates, handoffDates) : sourceDatesDirty;
     if (outcomeUnknown) {
-      if (!window.confirm(`일정 적용 여부를 확인하지 못했습니다. ${returnTarget}으로 돌아갈까요?`)) return;
-    } else if (sourceDatesDirty && !applied && !window.confirm('수정한 선행 업무 일정을 버리고 차단 관계 목록으로 돌아갈까요?')) return;
+      if (!window.confirm(`일정 적용 여부를 확인하지 못했습니다. ${returnTarget} 돌아갈까요?`)) return;
+    } else if (editedHere && !applied && !window.confirm(`여기서 수정한 선행 업무 일정을 버리고 ${returnTarget} 돌아갈까요?`)) return;
     onClose();
   }
 
