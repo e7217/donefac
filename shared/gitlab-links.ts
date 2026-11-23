@@ -58,6 +58,16 @@ function isRestorableManualGitlabLink(link: Record<string, unknown>): boolean {
 export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
+  if (Object.hasOwn(link, 'pipelineObservedAt')) {
+    const { pipelineObservedAt, updatedAt, kind, state } = link;
+    if (kind !== 'pipeline') return false;
+    if (pipelineObservedAt !== null) {
+      if (typeof pipelineObservedAt !== 'string' || pipelineObservedAt !== updatedAt ||
+          typeof state !== 'string' || !state || state === 'unknown' || state.length > 100) return false;
+      const time = Date.parse(pipelineObservedAt);
+      if (!Number.isFinite(time) || time > Date.now() || new Date(time).toISOString() !== pipelineObservedAt) return false;
+    }
+  }
   if (Object.hasOwn(link, 'mergeReadiness') &&
       (link.kind !== 'merge_request' || link.state !== 'opened' || !isGitlabMergeReadiness(link.mergeReadiness))) return false;
   if (Object.hasOwn(link, 'mergeCommitShas')) {

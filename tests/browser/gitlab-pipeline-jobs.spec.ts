@@ -26,6 +26,8 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
   const secret = `synthetic-gitlab-jobs-webhook-${unique}`;
   const upstreamError = `upstream-private-job-error-${unique}`;
   const at = new Date(Date.now() - 60_000).toISOString();
+  const changedAt = new Date(Date.parse(at) + 1_000).toISOString();
+  const latestAt = new Date(Date.parse(at) + 2_000).toISOString();
   const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
   const { projects: [project] } = await workspace();
@@ -39,6 +41,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
   let baseUrl = '';
   let unavailable = false;
   let recovered = false;
+  let upstreamUpdatedAt = at;
   const repoUrl = () => `${baseUrl}/team/app`;
   const pipelineUrl = () => `${repoUrl()}/-/pipelines/${pipelineId}`;
   const jobUrl = (id: number) => `${repoUrl()}/-/jobs/${id}`;
@@ -47,7 +50,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     requests.push({ url, method: incoming.method, credential: incoming.headers['private-token'] });
     response.setHeader('Content-Type', 'application/json');
     const pipeline = { id: pipelineId, iid: 19, project_id: repositoryId, status: recovered ? 'success' : 'failed', sha,
-      ref, updated_at: at, web_url: pipelineUrl(), yaml_errors: recovered ? null : upstreamError };
+      ref, updated_at: upstreamUpdatedAt, web_url: pipelineUrl(), yaml_errors: recovered ? null : upstreamError };
     const job = (id: number, name: string, stage: string, status: string, allowFailure: boolean, reason: string | null) => ({
       id, name, stage, status, allow_failure: allowFailure, failure_reason: reason, pipeline, web_url: jobUrl(id),
     });
@@ -65,17 +68,22 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
   await once(mock, 'listening');
   baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/forge`;
 
+  async function observePipeline(status: string, updatedAt: string) {
+    const received = await json<{ linked: number }>(await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: repoUrl() }, object_attributes: {
+        id: pipelineId, iid: 19, status, sha, ref, url: pipelineUrl(), updated_at: updatedAt,
+      } },
+    }));
+    expect(received.linked).toBe(1);
+    upstreamUpdatedAt = updatedAt;
+  }
+
   try {
     await json(await request.patch(settingsPath, { data: {
       expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
     } }));
-    const received = await json<{ linked: number }>(await request.post(`${settingsPath}/webhook`, {
-      headers: { 'X-Gitlab-Token': secret, 'webhook-id': unique },
-      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: repoUrl() }, object_attributes: {
-        id: pipelineId, iid: 19, status: 'running', sha, ref, url: pipelineUrl(), updated_at: at,
-      } },
-    }));
-    expect(received.linked).toBe(1);
+    await observePipeline('running', at);
     const saved = (await workspace()).gitlabLinks.find(link => link.issueId === issue.id && link.kind === 'pipeline');
     expect(saved?.state).toBe('running');
 
@@ -105,8 +113,51 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(jobs).not.toContainText(token);
     expect(await jobs.evaluate(region => region.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
 
-    unavailable = true;
+    const refreshActivity = gitlab.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true });
     const retry = jobs.getByRole('button', { name: 'CI 작업 다시 확인', exact: true });
+    const invalidated = jobs.getByRole('status').filter({ hasText: '파이프라인이 변경되었습니다.' });
+    const beforeUpdate = requests.length;
+    await observePipeline('failed', changedAt);
+    await refreshActivity.click();
+    await expect(pipelineRow).toHaveAttribute('data-gitlab-state', 'failed');
+    await expect(invalidated).toBeVisible();
+    await expect(job).toHaveCount(0);
+    expect(requests).toHaveLength(beforeUpdate);
+
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    const jobsRequest = /\/pipeline-jobs$/u;
+    await page.route(jobsRequest, async route => {
+      try {
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        started.resolve();
+        await release.promise;
+        await route.fulfill({ response }).catch(() => undefined);
+      } catch (cause) {
+        started.reject(cause);
+        await route.abort().catch(() => undefined);
+      } finally { finished.resolve(); }
+    }, { times: 1 });
+    try {
+      await retry.click();
+      await started.promise;
+      await expect(jobs.getByRole('status')).toHaveText('GitLab CI 작업을 확인하고 있습니다.');
+      const beforeTimestampUpdate = requests.length;
+      const aborted = page.waitForEvent('requestfailed', sent => jobsRequest.test(sent.url()));
+      await observePipeline('failed', latestAt);
+      await refreshActivity.click();
+      await expect(invalidated).toBeVisible();
+      expect((await aborted).failure()?.errorText).toContain('ERR_ABORTED');
+      expect(requests).toHaveLength(beforeTimestampUpdate);
+    } finally { release.resolve(); }
+    await finished.promise;
+    await expect(job).toHaveCount(0);
+    const refreshed = (await workspace()).gitlabLinks.find(link => link.id === saved?.id);
+    expect(refreshed).toMatchObject({ state: 'failed', updatedAt: latestAt });
+
+    unavailable = true;
     await retry.click();
     await expect(jobs.getByRole('alert')).toBeVisible();
     await expect(jobs).not.toContainText(upstreamError);
@@ -139,9 +190,9 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     } finally { await development.close(); }
 
     const final = await workspace();
-    expect(final.gitlabLinks.find(link => link.id === saved?.id)).toEqual(saved);
+    expect(final.gitlabLinks.find(link => link.id === saved?.id)).toEqual(refreshed);
     expect(final.issues.find(item => item.id === issue.id)).toMatchObject({ title: issue.title, status: issue.status, version: issue.version });
-    expect(requests.filter(call => call.url.pathname === jobsPath)).toHaveLength(4);
+    expect(requests.filter(call => call.url.pathname === jobsPath)).toHaveLength(5);
     expect(new Set(requests.map(call => call.url.pathname))).toEqual(new Set([repositoryPath, pipelinePath, jobsPath]));
     expect(requests.every(call => call.method === 'GET' && call.credential === token)).toBe(true);
   } finally {

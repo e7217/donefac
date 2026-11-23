@@ -67,7 +67,7 @@ function activityTime(value: unknown) {
 }
 
 type JobTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
-type JobView = { kind: 'loading' } | { kind: 'failed'; message: string } | { kind: 'ready'; result: GitlabPipelineJobs };
+type JobView = { kind: 'loading' } | { kind: 'stale' } | { kind: 'failed'; message: string } | { kind: 'ready'; result: GitlabPipelineJobs };
 
 const failureReasonLabels = new Map([
   ['script_failure', '작업 스크립트 실패'],
@@ -124,30 +124,39 @@ function pipelineJobsMessage(cause: unknown): string {
   return 'GitLab CI 작업을 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function PipelineJobs({ target }: { target: JobTarget }) {
+function PipelineJobs({ target, revision }: { target: JobTarget; revision: string }) {
   const panelId = useId();
-  const [view, setView] = useState<JobView | null>(null);
-  const request = useRef<AbortController | null>(null);
-  useEffect(() => () => request.current?.abort(), []);
+  const [snapshot, setSnapshot] = useState<{ revision: string; view: JobView | null }>({ revision, view: null });
+  const request = useRef<{ revision: string; controller: AbortController } | null>(null);
+  const view = snapshot.view;
+  // Preserve the open panel while discarding results from the previous pipeline observation.
+  if (snapshot.revision !== revision) setSnapshot({ revision, view: view ? { kind: 'stale' } : null });
+  useEffect(() => () => {
+    if (request.current?.revision !== revision) return;
+    request.current.controller.abort();
+    request.current = null;
+  }, [revision]);
 
   async function load() {
-    if (request.current) return;
+    if (request.current?.revision === revision) return;
+    request.current?.controller.abort();
     const controller = new AbortController();
-    request.current = controller;
-    setView({ kind: 'loading' });
+    const active = { revision, controller };
+    request.current = active;
+    const loading: JobView = { kind: 'loading' };
+    setSnapshot({ revision, view: loading });
+    const finish = (next: JobView) => {
+      if (!controller.signal.aborted) setSnapshot(current => current.view === loading ? { revision, view: next } : current);
+    };
     try {
       const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-jobs`;
       const result = await api<GitlabPipelineJobs | undefined>(path, { method: 'GET', cache: 'no-store', signal: controller.signal });
-      if (controller.signal.aborted) return;
-      if (!isPipelineJobsResult(result, target)) {
-        setView({ kind: 'failed', message: '연결된 파이프라인의 CI 작업 응답을 확인할 수 없습니다.' });
-        return;
-      }
-      setView({ kind: 'ready', result });
+      finish(isPipelineJobsResult(result, target) ? { kind: 'ready', result }
+        : { kind: 'failed', message: '연결된 파이프라인의 CI 작업 응답을 확인할 수 없습니다.' });
     } catch (cause) {
-      if (!controller.signal.aborted) setView({ kind: 'failed', message: pipelineJobsMessage(cause) });
+      finish({ kind: 'failed', message: pipelineJobsMessage(cause) });
     } finally {
-      if (request.current === controller) request.current = null;
+      if (request.current === active) request.current = null;
     }
   }
 
@@ -156,9 +165,9 @@ function PipelineJobs({ target }: { target: JobTarget }) {
       void load();
       return;
     }
-    request.current?.abort();
+    request.current?.controller.abort();
     request.current = null;
-    setView(null);
+    setSnapshot({ revision, view: null });
   }
 
   return <div className="gitlab-pipeline-jobs">
@@ -167,6 +176,7 @@ function PipelineJobs({ target }: { target: JobTarget }) {
     </button>
     {view && <section id={panelId} className="gitlab-pipeline-jobs-panel" aria-label="GitLab CI 작업" aria-busy={view.kind === 'loading'}>
       {view.kind === 'loading' && <p role="status">GitLab CI 작업을 확인하고 있습니다.</p>}
+      {view.kind === 'stale' && <p role="status">파이프라인이 변경되었습니다. CI 작업을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-pipeline-jobs-warning" role="alert">{view.message}</p>}
       {view.kind === 'ready' && <PipelineJobsResult result={view.result} target={target} />}
       <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
@@ -304,7 +314,8 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
     <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
-    {jobsTarget && <PipelineJobs key={`${link.id}:${link.manualLinkId ?? ''}:${jobsTarget.url.href}`} target={jobsTarget} />}
+    {jobsTarget && <PipelineJobs key={`${link.id}:${link.manualLinkId ?? ''}:${jobsTarget.url.href}`} target={jobsTarget}
+      revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha])} />}
     {link.manualLinkId && manualActions && <div className="gitlab-activity-manual-actions">
       <button className="btn btn-ghost" type="button" aria-label="수동 연결 다시 확인" title="수동 연결 다시 확인"
         disabled={manualActions.disabled} onClick={event => manualActions.verify(link, event.currentTarget)}>
