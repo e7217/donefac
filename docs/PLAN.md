@@ -377,6 +377,8 @@ GitLab 연결 미리보기는 현재 입력한 주소·저장소·읽기 토큰�
 
 배포 기록은 GitLab 인스턴스·저장소·배포 ID와 발생 시각을 기준으로 저장한다. 인증된 배포가 먼저 들어오면 저장소 이력에 나타난다. 이후 연결된 커밋·파이프라인의 전체 SHA 또는 대상 저장소가 확인된 병합 MR의 병합·스쿼시 SHA가 일치하면 티켓에도 표시된다. 배포 화면은 환경·상태·시각과 GitLab 작업 또는 커밋 주소를 표시한다. GitLab 19 이전의 시간대가 포함된 웹훅 발생 시각은 ISO 8601로 정규화한다. [GitLab 19 웹훅 변경](https://docs.gitlab.com/update/versions/gitlab_19_changes/#webhook-payload-timestamps-changed-to-iso-8601-format)
 
+**배포 조회 미리보기**는 GitLab 연결 초안의 주소·읽기 토큰·선택 저장소로 최근 배포와 성공한 배포의 포함 MR을 읽는다. 조회 집계와 빈 목록, 일부 조회와 권한·요청 한도 문제를 표시한다. 배포와 동기화 이력은 실제 동기화 실행 때 기록한다. 확인 중 입력이나 저장된 연결 버전이 바뀌면 이전 결과를 폐기한다. [GitLab 환경별 배포](API.md#gitlab-환경별-배포)
+
 저장소별 배포 이력 동기화는 GitLab에서 최근 배포 50건과 성공한 배포의 포함 MR을 읽는다. MR의 숫자 ID·IID·대상 저장소가 기존 티켓 연결과 일치하면 같은 배포를 함께 표시한다. 조회 권한·한도·일시 오류로 전체 관계를 읽지 못하면 확인한 관계를 보존하고 누락 가능성을 안내한다. 동기화 중 갱신한 웹훅 상태와 연결 설정 버전을 저장 직전에 확인한다. 자체 백업 형식 74는 배포 상태의 동기화 출처와 포함 MR을 보존한다. [GitLab의 배포별 MR 추적](https://docs.gitlab.com/ci/environments/deployments/#track-newly-included-merge-requests-per-deployment)
 
 기존 브랜치·커밋·MR·파이프라인을 티켓 상세에서 주소로 직접 연결할 수 있다. GitLab 읽기 API에서 저장소 ID와 브랜치 이름, 전체 커밋 SHA 또는 해당 항목 ID를 검증하고 정규 주소를 저장한다. 웹훅과 동기화는 같은 링크의 상태를 갱신한다. 직접 연결한 브랜치도 인증된 푸시에 따라 최신 확인 SHA와 삭제 상태를 표시한다. 상태 자동화는 티켓 키로 확인한 연결에 대해 기존 규칙을 평가한다. 같은 연결이 나중에 티켓 키로 확인되면 같은 행에 자동 연결을 기록한다. 백업과 휴지통 복원은 연결을 보존하고 해제 확인용 식별자를 새로 발급한다. [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch) · [GitLab 커밋 조회](https://docs.gitlab.com/api/commits/#retrieve-a-commit)

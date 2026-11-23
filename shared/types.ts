@@ -1413,6 +1413,19 @@ export interface GitlabDeployment {
   mergeRequests?: GitlabDeploymentMergeRequest[];
 }
 export interface GitlabDeploymentPage { items: GitlabDeployment[]; total: number; offset: number; limit: number }
+export interface GitlabDeploymentPreviewResult {
+  repositoryId: number;
+  settingsVersion: number;
+  status: 'ok' | 'empty' | 'partial';
+  deploymentsRead: number;
+  successfulDeployments: number;
+  mergeRequestsRead: number;
+  deploymentLimitReached: boolean;
+  associationUnavailable: number;
+  associationLimited: number;
+  associationDenied: number;
+  associationRateLimited: number;
+}
 export interface GitlabDeploymentSyncResult {
   repositoryId: number;
   settingsVersion: number;

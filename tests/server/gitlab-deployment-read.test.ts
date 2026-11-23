@@ -94,6 +94,8 @@ test('deployment REST reads normalize scoped URLs and retain only verified merge
   assert.equal(result.deploymentLimitReached, false);
   assert.equal(result.associationUnavailable, 3);
   assert.equal(result.associationLimited, 0);
+  assert.equal(result.associationDenied, 1);
+  assert.equal(result.associationRateLimited, 0);
   assert.deepEqual(result.deployments.map(row => row.status), ['created', 'skipped', 'success', 'failed', 'running', 'blocked', 'success', 'success']);
   assert.deepEqual(result.deployments[2], {
     repositoryId, deploymentId: 8, environment: 'production/app', environmentTier: 'production', sha, status: 'success',

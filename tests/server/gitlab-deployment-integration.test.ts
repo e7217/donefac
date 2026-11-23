@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 
 const integrationPath = '/api/integrations/gitlab';
 const baseUrl = 'https://git.example.test/gitlab';
@@ -64,14 +64,21 @@ function mergeRequest(issueKey: string, id = 101, target = repositoryId) {
   } };
 }
 
-async function mockGitlab(t: TestContext, handler: (path: string, response: ServerResponse, projectUrl: string) => void) {
+async function mockGitlab(t: TestContext, handler: (path: string, response: ServerResponse, projectUrl: string) => void, options: {
+  extraRepositoryIds?: number[];
+  projectFailure?: () => number | null;
+} = {}) {
   const requests: { method?: string; path: string; token?: string }[] = [];
+  const repositoryPaths = new Map([repositoryId, ...(options.extraRepositoryIds ?? [])].map(id => [`/gitlab/api/v4/projects/${id}`, id]));
   const mock = createServer((request, response) => {
     const path = new URL(request.url ?? '/', root).pathname;
     requests.push({ method: request.method, path, token: request.headers['private-token'] as string | undefined });
     response.setHeader('Content-Type', 'application/json');
-    if (path === `/gitlab/api/v4/projects/${repositoryId}`) {
-      response.end(JSON.stringify({ id: repositoryId, web_url: remoteProject, path_with_namespace: 'team/repo' }));
+    const id = repositoryPaths.get(path);
+    if (id) {
+      const status = options.projectFailure?.();
+      if (status) response.writeHead(status).end(JSON.stringify({ message: 'private upstream project details' }));
+      else response.end(JSON.stringify({ id, web_url: remoteProject, path_with_namespace: 'team/repo' }));
     } else handler(path, response, remoteProject);
   });
   mock.listen(0, '127.0.0.1');
@@ -84,6 +91,139 @@ async function mockGitlab(t: TestContext, handler: (path: string, response: Serv
   });
   return { root, remoteProject, requests };
 }
+
+const deploymentPreviewPath = `${integrationPath}/deployments/preview`;
+const deploymentListPath = (id: number) => `/gitlab/api/v4/projects/${id}/deployments`;
+
+function previewDeployment(id: number, status = 'success') {
+  return { id, sha: mergeSha, status, updated_at: timestamp(), environment: { name: 'synthetic internal production' }, deployable: null };
+}
+
+test('deployment preview distinguishes complete, empty, partial, and rejected reads without persisting GitLab state', async t => {
+  const savedToken = 'synthetic-deployment-preview-token';
+  const list = deploymentListPath(repositoryId);
+  let mode: 'ok' | 'empty' | 'failed-only' | 'association-denied' | 'rate-limited' | 'limited' | 'deployment-denied' | 'list-rate-limited' | 'project-denied' = 'ok';
+  const remote = await mockGitlab(t, (path, response) => {
+    if (path === list) {
+      if (mode === 'deployment-denied') return response.writeHead(403).end(JSON.stringify({ message: savedToken }));
+      if (mode === 'list-rate-limited') return response.writeHead(429).end(JSON.stringify({ message: savedToken }));
+      if (mode === 'limited') response.setHeader('X-Next-Page', '2');
+      return response.end(JSON.stringify(mode === 'empty' ? [] : mode === 'failed-only' ? [previewDeployment(1, 'failed')]
+        : [previewDeployment(2), previewDeployment(1, 'failed')]));
+    }
+    assert.equal(path, `${list}/2/merge_requests`);
+    if (mode === 'association-denied' || mode === 'rate-limited') {
+      return response.writeHead(mode === 'association-denied' ? 403 : 429).end(JSON.stringify({ message: savedToken }));
+    }
+    response.end(JSON.stringify([{ id: 102, iid: 2, state: 'merged', target_project_id: repositoryId, title: 'synthetic internal MR' }]));
+  }, { projectFailure: () => mode === 'project-denied' ? 401 : null });
+  const f = await fixture(t, { baseUrl: remote.root, token: savedToken });
+  const { version: settingsVersion } = await f.json<GitlabSettings>(integrationPath);
+  const input = { repositoryId, expectedVersion: settingsVersion };
+  const statePaths = ['/api/workspace', integrationPath, `${integrationPath}/sync-status`, `${integrationPath}/deployments?repositoryId=${repositoryId}`, `${integrationPath}/webhook-status`];
+  const snapshot = () => Promise.all(statePaths.map(path => f.json(path)));
+  const before = await snapshot();
+
+  const run = async <T = GitlabDeploymentPreviewResult>(status = 200): Promise<T> => {
+    const response = await f.request(deploymentPreviewPath, 'POST', input);
+    const body = await response.text();
+    assert.equal(response.status, status, body);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    for (const privateValue of [savedToken, remote.root, 'synthetic internal', 'private upstream']) assert.ok(!body.includes(privateValue));
+    return JSON.parse(body) as T;
+  };
+  const complete = { repositoryId, settingsVersion, status: 'ok', deploymentsRead: 2, successfulDeployments: 1,
+    mergeRequestsRead: 1, deploymentLimitReached: false, associationUnavailable: 0, associationLimited: 0,
+    associationDenied: 0, associationRateLimited: 0 };
+  assert.deepEqual(await run(), complete);
+  mode = 'empty';
+  assert.deepEqual(await run(), { ...complete, status: 'empty', deploymentsRead: 0, successfulDeployments: 0, mergeRequestsRead: 0 });
+  mode = 'failed-only';
+  assert.deepEqual(await run(), { ...complete, deploymentsRead: 1, successfulDeployments: 0, mergeRequestsRead: 0 });
+  mode = 'association-denied';
+  assert.deepEqual(await run(), { ...complete, status: 'partial', mergeRequestsRead: 0, associationUnavailable: 1, associationDenied: 1 });
+  mode = 'rate-limited';
+  assert.deepEqual(await run(), { ...complete, status: 'partial', mergeRequestsRead: 0, associationUnavailable: 1, associationRateLimited: 1 });
+  mode = 'limited';
+  assert.deepEqual(await run(), { ...complete, status: 'partial', deploymentLimitReached: true });
+  mode = 'deployment-denied';
+  assert.deepEqual((await run<{ details: unknown }>(502)).details, {
+    stage: 'deployments', httpStatus: 403, reason: '배포 조회 중 GitLab HTTP 403 응답',
+  });
+  mode = 'list-rate-limited';
+  assert.deepEqual((await run<{ details: unknown }>(502)).details, {
+    stage: 'deployments', httpStatus: 429, reason: '배포 조회 중 GitLab HTTP 429 응답',
+  });
+  mode = 'project-denied';
+  assert.deepEqual((await run<{ details: unknown }>(502)).details, {
+    stage: 'project', httpStatus: 401, reason: '저장소 조회 중 GitLab HTTP 401 응답',
+  });
+  assert.ok(remote.requests.every(request => request.method === 'GET' && request.token === savedToken));
+  assert.equal(remote.requests.filter(request => request.path.endsWith('/merge_requests')).length, 4);
+  assert.deepEqual(await snapshot(), before);
+});
+
+test('deployment preview uses an unsaved repository at the drafted address and discards results after a connection change', async t => {
+  const savedToken = 'synthetic-saved-preview-credential', draftToken = 'synthetic-draft-preview-credential';
+  const draftRepository = 43;
+  const pending: ServerResponse[] = [];
+  const saved = await mockGitlab(t, (path, response) => {
+    assert.equal(path, deploymentListPath(repositoryId));
+    pending.push(response);
+  });
+  const draft = await mockGitlab(t, (path, response) => {
+    assert.equal(path, deploymentListPath(draftRepository));
+    response.end('[]');
+  }, { extraRepositoryIds: [draftRepository] });
+  const f = await fixture(t, { baseUrl: saved.root, token: savedToken });
+  const settings = await f.json<GitlabSettings>(integrationPath);
+  const storedInput = { repositoryId, expectedVersion: settings.version };
+  const draftInput = { repositoryId: draftRepository, expectedVersion: settings.version, baseUrl: draft.root, projectIds: [draftRepository] };
+
+  for (const [body, status] of [
+    [{ ...storedInput, repositoryId: draftRepository }, 403],
+    [{ ...draftInput, projectIds: [repositoryId] }, 403],
+    [{ ...storedInput, baseUrl: draft.root }, 400],
+    [{ ...storedInput, projectIds: [repositoryId] }, 400],
+    [{ ...storedInput, unexpected: 'x' }, 400],
+    [{ ...storedInput, repositoryId: String(repositoryId) }, 400],
+    [{ ...storedInput, expectedVersion: settings.version + 1 }, 409],
+  ] as const) {
+    assert.equal((await f.request(deploymentPreviewPath, 'POST', body)).status, status);
+  }
+  assert.equal((await f.request(`${deploymentPreviewPath}?repositoryId=42`, 'POST', storedInput)).status, 400);
+  const { projects: [project], users: [user] } = await f.json<WorkspaceSnapshot>('/api/workspace');
+  const { token: apiKey } = await f.json<{ token: string }>('/api/api-keys', 'POST', {
+    name: 'Scoped key for deployment preview guard', access: 'write', projectIds: [project.id], expiresAt: null,
+  }, { 'X-Actor-Id': user.id }, 201);
+  const keyHeader = { Authorization: `Bearer ${apiKey}` };
+  assert.equal((await f.request(deploymentPreviewPath.replace('/api/', '/api/v1/'), 'POST', storedInput, keyHeader)).status, 403);
+  assert.equal(saved.requests.length, 0);
+  assert.equal(draft.requests.length, 0);
+
+  assert.equal((await f.json<GitlabDeploymentPreviewResult>(deploymentPreviewPath, 'POST', draftInput)).status, 'empty');
+  assert.equal((await f.json<GitlabDeploymentPreviewResult>(deploymentPreviewPath, 'POST', { ...draftInput, token: draftToken })).status, 'empty');
+  assert.deepEqual(draft.requests.map(row => [row.method, row.token]), [['GET', undefined], ['GET', undefined], ['GET', draftToken], ['GET', draftToken]]);
+  assert.deepEqual(await f.json(integrationPath), settings);
+
+  let expectedVersion = settings.version;
+  for (const upstreamStatus of [200, 403]) {
+    const response = f.request(deploymentPreviewPath, 'POST', { repositoryId, expectedVersion });
+    const until = Date.now() + 5_000;
+    while (!pending.length && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    const captured = pending.shift();
+    assert.ok(captured, 'expected a pending GitLab deployment list');
+    const nextToken = `${savedToken}-${upstreamStatus}`;
+    const updated = await f.json<GitlabSettings>(integrationPath, 'PATCH', { expectedVersion, token: nextToken });
+    expectedVersion = updated.version;
+    captured.writeHead(upstreamStatus).end('[]');
+    const result = await response;
+    assert.equal(result.status, 409);
+    assert.equal((await result.json() as { details: { currentVersion: number } }).details.currentVersion, expectedVersion);
+  }
+  assert.deepEqual(saved.requests.map(row => [row.method, row.token]), [['GET', savedToken], ['GET', savedToken], ['GET', `${savedToken}-200`], ['GET', `${savedToken}-200`]]);
+  assert.equal((await f.json<GitlabDeploymentPage>(`${integrationPath}/deployments?repositoryId=${repositoryId}`)).total, 0);
+});
 
 test('authenticated deployment first, merge later, scoped ticket evidence, and native archival restore are consistent', async t => {
   const f = await fixture(t);

@@ -297,6 +297,8 @@ Jira 이관 원본에서 연결 대상과 방향을 확인한 차단 업무에�
 
 ## GitLab 배포 확인
 
+처음 연결할 때나 읽기 토큰을 바꿀 때는 **개발 · GitLab → GitLab 연결**의 **배포 조회 미리보기**를 사용합니다. 확인할 저장소를 고르면 입력 중인 연결로 조회한 배포·성공·포함 MR 건수와 일부 조회 안내를 확인할 수 있습니다. 연결 설정과 배포 기록은 각 저장·동기화 버튼으로 반영합니다.
+
 **개발 · GitLab → GitLab 배포 기록**에서 저장소를 선택해 배포 환경과 상태를 확인합니다. 티켓의 **연결된 GitLab 배포**에는 같은 저장소에서 티켓에 연결된 커밋이나 파이프라인의 SHA, 또는 MR의 확인된 병합·스쿼시 SHA와 일치하는 배포가 표시됩니다. 새 이벤트를 받은 뒤 **배포 새로고침**을 눌러 확인하고, **GitLab 작업 열기**에서 원래 배포 작업으로 이동합니다. 작업 주소가 없는 배포는 커밋 링크를 제공합니다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
 
 **배포 이력 동기화**는 선택한 저장소의 최근 배포 50건을 읽습니다. 성공한 배포에는 GitLab이 포함됐다고 확인한 MR도 기록합니다. MR이 이미 Teamspace 티켓에 연결돼 있으면, 여러 MR을 한 번에 배포한 경우에도 해당 티켓에서 같은 배포를 확인할 수 있습니다. [GitLab 배포 API](https://docs.gitlab.com/api/deployments/#list-all-merge-requests-associated-with-a-deployment)

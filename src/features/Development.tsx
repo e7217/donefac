@@ -7,6 +7,7 @@ import { api, ApiError, patch, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { GitlabDeploymentPreview } from './GitlabDeploymentPreview';
 import { RepositoryGitlabDeployments } from './GitlabDeployments';
 import { GitlabProjectWebhookPanel } from './GitlabProjectWebhookPanel';
 import { GitlabRepositoryPicker } from './GitlabRepositoryPicker';
@@ -63,6 +64,7 @@ export function Development(props:FeatureProps){
   const [syncRead, setSyncRead] = useState<SyncStatusRead | null>(null);
   const [jiraSources, setJiraSources] = useState<JiraSources>({ items: [], loading: true, error: '' });
   const [repositorySearchRevision, setRepositorySearchRevision] = useState(0);
+  const [deploymentPreviewRevision, setDeploymentPreviewRevision] = useState(0);
   const previewRequest = useRef<AbortController | null>(null);
   const syncStatusRequest = useRef<AbortController | null>(null);
   const syncStatusVersion = useRef<number | null>(null);
@@ -80,6 +82,7 @@ export function Development(props:FeatureProps){
     setPreview(null);
   }, []);
   const clearRepositorySearch = useCallback(() => setRepositorySearchRevision(value => value + 1), []);
+  const clearDeploymentPreview = useCallback(() => setDeploymentPreviewRevision(value => value + 1), []);
   const readSyncStatus = useCallback(async (version: number): Promise<GitlabSyncStatus | null> => {
     if (!alive.current || syncStatusVersion.current !== version) return null;
     syncStatusRequest.current?.abort();
@@ -110,6 +113,7 @@ export function Development(props:FeatureProps){
   const accept=useCallback((value:GitlabSettings)=>{
     clearPreview();
     clearRepositorySearch();
+    clearDeploymentPreview();
     setSettings(value);
     const next = draftOf(value);
     setDraft(next);
@@ -123,7 +127,7 @@ export function Development(props:FeatureProps){
       syncStatusRequest.current = null;
       setSyncRead(null);
     }
-  },[clearPreview,clearRepositorySearch,readSyncStatus]);
+  },[clearPreview,clearRepositorySearch,clearDeploymentPreview,readSyncStatus]);
   useEffect(()=>{
     alive.current=true;
     let cancelled=false;
@@ -155,14 +159,15 @@ export function Development(props:FeatureProps){
     return () => { window.clearTimeout(scheduled); jiraSourcesRequest.current?.abort(); };
   }, [loadJiraSources]);
   useEffect(()=>{
-    const guard=(event:Event)=>{if(event.defaultPrevented)return;if(pending.current){event.preventDefault();notify('GitLab 요청이 끝난 뒤 이동해 주세요.','error');}else if(dirtyRef.current){if(!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?'))event.preventDefault();else afterAcceptedNavigation(event,()=>{clearPreview();clearRepositorySearch();setDraft(baseline);dirtyRef.current=false;setError('');});}};
+    const guard=(event:Event)=>{if(event.defaultPrevented)return;if(pending.current){event.preventDefault();notify('GitLab 요청이 끝난 뒤 이동해 주세요.','error');}else if(dirtyRef.current){if(!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?'))event.preventDefault();else afterAcceptedNavigation(event,()=>{clearPreview();clearRepositorySearch();clearDeploymentPreview();setDraft(baseline);dirtyRef.current=false;setError('');});}};
     const unload=(event:BeforeUnloadEvent)=>{if(pending.current||dirtyRef.current){event.preventDefault();event.returnValue='';}};
     window.addEventListener('teamspace:navigate',guard);window.addEventListener('beforeunload',unload);
     return()=>{window.removeEventListener('teamspace:navigate',guard);window.removeEventListener('beforeunload',unload);};
-  },[baseline,clearPreview,clearRepositorySearch,notify]);
+  },[baseline,clearPreview,clearRepositorySearch,clearDeploymentPreview,notify]);
   function edit<K extends keyof Draft>(key: K, value: Draft[K]) {
     clearPreview();
     if (key === 'baseUrl' || key === 'token') clearRepositorySearch();
+    if (key === 'baseUrl' || key === 'token' || key === 'ids') clearDeploymentPreview();
     setDraft(previous => {
       const next = { ...previous, [key]: value };
       if (key === 'baseUrl' && normalizedAddress(next.baseUrl) !== normalizedAddress(previous.baseUrl)) next.jiraRoutes = [];
@@ -280,6 +285,8 @@ export function Development(props:FeatureProps){
         <p className="help-text" id="gitlab-history-help">미리보기와 지금 동기화에 적용합니다. 저장소별로 브랜치 최대 500개와 최근 커밋 최대 100개를 읽습니다.</p>
       </div>
       <div className="data-actions"><button className="btn btn-primary" disabled={!dirty}>연결 설정 저장</button><button type="button" className="btn" disabled={!draft.baseUrl.trim() || !draft.ids.trim() || preview?.state === 'loading'} onClick={() => void requestPreview()}><Search size={15} aria-hidden="true"/>연결 미리보기</button>{(settings?.tokenConfigured||settings?.webhookSecretConfigured||settings?.signingTokenConfigured)&&<button className="btn btn-ghost" type="button" onClick={disconnect}>연결 해제</button>}</div>
+      {settings && <GitlabDeploymentPreview actorId={props.actorId} settingsVersion={settings.version} draftRevision={deploymentPreviewRevision}
+        baseUrl={draft.baseUrl} token={draft.token} projectIds={repositoryIds} />}
     </fieldset>{legacySyncFallback&&settings?.lastSyncAt&&<p className="help-text">마지막 동기화: {new Date(settings.lastSyncAt).toLocaleString('ko-KR')}</p>}{legacySyncFallback&&settings?.lastError&&<p className="error-text">{settings.lastError}</p>}
     </form>
     {preview && <GitlabPreview preview={preview} projects={props.data.projects} openIssue={props.openIssue}/>}

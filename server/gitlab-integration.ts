@@ -17,7 +17,7 @@ import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-bran
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
-import type { GitlabDeployment, GitlabDeploymentSyncResult, GitlabSyncStatus } from '../shared/types.js';
+import type { GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabSyncStatus } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -28,6 +28,12 @@ function failGitlabWorkflowRead(error: GitlabReadError): never {
     : error.httpStatus === 401 || error.httpStatus === 403 ? 403
     : error.httpStatus === 404 || error.httpStatus === 429 ? error.httpStatus : 502;
   return fail(error.message, status);
+}
+function failGitlabDeploymentRead(error: GitlabReadError): never {
+  const denied = error.httpStatus === 401 || error.httpStatus === 403;
+  const message = denied ? 'GitLab 배포 이력을 읽을 수 없습니다. 읽기 토큰과 접근 권한을 확인해 주세요.'
+    : 'GitLab 배포 이력을 읽지 못했습니다. 저장소 주소와 연결 상태를 확인해 주세요.';
+  return fail(message, 502, { stage: error.stage, httpStatus: error.httpStatus, reason: error.message });
 }
 type Obj=Record<string,unknown>;
 type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
@@ -1508,6 +1514,45 @@ export class GitlabIntegrationService{
     return reads;
   }
 
+  async previewDeployments(value: unknown, signal?: AbortSignal): Promise<GitlabDeploymentPreviewResult> {
+    const input = record(value);
+    if (Object.keys(input).some(key => !['repositoryId', 'expectedVersion', 'baseUrl', 'projectIds', 'token'].includes(key)) ||
+        !Object.hasOwn(input, 'expectedVersion') || !Object.hasOwn(input, 'repositoryId')) {
+      return fail('GitLab 배포 조회 미리보기 요청을 확인해 주세요.');
+    }
+    const saved = this.raw();
+    assertSettingsVersion(input.expectedVersion, saved.version);
+    const { repositoryId } = input;
+    if (typeof repositoryId !== 'number' || !Number.isSafeInteger(repositoryId) || repositoryId < 1) {
+      return fail('배포 이력을 읽을 GitLab 저장소를 선택해 주세요.');
+    }
+    const draft = Object.hasOwn(input, 'baseUrl');
+    if (draft !== Object.hasOwn(input, 'projectIds')) return fail('미리 볼 GitLab 주소와 저장소 ID를 함께 입력해 주세요.');
+    const address = draft ? baseUrl(input.baseUrl) : saved.baseUrl;
+    const allowed = draft ? projectIds(input.projectIds) : saved.projectIds;
+    if (draft && !address) return fail('미리 볼 GitLab 주소를 입력해 주세요.');
+    if (!address || !allowed.includes(repositoryId)) {
+      return fail(draft ? '입력한 GitLab 저장소를 선택해 주세요.' : '저장된 GitLab 저장소를 선택해 주세요.', 403);
+    }
+
+    const token = this.draftReadToken(input, address, saved);
+    const history = await readGitlabDeploymentHistory({ baseUrl: address, token }, repositoryId, signal).finally(() => {
+      signal?.throwIfAborted();
+      assertSettingsVersion(saved.version, this.raw().version);
+    }).catch(error => {
+      if (error instanceof GitlabReadError) return failGitlabDeploymentRead(error);
+      throw error;
+    });
+    const { deployments, scanned: deploymentsRead, deploymentLimitReached, associationUnavailable,
+      associationLimited, associationDenied, associationRateLimited } = history;
+    const successfulDeployments = deployments.filter(deployment => deployment.status === 'success').length;
+    const mergeRequestsRead = deployments.reduce((sum, deployment) => sum + (deployment.mergeRequests?.length ?? 0), 0);
+    const partial = deploymentLimitReached || associationUnavailable > 0 || associationLimited > 0;
+    return { repositoryId, settingsVersion: saved.version, status: partial ? 'partial' : deploymentsRead ? 'ok' : 'empty',
+      deploymentsRead, successfulDeployments, mergeRequestsRead, deploymentLimitReached,
+      associationUnavailable, associationLimited, associationDenied, associationRateLimited };
+  }
+
   async syncDeployments(value: unknown, signal?: AbortSignal, afterSave?: (result: GitlabDeploymentSyncResult) => void): Promise<GitlabDeploymentSyncResult> {
     const input = record(value);
     if (Object.keys(input).length !== 2 || !Object.hasOwn(input, 'repositoryId') || !Object.hasOwn(input, 'expectedVersion')) {
@@ -1555,10 +1600,7 @@ export class GitlabIntegrationService{
           this.syncAttempts.deployments(repositoryId, sequence, now(), { status: 'error', result: null,
             error: { stage, httpStatus: error.httpStatus, message: error.message } });
         });
-        const denied = error.httpStatus === 401 || error.httpStatus === 403;
-        const message = denied ? 'GitLab 배포 이력을 읽을 수 없습니다. 읽기 토큰과 접근 권한을 확인해 주세요.'
-          : 'GitLab 배포 이력을 읽지 못했습니다. 저장소 주소와 연결 상태를 확인해 주세요.';
-        return fail(message, 502, { stage: error.stage, httpStatus: error.httpStatus, reason: error.message });
+        return failGitlabDeploymentRead(error);
       }
       if (saving) this.store.transaction(() => {
         this.currentForSync(saved.version);
@@ -1694,6 +1736,19 @@ export class GitlabIntegrationService{
       if(!repositoryId)fail('배포를 조회할 GitLab 저장소를 선택해 주세요.');
       if(!settings.projectIds.includes(repositoryId))fail('저장된 GitLab 저장소를 선택해 주세요.',403);
       res.set('Cache-Control','no-store').json(this.deployments.repositoryPage(this.instance(settings),repositoryId,deploymentOffset(req)));
+    });
+    app.post('/api/integrations/gitlab/deployments/preview', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      hooks.actor(req);
+      if (Object.keys(req.query).length) fail('GitLab 배포 조회 미리보기 조건을 확인해 주세요.');
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.previewDeployments(req.body, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
     });
     app.post('/api/integrations/gitlab/deployments/sync', async (req, res) => {
       hooks.actor(req);

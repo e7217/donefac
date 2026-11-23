@@ -16,6 +16,17 @@
 .gitlab-history-option p,.gitlab-history-result p{margin:4px 0 0}
 .gitlab-history-result{margin-top:10px;color:#375649;font-size:14px}
 .gitlab-history-limits{color:#71542a}
+.gitlab-deployment-preview{min-width:0;border-top:1px solid #dae8e1;padding-top:12px}
+.gitlab-deployment-preview p{margin:0;overflow-wrap:anywhere}
+.gitlab-deployment-preview-controls{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin-top:8px}
+.gitlab-deployment-preview-controls label{flex:1 1 150px}
+.gitlab-deployment-preview-controls select{width:100%;min-width:0}
+.gitlab-deployment-preview-result{margin-top:10px;padding:9px 11px;border:1px solid #dae8e1;border-radius:6px;background:#f9fbfa;color:#375649;font-size:14px}
+.gitlab-deployment-preview-result h3{margin:0 0 3px;color:#274c3c;font-size:14px}
+.gitlab-deployment-preview-counts{display:flex;flex-wrap:wrap;gap:4px 14px;margin:7px 0}
+.gitlab-deployment-preview-counts>div{display:flex;align-items:baseline;gap:5px}
+.gitlab-deployment-preview-counts dd{margin:0;font-weight:600;font-variant-numeric:tabular-nums}
+.gitlab-deployment-preview-result ul{margin:5px 0 0;padding-inline-start:1.2em;color:#71542a}
 .gitlab-preview,.gitlab-sync-result,.gitlab-webhook-status{grid-column:1/-1;padding:20px;color:#375649;font-size:14px;line-height:1.6}
 .gitlab-webhook-status-heading{flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .gitlab-webhook-status>.gitlab-webhook-repositories{margin-top:12px;align-items:start}
@@ -80,4 +91,5 @@
   .gitlab-preview-candidates li{align-items:flex-start;flex-direction:column}
   .gitlab-preview-target{justify-content:flex-start}
   .gitlab-jira-route{grid-template-columns:minmax(0,1fr)}
+  .gitlab-deployment-preview-controls .btn,.gitlab-deployment-preview-controls select{min-height:44px}
 }

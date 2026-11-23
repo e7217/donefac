@@ -469,6 +469,8 @@ async function verifyGitlabMessageCorrelation(session, anonymous, origin) {
   const integration = '/api/integrations/gitlab';
   const webhook = `${integration}/webhook`;
   const history = `${integration}/project-webhook-history`;
+  const repository = '/api/v4/projects/42';
+  const deploymentReads = [];
   const receiver = origin + webhook;
   const webhookId = randomUUID();
   const proxyOnly = randomUUID();
@@ -480,12 +482,20 @@ async function verifyGitlabMessageCorrelation(session, anonymous, origin) {
       response.writeHead(403).end();
       return;
     }
-    if (path === '/api/v4/projects/42/hooks') {
+    if (path === repository) {
+      deploymentReads.push(path);
+      response.setHeader('Content-Type', 'application/json').end(JSON.stringify({
+        id: 42, path_with_namespace: 'team/pilot', web_url: `http://127.0.0.1:${source.address().port}/team/pilot`,
+      }));
+    } else if (path === `${repository}/deployments`) {
+      deploymentReads.push(path);
+      response.setHeader('Content-Type', 'application/json').end('[]');
+    } else if (path === `${repository}/hooks`) {
       response.setHeader('Content-Type', 'application/json').end(JSON.stringify([{
         id: 17, project_id: 42, url: receiver, push_events: true, merge_requests_events: true,
         pipeline_events: true, deployment_events: true, enable_ssl_verification: true, alert_status: 'executable',
       }]));
-    } else if (path === '/api/v4/projects/42/hooks/17/events') {
+    } else if (path === `${repository}/hooks/17/events`) {
       response.setHeader('Content-Type', 'application/json').end(JSON.stringify([
         { id: 10, url: receiver, trigger: 'push_hooks', response_status: 200, request_headers: { 'webhook-id': proxyOnly } },
         { id: 11, url: receiver, trigger: 'push_hooks', response_status: 502, request_headers: { 'webhook-id': webhookId } },
@@ -509,6 +519,25 @@ async function verifyGitlabMessageCorrelation(session, anonymous, origin) {
     const { attempts, localReceipt } = JSON.parse(raw);
     assert.deepEqual(attempts.map(({ status, messageReceipt }) => [status, messageReceipt.status]), [[200, 'unconfirmed'], [502, 'matched']]);
     assert.deepEqual(attempts[1].messageReceipt.delivery, localReceipt);
+
+    const preview = `${integration}/deployments/preview`;
+    const previewData = { expectedVersion: saved.version, repositoryId: 42 };
+    const savedDeployments = () => Promise.all([`${integration}/deployments?repositoryId=42`, `${integration}/sync-status`]
+      .map(async path => (await call(session, 'GET', path, 200)).json()));
+    const before = await savedDeployments();
+    await call(anonymous, 'POST', preview, 401, { headers: { Origin: origin }, data: previewData });
+    await call(session, 'POST', preview, 403, { data: previewData });
+    assert.deepEqual(deploymentReads, []);
+
+    const previewResponse = await call(session, 'POST', preview, 200, { headers: { Origin: origin }, data: previewData });
+    assert.equal(previewResponse.headers()['cache-control'], 'no-store');
+    const previewBody = await previewResponse.text();
+    checkCredentials(previewBody, 'GitLab deployment preview');
+    assert.deepEqual(JSON.parse(previewBody), { repositoryId: 42, settingsVersion: saved.version, status: 'empty', deploymentsRead: 0,
+      successfulDeployments: 0, mergeRequestsRead: 0, deploymentLimitReached: false, associationUnavailable: 0, associationLimited: 0,
+      associationDenied: 0, associationRateLimited: 0 });
+    assert.deepEqual(deploymentReads, [repository, `${repository}/deployments`]);
+    assert.deepEqual(await savedDeployments(), before);
   } finally {
     await new Promise((resolve, reject) => {
       source.close(error => error ? reject(error) : resolve());

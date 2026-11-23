@@ -14,7 +14,13 @@ const states: ReadonlySet<unknown> = new Set(GITLAB_DEPLOYMENT_STATES);
 type Connection = { baseUrl: string; token?: string | null };
 type Deployment = Omit<GitlabDeployment, 'instance'>;
 type Reader = ReturnType<typeof createGitlabDeploymentReader>;
-type AssociationResult = { mergeRequests: GitlabDeploymentMergeRequest[]; unavailable: boolean; limited: boolean; rateLimited: boolean };
+type AssociationResult = {
+  mergeRequests: GitlabDeploymentMergeRequest[];
+  unavailable: boolean;
+  limited: boolean;
+  denied: boolean;
+  rateLimited: boolean;
+};
 
 export interface GitlabDeploymentHistory {
   deployments: Deployment[];
@@ -22,6 +28,8 @@ export interface GitlabDeploymentHistory {
   deploymentLimitReached: boolean;
   associationUnavailable: number;
   associationLimited: number;
+  associationDenied: number;
+  associationRateLimited: number;
 }
 
 function positiveId(value: unknown): value is number {
@@ -103,6 +111,7 @@ async function associatedMergeRequests(reader: Reader, deployment: Deployment, s
   const pairs: GitlabDeploymentMergeRequest[] = [];
   let unavailable = false;
   let more = false;
+  let denied = false;
   let rateLimited = false;
   for (let page = 1; page <= MERGE_REQUEST_PAGE_LIMIT; page++) {
     try {
@@ -118,12 +127,15 @@ async function associatedMergeRequests(reader: Reader, deployment: Deployment, s
       parentSignal?.throwIfAborted();
       unavailable = true;
       more = false;
-      rateLimited = error instanceof GitlabReadError && error.httpStatus === 429;
+      if (error instanceof GitlabReadError) {
+        denied = error.httpStatus === 401 || error.httpStatus === 403;
+        rateLimited = error.httpStatus === 429;
+      }
       break;
     }
   }
   const { mergeRequests, ambiguous } = uniqueMergeRequests(pairs);
-  return { mergeRequests, unavailable: unavailable || ambiguous, limited: more, rateLimited };
+  return { mergeRequests, unavailable: unavailable || ambiguous, limited: more, denied, rateLimited };
 }
 
 export async function readGitlabDeploymentHistory(connection: Connection, repositoryId: number, parentSignal?: AbortSignal): Promise<GitlabDeploymentHistory> {
@@ -142,12 +154,12 @@ export async function readGitlabDeploymentHistory(connection: Connection, reposi
   }
 
   const successful = deployments.filter(deployment => deployment.status === 'success');
-  let next = 0, associationUnavailable = 0, associationLimited = 0, rateLimited = false;
+  let next = 0, associationUnavailable = 0, associationLimited = 0, associationDenied = 0, associationRateLimited = 0;
   async function readAssociations() {
     while (next < successful.length) {
       parentSignal?.throwIfAborted();
       const deployment = successful[next++];
-      if (rateLimited || signal.aborted) {
+      if (associationRateLimited > 0 || signal.aborted) {
         associationUnavailable++;
         continue;
       }
@@ -155,10 +167,12 @@ export async function readGitlabDeploymentHistory(connection: Connection, reposi
       if (result.mergeRequests.length) deployment.mergeRequests = result.mergeRequests;
       if (result.unavailable) associationUnavailable++;
       if (result.limited) associationLimited++;
-      if (result.rateLimited) rateLimited = true;
+      if (result.denied) associationDenied++;
+      if (result.rateLimited) associationRateLimited++;
     }
   }
   await Promise.all(Array.from({ length: Math.min(MERGE_REQUEST_CONCURRENCY, successful.length) }, readAssociations));
   parentSignal?.throwIfAborted();
-  return { deployments, scanned: rows.length, deploymentLimitReached, associationUnavailable, associationLimited };
+  return { deployments, scanned: rows.length, deploymentLimitReached, associationUnavailable, associationLimited,
+    associationDenied, associationRateLimited };
 }
