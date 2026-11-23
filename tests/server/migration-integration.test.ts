@@ -366,11 +366,16 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   previous.schemaVersion = 38;
   for (const receipt of previous.sourceImports) delete receipt.integrity;
   for (const record of previous.sourceRecords) delete record.jiraIssueFieldHashes;
+  const oldTicket = previous.issues.find(issue => issue.key === 'SYNC-1');
+  assert.ok(oldTicket);
+  // Older REST imports retained duedate in the source archive and stored an empty canonical deadline.
+  oldTicket.dueDate = null;
   const upgraded = await f.call('/import', 'POST', { data: previous });
   assert.equal(upgraded.status, 200, JSON.stringify(upgraded.data));
   const snapshot = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
   const currentTicket = async (key: string) => (await snapshot()).issues.find(ticket => ticket.key === key)!;
   const ticket = await currentTicket('SYNC-1');
+  assert.equal(ticket.dueDate, null);
   const local = await f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', {
     expectedVersion: ticket.version, title: '팀이 수정한 제목', description: '팀이 수정한 본문',
   });

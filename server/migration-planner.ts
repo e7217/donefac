@@ -50,6 +50,12 @@ type JiraScheduleEndpoint = typeof jiraScheduleEndpoints[number];
 const jiraScheduleLabels = { startDate: '시작일', endDate: '종료일' } satisfies Record<JiraScheduleEndpoint, string>;
 const projectedJiraDate = (row: LegacyRecord, field: JiraScheduleEndpoint): unknown => object(row.metadata.jiraProjectedDates)[field];
 function sourceField(row:LegacyRecord,...names:string[]):unknown{const fields=fieldMap(row);const name=Object.keys(fields).find(name=>names.some(candidate=>normalizedName(name)===normalizedName(candidate)));return name===undefined?undefined:fields[name];}
+function recognizedJiraPriority(label: string): Issue['priority'] | null {
+  if (/urgent|highest|blocker|긴급/i.test(label)) return 'urgent';
+  if (/high|critical|높음/i.test(label)) return 'high';
+  if (/low|minor|trivial|낮음/i.test(label)) return 'low';
+  return /^(?:medium|normal|major|보통|중간)$/i.test(label.trim()) ? 'medium' : null;
+}
 function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
   const raw = scalar(sourceField(row, kind, kind === 'issuetype' ? 'type' : 'status') ?? row.metadata[kind]);
   const item = object(raw);
@@ -616,7 +622,10 @@ class Planner{
         values.type = configuration.issueTypes[typeOption] || importedIssueTypeId(source, sourceType);
       }
     }
-    values.priority = this.priority(sourceField(record, 'priority'));
+    // Receipts without an accepted value predate administrator option lookup during creation.
+    const oldPriority = scalar(sourceField(record, 'priority'));
+    const oldPriorityLabel = string(object(oldPriority).name || object(oldPriority).text || oldPriority);
+    values.priority = recognizedJiraPriority(oldPriorityLabel) ?? 'medium';
     const assignee = jiraAssignee(record);
     values.assigneeId = assignee ? configuration.users[optionId(stagingId, 'identity', assignee)] ?? null : null;
     const labels = sourceField(record, 'labels') ?? record.metadata.labels;
@@ -697,17 +706,9 @@ class Planner{
       if (id && (previous || schema.issueTypes.some(issueType => issueType.id === id && !issueType.archived))) values.type = id;
       else unavailable('업무 유형');
     }
-    const rawPriority = scalar(sourceField(row, 'priority'));
-    if (rawPriority !== undefined && rawPriority !== null && rawPriority !== '') {
-      const item = object(rawPriority);
-      const optionId = `builtin:priority:${string(item.id || rawPriority)}`;
-      const title = previous ? previous.priorityOption?.sourceId === optionId && previous.priorityOption.title
-        : this.sourceEntry(entry, 'option', optionId)?.row.title;
-      const label = string(item.name || item.text || title || rawPriority);
-      const priority = this.priority(label);
-      if (priority !== 'medium' || /^(?:medium|normal|major|보통|중간)$/i.test(label.trim())) values.priority = priority;
-      else unavailable('우선순위');
-    }
+    const priority = this.jiraPriorityValue(entry, previous);
+    if (priority === null) unavailable('우선순위');
+    else if (priority !== undefined) values.priority = priority;
     const sourceAssignee = jiraAssignee(row);
     if (sourceAssignee) {
       const mapped = mappedIdentity(sourceAssignee);
@@ -1847,6 +1848,8 @@ class Planner{
           continue;
         }
         issueNumbers.set(project.id, number);
+        const priority = this.jiraPriorityValue(entry);
+        if (priority === null) this.notice('JIRA_PRIORITY_UNRESOLVED', '원본 우선순위를 확인할 수 없어 보통으로 이관합니다. 원본 값은 보존합니다.', 'warning', entry, true);
         const assigneeRef=row.references.find(reference=>reference.kind==='identity'&&reference.relation==='assignee'),assigneeSource=assigneeRef?.sourceId||string(scalar(sourceField(row,'assignee'))),mappedAssignee=assigneeSource?this.configuration.users[optionId(entry.pkg.summary.id,'identity',assigneeSource)]:null;
         const reporter = jiraReporter(row);
         const reporterId = typeof reporter === 'string' ? this.mappedAuthor(entry, reporter) ?? undefined : reporter;
@@ -1856,7 +1859,7 @@ class Planner{
         const due = this.issueDate(jiraCalendarValue(row, 'dueDate'), entry);
         if (start && end && start > end) this.notice('ISSUE_DATE_RANGE','시작일이 종료일보다 늦습니다.','error',entry);
         const rawEstimate=sourceField(row,'estimate'),estimate=rawEstimate===undefined||rawEstimate===null||rawEstimate===''?null:Number(rawEstimate);if(estimate!==null&&(!Number.isFinite(estimate)||estimate<0||estimate>100000))this.notice('ESTIMATE_ARCHIVED','예상 작업량의 단위/범위를 현재 숫자로 옮기지 않고 원본으로 보관합니다.','warning',entry,true);
-        const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:this.priority(sourceField(row,'priority')),assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
+        const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:priority??'medium',assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
         if (reporterId !== undefined) issue.reporterId = reporterId;
         if (mapping) this.mapAppendFields(entry, issue, schema, mapping.fields);
         else this.mapNewIssueFields(entry, issue, schema);
@@ -2101,7 +2104,24 @@ class Planner{
     return date || null;
   }
   issueDate(value:unknown,entry:Entry):string|null{value=scalar(value);if(value===undefined||value===null||value==='')return null;const raw=string(value);if(isCalendarDate(raw))return raw;const timestamp=this.time(raw,entry,false);if(!timestamp)return null;const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:this.timezoneValid?this.configuration.timezone:'UTC',year:'numeric',month:'2-digit',day:'2-digit'}),parts=Object.fromEntries(formatter.formatToParts(new Date(timestamp)).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));return`${parts.year}-${parts.month}-${parts.day}`;}
-  priority(value:unknown):Issue['priority']{value=scalar(value);const label=string(object(value).name||object(value).text||value);if(/urgent|highest|blocker|긴급/i.test(label))return'urgent';if(/high|critical|높음/i.test(label))return'high';if(/low|minor|trivial|낮음/i.test(label))return'low';return'medium';}
+  private jiraPriorityValue(entry: Entry, previous?: MigrationJiraRefreshCandidate['previous']): Issue['priority'] | null | undefined {
+    const row = previous?.archive.record ?? entry.row;
+    if (row.metadata.jiraPriorityAmbiguous === true) return null;
+    const raw = scalar(sourceField(row, 'priority'));
+    if (raw === undefined || raw === null || raw === '') return;
+    const value = object(raw);
+    const label = string(value.name || value.text);
+    if (label) return recognizedJiraPriority(label);
+    const optionId = `builtin:priority:${string(value.id || raw)}`;
+    if (previous) {
+      const option = previous.priorityOption?.sourceId === optionId ? previous.priorityOption : undefined;
+      return option?.ambiguous ? null : recognizedJiraPriority(option?.title || string(raw));
+    }
+    const boundOption = row.references.some(ref => ref.kind === 'option' && ref.relation === 'priority' && ref.sourceId === optionId);
+    const option = boundOption ? this.sourceEntry(entry, 'option', optionId) : undefined;
+    if (option?.row.metadata.jiraPriorityAmbiguous === true || option && this.excluded.has(option.key)) return null;
+    return recognizedJiraPriority(option?.row.title || string(raw));
+  }
   convertField(entry: Entry, sourceId: string, definition: CustomFieldDefinition, input: unknown): CustomFieldValue;
   convertField(entry: Entry, sourceId: string, definition: CustomFieldDefinition, input: unknown,
     refresh: JiraCustomFieldConversion): CustomFieldValue | undefined;

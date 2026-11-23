@@ -827,6 +827,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
 | `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
 | `GET /api/issues/:id/jira-status-history?offset=0&limit=50` | 현재 티켓의 이관된 Jira 상태 변경과 각 변경의 원본 기록 ID |
+| `GET` · `POST /api/issues/:id/jira-deadline-recovery` | 현재 티켓의 보존 Jira 마감일 검토와 확인한 날짜 복구 |
 | `GET /api/issues/:id/relations` | 이관한 관계와 팀에서 직접 만든 업무 관계 |
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
@@ -862,6 +863,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 `counts.issues`는 새 업무 수, `retainedIssues`와 `retainedRecords`는 이전 이관으로 이미 처리해 원본으로 보관하는 업무와 관련 기록 수다. 휴지통이나 영구 삭제한 업무의 원본 ID도 중복 생성 방지에 사용한다. 새 업무는 현재 연결 가능한 부모나 관계를 참조할 수 있다. 적용은 대상의 설정 버전, 다음 업무 번호와 원본 연결을 다시 확인한다. 형식 37 자체 백업은 추가 이관의 대상과 매핑을 보존한다.
 
+새 업무의 Jira 관리자 XML 숫자 우선순위는 보존한 같은 패키지의 옵션 이름과 연결을 확인한다. 명시한 값의 이름을 확인하거나 구분할 수 없으면 미리보기에 `JIRA_PRIORITY_UNRESOLVED`를 보여 주고 확인을 받아 보통으로 저장한다. 원본 값은 영수증에 보존한다.
+
 ### 이미 이관한 Jira 업무에 원본 변경분 반영
 
 위 설정에 `appendTo.refreshExisting: true`를 지정하면 같은 프로젝트에 연결된 기존 티켓도 검토한다. 새 패키지의 실제 수정 시각이 직전 원본 기록보다 늦을 때 제목·설명·유형·상태·우선순위·담당자·요청자·라벨·시작일·종료일·마감일·예상 작업량·상위 업무 중 확인 가능한 값을 비교한다. 원본에서 생략한 필드나 Teamspace에서 별도로 편집한 필드는 현재 값이 유지된다. 사용자·상태·유형을 반영할 때는 검토한 매핑을 사용한다.
@@ -871,6 +874,14 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 충돌한 필드의 원본 값이 더 새로운 내보내기에 그대로 들어 있어도 현재 값과 마지막 반영 값을 다시 비교한다. 형식 98 백업은 마지막으로 반영한 기본 필드의 원본 검증값을 함께 보존한다.
 
 `issueRefresh[].fields`의 `parentId`는 두 상위 업무의 키와 제목 또는 최상위를 표시한다. 상위 업무가 확인되는 REST·검색 CSV·RSS XML·관리자 XML 자료를 사용한다. 최상위 이동은 REST `fields.parent`에 명시한 `null`을 사용한다. 생략한 필드나 모호한 연결은 현재 값을 보존한다. 같은 원본 프로젝트에서 확인한 기존 업무 또는 이번 적용에서 생성할 업무로 이동할 수 있다. 최종 트리의 순환과 관련 업무의 버전을 확인한다. 형식 100 백업은 상위 업무 비교 기준을 보존한다.
+
+### 보존 원본의 Jira 마감일 복구
+
+브라우저의 `GET /api/issues/:id/jira-deadline-recovery`는 `{review}`를 반환한다. 최초 이관된 Jira REST 업무와 `YYYY-MM-DD` 원본 마감일, 당시 비어 있던 저장 기준을 확인한다. 후속 이관에서 업무를 갱신하지 않고 보관한 원본도 같은 Jira 인스턴스·프로젝트·업무를 확인해 비교한다. 다른 원본 근거와 모순되거나 대상 연결이 불명확하면 `review`는 `null`이다. 비교에는 관련 원본 200개와 메타데이터 4MiB까지 사용한다.
+
+검토에는 `sourceImportId`, `sourceRecordId`, `sourceKey`, `sourceDueDate`, `currentDueDate`, `issueVersion`, `status`, `revision`이 들어 있다. `ready`는 현재 값이 비어 있고 해당 마감일에 후속 수정 이력이 없음을 확인한 경우다. `current-value`는 저장한 날짜가 있는 경우다. `local-change`는 마감일을 편집한 이력이 있었던 경우다. `history-unverified`는 마감일 편집 유무를 확인할 수 없는 경우다.
+
+`POST /api/issues/:id/jira-deadline-recovery`에 `ready` 상태의 `{revision}`을 보낸다. 같은 트랜잭션에서 원본과 티켓 버전을 다시 대조하고, 일치하면 업무의 목표 마감일과 일반 업무 변경 이력을 저장한다. 응답은 `{issue}`다. 확인 상태가 바뀌면 `409`를 반환한다. 응답을 받지 못하면 다시 조회해 현재 날짜와 원본을 확인할 수 있다.
 
 ### 이미 이관한 Jira 업무에 사용자 정의 필드 변경분 반영
 

@@ -451,6 +451,9 @@ export class SourcePreservationService {
         ON source_records(source_instance,kind,source_id) WHERE product='confluence';
       CREATE INDEX IF NOT EXISTS source_records_jira_history
         ON source_records(source_instance,kind,source_id) WHERE product='jira';
+      CREATE INDEX IF NOT EXISTS source_records_jira_unbound_issue_key
+        ON source_records(source_instance,json_extract(json,'$.record.metadata.key'))
+        WHERE product='jira' AND kind='issue' AND target_type IS NULL AND target_id IS NULL;
       CREATE INDEX IF NOT EXISTS source_records_jira_relation
         ON source_records(json_extract(json,'$.jiraRelationId'))
         WHERE product='jira' AND kind='relation' AND json_valid(json) AND json_type(json,'$.jiraRelationId')='text';

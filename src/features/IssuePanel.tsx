@@ -15,6 +15,7 @@ import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
+import { JiraDeadlineRecovery } from './JiraDeadlineRecovery';
 import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
@@ -256,6 +257,12 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [trackLinkedDocumentDraft]);
   const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
+  const [jiraDeadlinePending, setJiraDeadlinePending] = useState(false);
+  const jiraDeadlinePendingRef = useRef(false);
+  const trackJiraDeadlinePending = useCallback((pending: boolean) => {
+    jiraDeadlinePendingRef.current = pending;
+    setJiraDeadlinePending(pending);
+  }, []);
   // Restore focus after the nested dialog is removed and the ticket becomes interactive.
   useLayoutEffect(() => {
     if (dependencyBusy || nestedModalOpen || previewDocumentId || !scheduleReturnFocus.current) return;
@@ -297,6 +304,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, []);
   const switchTab = useCallback((next: typeof tab) => {
     if (next === tab) return true;
+    if (jiraDeadlinePendingRef.current) { notify('마감일 복구 확인이 끝난 뒤 이동해 주세요.', 'error'); return false; }
     if (isCommentEditPending()) { notify('댓글 수정 요청이 끝난 뒤 이동해 주세요.', 'error'); return false; }
     const editingReservations = tab === 'reservations';
     const drafts = [childDraft.current, gitlabDraft.current];
@@ -363,7 +371,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       const documentGuard = linkedDocumentGuard.current;
       if (savingRef.current || commentingRef.current || linkingRef.current || isCommentEditPending() ||
           childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending ||
-          projectMoveGuard.current.pending || documentGuard.pending) {
+          projectMoveGuard.current.pending || documentGuard.pending || jiraDeadlinePendingRef.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
@@ -402,7 +410,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !commentingRef.current && !linkingRef.current &&
+      if (!dirtyRef.current && !savingRef.current && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
           !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
           !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
           !linkedDocumentGuard.current.dirty && !linkedDocumentGuard.current.pending && !linkedDocumentGuard.current.uncertain) return;
@@ -486,7 +494,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         event.preventDefault();
         event.stopPropagation();
       }
-      if (!saving && !dependencyBusyRef.current) closePanel();
+      if (!saving && !dependencyBusyRef.current && !jiraDeadlinePendingRef.current) closePanel();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
@@ -544,9 +552,12 @@ function IssuePanelContent(props: IssuePanelProps) {
     setRowScheduleEdit({ issue: savedRelationIssue, initialDates,
       initialDateDraft: Object.keys(initialDates).length ? baseDraft : undefined });
   }
-  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean, reviewedAnchorVersion?: number) {
+  async function reflectIssueSchedule(anchorVersion: number | null, keepDateDraft: boolean) {
     await refresh();
-    setScheduleReflection({ anchorVersion: result.updated.find(value => value.id === issueId)?.version ?? reviewedAnchorVersion ?? null, keepDateDraft });
+    setScheduleReflection({ anchorVersion, keepDateDraft });
+  }
+  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean, reviewedAnchorVersion?: number) {
+    await reflectIssueSchedule(result.updated.find(value => value.id === issueId)?.version ?? reviewedAnchorVersion ?? null, keepDateDraft);
     setScheduleWarnings(result.warnings);
   }
   async function reflectRowScheduleEdit(result: SchedulePasteApplyResult, reviewedAnchorVersion: number) {
@@ -892,10 +903,13 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
   const previousKeys = issueSearchAliases(data, issue.id);
-  const reviewBusy = saving || commenting || linking || dependencyBusy || Boolean(commentEditing.operation);
+  const reviewBusy = saving || commenting || linking || dependencyBusy || jiraDeadlinePending || Boolean(commentEditing.operation);
+  const deadlineRecoveryBlocked = baseDraft && scheduleDateFields.some(field => draft[field] !== baseDraft[field])
+    ? '저장하지 않은 날짜가 있습니다. 날짜 입력을 저장하거나 취소한 뒤 복구해 주세요.'
+    : reviewBusy && !jiraDeadlinePending ? '현재 업무 저장이 끝난 뒤 복구해 주세요.' : null;
   return <>
     <div className="issue-panel-backdrop" inert={nestedModalOpen || Boolean(previewDocument)} onMouseDown={event => {
-      if (event.target === event.currentTarget && !saving && !nestedModalOpen && !dependencyBusyRef.current) closePanel();
+      if (event.target === event.currentTarget && !saving && !nestedModalOpen && !dependencyBusyRef.current && !jiraDeadlinePendingRef.current) closePanel();
     }}><aside ref={issuePanel} className="issue-detail-panel" role="dialog" aria-modal="true" aria-labelledby="issue-panel-heading"
       tabIndex={manageFocus ? -1 : undefined} onKeyDown={manageFocus ? keepIssuePanelFocus : undefined}>
     <header className="issue-panel-header">
@@ -903,16 +917,16 @@ function IssuePanelContent(props: IssuePanelProps) {
       <div className="issue-panel-header-actions">
         {data.projects.some(project => project.id !== issue.projectId) && <button ref={projectMoveTrigger}
           className="btn btn-ghost issue-move-trigger" type="button" aria-haspopup="dialog" aria-label="프로젝트 이동" title="프로젝트 이동"
-          disabled={saving || commenting || dependencyBusy || linking} onClick={() => setProjectMove({ draftMessage: projectMoveDraftMessage() })}>
+          disabled={saving || commenting || dependencyBusy || linking || jiraDeadlinePending} onClick={() => setProjectMove({ draftMessage: projectMoveDraftMessage() })}>
           <FolderInput size={14} aria-hidden="true" /><span>프로젝트 이동</span>
         </button>}
         <button ref={cloneCreationTrigger} className="btn btn-ghost issue-clone-trigger" type="button" aria-haspopup="dialog"
-          aria-label="업무 복제" title="업무 복제" disabled={saving || dependencyBusy} onClick={() => setCloneCreation(issue)}>
+          aria-label="업무 복제" title="업무 복제" disabled={saving || dependencyBusy || jiraDeadlinePending} onClick={() => setCloneCreation(issue)}>
           <Copy size={14} aria-hidden="true" /><span>업무 복제</span>
         </button>
         <FavoriteAction type="issue" id={issue.id} />
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
-        <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy || commenting || linking} aria-label="업무 상세 닫기"><X size={20} /></button>
+        <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy || commenting || linking || jiraDeadlinePending} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
     {reviewPosition && onAdvanceReview && <nav className="issue-review-navigation" aria-label="업무 검토 순서">
@@ -1122,7 +1136,12 @@ function IssuePanelContent(props: IssuePanelProps) {
     </> : tab === 'worklogs' ? <IssueWorklogs issueId={issue.id} actorId={props.actorId} users={data.users}
       notify={notify} onChanged={refresh} onDraftChange={trackChildDraft}/>
     : tab === 'reservations' ? <TimeReservations issue={issue} actorId={props.actorId} users={data.users} notify={notify} onDraftChange={trackChildDraft} onChanged={refresh} />
-    : tab === "source" ? <SourceOrigins resourceType="issue" resourceId={issue.id}/> : <>
+    : tab === 'source' ? <>
+      <JiraDeadlineRecovery issueId={issue.id} issueVersion={issue.version} actorId={props.actorId}
+        blockedReason={deadlineRecoveryBlocked} onPendingChange={trackJiraDeadlinePending}
+        onObserved={version => reflectIssueSchedule(version, true)} />
+      <SourceOrigins resourceType="issue" resourceId={issue.id} />
+    </> : <>
       <IssueChangeHistory issueId={issue.id} issueVersion={issue.version} />
       <section className="issue-activity-list" aria-label="Teamspace 변경 이력">
         <h3 className="issue-history-heading">Teamspace 변경 이력</h3>

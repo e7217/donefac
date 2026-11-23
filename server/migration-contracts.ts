@@ -5,7 +5,7 @@ export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyD
 export interface MigrationJiraRefreshCandidate {
   issue: Issue;
   previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration;
-    priorityOption?: Pick<LegacyRecord, 'sourceId' | 'title'> };
+    priorityOption?: Pick<LegacyRecord, 'sourceId' | 'title'> & { ambiguous?: boolean } };
   previousCustom?: MigrationJiraRefreshCandidate['previous'];
   initialParentId?: string | null;
 }

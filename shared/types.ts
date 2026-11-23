@@ -328,6 +328,16 @@ export interface JiraMigrationIssueReview {
   fields: { field: JiraMigrationIssueField; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
   customFields?: { fieldId: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
 }
+export interface JiraDeadlineRecoveryReview {
+  sourceImportId: string;
+  sourceRecordId: string;
+  sourceKey: string;
+  sourceDueDate: string;
+  currentDueDate: string | null;
+  issueVersion: number;
+  status: 'ready' | 'current-value' | 'local-change' | 'history-unverified';
+  revision: string;
+}
 export interface MigrationPageAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceSpaceId: string; sourceSpaceKey?: string;
 }

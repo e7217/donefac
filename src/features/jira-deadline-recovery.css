@@ -1,0 +1,45 @@
+.jira-deadline-recovery {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #d8e5df;
+  border-radius: .5rem;
+}
+
+.jira-deadline-recovery h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.jira-deadline-recovery p,
+.jira-deadline-recovery dl {
+  margin: .6rem 0;
+  font-size: .875rem;
+}
+
+.jira-deadline-recovery dl {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: .35rem .75rem;
+}
+
+.jira-deadline-recovery dt {
+  color: #536f61;
+}
+
+.jira-deadline-recovery dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.jira-deadline-confirm {
+  border-top: 1px solid #d8e5df;
+  margin-top: .75rem;
+  padding-top: .35rem;
+}
+
+.jira-deadline-confirm > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}

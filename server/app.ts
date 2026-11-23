@@ -61,6 +61,7 @@ import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
+import { readJiraDeadlineRecovery } from './jira-deadline-recovery.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
 import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
@@ -1798,6 +1799,27 @@ export function createApp(options: {
       activity(req, 'issue', after.id, '업무를 다른 프로젝트로 이동', `${before.key} → ${after.key}`);
     });
     res.set('Cache-Control', 'no-store').json(result);
+  });
+  app.get('/api/issues/:id/jira-deadline-recovery', (req, res) => {
+    if (Object.keys(req.query).length) return fail('Jira 마감일 검토 조건을 확인해 주세요.');
+    const review = store.transaction(() => readJiraDeadlineRecovery(store, sourcePreservation, get<Issue>('issues', req.params.id)));
+    res.set('Cache-Control', 'no-store').json({ review });
+  });
+  app.post('/api/issues/:id/jira-deadline-recovery', (req, res) => {
+    const { revision } = req.body;
+    if (Object.keys(req.query).length || Object.keys(req.body).length !== 1 ||
+        typeof revision !== 'string' || !/^[0-9a-f]{64}$/.test(revision)) return fail('검토한 Jira 마감일 정보를 보내 주세요.');
+    const issue = store.transaction(() => {
+      const old = get<Issue>('issues', req.params.id);
+      const review = readJiraDeadlineRecovery(store, sourcePreservation, old);
+      if (!review || review.status !== 'ready' || review.revision !== revision) {
+        return fail('Jira 원본이나 현재 업무가 변경되었습니다. 마감일을 다시 검토해 주세요.', 409);
+      }
+      return commitIssueUpdate(req, old, prepareIssueUpdate(old, { dueDate: review.sourceDueDate }), {
+        action: 'Jira 원본 마감일 복구', detail: `${review.sourceKey} · ${review.sourceDueDate}`,
+      });
+    });
+    res.set('Cache-Control', 'no-store').json({ issue });
   });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{

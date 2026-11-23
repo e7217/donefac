@@ -29,7 +29,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 10;
+const conversionVersion = 11;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -472,7 +472,10 @@ export class MigrationService {
           for (const option of rows) include(option.json);
           if (rows.length === 1) {
             const option = (JSON.parse(rows[0].json) as SourceRecordArchive).record;
-            if (option.kind === 'option' && option.sourceId === references[0]) baseline.priorityOption = { sourceId: option.sourceId, title: option.title };
+            if (option.kind === 'option' && option.sourceId === references[0]) {
+              baseline.priorityOption = { sourceId: option.sourceId, title: option.title,
+                ...(option.metadata.jiraPriorityAmbiguous === true ? { ambiguous: true } : {}) };
+            }
           }
         }
       }

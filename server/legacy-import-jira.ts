@@ -836,7 +836,20 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
         if (proof === true) projectedFields.set(field.sourceId,role);
       }
     }
-    else if(['Status','IssueType','Priority','Resolution'].includes(name)){const fieldId=`builtin:${name.toLowerCase()}`;context.field(fieldId,name,'jira-builtin');context.ensure('option',`${fieldId}:${str(v.id)}`,{title:str(v.pname||v.name)||str(v.id),containerId:fieldId,metadata:selected(v,['id','description','sequence','style']),references:ref('field',fieldId,'field')});}
+    else if (['Status','IssueType','Priority','Resolution'].includes(name)) {
+      const fieldId = `builtin:${name.toLowerCase()}`, id = str(v.id);
+      const title = str(v.pname || v.name) || id;
+      context.field(fieldId, name, 'jira-builtin');
+      const option = context.ensure('option', `${fieldId}:${id}`, { title, containerId: fieldId,
+        metadata: selected(v, ['id','description','sequence','style']), references: ref('field', fieldId, 'field') });
+      if (name === 'Priority' && option) {
+        const labels = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
+        const names = new Set(labels.filter((label): label is string => typeof label === 'string' && !!label.trim()).map(label => label.trim()));
+        if (adminXmlScalar(node, 'id') !== id || labels.includes(null) || names.size > 1 || option.title.trim() !== title.trim()) {
+          option.metadata.jiraPriorityAmbiguous = true;
+        }
+      }
+    }
     else if(name==='CustomFieldOption')context.put('option',v.id,{title:str(v.value)||str(v.customvalue)||str(v.id),containerId:str(v.customfield)||null,parentId:str(v.parentoptionid)||null,metadata:selected(v,['sequence','disabled']),references:[...ref('field',v.customfield,'field'),...ref('option',v.parentoptionid,'parent')]});
     else if(name==='Workflow'){context.put('workflow',v.id||v.name,{title:str(v.name),authorId:resolveActor(v.creatorname),createdAt:context.date(v.created),updatedAt:context.date(v.updated),metadata:{descriptorPresent:!!(v.descriptor||v.workflow)}});if(v.descriptor||v.workflow)context.warn('WORKFLOW_DESCRIPTOR_NOT_CONVERTED','워크플로 이름·작성 정보만 분석했습니다. 실행 가능한 descriptor/플러그인 설정은 복사하지 않았습니다.',`workflow:${str(v.id||v.name)}`);}
   }
@@ -850,6 +863,7 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (adminXmlScalar(node, 'id') !== id || adminXmlScalar(node, 'project') !== projectId) {
       item.metadata.jiraComponentProjectAmbiguous = true;
     }
+    if (adminXmlScalar(node, 'priority') === null) item.metadata.jiraPriorityAmbiguous = true;
     const reporterElements = children(node, 'reporter');
     if (Number(Object.hasOwn(node.attributes, 'reporter')) + reporterElements.length === 1 &&
         !reporterElements.some(element => element.children.length) && typeof v.reporter === 'string') {
