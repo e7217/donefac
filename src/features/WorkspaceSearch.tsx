@@ -8,8 +8,9 @@ import {
   DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput,
   searchWorkspace, workspaceSearchLabels, type WorkspaceSearchFilters,
 } from '../../shared/workspace-search';
+import { useAtlassianSearch } from '../lib/use-atlassian-search';
 
-type Props = Pick<FeatureProps, 'openIssue' | 'openDocument'> & {
+type Props = Pick<FeatureProps, 'openIssue' | 'openDocument' | 'refresh'> & {
   data: WorkspaceSnapshot;
   filters: WorkspaceSearchFilters;
   onChange: (next: WorkspaceSearchFilters) => boolean;
@@ -27,7 +28,7 @@ function sameCriteria(left: Criteria, right: Criteria): boolean {
 
 const sortProjects = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' });
 
-export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocument }: Props) {
+export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocument, refresh }: Props) {
   const resultsId = useId();
   const resultsHeading = useRef<HTMLHeadingElement>(null);
   const [applied, setApplied] = useState(() => criteria(filters));
@@ -42,7 +43,8 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
     || sortProjects.compare(left.key, right.key)), [data.projects]);
   const projectsById = useMemo(() => new Map(projects.map(project => [project.id, project])), [projects]);
   const labels = useMemo(() => workspaceSearchLabels(data, draft.scope), [data, draft.scope]);
-  const results = useMemo(() => searchWorkspace(data, filters), [data, filters]);
+  const lookup = useAtlassianSearch(filters.query, data, refresh);
+  const results = useMemo(() => searchWorkspace(data, filters, lookup.matches), [data, filters, lookup.matches]);
   const missingScope = draft.scope && draft.scope !== 'common' && !projects.some(project => draft.scope === `project:${project.id}`);
   const missingLabel = draft.label && !labels.some(label => label.key === draft.label);
   const hasSearchTerm = Boolean(filters.query || filters.label);
@@ -55,6 +57,7 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
     event.preventDefault();
     const next = { ...draft, query: normalizeWorkspaceSearchInput(draft.query), page: DEFAULT_WORKSPACE_SEARCH_FILTERS.page };
     if (onChange(next)) {
+      if (lookup.label && next.query === filters.query) lookup.retry();
       setDraft(criteria(next));
       focusResults();
     }
@@ -75,7 +78,7 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
     <form className="card workspace-search-filters" aria-label="업무·문서 검색 조건" onSubmit={submit}>
       <label className="workspace-search-query">검색어
         <input className="field" type="search" value={draft.query} maxLength={WORKSPACE_SEARCH_INPUT_LIMIT}
-          placeholder="업무 번호, 제목, 문서 내용, GitLab 링크·참조"
+          placeholder="업무 번호, 제목, 본문, 원본 주소"
           onChange={event => setDraft({ ...draft, query: event.currentTarget.value })} />
       </label>
       <label>검색 대상
@@ -112,7 +115,8 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
     <section className="card workspace-search-results" aria-labelledby={resultsId}>
       <header className="workspace-search-results-heading">
         <h2 id={resultsId} tabIndex={-1} ref={resultsHeading}>검색 결과</h2>
-        <p role="status">검색 결과 {results.total.toLocaleString('ko-KR')}건</p>
+        <p role="status">{lookup.pending ? '원본 주소를 찾는 중…' : lookup.failed ? '' :
+          `검색 결과 ${results.total.toLocaleString('ko-KR')}건`}</p>
       </header>
       {results.items.length > 0 ? <ul className="workspace-search-result-list" role="list">
         {results.items.map((result, index) => {
@@ -128,9 +132,10 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
                 <span className="workspace-search-result-content" id={detailId}>
                   <span className="workspace-search-result-title"><span className="workspace-search-issue-key">{issue.key}</span><strong>{issue.title}</strong></span>
                   <span className="workspace-search-result-path">{project?.name ?? '프로젝트'} · {status.label}</span>
-                  {(matchedAliases || matchedGitlab) && <span className="workspace-search-result-labels">
+                  {(matchedAliases || matchedGitlab || lookup.label) && <span className="workspace-search-result-labels">
                     {matchedAliases?.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
                     {matchedGitlab && <span className="workspace-search-label">{matchedGitlab}</span>}
+                    {lookup.label && <span className="workspace-search-label">{lookup.label}</span>}
                   </span>}
                   {excerpt && <span className="workspace-search-excerpt">{excerpt}</span>}
                 </span>
@@ -150,15 +155,20 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
                 <span className="workspace-search-result-title"><strong>{title}</strong></span>
                 <span className="workspace-search-result-path">{path}</span>
                 {excerpt && <span className="workspace-search-excerpt" id={detailId}>{excerpt}</span>}
-                {document.labels?.length ? <span className="workspace-search-result-labels">
-                  {document.labels.map(label => <span key={label} className="workspace-search-label">{label}</span>)}
+                {document.labels?.length || lookup.label ? <span className="workspace-search-result-labels">
+                  {lookup.label && <span className="workspace-search-label">{lookup.label}</span>}
+                  {document.labels?.map(label => <span key={label} className="workspace-search-label">{label}</span>)}
                 </span> : null}
               </span>
               <ChevronRight size={16} aria-hidden="true" className="workspace-search-result-arrow" />
             </button>
           </li>;
         })}
-      </ul> : <p className="workspace-search-empty">{hasSearchTerm ? '조건에 맞는 업무나 문서가 없습니다.' : '검색어를 입력하거나 문서 라벨을 선택하세요.'}</p>}
+      </ul> : !lookup.pending && !lookup.failed && <p className="workspace-search-empty">{hasSearchTerm ? '조건에 맞는 업무나 문서가 없습니다.' : '검색어를 입력하거나 문서 라벨을 선택하세요.'}</p>}
+      {lookup.failed && <div className="workspace-search-empty">
+        <p role="alert">원본 주소를 확인하지 못했습니다.</p>
+        <button className="btn" type="button" onClick={lookup.retry}>다시 검색</button>
+      </div>}
       {results.pageCount > 1 && <nav className="workspace-search-pagination" aria-label="검색 결과 페이지">
         <button className="btn" type="button" disabled={results.page <= DEFAULT_WORKSPACE_SEARCH_FILTERS.page}
           aria-label="검색 결과 이전 페이지" onClick={() => movePage(results.page - 1)}><ChevronLeft size={15} aria-hidden="true" />이전</button>

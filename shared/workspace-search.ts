@@ -1,5 +1,6 @@
 import { normalizeDocumentLabel, normalizeDocumentLabelKey } from './document-labels.js';
 import { GITLAB_SEARCH_INPUT_LIMIT, matchingGitlabSearchLinks, normalizeGitlabSearchInput } from './gitlab-search.js';
+import { parseAtlassianSearchInput } from './atlassian-search.js';
 import { issueSearchText } from './issue-schema.js';
 import type { DocPage, Issue, IssueSearchAlias, WorkspaceSnapshot } from './types.js';
 import { projectStatuses } from './workflow-helpers.js';
@@ -15,6 +16,7 @@ export interface WorkspaceSearchFilters {
 export const DEFAULT_WORKSPACE_SEARCH_FILTERS: WorkspaceSearchFilters = { query: '', kind: 'all', scope: '', label: '', page: 1 };
 export const WORKSPACE_SEARCH_QUERY_LIMIT = 200;
 export const WORKSPACE_SEARCH_INPUT_LIMIT = GITLAB_SEARCH_INPUT_LIMIT;
+export type OriginalAddressMatches = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
 const pageSize = 20;
 const quickIssueLimit = 12;
 const excerptLimit = 160;
@@ -45,19 +47,27 @@ export function normalizeWorkspaceSearchQuery(input: string): string {
   return textSlice(readableText(input), 0, WORKSPACE_SEARCH_QUERY_LIMIT).trimEnd();
 }
 
+export function workspaceAtlassianSearchAddress(input: string) {
+  if (!httpUrlStart.test(input.trim()) || normalizeGitlabSearchInput(input)) return null;
+  return parseAtlassianSearchInput(input);
+}
+
 export function normalizeWorkspaceSearchInput(input: string): string {
   const trimmed = input.trim();
   const reference = normalizeGitlabSearchInput(trimmed);
   if (reference) return reference;
   if (!httpUrlStart.test(trimmed)) return normalizeWorkspaceSearchQuery(input);
   if (trimmed.length > WORKSPACE_SEARCH_INPUT_LIMIT) return '';
+  const original = parseAtlassianSearchInput(trimmed);
+  if (original) return original.url;
   // Keep the pasted path intact so an invalid GitLab reference stays invalid after sharing.
   const match = /^https?:\/\/[^/?#\\]+(\/[^?#]*)?(?=[?#]|$)/iu.exec(trimmed);
   if (!match || /[\u0000-\u001f\u007f\\]/u.test(match[0])) return '';
   try {
     const url = new URL(trimmed);
     const sanitized = `${url.origin}${match[1] ?? ''}`;
-    return sanitized.length <= WORKSPACE_SEARCH_INPUT_LIMIT ? sanitized : '';
+    // Removing userinfo or a conflicting page ID must not turn a rejected original address into a match.
+    return sanitized.length <= WORKSPACE_SEARCH_INPUT_LIMIT && !parseAtlassianSearchInput(sanitized) ? sanitized : '';
   } catch {
     return '';
   }
@@ -82,7 +92,10 @@ function issueKeyMatchRank(issue: Issue, query: string, aliases: readonly IssueS
   return aliases.some(alias => searchKey(alias.key) === query) ? 1 : null;
 }
 
-export function searchQuickIssues(data: WorkspaceSnapshot, input: string): IssueSearchMatch[] {
+export function searchQuickIssues(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): IssueSearchMatch[] {
+  if (workspaceAtlassianSearchAddress(input)) {
+    return data.issues.filter(issue => original?.issueIds.has(issue.id)).slice(0, quickIssueLimit).map(issue => ({ issue }));
+  }
   const trimmed = input.trim();
   const textQuery = httpUrlStart.test(trimmed) ? normalizeWorkspaceSearchInput(trimmed).toLowerCase() : trimmed.toLocaleLowerCase();
   if (!textQuery) return [];
@@ -181,10 +194,11 @@ function ancestorTitles(document: DocPage, byId: ReadonlyMap<string, DocPage>): 
   return titles.reverse();
 }
 
-export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearchFilters): {
+export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearchFilters, original?: OriginalAddressMatches): {
   items: WorkspaceSearchResult[]; total: number; page: number; pageCount: number;
 } {
   const input = normalizeWorkspaceSearchInput(filters.query);
+  const originalAddress = workspaceAtlassianSearchAddress(input);
   const query = httpUrlStart.test(input) ? input.toLowerCase() : searchKey(input);
   const label = normalizeDocumentLabelKey(filters.label);
   if ((!query && !label) || (filters.label && !label)) return { items: [], total: 0, page: 1, pageCount: 1 };
@@ -192,14 +206,18 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
   const spaces = new Map(data.projects.map(({ id, key, name }) => [id, `${name} ${key}`]));
   const matches: Match[] = [];
   if (query && !label && filters.kind !== 'document') {
-    const statuses = new Map(data.projects.map(({ id }) => [id, new Map(projectStatuses(data, id).map(status => [status.id, status.label]))]));
-    const gitlabMatches = matchingGitlabSearchLinks(data.gitlabLinks, filters.query);
+    const statuses = new Map(originalAddress ? [] : data.projects.map(({ id }) => [id, new Map(projectStatuses(data, id).map(status => [status.id, status.label]))]));
+    const gitlabMatches = originalAddress ? null : matchingGitlabSearchLinks(data.gitlabLinks, filters.query);
     for (const issue of data.issues) {
       if (!scopeMatches(issue.projectId, filters.scope)) continue;
       const title = searchKey(issue.title);
+      if (originalAddress) {
+        if (original?.issueIds.has(issue.id)) matches.push({ kind: 'issue', value: issue, title, rank: 0, matchedAliases: [] });
+        continue;
+      }
       const status = statuses.get(issue.projectId)?.get(issue.status) ?? issue.status;
       const matchedAliases = matchingIssueSearchAliases(data, issue.id, query);
-      const matchedGitlab = gitlabMatches.get(issue.id);
+      const matchedGitlab = gitlabMatches?.get(issue.id);
       const rank = issueKeyMatchRank(issue, query, matchedAliases) ?? (matchedGitlab ? 2 : rankMatch(query, title, issue.labels, () =>
         `${issueSearchText(data, issue)} ${status} ${spaces.get(issue.projectId) ?? ''}`, matchedAliases.length > 0));
       if (rank !== null) matches.push({ kind: 'issue', value: issue, title, rank, matchedAliases, matchedGitlab });
@@ -211,6 +229,10 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       const labels = document.labels ?? [];
       if (label && !labels.some(value => normalizeDocumentLabelKey(value) === label)) continue;
       const title = searchKey(document.title);
+      if (originalAddress) {
+        if (original?.documentIds.has(document.id)) matches.push({ kind: 'document', value: document, title, rank: 0 });
+        continue;
+      }
       const space = document.projectId === null ? '팀 공통' : spaces.get(document.projectId) ?? '';
       const rank = rankMatch(query, title, labels, () => `${document.plainText} ${space}`);
       if (rank !== null) matches.push({ kind: 'document', value: document, title, rank });

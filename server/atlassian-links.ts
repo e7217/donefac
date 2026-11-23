@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { AtlassianReadError, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget } from '../shared/atlassian-links.js';
+import { AtlassianReadError, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
+import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
 import type { Store } from './store.js';
 
 type LinkTarget = Pick<AtlassianLink, 'targetType' | 'targetId'>;
@@ -7,7 +8,8 @@ type LinkReferences = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<
 
 const inputFields = ['targetType', 'targetId', 'product', 'url'];
 const backupFields = ['id', ...inputFields, 'createdAt'];
-const columns = 'id,target_type AS targetType,target_id AS targetId,product,url,created_at AS createdAt';
+const targetColumns = 'target_type AS targetType,target_id AS targetId';
+const columns = `id,${targetColumns},product,url,created_at AS createdAt`;
 const insert = 'INSERT INTO atlassian_links(id,target_type,target_id,product,url,created_at) VALUES(?,?,?,?,?,?)';
 const activeTarget = `(
   (target_type='issue' AND EXISTS(SELECT 1 FROM issues WHERE issues.id=atlassian_links.target_id))
@@ -65,6 +67,7 @@ export class AtlassianLinksService {
         created_at TEXT NOT NULL,
         UNIQUE(target_type,target_id,product,url)
       );
+      CREATE INDEX IF NOT EXISTS atlassian_links_product_url ON atlassian_links(product,url);
     `);
   }
 
@@ -82,6 +85,30 @@ export class AtlassianLinksService {
       WHERE target_type=? AND target_id=? AND ${activeTarget} ORDER BY created_at,id`)
       .all(target.targetType, target.targetId) as unknown as AtlassianLink[];
     return rows.map(row => ({ ...row }));
+  }
+
+  resolve(address: ParsedAtlassianLink): AtlassianSearchTarget[] {
+    const order = 'ORDER BY targetType,targetId';
+    if (address.product !== 'confluence' || !('pageId' in address)) {
+      return this.store.db.prepare(`SELECT ${targetColumns} FROM atlassian_links
+        WHERE product=? AND url=? AND ${activeTarget} ${order}`).all(address.product, address.url) as unknown as AtlassianSearchTarget[];
+    }
+
+    const base = `${address.origin}${address.contextPath}`;
+    const classic = `${base}/pages/viewpage.action?pageId=${address.pageId}`;
+    // Numeric page URLs can have different space names and slugs. Narrow the index scan to this installation's /spaces/ paths.
+    const candidates = this.store.db.prepare(`SELECT ${targetColumns},url FROM atlassian_links
+      WHERE product='confluence' AND url=? AND ${activeTarget}
+      UNION ALL
+      SELECT ${targetColumns},url FROM atlassian_links
+      WHERE product='confluence' AND url>=? AND url<? AND ${activeTarget}
+      ${order}`).all(classic, `${base}/spaces/`, `${base}/spaces0`) as unknown as (AtlassianSearchTarget & { url: string })[];
+    const targets = new Map<string, AtlassianSearchTarget>();
+    for (const { targetType, targetId, url } of candidates) {
+      const candidate = parseAtlassianSearchInput(url);
+      if (candidate && sameAtlassianSearchAddress(address, candidate)) targets.set(`${targetType}:${targetId}`, { targetType, targetId });
+    }
+    return [...targets.values()];
   }
 
   create(input: unknown): AtlassianLink {

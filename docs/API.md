@@ -79,6 +79,12 @@ curl --fail-with-body \
 
 빠른 검색과 전체 검색에서는 결과에 일치한 GitLab 서버·저장소·참조를 함께 표시하고 전체 검색의 공간 조건은 현재 티켓 프로젝트에 적용한다. 같은 참조에 연결된 티켓은 각각 확인할 수 있다. 텍스트 조회와 현재·이전 티켓 키 우선순위도 지원한다. 검색은 저장된 링크를 사용하며 GitLab에 요청하지 않는다.
 
+## 원본 주소로 업무와 문서 찾기
+
+브라우저의 `GET /api/atlassian-links/resolve?url=…`은 원본 주소 한 개를 받아 `{targets: [{targetType, targetId}]}`를 반환한다. 붙여넣은 주소는 클라이언트에서 정규화한다. Confluence의 `viewpage.action` 주소는 검색에 필요한 `pageId`를 유지하며, 추적 쿼리·프래그먼트는 검색 주소에서 제거한다. 지원 형식에 맞지 않는 요청은 `400`을 반환한다.
+
+같은 스킴·호스트·포트·설치 경로의 Jira 업무 키 또는 Confluence 페이지 ID를 저장된 링크에서 찾는다. `/display/…` 주소는 해당 원본 공간·제목으로 저장된 링크가 일치해야 한다. 활성 업무·문서를 한 번씩 반환하며 같은 주소에 연결된 별도 대상은 각각 반환한다. 원본 서버에 접속하지 않는다. `GET /api/search?q=…`에 유효한 원본 주소를 보내면 같은 대상을 기존 `{issues, documents}` 형식으로 반환한다.
+
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.

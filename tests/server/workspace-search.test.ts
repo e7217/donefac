@@ -10,7 +10,7 @@ import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import type { DocPage, GitlabLink, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, normalizeWorkspaceSearchInput, normalizeWorkspaceSearchQuery, searchQuickIssues, searchWorkspace, workspaceSearchLabels,
-  WORKSPACE_SEARCH_QUERY_LIMIT, type WorkspaceSearchFilters, type WorkspaceSearchResult } from '../../shared/workspace-search.js';
+  workspaceAtlassianSearchAddress, WORKSPACE_SEARCH_QUERY_LIMIT, type WorkspaceSearchFilters, type WorkspaceSearchResult } from '../../shared/workspace-search.js';
 
 const now = '2026-11-21T00:00:00.000Z';
 const firstProject: Project = { id: 'one', name: '연구실', key: 'LAB', description: '', color: '#333333', createdAt: now };
@@ -50,6 +50,29 @@ function gitlabLink(issueId: string, kind: GitlabLink['kind'], webUrl: string, f
   return { id: `${issueId}:${kind}:${webUrl}`, issueId, projectId: 5, iid: 91, kind, webUrl,
     title: '합성 개발 활동', state: 'active', updatedAt: now, ...fields };
 }
+
+test('workspace original-address searches only linked local targets and preserves filters and safe sharing', () => {
+  const url = 'https://wiki.search.invalid/wiki/pages/viewpage.action?pageId=90071992547409931234';
+  const input = `${url}&private_token=synthetic-secret#section`;
+  const data = snapshot([issue('linked-ticket', '원본에 연결한 업무'), issue('body-ticket', '본문 주소 업무', { description: url })], [
+    doc('linked-doc', '이관 문서', { projectId: secondProject.id, labels: ['정책'] }),
+    doc('body-doc', '본문 주소 문서', { plainText: url }),
+  ]);
+  const matches = { issueIds: new Set(['linked-ticket', 'inactive-ticket']), documentIds: new Set(['linked-doc', 'inactive-doc']) };
+  assert.equal(normalizeWorkspaceSearchInput(input), url);
+  assert.equal(workspaceAtlassianSearchAddress(input)?.product, 'confluence');
+  assert.deepEqual(ids(searchWorkspace(data, filters({ query: input }), matches).items).sort(), ['linked-doc', 'linked-ticket']);
+  assert.deepEqual(ids(searchWorkspace(data, filters({ query: input, scope: `project:${secondProject.id}`, label: '정책' }), matches).items), ['linked-doc']);
+  assert.equal(searchWorkspace(data, filters({ query: input, scope: `project:${firstProject.id}`, kind: 'document' }), matches).total, 0);
+  assert.equal(searchWorkspace(data, filters({ query: input })).total, 0);
+  assert.deepEqual(searchQuickIssues(data, input, matches).map(row => row.issue.id), ['linked-ticket']);
+  assert.deepEqual(searchQuickIssues(data, input), []);
+  assert.equal(normalizeWorkspaceSearchInput('https://reviewer:synthetic-secret@jira.search.invalid/jira/browse/TEAM-1'), '');
+  assert.equal(normalizeWorkspaceSearchInput('https://wiki.search.invalid/wiki/spaces/TEAM/pages/123?pageId=124'), '');
+  const overlappingGitlabUrl = `${gitlabRepository}/-/tree/browse/TEAM-1`;
+  assert.equal(workspaceAtlassianSearchAddress(overlappingGitlabUrl), null);
+  assert.equal(normalizeWorkspaceSearchInput(overlappingGitlabUrl), `${gitlabRepository}/-/tree/browse%2FTEAM-1`);
+});
 
 test('GitLab URL lookup matches the exact local object for all active linked tickets', () => {
   const data = snapshot([issue('one', '첫 번째 검토'), issue('two', '두 번째 검토', { projectId: secondProject.id }),

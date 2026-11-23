@@ -229,6 +229,126 @@ test('GitLab MR 주소로 빠른 검색에서 통합 검색까지 연결 업무�
   }
 });
 
+test('360px에서 Confluence 원본 주소를 검색하고 현재 문서와 공유 필터를 다시 연다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  let trashId: string | undefined;
+  try {
+    const first = await f.document(f.first.id, `이관 검토 기록 ${f.token}`);
+    const second = await f.document(f.second.id, `배포 운영 기록 ${f.token}`);
+    const wrongContext = await f.document(f.first.id, `별도 설치의 기록 ${f.token}`);
+    const wrongOrigin = await f.document(f.first.id, `별도 원본의 기록 ${f.token}`);
+    const origin = `https://wiki-${f.token}.search.invalid`;
+    const pageId = '90071992547409931234';
+    const classic = `${origin}/wiki/pages/viewpage.action?pageId=${pageId}`;
+    const modern = `${origin}/wiki/spaces/TEAM/pages/${pageId}`;
+    const titleAlias = `${origin}/wiki/display/TEAM/Original+Name`;
+    const otherContext = `${origin}/another-wiki/pages/viewpage.action?pageId=${pageId}`;
+    const bodyOnly = await f.document(f.first.id, `본문에만 주소가 있는 문서 ${f.token}`, { content: paragraph(classic) });
+    async function saveLink(document: DocPage, url: string) {
+      const saved = await json<{ url: string }>(await request.post('/api/atlassian-links', { data: {
+        targetType: 'document', targetId: document.id, product: 'confluence', url,
+      } }), 201);
+      expect(saved.url).toBe(url);
+    }
+    await saveLink(first, classic);
+    await saveLink(first, modern);
+    await saveLink(first, titleAlias);
+    await saveLink(second, modern);
+    await saveLink(wrongContext, otherContext);
+    await saveLink(wrongOrigin, classic.replace('wiki-', 'other-'));
+
+    const outbound: string[] = [];
+    await page.route(url => url.hostname.endsWith('.search.invalid'), async route => {
+      outbound.push(route.request().url()); await route.abort();
+    });
+    await page.route('**/api/atlassian-links/*/preview', async route => {
+      outbound.push(route.request().url()); await route.abort();
+    });
+    const lookupInputs: string[] = [];
+    let slowStarted = false, slowFinished = false;
+    let releaseSlow!: () => void;
+    const slowRelease = new Promise<void>(resolve => { releaseSlow = resolve; });
+    await page.route(url => url.pathname === '/api/atlassian-links/resolve', async route => {
+      const input = new URL(route.request().url()).searchParams.get('url') ?? '';
+      lookupInputs.push(input);
+      if (input !== otherContext) return route.continue();
+      slowStarted = true;
+      await slowRelease;
+      // A correct client may cancel the previous lookup when a new address is entered.
+      try { await route.fulfill({ response: await route.fetch() }); }
+      catch { /* The previous navigation may have canceled this request. */ }
+      finally { slowFinished = true; }
+    });
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${f.first.id}/overview`);
+    await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+    const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+    const term = quick.getByRole('textbox', { name: '통합 검색어', exact: true });
+    try {
+      await term.fill(otherContext);
+      await expect.poll(() => slowStarted).toBe(true);
+      await term.fill(`${classic}&token=synthetic-wiki-secret#private-section`);
+      await expect(quick.getByText(first.title, { exact: true })).toBeVisible();
+      await expect(quick.getByText(second.title, { exact: true })).toBeVisible();
+    } finally {
+      releaseSlow();
+    }
+    await expect.poll(() => slowFinished).toBe(true);
+    await expect(quick.getByText(first.title, { exact: true })).toHaveCount(1);
+    await expect(quick.getByText(wrongContext.title, { exact: true })).toHaveCount(0);
+    await expect(quick.getByText(wrongOrigin.title, { exact: true })).toHaveCount(0);
+    await expect(quick.getByText(bodyOnly.title, { exact: true })).toHaveCount(0);
+    await expect(quick.getByText('Confluence 원본 주소', { exact: true })).toHaveCount(2);
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+
+    const result = search(page);
+    const path = `#/${f.first.id}/search`;
+    await expect.poll(() => route(page)).toEqual({ path, query: { q: classic } });
+    await expect(result.term).toHaveValue(classic);
+    await expect(result.rows).toHaveCount(2);
+    await expect(result.results.getByText('Confluence 원본 주소', { exact: true })).toHaveCount(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const scope = `project:${f.second.id}`;
+    await result.scope.selectOption(scope);
+    await result.submit.click();
+    await expect.poll(() => route(page)).toEqual({ path, query: { q: classic, space: scope } });
+    await expect(result.rows).toHaveCount(1);
+    await expect(result.document(second)).toBeVisible();
+    await page.reload();
+    await expect(result.term).toHaveValue(classic);
+    await expect(result.scope).toHaveValue(scope);
+    await result.document(second).click();
+    await expect.poll(() => route(page)).toEqual({ path: `#/${f.second.id}/documents/${second.id}`, query: {} });
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(second.title);
+    await page.goBack();
+    await expect(result.document(second)).toBeVisible();
+
+    const deleted = await json<{ trashEntryId: string }>(await request.delete(`/api/documents/${second.id}`));
+    trashId = deleted.trashEntryId;
+    await page.reload();
+    await expect(result.results).toContainText('검색 결과 0건');
+    const restored = await request.post(`/api/trash/${trashId}/restore`);
+    expect(restored.ok(), await restored.text()).toBe(true);
+    trashId = undefined;
+    await page.reload();
+    await expect(result.document(second)).toBeVisible();
+
+    await page.goto(`/${path}?${new URLSearchParams({ q: titleAlias })}`);
+    await expect(result.rows).toHaveCount(1);
+    await expect(result.document(first)).toBeVisible();
+    await page.goto(`/${path}?${new URLSearchParams({ q: classic.replace('/wiki/', '/wrong-mount/') })}`);
+    await expect(result.results).toContainText('검색 결과 0건');
+    expect(lookupInputs).toContain(classic);
+    expect(lookupInputs.join('\n')).not.toMatch(/synthetic-wiki-secret|private-section/u);
+    expect(outbound).toEqual([]);
+  } finally {
+    if (trashId) await request.delete(`/api/trash/${trashId}`);
+    await f.close();
+  }
+});
+
 test('작성 중인 문서에서 통합 검색 이동을 제어하고 업무 키·상태·사용자 필드로 찾는다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const f = await fixture(request);

@@ -9,12 +9,15 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AtlassianLink, AtlassianLinkPreview } from '../../shared/atlassian-links.js';
+import type { AtlassianSearchTarget } from '../../shared/atlassian-search.js';
 import type { ApiKeyCreated, DocPage, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Export = WorkspaceSnapshot & { schemaVersion: number; atlassianLinks: AtlassianLink[] };
 const linksRoute = '/atlassian-links';
 const previewRoute = (id: string) => `${linksRoute}/${id}/preview`;
 const targetRoute = (targetType: string, targetId: string) => `${linksRoute}?${new URLSearchParams({targetType,targetId})}`;
+const resolveRoute = (url: string) => `${linksRoute}/resolve?${new URLSearchParams({ url })}`;
+const searchRoute = (query: string) => `/search?${new URLSearchParams({ q: query })}`;
 
 function scratch(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-atlassian-integration-'));
@@ -87,6 +90,13 @@ test('linked Jira and Confluence metadata is fetched on demand from the configur
   assert.deepEqual(await call(targetRoute('document','doc-overview')),[wiki]);
   assert.deepEqual(await call(targetRoute('issue','issue-2')),[]);
   assert.deepEqual(await call(linksRoute,'POST',{targetType:'issue',targetId:'issue-1',product:'jira',url:jira.url},201),jira);
+  assert.deepEqual(await call(resolveRoute(base+'/jira/browse/leg-17?focusedCommentId=9#comments')),
+    { targets: [{ targetType: 'issue', targetId: 'issue-1' }] });
+  assert.deepEqual(await call(resolveRoute(base+'/wiki/spaces/TEAM/pages/1234/Retitled%20Page')),
+    { targets: [{ targetType: 'document', targetId: 'doc-overview' }] });
+  const search = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(wiki.url));
+  assert.deepEqual(search.issues, []);
+  assert.deepEqual(search.documents.map(document => document.id), ['doc-overview']);
   assert.equal(requests.length,0);
 
   const jiraView = await call<AtlassianLinkPreview>(previewRoute(jira.id));
@@ -133,6 +143,7 @@ test('external links suffice without remote setup and survive trash and native b
   const archive = await call<{trashEntryId:string}>(`/issues/${issue.id}`,'DELETE');
   await call(targetRoute('issue',issue.id),'GET',undefined,404);
   await call(previewRoute(jira.id),'GET',undefined,404);
+  assert.deepEqual(await call(resolveRoute(jira.url)), { targets: [] });
   const backup = await call<Export>('/export');
   assert.equal(backup.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(new Set(backup.atlassianLinks.map(link=>link.id)),new Set([jira.id,confluence.id]));
@@ -144,9 +155,64 @@ test('external links suffice without remote setup and survive trash and native b
   await call('/import','POST',{data:{...backup,schemaVersion:27}});
   await call(`/trash/${archive.trashEntryId}/restore`,'POST');
   assert.deepEqual(await call(targetRoute('issue',issue.id)),[jira]);
+  assert.deepEqual(await call(resolveRoute(jira.url)), { targets: [{ targetType: 'issue', targetId: issue.id }] });
   const again = await call<{trashEntryId:string}>(`/issues/${issue.id}`,'DELETE');
   await call(`/trash/${again.trashEntryId}`,'DELETE');
   assert.deepEqual((await call<Export>('/export')).atlassianLinks,[confluence]);
   await call(`${linksRoute}/${confluence.id}`,'DELETE',undefined,204);
   assert.deepEqual(await call(targetRoute('document',document.id)),[]);
+  assert.deepEqual(await call(resolveRoute(confluence.url)), { targets: [] });
+});
+
+test('original address search matches local targets by exact installation and source identity', async t => {
+  const { call, base } = await appFixture(t, scratch(t));
+  const classic = 'https://wiki.example.invalid/wiki/pages/viewpage.action?pageId=99999999999999999999';
+  const modern = 'https://wiki.example.invalid/wiki/spaces/TEAM/pages/99999999999999999999/Old+Title';
+  const samePage = 'https://wiki.example.invalid/wiki/spaces/OTHER/pages/99999999999999999999/Renamed';
+  const sameIdElsewhere = 'https://wiki.example.invalid/other/pages/viewpage.action?pageId=99999999999999999999';
+  const display = 'https://wiki.example.invalid/wiki/display/TEAM/Release%20Notes';
+  const issue = await call<Issue>('/issues', 'POST', { projectId: 'project-neo', title: '원본 주소 검사 업무' }, 201);
+  const document = await call<DocPage>('/documents', 'POST', { projectId: 'project-neo', title: '원본 주소 검사 문서' }, 201);
+  const unrelated = await call<DocPage>('/documents', 'POST', { title: classic }, 201);
+  const documentTarget = { targetType: 'document', targetId: document.id } as const;
+  const issueTarget = { targetType: 'issue', targetId: issue.id } as const;
+  const link = (url: string, target: AtlassianSearchTarget, product = 'confluence') =>
+    call<AtlassianLink>(linksRoute, 'POST', { ...target, product, url }, 201);
+  await link(classic, documentTarget);
+  await link(modern, documentTarget);
+  await link(modern, issueTarget);
+  await link(display, documentTarget);
+  await link(sameIdElsewhere, { targetType: 'document', targetId: unrelated.id });
+
+  const numeric = await fetch(base + resolveRoute(samePage + '?utm_source=hidden#marker'));
+  assert.equal(numeric.status, 200);
+  assert.equal(numeric.headers.get('Cache-Control'), 'no-store');
+  assert.deepEqual(await numeric.json(), { targets: [documentTarget, issueTarget] });
+  assert.deepEqual(await call(resolveRoute(classic)), { targets: [documentTarget, issueTarget] });
+  assert.deepEqual(await call(resolveRoute(sameIdElsewhere)), {
+    targets: [{ targetType: 'document', targetId: unrelated.id }],
+  });
+  assert.deepEqual(await call(resolveRoute(classic.replace('wiki.example.invalid', 'different.example.invalid'))), { targets: [] });
+  assert.deepEqual(await call(resolveRoute(display + '?tracking=ignored#marker')), { targets: [documentTarget] });
+  assert.deepEqual(await call(resolveRoute(display.replace('TEAM', 'OTHER'))), { targets: [] });
+  assert.deepEqual(await call(resolveRoute(display.replace('Release', 'release'))), { targets: [] });
+  const result = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(classic));
+  assert.deepEqual(Object.keys(result).sort(), ['documents', 'issues']);
+  assert.deepEqual(result.issues.map(value => value.id), [issue.id]);
+  assert.deepEqual(result.documents.map(value => value.id), [document.id]);
+  const text = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(document.title));
+  assert.deepEqual(text.documents.map(value => value.id), [document.id]);
+
+  await call(resolveRoute(samePage + '?pageId=300'), 'GET', undefined, 400);
+  await call(resolveRoute(classic + '&pageId=99999999999999999999'), 'GET', undefined, 400);
+  await call(resolveRoute(classic.replace('https://', 'https://user:password@')), 'GET', undefined, 400);
+  await call(resolveRoute(classic) + '&url=duplicate', 'GET', undefined, 400);
+  await call(resolveRoute(classic) + '&unknown=true', 'GET', undefined, 400);
+  const { token } = await call<ApiKeyCreated>('/api-keys', 'POST', { name: '읽기 키', access: 'read', projectIds: ['project-neo'] }, 201);
+  await call('/v1' + resolveRoute(classic), 'GET', undefined, 403, token);
+
+  const gitlabWithJiraSuffix = 'https://git.example.invalid/group/repo/-/tree/browse/LEG-1';
+  await link(gitlabWithJiraSuffix, issueTarget, 'jira');
+  assert.deepEqual(await call(resolveRoute(gitlabWithJiraSuffix)), { targets: [issueTarget] });
+  assert.deepEqual(await call(searchRoute(gitlabWithJiraSuffix)), { issues: [], documents: [] });
 });

@@ -1480,6 +1480,28 @@ test('360px 이관 원본 주소를 검토하고 영수증 집계와 저장된 �
     const savedLink = linkPanel.getByRole('link', { name: '원본 열기', exact: true });
     await expect(savedLink).toHaveAttribute('href', sourceUrl);
     await expect(savedLink).toHaveAttribute('rel', 'noopener noreferrer');
+
+    const outbound: string[] = [];
+    await page.route('https://jira.example.test/**', async route => {
+      outbound.push(route.request().url());
+      await route.abort();
+    });
+    await page.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+    const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+    await quick.getByRole('textbox', { name: '통합 검색어', exact: true })
+      .fill(`${base}/browse/${originalKey.toLowerCase()}-1?token=synthetic-jira-secret#private-section`);
+    await expect(quick.getByText(title, { exact: true })).toBeVisible();
+    await expect(quick.getByText('Jira 원본 주소', { exact: true })).toBeVisible();
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+    const result = page.getByRole('region', { name: '검색 결과', exact: true });
+    await expect(page.getByRole('searchbox', { name: '검색어', exact: true })).toHaveValue(sourceUrl);
+    const params = () => Object.fromEntries(new URLSearchParams(new URL(page.url()).hash.split('?')[1]));
+    await expect.poll(params).toEqual({ q: sourceUrl });
+    await expect(result.getByText('Jira 원본 주소', { exact: true })).toBeVisible();
+    await result.getByRole('button', { name: `${issue.key} 업무 열기`, exact: true }).click();
+    await expect(page.getByRole('dialog', { name: title, exact: true })).toBeVisible();
+    expect(outbound).toEqual([]);
   } finally {
     await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }

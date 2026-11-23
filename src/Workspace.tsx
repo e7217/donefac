@@ -15,6 +15,7 @@ import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSe
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
+import { useAtlassianSearch } from './lib/use-atlassian-search';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
 import { appendWorkspaceSearchFilters, readWorkspaceSearchFilters, sameWorkspaceSearchFilters } from './lib/workspace-search-route';
@@ -959,7 +960,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'favorites' && <FavoritesPage data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh}/>}
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
-          <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} openIssue={openIssue} openDocument={openDocument}/>
+          <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openIssue} openDocument={openDocument}/>
         </Suspense>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}
           onOpenIssueForReview={openIssueForReview}
@@ -1086,16 +1087,18 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
 
-function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: FeatureProps & {
+function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: FeatureProps & {
   onClose: () => void;
   onShowAll: (query: string) => void;
 }) {
   const [query, setQuery] = useState('');
   const trimmed = query.trim();
-  const issues = searchQuickIssues(data, query);
+  const lookup = useAtlassianSearch(query, data, refresh, 150);
+  const issues = searchQuickIssues(data, query, lookup.matches);
   const projectNames = new Map(data.projects.map(project => [project.id, project.name]));
   const documentQuery = documentLabelKey(trimmed);
-  const docs = documentQuery ? data.documents.filter(doc => documentSearchText(doc).includes(documentQuery)).slice(0, 8) : [];
+  const docs = lookup.label ? data.documents.filter(doc => lookup.matches?.documentIds.has(doc.id)).slice(0, 8) :
+    documentQuery ? data.documents.filter(doc => documentSearchText(doc).includes(documentQuery)).slice(0, 8) : [];
   return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}>
     <div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색">
       <form className="search-input-wrap" onSubmit={event => {
@@ -1104,7 +1107,7 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
       }} id="workspace-quick-search">
         <Search size={21} aria-hidden="true"/>
         <input autoFocus value={query} maxLength={WORKSPACE_SEARCH_INPUT_LIMIT} onChange={event => setQuery(event.target.value)}
-          aria-label="통합 검색어" placeholder="업무 번호, 제목, 문서 내용, GitLab 링크·참조"/>
+          aria-label="통합 검색어" placeholder="업무 번호, 제목, 본문, 원본 주소"/>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="검색 닫기"><X size={19}/></button>
       </form>
       <div className="search-results">
@@ -1115,18 +1118,27 @@ function SearchDialog({ data, openIssue, openDocument, onClose, onShowAll }: Fea
             <span className="search-result-issue-content">
               <span className="search-result-issue-title"><span className="workspace-search-issue-key">{issue.key}</span><span>{issue.title}</span></span>
               <span className="workspace-search-result-path">{projectNames.get(issue.projectId) ?? '프로젝트'}</span>
-              {(matchedAliases || matchedGitlab) && <span className="workspace-search-result-labels">
+              {(matchedAliases || matchedGitlab || lookup.label) && <span className="workspace-search-result-labels">
                 {matchedAliases?.map(alias => <span key={`${alias.source}:${alias.key}`} className="workspace-search-label">{issueSearchAliasLabel(alias)}</span>)}
                 {matchedGitlab && <span className="workspace-search-label">{matchedGitlab}</span>}
+                {lookup.label && <span className="workspace-search-label">{lookup.label}</span>}
               </span>}
             </span>
             <ChevronRight size={15} aria-hidden="true"/>
           </button>)}
           {docs.length > 0 && <div className="search-label">문서</div>}
           {docs.map(doc => <button type="button" className="search-result" key={doc.id} onClick={() => openDocument(doc.id)}>
-            <BookOpen size={17}/><span>{doc.title}</span><ChevronRight size={15}/>
+            <BookOpen size={17} aria-hidden="true"/>
+            <span className="search-result-issue-content">
+              <span>{doc.title}</span>
+              {lookup.label && <span className="workspace-search-result-labels"><span className="workspace-search-label">{lookup.label}</span></span>}
+            </span>
+            <ChevronRight size={15} aria-hidden="true"/>
           </button>)}
-          {!issues.length && !docs.length && <div className="empty-state"><Search/><p>빠른 검색 결과가 없습니다.</p></div>}
+          {lookup.pending && <div className="empty-state" role="status"><p>원본 주소를 찾는 중…</p></div>}
+          {lookup.failed && <div className="empty-state"><p role="alert">원본 주소를 확인하지 못했습니다.</p>
+            <button className="btn" type="button" onClick={lookup.retry}>다시 검색</button></div>}
+          {!lookup.pending && !lookup.failed && !issues.length && !docs.length && <div className="empty-state"><Search/><p>빠른 검색 결과가 없습니다.</p></div>}
         </>}
       </div>
       <div className="search-footer">

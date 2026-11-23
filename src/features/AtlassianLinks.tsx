@@ -5,6 +5,7 @@ import { ExternalLink, Link2, Plus, RefreshCw, Unlink } from 'lucide-react';
 import { MAX_ATLASSIAN_LINK_URL_LENGTH, type AtlassianLink, type AtlassianLinkPreview, type AtlassianLinkTarget, type AtlassianProduct } from '../../shared/atlassian-links';
 import type { FeatureProps } from '../../shared/types';
 import { api } from '../lib/api';
+import { ATLASSIAN_LINKS_CHANGED } from '../lib/use-atlassian-search';
 import './atlassian-links.css';
 
 type Props = Pick<FeatureProps, 'actorId' | 'notify'> & { targetType: AtlassianLinkTarget; targetId: string };
@@ -71,6 +72,7 @@ function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
       setList(current => current && 'links' in current && !current.links.some(item => item.id === link.id)
         ? { links: [...current.links, link] } : current);
       setUrl('');
+      window.dispatchEvent(new Event(ATLASSIAN_LINKS_CHANGED));
       notify('원본 링크를 연결했습니다.');
     } catch (error) {
       if (!controller.signal.aborted) setAddError(messageOf(error, '원본 링크를 추가하지 못했습니다.'));
@@ -91,6 +93,7 @@ function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
       await api(linkPath(id), { method: 'DELETE', signal: controller.signal, headers: { 'X-Actor-Id': actorId } });
       if (controller.signal.aborted) return;
       setList(current => current && 'links' in current ? { links: current.links.filter(link => link.id !== id) } : current);
+      window.dispatchEvent(new Event(ATLASSIAN_LINKS_CHANGED));
       notify('원본 링크 연결을 해제했습니다.');
     } catch (error) {
       if (!controller.signal.aborted) notify(messageOf(error, '원본 링크 연결을 해제하지 못했습니다.'), 'error');

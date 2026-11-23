@@ -85,6 +85,7 @@ import { DeadlineReminderError, DeadlineRemindersService } from './deadline-remi
 import { documentNotificationSpaceProject, NotificationSubscriptionError, NotificationSubscriptionsService } from './notification-subscriptions.js';
 import { FavoriteError, FavoritesService } from './favorites.js';
 import { AtlassianReadError } from '../shared/atlassian-links.js';
+import { parseAtlassianSearchInput } from '../shared/atlassian-search.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
@@ -1081,6 +1082,12 @@ export function createApp(options: {
   app.get('/api/atlassian-links',(req,res)=>{
     if(Object.keys(req.query).some(key=>key!=='targetType'&&key!=='targetId'))return fail('기존 도구 링크 조회 조건을 확인해 주세요.');
     res.set('Cache-Control','no-store').json(atlassianLinks.list(req.query.targetType,req.query.targetId));
+  });
+  app.get('/api/atlassian-links/resolve', (req, res) => {
+    if (Object.keys(req.query).length !== 1 || typeof req.query.url !== 'string') return fail('검색할 원본 주소 한 개를 입력해 주세요.');
+    const address = parseAtlassianSearchInput(req.query.url);
+    if (!address) return fail('Jira 업무 또는 Confluence 페이지 주소를 확인해 주세요.');
+    res.set('Cache-Control', 'no-store').json({ targets: atlassianLinks.resolve(address) });
   });
   app.post('/api/atlassian-links',(req,res)=>{
     actor(req);
@@ -2476,6 +2483,20 @@ export function createApp(options: {
   app.get('/api/search',(req,res)=>{
     const query=String(req.query.q||'').trim(), q=query.toLocaleLowerCase();
     const gitlabQuery = normalizeGitlabSearchInput(query);
+    const originalAddress = gitlabQuery ? null : parseAtlassianSearchInput(query);
+    if (originalAddress) {
+      const issues: Issue[] = [], documents: DocPage[] = [];
+      for (const { targetType, targetId } of atlassianLinks.resolve(originalAddress)) {
+        if (targetType === 'issue') {
+          const issue = store.get<Issue>('issues', targetId);
+          if (issue) issues.push(issue);
+        } else {
+          const document = store.get<DocPage>('documents', targetId);
+          if (document) documents.push(document);
+        }
+      }
+      return res.set('Cache-Control', 'no-store').json({ issues, documents });
+    }
     if(q.length>500 && !gitlabQuery)fail('검색어가 너무 깁니다.');
     const gitlabMatches = gitlabQuery ? matchingGitlabSearchLinks(store.all<GitlabLink>('gitlab_links'), gitlabQuery) : null;
     if(q.length>500 && !gitlabMatches?.size && !/^https?:\/\//u.test(gitlabQuery ?? ''))fail('검색어가 너무 깁니다.');
