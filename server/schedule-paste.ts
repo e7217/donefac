@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
+import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type WorkCalendar } from '../shared/types.js';
@@ -44,6 +45,7 @@ interface PasteProposal extends ScheduleScope {
   actorId: string;
   removeAfter: string;
   issueIds: string[];
+  hierarchyId?: string;
   guard: string;
   changes: ScheduleDateMutation[];
   linkChanges?: ScheduleDependencyMutation[];
@@ -53,11 +55,12 @@ interface PasteProposal extends ScheduleScope {
   result?: SchedulePasteApplyResult;
 }
 
-type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings'>;
+type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings'>;
 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
+const MAX_MANUAL_ISSUES = 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -147,7 +150,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const invalid = () => new SchedulePasteError(400, '일정을 변경할 업무와 날짜 또는 이동 일수를 확인해 주세요.');
   if (!isRecord(raw)) throw invalid();
   if (Object.hasOwn(raw, 'changes')) {
-    if (Object.keys(raw).length !== 1 || !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > 1000) throw invalid();
+    if (Object.keys(raw).length !== 1 || !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
       const { id, expectedVersion, startDate, endDate } = value;
@@ -159,9 +162,11 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
     return { changes };
   }
   const { issueIds, days, workingDays } = raw;
-  if (Object.keys(raw).length !== 3 || !Array.isArray(issueIds) || !issueIds.length || issueIds.length > 1000 ||
-      !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length || typeof days !== 'number' || !Number.isSafeInteger(days) ||
+  if (Object.keys(raw).length !== 3 || typeof days !== 'number' || !Number.isSafeInteger(days) ||
       Math.abs(days) > MAX_WORKING_DURATION_DAYS || typeof workingDays !== 'boolean') throw invalid();
+  if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays };
+  if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_MANUAL_ISSUES ||
+      !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length) throw invalid();
   return { issueIds, days, workingDays };
 }
 
@@ -306,13 +311,14 @@ export class SchedulePasteService {
     return { projectId: null, projectIds: rows.map(({ id }) => id) };
   }
 
-  private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: PasteHooks) {
+  private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind' | 'hierarchyId'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: PasteHooks) {
     const links = incidentLinks(dependencies, targetIds);
     const related = new Set([...targetIds, ...links.flatMap(link => [link.predecessorId, link.successorId])]);
     // Keep the original single-project guard encoding for existing pending previews.
     const issueVersions = issues.filter(issue => related.has(issue.id)).sort((a, b) => a.id.localeCompare(b.id))
       .map(issue => {
-        if (scope.kind === 'manual-edit') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate];
+        if (scope.kind === 'manual-edit') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate,
+          ...(scope.hierarchyId ? [issue.parentId ?? null, issue.status] : [])];
         return scope.projectId === null ? [issue.id, issue.version, issue.projectId] : [issue.id, issue.version];
       });
     const linkVersions = links.map(dependencyGuardFields);
@@ -334,24 +340,40 @@ export class SchedulePasteService {
     this.store.put(table, {
       ...proposal, id, projectId: scope.projectId, removeAfter: expiresAt,
       ...(scope.projectIds ? { projectIds: scope.projectIds } : {}),
-      guard: this.guard({ ...scope, kind: proposal.kind }, state, proposal.issueIds, hooks),
+      guard: this.guard({ ...scope, kind: proposal.kind, hierarchyId: proposal.hierarchyId }, state, proposal.issueIds, hooks),
     } satisfies PasteProposal);
     return { previewId: id, expiresAt };
   }
 
   private previewManual(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePreview {
     const input = parseManualPreviewInput(raw);
-    const shift = 'issueIds' in input ? input : null;
-    const selected = 'changes' in input ? input.changes : input.issueIds.map(id => ({ id, expectedVersion: undefined, startDate: null, endDate: null }));
-    const issueIds = selected.map(({ id }) => id);
+    const shift = 'changes' in input ? null : input;
+    const hierarchy = 'hierarchy' in input ? input.hierarchy : null;
+    const shiftTarget = (id: string) => ({ id, expectedVersion: undefined, startDate: null, endDate: null });
     return this.store.transaction(() => {
       this.prune();
-      const scope = this.scopeForIssues(issueIds);
+      const anchor = hierarchy ? this.store.get<Issue>('issues', hierarchy.id) : null;
+      if (hierarchy && !anchor) throw new SchedulePasteError(404, '상위 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
+      let selected = 'changes' in input ? input.changes : 'issueIds' in input ? input.issueIds.map(shiftTarget) : [];
+      const scope = anchor ? { projectId: anchor.projectId } : this.scopeForIssues(selected.map(({ id }) => id));
       const state = this.scopeState(scope);
+      const categories = anchor ? new Map(hooks.workflow(anchor.projectId).statuses.map(status => [status.id, status.category])) : null;
+      if (hierarchy && anchor) {
+        if (anchor.version !== hierarchy.expectedVersion) {
+          throw new SchedulePasteError(409, `${anchor.key}: 업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.`);
+        }
+        const trace = traceGanttHierarchy(anchor.id, state.issues, issue => categories?.get(issue.status) ?? 'backlog');
+        if (!trace) throw new SchedulePasteError(404, '상위 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
+        if (trace.issues.length > MAX_MANUAL_ISSUES) {
+          throw new SchedulePasteError(400, `한 번에 검토할 수 있는 상위·하위 업무는 ${MAX_MANUAL_ISSUES}개입니다. 하위 업무를 기준으로 범위를 나누어 주세요.`);
+        }
+        selected = trace.issues.map(issue => shiftTarget(issue.id));
+      }
       const byId = new Map(state.issues.map(issue => [issue.id, issue]));
       const calendars = new Map<string, ReturnType<typeof createCalendarMath>>();
       const changes = new Map<string, ScheduleDateMutation>();
-      const preview: SchedulePreview = { changes: [], warnings: [] };
+      const skipped: SchedulePreview['skipped'] = hierarchy ? [] : undefined;
+      const preview: SchedulePreview = { changes: [], warnings: [], ...(skipped ? { skipped } : {}) };
       const blocking: string[] = [];
       for (const { id, expectedVersion, startDate, endDate } of selected) {
         const issue = byId.get(id);
@@ -361,8 +383,11 @@ export class SchedulePasteService {
         }
         let dates = { startDate, endDate };
         if (shift) {
-          if (!issue.startDate && !issue.endDate) {
-            preview.warnings.push(`${issue.key}: 일정이 없어 이동하지 않습니다.`);
+          const category = categories?.get(issue.status);
+          const reason = category === 'done' || category === 'cancelled' ? 'closed' : !issue.startDate && !issue.endDate ? 'unscheduled' : null;
+          if (reason) {
+            if (skipped) skipped.push({ id, key: issue.key, title: issue.title, reason });
+            else preview.warnings.push(`${issue.key}: 일정이 없어 이동하지 않습니다.`);
             continue;
           }
           let math = calendars.get(issue.projectId);
@@ -401,7 +426,8 @@ export class SchedulePasteService {
       if (blocking.length) return { ...preview, blocking };
       if (!changes.size) return preview;
       return { ...preview, ...this.saveProposal(scope, state, {
-        actorId, issueIds, changes: [...changes.values()], kind: 'manual-edit',
+        actorId, issueIds: selected.map(({ id }) => id), changes: [...changes.values()], kind: 'manual-edit',
+        ...(hierarchy ? { hierarchyId: hierarchy.id } : {}),
       }, hooks) };
     });
   }
@@ -745,6 +771,13 @@ export class SchedulePasteService {
       if (proposal.removeAfter <= after(0)) throw new SchedulePasteError(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
       const state = this.scopeState(proposal);
+      if (proposal.hierarchyId) {
+        const trace = traceGanttHierarchy(proposal.hierarchyId, state.issues, () => 'backlog');
+        const reviewedIds = new Set(proposal.issueIds);
+        if (!trace || trace.issues.length !== reviewedIds.size || trace.issues.some(issue => !reviewedIds.has(issue.id))) {
+          throw new SchedulePasteError(409, '상위·하위 업무 구성이 변경되었습니다. 다시 미리 확인해 주세요.');
+        }
+      }
       if (this.guard(proposal, state, proposal.issueIds, hooks) !== proposal.guard) {
         throw new SchedulePasteError(409, '업무, 연결된 일정 또는 프로젝트 규칙이 변경되었습니다. 다시 미리 확인해 주세요.');
       }

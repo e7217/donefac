@@ -907,6 +907,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/schedule/manual-preview`에 `{issueIds,days,workingDays}`를 보내 여러 업무를 이동하거나 `{changes:[{id,expectedVersion,startDate,endDate}]}`로 날짜를 직접 지정한다. 대상은 1~1,000개이며, 이동 일수의 범위는 −3,650~3,650이다. 날짜를 직접 지정할 때는 두 날짜에 각각 `YYYY-MM-DD` 또는 `null`을 보낸다. 여러 프로젝트가 포함된 근무일 이동은 각 업무가 속한 프로젝트의 달력을 사용한다.
 
+상위 업무와 하위 업무를 함께 이동할 때는 `{hierarchy:{id,expectedVersion},days,workingDays}`를 보낸다. 서버가 기준 업무와 같은 프로젝트의 전체 하위 단계에서 최대 1,000개까지 계산한다. 완료·취소 상태와 시작일·종료일이 모두 없는 업무는 `skipped`의 `{id,key,title,reason}`에 기록된다. `reason`은 각각 `closed`, `unscheduled`다. 한쪽 날짜만 저장한 업무는 그 날짜를 이동한다. 적용 시 하위 업무 구성과 각 업무의 상위 연결도 확인한다.
+
 응답은 `changes`, 관련 업무의 `warnings`와 적용 가능한 경우 `previewId`·`expiresAt`을 반환한다. 변경할 날짜가 없거나 `blocking`에 확인할 이유가 있으면 적용 ID를 발급하지 않는다. `POST /api/schedule/manual-apply`에는 `{previewId}`를 보내며, 같은 작업자의 미리보기와 선택 업무·관련 업무·선후행 연결·프로젝트 규칙을 확인한다. 검토한 조건이 달라지면 `409`로 응답하고 날짜는 유지한다.
 
 성공 시 `{undoId,updated,warnings}`를 반환한다. 날짜와 되돌리기 정보, 적용 결과는 한 트랜잭션으로 저장한다. 미사용 미리보기는 30분간 유효하며, 같은 미리보기의 적용 결과는 7일 안에 다시 조회할 수 있다. `POST /api/schedule/undo`에 `{undoId}`를 보내 해당 날짜 변경을 되돌린다.

@@ -61,6 +61,8 @@ type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
 type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
+type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
+type ShiftMode = 'selection' | 'hierarchy';
 function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
   return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
 }
@@ -107,6 +109,7 @@ type RowScheduleEdit = { issue: Issue; opener: HTMLButtonElement; focusDate?: 'd
 type ScheduleFocus = {
   kind: 'dependencies' | 'hierarchy';
   issueId: string;
+  projectId: string;
   opener: HTMLButtonElement;
   teamScope: string | null;
   previousSelection: Set<string>;
@@ -212,7 +215,7 @@ function ProjectGantt(props: GanttProps) {
   const [undoId, setUndoId] = useState<string | null>(null);
   const [days, setDays] = useState(5);
   const [workingDays, setWorkingDays] = useState(true);
-  const [shiftOpen, setShiftOpen] = useState(false);
+  const [shiftMode, setShiftMode] = useState<ShiftMode | null>(null);
   const [linkEditor, setLinkEditor] = useState<DependencyEditor | null>(null);
   const [linkPicker, setLinkPicker] = useState<{ source: LinkPick | null } | null>(null);
   const [datePicker, setDatePicker] = useState<DateRangePick | null>(null);
@@ -243,6 +246,7 @@ function ProjectGantt(props: GanttProps) {
       setScheduleFocus(null);
       setSelected(scheduleFocus.previousSelection);
       setWindowStart(scheduleFocus.previousWindowStart);
+      if (shiftMode === 'hierarchy') setShiftMode(null);
     }
     if (focusedIssue) {
       if (!focusDateEndpoint) {
@@ -263,7 +267,7 @@ function ProjectGantt(props: GanttProps) {
       setWindowStart(scheduleFocus.previousWindowStart);
     }
     if (selected.size) setSelected(new Set());
-    if (shiftOpen) setShiftOpen(false);
+    if (shiftMode) setShiftMode(null);
     if (autoOpen) setAutoOpen(false);
     if (bulkDateSelection) setBulkDateSelection(null);
     if (bulkLinkSelection) setBulkLinkSelection(null);
@@ -273,6 +277,7 @@ function ProjectGantt(props: GanttProps) {
     setScheduleFocus(null);
     setSelected(scheduleFocus.previousSelection);
     setWindowStart(scheduleFocus.previousWindowStart);
+    if (shiftMode === 'hierarchy') setShiftMode(null);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
   const teamUnscheduledFilter = useRef<HTMLInputElement>(null);
@@ -288,6 +293,9 @@ function ProjectGantt(props: GanttProps) {
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const dependencyFocusTrigger = useRef<HTMLButtonElement>(null);
   const hierarchyFocusTrigger = useRef<HTMLButtonElement>(null);
+  const selectionShiftTrigger = useRef<HTMLButtonElement>(null);
+  const hierarchyShiftTrigger = useRef<HTMLButtonElement>(null);
+  const shiftDaysField = useRef<HTMLInputElement>(null);
   const restoringScheduleFocus = useRef<ScheduleFocus | null>(null);
   const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
   const bulkLinksTrigger = useRef<HTMLButtonElement>(null);
@@ -305,7 +313,7 @@ function ProjectGantt(props: GanttProps) {
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
-    shiftOpen || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
+    shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -360,6 +368,9 @@ function ProjectGantt(props: GanttProps) {
     if (preview) previewDialog.current?.focus();
   }, [preview]);
   useLayoutEffect(() => {
+    if (shiftMode) shiftDaysField.current?.focus();
+  }, [shiftMode]);
+  useLayoutEffect(() => {
     if (!busy && (manualProblem?.kind === 'stale' || manualProblem?.kind === 'uncertain')) {
       manualReviewAction.current?.focus({ preventScroll: true });
     }
@@ -411,7 +422,7 @@ function ProjectGantt(props: GanttProps) {
             setDatePreviewFocusTarget(null);
             draftsRef.current.clear();
             setHasDraft(false);
-            setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
+            setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setPasteProject(null);
             setBulkLinkSelection(null);
@@ -435,7 +446,7 @@ function ProjectGantt(props: GanttProps) {
       setPasteProject(null);
       setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
-      setRowScheduleEdit(null); setScheduleFocus(null); setSelected(new Set());
+      setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
     window.addEventListener('teamspace:workspace-imported', importReset);
@@ -525,9 +536,11 @@ function ProjectGantt(props: GanttProps) {
   const calendarFor = useCallback((id: string) => calendarsByProject.get(id) ?? defaultWorkCalendar(id), [calendarsByProject]);
   const dependencyTrace = useMemo(() => scheduleFocus?.kind === 'dependencies' ? traceGanttDependencies(scheduleFocus.issueId, projectIssues, data.dependencies) : null,
     [scheduleFocus, projectIssues, data.dependencies]);
-  const hierarchyTrace = useMemo(() => scheduleFocus?.kind === 'hierarchy'
-    ? traceGanttHierarchy(scheduleFocus.issueId, projectIssues, issue => statusMeta({ workflows: data.workflows }, issue.projectId, issue.status).category)
-    : null, [scheduleFocus, projectIssues, data.workflows]);
+  const hierarchyTrace = useMemo(() => {
+    if (scheduleFocus?.kind !== 'hierarchy') return null;
+    const trace = traceGanttHierarchy(scheduleFocus.issueId, projectIssues, issue => statusMeta({ workflows: data.workflows }, issue.projectId, issue.status).category);
+    return trace?.anchor.projectId === scheduleFocus.projectId ? trace : null;
+  }, [scheduleFocus, projectIssues, data.workflows]);
   const focusedTrace = dependencyTrace ?? hierarchyTrace;
   const rowEditProjectId = rowScheduleEdit?.issue.projectId;
   const rowEditIssues = useMemo(() => rowEditProjectId ? projectIssues.filter(issue => issue.projectId === rowEditProjectId) : [],
@@ -628,7 +641,9 @@ function ProjectGantt(props: GanttProps) {
     return { projectDependencyCount, findings, conflictingIds, outgoingIssueIds };
   }, [projectIssues, data.dependencies, calendarFor, calendarMath, chartProjectFilter, timelineProjectId, findingsProjectId]);
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
-  const previewCascade = singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
+  const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
+  const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
+  const previewCascade = !hierarchyPreview && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
     if (!analysisOpen || !hasProject || !calendar) return null;
     try {
@@ -933,7 +948,8 @@ function ProjectGantt(props: GanttProps) {
   function openScheduleFocus(kind: ScheduleFocus['kind'], issue: Issue, opener: HTMLButtonElement) {
     if (scheduleFocus || !canLeave()) return;
     const next: ScheduleFocus = {
-      kind, opener, teamScope: teamFocusScope, issueId: issue.id, previousSelection: selected, previousWindowStart: windowStart,
+      kind, opener, teamScope: teamFocusScope, issueId: issue.id, projectId: issue.projectId,
+      previousSelection: selected, previousWindowStart: windowStart,
       scrollLeft: scrollRef.current?.scrollLeft ?? 0, scrollTop: scrollRef.current?.scrollTop ?? 0,
     };
     const preferredDate = kind === 'hierarchy'
@@ -945,7 +961,7 @@ function ProjectGantt(props: GanttProps) {
       setLinkPicker(null);
       setDatePicker(null);
       setDrag(null);
-      setShiftOpen(false);
+      setShiftMode(null);
       locateScheduleFocusRow(issue, { showIssueNames: true, preferredDate });
     });
   }
@@ -959,7 +975,7 @@ function ProjectGantt(props: GanttProps) {
       setLinkPicker(null);
       setDatePicker(null);
       setDrag(null);
-      setShiftOpen(false);
+      setShiftMode(null);
     });
   }
   function locateFindingDate(issueId: string, endpoint: ScheduleDependencyEndpoint) {
@@ -1051,20 +1067,54 @@ function ProjectGantt(props: GanttProps) {
       (trigger && !trigger.disabled ? trigger : scrollRef.current)?.focus({ preventScroll: true });
     });
   }
-  async function requestPreview(ids: string[], offset: number, skipWeekends: boolean, opener?: HTMLButtonElement) {
+  function restoreShiftFocus(opener: HTMLButtonElement | null) {
+    pendingScheduleFocus.current = () => {
+      const target = opener?.isConnected && !opener.disabled ? opener : scrollRef.current;
+      target?.focus({ preventScroll: true });
+    };
+  }
+  function closeShiftForm() {
+    if (busyRef.current || !shiftMode) return;
+    restoreShiftFocus(shiftMode === 'hierarchy' ? hierarchyShiftTrigger.current : selectionShiftTrigger.current);
+    setShiftMode(null);
+  }
+  function toggleShiftForm(mode: ShiftMode) {
     if (busyRef.current) return;
-    if (!ids.length) { notify('이동할 업무를 먼저 선택하세요.', 'error'); return; }
-    if (!Number.isInteger(offset) || offset === 0) { notify('0이 아닌 정수 일수를 입력하세요.', 'error'); return; }
-    const input = { issueIds: ids, days: offset, workingDays: skipWeekends };
+    if (shiftMode === mode) { closeShiftForm(); return; }
+    if (canLeave()) queueMicrotask(() => setShiftMode(mode));
+  }
+  function submitShift(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (shiftMode === 'hierarchy') {
+      if (!hierarchyTrace) return;
+      const { id, version } = hierarchyTrace.anchor;
+      void requestShiftPreview({ hierarchy: { id, expectedVersion: version }, days, workingDays }, hierarchyShiftTrigger.current);
+    } else {
+      void requestShiftPreview({ issueIds: selectedIssues.map(issue => issue.id), days, workingDays }, selectionShiftTrigger.current);
+    }
+  }
+  async function requestShiftPreview(input: ScheduleShiftInput, opener: HTMLButtonElement | null) {
+    if (busyRef.current) return;
+    if ('issueIds' in input && !input.issueIds.length) { notify('이동할 업무를 먼저 선택하세요.', 'error'); return; }
+    if (!Number.isInteger(input.days) || input.days === 0) { notify('0이 아닌 정수 일수를 입력하세요.', 'error'); return; }
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
-      setDatePreviewFocusTarget(opener ?? null);
+      setDatePreviewFocusTarget(opener);
       setManualReview({ input, preview });
       setManualProblem(null);
-      setShiftOpen(false);
+      setShiftMode(null);
+    } catch (cause) {
+      if ('hierarchy' in input && cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
+        setDatePreviewFocusTarget(opener);
+        setManualReview({ input, preview: { changes: [], warnings: [] } });
+        setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+        setShiftMode(null);
+        await refresh().catch(() => undefined);
+      } else notify(errorMessage(cause), 'error');
+    } finally {
+      markBusy(false);
     }
-    catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
   async function commitManualReview(review: ManualReview, checking = false) {
     const { previewId } = review.preview;
@@ -1102,17 +1152,21 @@ function ProjectGantt(props: GanttProps) {
   }
   async function applyManualReview() {
     if (busyRef.current || !manualReview?.preview.previewId ||
-        (manualProblem && manualProblem.kind !== 'uncertain')) return;
+        (manualProblem && manualProblem.kind !== 'uncertain') || (missingHierarchyAnchor && manualProblem?.kind !== 'uncertain')) return;
     markBusy(true);
     try { await commitManualReview(manualReview, manualProblem?.kind === 'uncertain'); }
     finally { markBusy(false); }
   }
   async function reviewManualAgain() {
-    if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale') return;
+    if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
     if ('changes' in input) {
       const issues = new Map(data.issues.map(issue => [issue.id, issue]));
       input = { changes: input.changes.map(change => ({ ...change, expectedVersion: issues.get(change.id)?.version ?? change.expectedVersion })) };
+    } else if ('hierarchy' in input) {
+      const anchor = hierarchyTrace?.anchor;
+      if (!anchor || anchor.id !== input.hierarchy.id) return;
+      input = { ...input, hierarchy: { id: anchor.id, expectedVersion: anchor.version } };
     }
     markBusy(true);
     try {
@@ -1361,7 +1415,10 @@ function ProjectGantt(props: GanttProps) {
   }
   function restoreDatePreviewFocus(restore = true) {
     setDatePreviewFocusTarget(null);
-    if (restore && datePreviewFocusTarget) focusAfterDatePicking(datePreviewFocusTarget);
+    if (!restore || !datePreviewFocusTarget) return;
+    if (datePreviewFocusTarget === hierarchyShiftTrigger.current || datePreviewFocusTarget === selectionShiftTrigger.current) {
+      restoreShiftFocus(datePreviewFocusTarget);
+    } else focusAfterDatePicking(datePreviewFocusTarget);
   }
   function closePreview() {
     const unresolved = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
@@ -1378,7 +1435,7 @@ function ProjectGantt(props: GanttProps) {
     queueMicrotask(() => {
       setDrag(null);
       setLinkPicker(null);
-      setShiftOpen(false);
+      setShiftMode(null);
       if (anchor && outside(anchor)) setWindowStart(windowForDate(anchor));
       setDatePicker({ issue, fixedEdge: getFixedDateEdge(issue), firstDate: null, initialDay, opener });
     });
@@ -1425,7 +1482,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
-    if (current.delta) { if (current.mode === 'move') void requestPreview([current.issue.id], current.delta, false, event.currentTarget); else previewResize(current.issue, current.mode, current.delta, event.currentTarget); }
+    if (current.delta) { if (current.mode === 'move') void requestShiftPreview({ issueIds: [current.issue.id], days: current.delta, workingDays: false }, event.currentTarget); else previewResize(current.issue, current.mode, current.delta, event.currentTarget); }
     else if (current.mode === 'move') openIssue(current.issue.id);
     else focusDateFromControl(event.currentTarget, current.issue, current.mode);
   }
@@ -1446,6 +1503,7 @@ function ProjectGantt(props: GanttProps) {
     if (preview && !busy) closePreview();
     else if (activeDatePicker) cancelDatePicking();
     else if (linkPicker) cancelLinkPicking();
+    else if (shiftMode && !busy) closeShiftForm();
     else return;
     event.preventDefault();
     event.stopPropagation();
@@ -1546,7 +1604,13 @@ function ProjectGantt(props: GanttProps) {
         if (onClearIssueFocus()) scrollRef.current?.focus({ preventScroll: true });
       }}>업무 위치 해제</button>}
     </div>}
-    <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div><button className="btn" onClick={() => { if (shiftOpen || canLeave()) setShiftOpen(!shiftOpen); }} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}><MoveHorizontal size={15} />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동</button><button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
+    <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div>
+      <button ref={selectionShiftTrigger} className="btn" type="button" onClick={() => toggleShiftForm('selection')}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}
+        aria-expanded={shiftMode === 'selection'} aria-controls={shiftMode === 'selection' ? 'gantt-shift-form' : undefined}>
+        <MoveHorizontal size={15} aria-hidden="true" />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동
+      </button>
+      <button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
       {canEditBulkDates && <button ref={bulkDatesTrigger} className="btn" type="button" onClick={openBulkDates}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
         disabled={!selectedIssues.length || bulkDatesOverLimit || busy || Boolean(activeDatePicker)}>
@@ -1615,7 +1679,12 @@ function ProjectGantt(props: GanttProps) {
       onPointerDown={keepInlineDateFocus} />}
     {scheduleFocus?.kind === 'hierarchy' && <GanttHierarchyFocusPanel trace={hierarchyTrace} outsideFilterCount={outsideFilterCount} disabled={busy}
       onClose={closeScheduleFocus} onLocate={() => { if (hierarchyTrace) locateScheduleFocusRow(hierarchyTrace.anchor, { preferredDate: hierarchyTrace.span?.startDate }); }}
-      onPointerDown={keepInlineDateFocus} />}
+      onPointerDown={keepInlineDateFocus} additionalActions={hierarchyTrace && <button ref={hierarchyShiftTrigger} className="btn" type="button"
+        onClick={() => toggleShiftForm('hierarchy')} data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
+        disabled={busy || Boolean(activeDatePicker || linkPicker || issueOverlayOpen || drag)}
+        aria-expanded={shiftMode === 'hierarchy'} aria-controls={shiftMode === 'hierarchy' ? 'gantt-shift-form' : undefined}>
+        <MoveHorizontal size={14} aria-hidden="true" />상위·하위 일정 함께 이동
+      </button>} />}
     {linkPicker && <GanttLinkPrompt source={sourceRow && pickedSource ? { key: sourceRow.issue.key, endpoint: pickedSource.endpoint } : null}
       canPick={hasVisibleLinkPair} onReset={() => {
         setLinkPicker({ source: null });
@@ -1638,7 +1707,20 @@ function ProjectGantt(props: GanttProps) {
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateTimelineDate} />}
-    {shiftOpen && <form className="gantt-shift-form" onSubmit={e => { e.preventDefault(); void requestPreview(selectedIssues.map(i => i.id), days, workingDays); }}><span><strong>{selectedIssues.length}개</strong> 업무를</span><input className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650" value={days} onChange={e => setDays(Number(e.target.value))} required /><span>일 이동</span><label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label><small>음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용</small><button className="btn btn-primary" type="submit" disabled={busy}>변경 미리보기</button><button className="issue-icon-button" type="button" onClick={() => setShiftOpen(false)} aria-label="일정 이동 닫기"><X size={16} /></button></form>}
+    {shiftMode && <form className="gantt-shift-form" id="gantt-shift-form" data-shift-mode={shiftMode} onSubmit={submitShift}>
+      {shiftMode === 'hierarchy'
+        ? <span>상위 업무와 하위 업무 <strong>{hierarchyTrace?.depths.size ?? 0}개</strong>를</span>
+        : <span><strong>{selectedIssues.length}개</strong> 업무를</span>}
+      <input ref={shiftDaysField} className="field" aria-label="이동 일수" type="number" step="1" min="-3650" max="3650"
+        value={days} disabled={busy} onChange={e => setDays(Number(e.target.value))} required />
+      <span>일 이동</span>
+      <label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} disabled={busy} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label>
+      <small>{shiftMode === 'hierarchy'
+        ? '시작일과 종료일을 같은 일수만큼 옮깁니다. 음수는 앞당기며, 근무일 기준은 프로젝트 달력의 근무 요일과 예외를 적용합니다.'
+        : '음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용'}</small>
+      <button className="btn btn-primary" type="submit" disabled={busy || (shiftMode === 'hierarchy' ? !hierarchyTrace : !selectedIssues.length)}>변경 미리보기</button>
+      <button className="issue-icon-button" type="button" onClick={closeShiftForm} disabled={busy} aria-label="일정 이동 닫기"><X size={16} aria-hidden="true" /></button>
+    </form>}
     {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={filteredProject?.id ?? projectId} chooseProject={allProjects} actorId={props.actorId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={closeCreateForm} onCreated={async issue => {
       await refresh();
       finishCreating();
@@ -1876,22 +1958,39 @@ function ProjectGantt(props: GanttProps) {
         )) : <div className="gantt-bottom-empty">선행 업무를 연결해 일정의 흐름을 확인하세요.</div>}
       </section>
     </div>
-    {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title"><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
+    {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
+      if (!hierarchyPreview || busy || event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closePreview();
+    }}><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
       <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
       {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
-      {(manualProblem || Boolean(preview.blocking?.length)) && <div className="issue-form-error gantt-preview-error" role="alert">
-        {manualProblem ? manualProblem.message : preview.blocking?.map((message, index) => <p key={index}>{message}</p>)}
+      {(manualProblem || missingHierarchyAnchor || Boolean(preview.blocking?.length)) && <div className="issue-form-error gantt-preview-error" role="alert">
+        {missingHierarchyAnchor && (!manualProblem || manualProblem.kind === 'stale') ? '현재 프로젝트에서 상위 업무를 찾을 수 없습니다.'
+          : manualProblem ? manualProblem.message : preview.blocking?.map((message, index) => <p key={index}>{message}</p>)}
       </div>}
-      <div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>{preview.changes.length === 0 && !preview.blocking?.length && <div className="issue-empty">이동할 일정이 없습니다. 날짜를 먼저 입력하세요.</div>}</div>
+      <div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>
+        {preview.changes.length === 0 && !manualProblem && !missingHierarchyAnchor && !preview.blocking?.length && <div className="issue-empty">
+          {hierarchyPreview ? '이동할 수 있는 일정이 없습니다.' : '이동할 일정이 없습니다. 날짜를 먼저 입력하세요.'}
+        </div>}
+      </div>
+      {Boolean(preview.skipped?.length) && <section className="gantt-preview-skipped" aria-labelledby="gantt-preview-skipped-title">
+        <h3 id="gantt-preview-skipped-title">이동에서 제외된 업무</h3>
+        <ul>{preview.skipped?.map(issue => <li key={issue.id}>
+          <span><span className="issue-key">{issue.key}</span> <strong>{issue.title}</strong></span>
+          <span>{issue.reason === 'closed' ? '완료·취소 상태' : '일정 미정'}</span>
+        </li>)}</ul>
+      </section>}
       <footer><span className="muted">적용 후 마지막 변경을 되돌릴 수 있습니다.</span><button className="btn btn-ghost" onClick={closePreview} disabled={busy}>취소</button>
         {previewCascade && <button ref={cascadePreviewButton} type="button" className="btn" disabled={busy || Boolean(manualProblem) || !preview.previewId} onClick={() => reviewSuccessors({
           id: previewCascade.id, expectedVersion: previewCascade.version, startDate: previewCascade.toStart, endDate: previewCascade.toEnd,
         }, { kind: 'preview' })}>후행 일정 검토</button>}
-        {manualProblem?.kind === 'stale' && <button ref={manualReviewAction} type="button" className="btn" disabled={busy} onClick={() => void reviewManualAgain()}>다시 미리보기</button>}
+        {manualProblem?.kind === 'stale' && !missingHierarchyAnchor && <button ref={manualReviewAction} type="button" className="btn" disabled={busy} onClick={() => void reviewManualAgain()}>다시 미리보기</button>}
         {manualProblem?.kind === 'uncertain'
           ? <button ref={manualReviewAction} type="button" className="btn btn-primary" disabled={busy}
             onClick={() => void applyManualReview()}>{busy ? '확인 중…' : '적용 결과 다시 확인'}</button>
-          : <button type="button" className="btn btn-primary" disabled={busy || Boolean(manualProblem) || !preview.previewId}
+          : <button type="button" className="btn btn-primary" disabled={busy || Boolean(manualProblem) || missingHierarchyAnchor || !preview.previewId}
             onClick={() => void applyManualReview()}><Check size={16} />{busy ? '적용 중…' : '변경 적용'}</button>}
       </footer></section></div>}
     {cascade && <GanttCascadeDialog projectId={cascade.projectId} anchorChange={cascade.anchorChange}

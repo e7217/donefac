@@ -1055,6 +1055,40 @@ async function runStandardPilot() {
   assert.deepEqual(cycleProgress.days.at(-1).changes, { added: 2, removed: 1, completed: 0, cancelled: 0,
     reopened: 0, estimateChanged: 1, reclassified: 0 });
   assert.deepEqual(cycleProgress.evidence.items.map(item => item.issueId), Array(4).fill(progressIssue.id));
+  const hierarchyProject = await (await call(pilot.url, '/projects', { method: 'POST', status: 201,
+    body: { key: 'HSHIFT', name: '파일럿 업무 계층 일정 이동' } })).json();
+  const createHierarchyIssue = async body => (await call(pilot.url, '/issues', { method: 'POST', status: 201,
+    body: { projectId: hierarchyProject.id, ...body } })).json();
+  const hierarchyRoot = await createHierarchyIssue({ title: '파일럿 상위 업무', startDate: '2027-04-05', endDate: '2027-04-08', dueDate: '2027-04-15' });
+  const hierarchyChild = await createHierarchyIssue({ title: '파일럿 직접 하위 업무', startDate: '2027-04-06', endDate: '2027-04-07', parentId: hierarchyRoot.id });
+  const hierarchyGrandchild = await createHierarchyIssue({ title: '파일럿 간접 하위 업무', startDate: '2027-04-07', parentId: hierarchyChild.id });
+  const hierarchyUnscheduled = await createHierarchyIssue({ title: '파일럿 일정이 없는 하위 업무', parentId: hierarchyRoot.id });
+  const hierarchyReview = await (await call(pilot.url, '/schedule/manual-preview', { method: 'POST', body: {
+    hierarchy: { id: hierarchyRoot.id, expectedVersion: hierarchyRoot.version }, days: 2, workingDays: false,
+  } })).json();
+  assert.deepEqual(hierarchyReview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
+    [hierarchyRoot.id, '2027-04-07', '2027-04-10'],
+    [hierarchyChild.id, '2027-04-08', '2027-04-09'],
+    [hierarchyGrandchild.id, '2027-04-09', null],
+  ]);
+  assert.deepEqual(hierarchyReview.skipped, [{ id: hierarchyUnscheduled.id, key: hierarchyUnscheduled.key,
+    title: hierarchyUnscheduled.title, reason: 'unscheduled' }]);
+  const applyHierarchyShift = async url => (await call(url, '/schedule/manual-apply', { method: 'POST',
+    body: { previewId: hierarchyReview.previewId } })).json();
+  const hierarchyApplied = await applyHierarchyShift(pilot.url);
+  assert.ok(hierarchyApplied.undoId);
+  assert.deepEqual(hierarchyApplied.updated.map(({ id, startDate, endDate }) => [id, startDate, endDate]),
+    hierarchyReview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]));
+  const verifyHierarchyShift = async url => {
+    assert.deepEqual(await applyHierarchyShift(url), hierarchyApplied);
+    const { issues } = await (await call(url, '/workspace')).json();
+    const byId = new Map(issues.map(issue => [issue.id, issue]));
+    for (const issue of hierarchyApplied.updated) assert.deepEqual(byId.get(issue.id), issue);
+    assert.deepEqual(byId.get(hierarchyUnscheduled.id), hierarchyUnscheduled);
+    assert.equal(byId.get(hierarchyRoot.id).dueDate, hierarchyRoot.dueDate);
+    assert.equal(byId.get(hierarchyGrandchild.id).parentId, hierarchyChild.id);
+  };
+  await verifyHierarchyShift(pilot.url);
   const locked = cli('backup',source,backup);
   assert.equal(locked.status,75,locked.stderr);
   assert.equal(existsSync(backup),false);
@@ -1140,6 +1174,11 @@ async function runStandardPilot() {
   assert.equal(restoredCycleProgress.revision, cycleProgress.revision);
   assert.deepEqual(restoredCycleProgress.days, cycleProgress.days);
   assert.deepEqual(restoredCycleProgress.evidence, cycleProgress.evidence);
+  await verifyHierarchyShift(copy.url);
+  const hierarchyUndo = await (await call(copy.url, '/schedule/undo', { method: 'POST',
+    body: { undoId: hierarchyApplied.undoId } })).json();
+  const hierarchyDates = ({ id, parentId, startDate, endDate, dueDate }) => ({ id, parentId, startDate, endDate, dueDate });
+  assert.deepEqual(hierarchyUndo.updated.map(hierarchyDates), [hierarchyRoot, hierarchyChild, hierarchyGrandchild].map(hierarchyDates));
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

@@ -1,6 +1,6 @@
 'use client';
 
-import { useId, type CSSProperties, type PointerEventHandler } from 'react';
+import { useId, type CSSProperties, type PointerEventHandler, type ReactNode } from 'react';
 import { ListTree, LocateFixed, X } from 'lucide-react';
 import type { GanttHierarchyFocus } from '../../shared/gantt-hierarchy-focus';
 import './gantt-hierarchy-focus.css';
@@ -12,11 +12,12 @@ interface GanttHierarchyFocusPanelProps {
   onClose: () => void;
   onLocate: () => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
+  additionalActions?: ReactNode;
 }
 
 const count = (value: number) => `${value.toLocaleString('ko-KR')}개`;
 
-export function GanttHierarchyFocusPanel({ trace, outsideFilterCount, disabled, onClose, onLocate, onPointerDown }: GanttHierarchyFocusPanelProps) {
+export function GanttHierarchyFocusPanel({ trace, outsideFilterCount, disabled, onClose, onLocate, onPointerDown, additionalActions }: GanttHierarchyFocusPanelProps) {
   const headingId = useId();
 
   return <section className="gantt-hierarchy-focus" aria-labelledby={headingId}>
@@ -47,6 +48,7 @@ export function GanttHierarchyFocusPanel({ trace, outsideFilterCount, disabled, 
       {trace && <button className="btn" type="button" disabled={disabled} data-gantt-focus-control="" onPointerDown={onPointerDown} onClick={onLocate}>
         <LocateFixed size={14} aria-hidden="true" />상위 업무로 이동
       </button>}
+      {additionalActions}
       <button className="btn btn-ghost" type="button" disabled={disabled} data-gantt-focus-control="" onPointerDown={onPointerDown} onClick={onClose}>
         <X size={14} aria-hidden="true" />하위 업무 일정 닫기
       </button>

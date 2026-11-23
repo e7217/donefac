@@ -203,6 +203,44 @@
   box-shadow: inset 0 2px #57a293, inset 0 -2px #57a293;
 }
 
+.gantt-shift-form[data-shift-mode='hierarchy'],
+.gantt-shift-form[data-shift-mode='hierarchy'] small {
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.gantt-preview-skipped {
+  margin: 16px 25px;
+  font-size: 12px;
+}
+
+.gantt-preview-skipped h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.gantt-preview-skipped ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gantt-preview-skipped li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.gantt-preview-skipped li > span:last-child {
+  color: var(--ink);
+  font-size: 11px;
+}
+
 @media (max-width: 900px) {
   .gantt-feature .gantt-left { position: relative; left: auto; }
 }

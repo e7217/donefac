@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Issue, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, SavedView, SchedulePasteApplyResult, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
-async function json<T>(response: APIResponse, status = 200): Promise<T> {
+async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
   return response.json();
 }
@@ -25,7 +25,7 @@ async function fixture(request: APIRequestContext) {
   const views: SavedView[] = [];
   return {
     project, otherProject, actor, prefix,
-    async issue(name: string, fields: Partial<Pick<Issue, 'parentId' | 'projectId' | 'assigneeId' | 'status' | 'startDate' | 'endDate'>> = {}) {
+    async issue(name: string, fields: Partial<Pick<Issue, 'parentId' | 'projectId' | 'assigneeId' | 'status' | 'startDate' | 'endDate' | 'dueDate'>> = {}) {
       const issue = await json<Issue>(await request.post('/api/issues', {
         headers, data: { projectId: project.id, title: `${prefix} ${name}`, ...fields },
       }), 201);
@@ -181,6 +181,146 @@ test('360px 프로젝트 간트에서 검색 밖의 하위 일정을 고치고 �
     await expect(hideDone).toBeChecked();
     await expect(zoomWeek).toHaveClass(/active/u);
     await expect(page).toHaveURL(url => url.hash === hash);
+  } finally {
+    await f.clear();
+  }
+});
+
+test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하고 저장 결과를 확인한 뒤 함께 되돌린다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const d = dateInNextWeek;
+  const previewPath = '/api/schedule/manual-preview';
+  const applyPath = '/api/schedule/manual-apply';
+  const nextPost = (path: string) => page.waitForResponse(response =>
+    new URL(response.url()).pathname === path && response.request().method() === 'POST');
+  const schedule = ({ id, version, startDate, endDate, dueDate }: Issue) => ({ id, version, startDate, endDate, dueDate });
+  try {
+    const parent = await f.issue('검색에 표시할 상위', { startDate: d(0), endDate: d(1), dueDate: d(7) });
+    const child = await f.issue('직접 하위 업무', { parentId: parent.id, startDate: d(1), endDate: d(2) });
+    const nested = await f.issue('간접 하위 업무', { parentId: child.id, startDate: d(3), endDate: d(3) });
+    const closed = await f.issue('완료된 하위 업무', { parentId: parent.id, status: 'done', startDate: d(1), endDate: d(2) });
+    const undated = await f.issue('일정 미정 하위 업무', { parentId: child.id });
+    const unrelated = await f.issue('검색에 표시할 다른 업무', { startDate: d(1), endDate: d(2) });
+    const stored = async (issues: Issue[]) => {
+      const current = new Map((await workspace(request)).issues.map(issue => [issue.id, issue]));
+      return issues.map(issue => schedule(current.get(issue.id)!));
+    };
+    const members = [parent, child, nested];
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/#/${f.project.id}/gantt`);
+    const g = gantt(page);
+    const openMove = g.panel.getByRole('button', { name: '상위·하위 일정 함께 이동', exact: true });
+    const dialog = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '변경 적용', exact: true });
+    const undo = page.getByRole('button', { name: '되돌리기', exact: true });
+    const query = `${f.prefix} 검색에 표시할`;
+    await expect(g.search).toBeVisible({ timeout: 35_000 });
+    await g.search.fill(query);
+    await expect(g.rows).toHaveCount(2);
+    await expect(g.row(nested)).toHaveCount(0);
+    await g.select(parent).check();
+    await g.open.click();
+    await expect(g.row(nested)).toBeVisible();
+    await expect(g.select(child)).not.toBeChecked();
+    const nestedEnd = g.date(nested, '종료일');
+    await nestedEnd.fill(d(8));
+    await dismissDiscard(page, () => openMove.click());
+    await expect(nestedEnd).toBeFocused();
+    await expect(nestedEnd).toHaveValue(d(8));
+    await nestedEnd.press('Escape');
+    await expect(nestedEnd).toHaveValue(d(3));
+    await openMove.click();
+    await page.getByLabel('이동 일수', { exact: true }).fill('2');
+    await page.getByRole('checkbox', { name: '근무일 기준', exact: true }).uncheck();
+    const inspected = nextPost(previewPath);
+    await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const inspectedResponse = await inspected;
+    expect(inspectedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: parent.version }, days: 2, workingDays: false });
+    const first = await json<SchedulePreview>(inspectedResponse);
+    expect(first.previewId).toBeTruthy();
+    expect(first.changes.map(change => change.id)).toEqual(members.map(issue => issue.id));
+    expect(first.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: closed.id, reason: 'closed' }),
+      expect.objectContaining({ id: undated.id, reason: 'unscheduled' }),
+    ]));
+    await expect(dialog.getByText(nested.title, { exact: true })).toBeVisible();
+    await expect(dialog.getByText(closed.title, { exact: true })).toBeVisible();
+    await expect(dialog.getByText(undated.title, { exact: true })).toBeVisible();
+    expect(await stored([...members, closed, undated, unrelated])).toEqual([...members, closed, undated, unrelated].map(schedule));
+
+    const added = await f.issue('검토 뒤 연결된 하위 업무', { parentId: nested.id, startDate: d(4), endDate: d(5) });
+    const changedParent = await json<Issue>(await request.patch(`/api/issues/${parent.id}`, {
+      headers: { 'X-Actor-Id': f.actor.id },
+      data: { expectedVersion: parent.version, title: `${parent.title} 수정` },
+    }));
+    const rejected = nextPost(applyPath);
+    await apply.click();
+    expect((await rejected).status()).toBe(409);
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(apply).toBeDisabled();
+    const expectedBefore = [changedParent, child, nested, added, closed, undated, unrelated];
+    expect(await stored(expectedBefore)).toEqual(expectedBefore.map(schedule));
+
+    const inspectedAgain = nextPost(previewPath);
+    await dialog.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const updatedResponse = await inspectedAgain;
+    expect(updatedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: changedParent.version }, days: 2, workingDays: false });
+    const fresh = await json<SchedulePreview>(updatedResponse);
+    expect(fresh.previewId).toBeTruthy();
+    expect(fresh.previewId).not.toBe(first.previewId);
+    expect(fresh.changes.map(change => change.id)).toEqual([parent.id, child.id, nested.id, added.id]);
+    await expect(dialog.getByText(added.title, { exact: true })).toBeVisible();
+
+    let lostResult: SchedulePasteApplyResult | undefined;
+    let lostBody: unknown;
+    await page.route(`**${applyPath}`, async route => {
+      lostBody = route.request().postDataJSON();
+      lostResult = await json<SchedulePasteApplyResult>(await route.fetch());
+      await route.abort('failed');
+    }, { times: 1 });
+    await apply.click();
+    const recover = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(recover).toBeFocused();
+    expect(lostBody).toEqual({ previewId: fresh.previewId });
+    expect(lostResult?.undoId).toBeTruthy();
+    const moved = [
+      { ...schedule(changedParent), version: changedParent.version + 1, startDate: d(2), endDate: d(3) },
+      { ...schedule(child), version: child.version + 1, startDate: d(3), endDate: d(4) },
+      { ...schedule(nested), version: nested.version + 1, startDate: d(5), endDate: d(5) },
+      { ...schedule(added), version: added.version + 1, startDate: d(6), endDate: d(7) },
+      ...[closed, undated, unrelated].map(schedule),
+    ];
+    expect(await stored(expectedBefore)).toEqual(moved);
+
+    const replayed = nextPost(applyPath);
+    await recover.click();
+    const replayResponse = await replayed;
+    expect(replayResponse.request().postDataJSON()).toEqual(lostBody);
+    expect(await json<SchedulePasteApplyResult>(replayResponse)).toEqual(lostResult);
+    await expect(dialog).toHaveCount(0);
+    await expect(openMove).toBeFocused();
+    await expect(g.date(added, '시작일')).toHaveValue(d(6));
+    expect(await stored(expectedBefore)).toEqual(moved);
+
+    const reverted = nextPost('/api/schedule/undo');
+    await undo.click();
+    const revertResponse = await reverted;
+    expect(revertResponse.request().postDataJSON()).toEqual({ undoId: lostResult?.undoId });
+    await json(revertResponse);
+    await expect(g.date(added, '시작일')).toHaveValue(d(4));
+    await expect(undo).toBeDisabled();
+    expect(await stored(expectedBefore)).toEqual(expectedBefore.map((issue, index) => ({
+      ...schedule(issue), version: issue.version + (index < 4 ? 2 : 0),
+    })));
+    await g.close.click();
+    await expect(g.search).toHaveValue(query);
+    await expect(g.rows).toHaveCount(2);
+    await expect(g.open).toBeFocused();
+    await expect(g.select(parent)).toBeChecked();
+    await expect(g.select(unrelated)).not.toBeChecked();
   } finally {
     await f.clear();
   }

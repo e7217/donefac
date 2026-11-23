@@ -1615,9 +1615,24 @@ export interface ScheduleChange {
   fromDue?: string | null;
   toDue?: string | null;
 }
-export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
+export interface ScheduleHierarchySkip {
+  id: string;
+  key: string;
+  title: string;
+  reason: 'closed' | 'unscheduled';
+}
+export interface SchedulePreview {
+  changes: ScheduleChange[];
+  warnings: string[];
+  calendarVersions?: Record<string, number>;
+  previewId?: string;
+  blocking?: string[];
+  expiresAt?: string;
+  skipped?: ScheduleHierarchySkip[];
+}
 export interface ScheduleAnchorChange { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }
 export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
+  { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
   { changes: ScheduleAnchorChange[] };
 export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number; anchorChange?: ScheduleAnchorChange }
 export interface AutomaticSchedulePreview extends SchedulePreview {
