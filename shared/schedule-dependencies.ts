@@ -1,4 +1,4 @@
-import { CalendarError, type createCalendarMath } from './calendar.js';
+import { CalendarError, MAX_CALENDAR_DATE, type createCalendarMath } from './calendar.js';
 import type { Dependency, DependencyType } from './types.js';
 
 export const DEPENDENCY_TYPES = ['FS', 'SS', 'FF', 'SF'] as const;
@@ -53,12 +53,29 @@ export function isDependencyLag(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && Math.abs(value) <= MAX_DEPENDENCY_LAG_DAYS;
 }
 
+function workdayOffset(dependency: DependencyRule) {
+  return dependency.lagDays + Number(dependency.type === 'FS');
+}
+
 /** Inclusive dates make the first working day after the predecessor the FS zero-lag bound. */
 export function dependencyBound(dependency: DependencyRule, predecessor: ScheduleDates, math: CalendarMath) {
   const endpoints = DEPENDENCY_ENDPOINTS[dependency.type];
   const anchor = predecessor[endpoints.predecessor];
   if (!anchor) return null;
-  return { endpoint: endpoints.successor, date: math.shift(anchor, dependency.lagDays + Number(dependency.type === 'FS')) };
+  return { endpoint: endpoints.successor, date: math.shift(anchor, workdayOffset(dependency)) };
+}
+
+/** Latest working predecessor endpoint that satisfies the stored successor date. */
+export function dependencyPredecessorBound(dependency: DependencyRule, successor: ScheduleDates, math: CalendarMath) {
+  const endpoints = DEPENDENCY_ENDPOINTS[dependency.type];
+  const anchor = successor[endpoints.successor];
+  if (!anchor) return null;
+  const workingAnchor = math.isWorking(anchor) ? anchor : math.shift(anchor, -1);
+  const inverse = -workdayOffset(dependency);
+  // A negative lag can put the exact boundary beyond the last representable workday.
+  const offset = inverse > 0 && Number.isSafeInteger(inverse)
+    ? Math.min(inverse, math.count(workingAnchor, MAX_CALENDAR_DATE) - 1) : inverse;
+  return { endpoint: endpoints.predecessor, date: math.shift(workingAnchor, offset) };
 }
 
 export function checkDependencySchedule(

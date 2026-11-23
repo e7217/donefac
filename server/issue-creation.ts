@@ -3,7 +3,8 @@ import { creationRequestFingerprint, creationRequestId } from './creation-reques
 import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
-type CreationScope = { kind: 'schedule-successor'; predecessorId: string } | { kind: 'issue-clone'; sourceIssueId: string };
+type CreationScope = { kind: 'schedule-successor'; predecessorId: string } |
+  { kind: 'schedule-predecessor'; successorId: string } | { kind: 'issue-clone'; sourceIssueId: string };
 type Receipt = { actorId: string; projectId: string; fingerprint: string; issueId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
 
@@ -39,10 +40,9 @@ export class IssueCreationService {
       throw new IssueCreationError(400, '업무 생성 요청 ID를 확인해 주세요.', { reason: 'invalid_request_id' });
     }
     const id = requestId.toLowerCase();
-    // Keep the ordinary and schedule-successor digests stable for previously saved requests.
-    const digest = !scope ? fingerprint(input) : scope.kind === 'schedule-successor'
-      ? `schedule-successor:${fingerprint({ ...input, predecessorId: scope.predecessorId })}`
-      : `issue-clone:${fingerprint({ ...input, sourceIssueId: scope.sourceIssueId })}`;
+    // Keep the scope prefix and identity fields of previously saved requests.
+    const { kind, ...identity } = scope ?? {};
+    const digest = kind ? `${kind}:${fingerprint({ ...input, ...identity })}` : fingerprint(input);
     return this.store.transaction(() => {
       const author = actorId();
       const receipt = this.store.db.prepare(`SELECT actor_id AS actorId, project_id AS projectId,

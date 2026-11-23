@@ -1527,44 +1527,55 @@ export function createApp(options: {
     const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,issueCreationInput(req.body)));
     res.status(result.duplicate?200:201).json(result.issue);
   });
-  app.post('/api/issues/:id/schedule-successors', (req, res) => {
-    const input = req.body as Record<string, unknown>;
-    if (Object.keys(input).some(key => !['requestId', 'expectedPredecessorVersion', 'expectedCalendarVersion', 'type', 'lagDays', 'issue'].includes(key))) {
-      return fail('후행 업무 생성 요청을 확인해 주세요.');
-    }
-    const { expectedPredecessorVersion, expectedCalendarVersion, type, lagDays, issue } = input;
-    if (typeof expectedPredecessorVersion !== 'number' || !Number.isSafeInteger(expectedPredecessorVersion) || expectedPredecessorVersion < 1 ||
-        typeof expectedCalendarVersion !== 'number' || !Number.isSafeInteger(expectedCalendarVersion) || expectedCalendarVersion < 1) {
-      return fail('선행 업무와 작업 달력의 버전을 확인해 주세요.');
-    }
-    if (!isDependencyType(type) || !isDependencyLag(lagDays)) {
-      return fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
-    }
-    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail('생성할 후행 업무 정보를 확인해 주세요.');
-    const issueInput = issue as Record<string, unknown>;
-    const predecessorId = String(req.params.id);
-    const result = issueCreation.create(() => actor(req), input, () => {
-      const predecessor = store.get<Issue>('issues', predecessorId);
-      if (!predecessor) return fail('선행 업무를 찾을 수 없습니다.', 404, { reason: 'predecessor_missing' });
-      if (predecessor.version !== expectedPredecessorVersion) {
-        return fail('선행 업무가 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.', 409,
-          { reason: 'predecessor_changed', currentVersion: predecessor.version });
+  const registerScheduleLinkedIssue = (direction: 'predecessor' | 'successor') => {
+    const createsPredecessor = direction === 'predecessor';
+    const newRole = createsPredecessor ? '선행 업무' : '후행 업무';
+    const anchorRole = createsPredecessor ? '후행 업무' : '선행 업무';
+    const anchorKind = createsPredecessor ? 'successor' : 'predecessor';
+    const versionField = createsPredecessor ? 'expectedSuccessorVersion' : 'expectedPredecessorVersion';
+    const fields = new Set(['requestId', versionField, 'expectedCalendarVersion', 'type', 'lagDays', 'issue']);
+    app.post(`/api/issues/:id/schedule-${direction}s`, (req, res) => {
+      const input = req.body as Record<string, unknown>;
+      if (Object.keys(input).some(key => !fields.has(key))) return fail(`${newRole} 생성 요청을 확인해 주세요.`);
+      const { [versionField]: expectedAnchorVersion, expectedCalendarVersion, type, lagDays, issue } = input;
+      if (typeof expectedAnchorVersion !== 'number' || !Number.isSafeInteger(expectedAnchorVersion) || expectedAnchorVersion < 1 ||
+          typeof expectedCalendarVersion !== 'number' || !Number.isSafeInteger(expectedCalendarVersion) || expectedCalendarVersion < 1) {
+        return fail(`${anchorRole}와 작업 달력의 버전을 확인해 주세요.`);
       }
-      const calendar = calendars.get(predecessor.projectId);
-      if (calendar.version !== expectedCalendarVersion) {
-        return fail('작업 달력이 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.', 409,
-          { reason: 'calendar_changed', currentVersion: calendar.version });
+      if (!isDependencyType(type) || !isDependencyLag(lagDays)) {
+        return fail('업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
       }
-      if (Object.hasOwn(issueInput, 'projectId') && issueInput.projectId !== predecessor.projectId) {
-        return fail('후행 업무는 선행 업무와 같은 프로젝트에 만들어 주세요.');
-      }
-      const successor = createIssueInTransaction(req, { ...issueInput, projectId: predecessor.projectId });
-      saveNewDependency(req, { id: uid(), predecessorId, successorId: successor.id, type, lagDays, version: 1 });
-      activity(req, 'issue', predecessor.id, '후행 업무 생성', `${successor.key} ${successor.title}`);
-      return successor;
-    }, { kind: 'schedule-successor', predecessorId });
-    res.status(result.duplicate ? 200 : 201).json(result.issue);
-  });
+      if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail(`생성할 ${newRole} 정보를 확인해 주세요.`);
+      const issueInput = issue as Record<string, unknown>;
+      const anchorId = String(req.params.id);
+      const scope = createsPredecessor ? { kind: 'schedule-predecessor' as const, successorId: anchorId }
+        : { kind: 'schedule-successor' as const, predecessorId: anchorId };
+      const result = issueCreation.create(() => actor(req), input, () => {
+        const anchor = store.get<Issue>('issues', anchorId);
+        if (!anchor) return fail(`${anchorRole}를 찾을 수 없습니다.`, 404, { reason: `${anchorKind}_missing` });
+        if (anchor.version !== expectedAnchorVersion) {
+          return fail(`${anchorRole}가 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.`, 409,
+            { reason: `${anchorKind}_changed`, currentVersion: anchor.version });
+        }
+        const calendar = calendars.get(anchor.projectId);
+        if (calendar.version !== expectedCalendarVersion) {
+          return fail('작업 달력이 변경되었습니다. 최신 날짜와 연결 조건을 확인해 주세요.', 409,
+            { reason: 'calendar_changed', currentVersion: calendar.version });
+        }
+        if (Object.hasOwn(issueInput, 'projectId') && issueInput.projectId !== anchor.projectId) {
+          return fail(`${newRole}는 ${anchorRole}와 같은 프로젝트에 만들어 주세요.`);
+        }
+        const created = createIssueInTransaction(req, { ...issueInput, projectId: anchor.projectId });
+        const [predecessorId, successorId] = createsPredecessor ? [created.id, anchor.id] : [anchor.id, created.id];
+        saveNewDependency(req, { id: uid(), predecessorId, successorId, type, lagDays, version: 1 });
+        activity(req, 'issue', anchor.id, `${newRole} 생성`, `${created.key} ${created.title}`);
+        return created;
+      }, scope);
+      res.status(result.duplicate ? 200 : 201).json(result.issue);
+    });
+  };
+  registerScheduleLinkedIssue('successor');
+  registerScheduleLinkedIssue('predecessor');
   app.post('/api/issues/:id/children', (req, res) => {
     const result = issueChildren.create({ parentId: String(req.params.id), actorId: actor(req), body: req.body }, {
       checkParentVersion: checkVersion,

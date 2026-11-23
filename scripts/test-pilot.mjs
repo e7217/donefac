@@ -1004,6 +1004,34 @@ async function runStandardPilot() {
   const replacementReservation = await (await call(pilot.url,`/issues/${parallel.id}/time-reservations`,{
     method:'POST',status:201,body:{...reservedTime,requestId:randomUUID()},
   })).json();
+  const prerequisiteProject = await (await call(pilot.url, '/projects', { method: 'POST', status: 201,
+    body: { key: 'PRER', name: '파일럿 선행 업무' } })).json();
+  const prerequisiteAnchor = await (await call(pilot.url, '/issues', { method: 'POST', status: 201,
+    body: { projectId: prerequisiteProject.id, title: '파일럿 기존 후행 업무', startDate: '2027-04-05', endDate: '2027-04-08' } })).json();
+  const prerequisiteCalendar = await (await call(pilot.url, `/projects/${prerequisiteProject.id}/calendar`)).json();
+  const prerequisitePath = `/issues/${prerequisiteAnchor.id}/schedule-predecessors`;
+  const prerequisiteRequest = { requestId: randomUUID(), expectedSuccessorVersion: prerequisiteAnchor.version,
+    expectedCalendarVersion: prerequisiteCalendar.version, type: 'FS', lagDays: 0, issue: {
+      projectId: prerequisiteProject.id, title: '파일럿 신규 선행 업무', startDate: '2027-04-02', endDate: '2027-04-02',
+    } };
+  const prerequisite = await (await call(pilot.url, prerequisitePath, {
+    method: 'POST', status: 201, body: prerequisiteRequest,
+  })).json();
+  const prerequisiteLinksPath = `/projects/${prerequisiteProject.id}/dependencies`;
+  const [prerequisiteLink] = await (await call(pilot.url, prerequisiteLinksPath)).json();
+  assert.deepEqual(prerequisiteLink, { id: prerequisiteLink.id, predecessorId: prerequisite.id, successorId: prerequisiteAnchor.id,
+    type: 'FS', lagDays: 0, version: 1 });
+  const verifyPrerequisite = async url => {
+    const replay = await (await call(url, prerequisitePath, { method: 'POST', body: prerequisiteRequest })).json();
+    assert.deepEqual(replay, prerequisite);
+    assert.deepEqual(await (await call(url, prerequisiteLinksPath)).json(), [prerequisiteLink]);
+    const live = await (await call(url, '/workspace')).json();
+    const issues = live.issues.filter(item => item.projectId === prerequisiteProject.id);
+    assert.equal(issues.length, 2);
+    assert.deepEqual(issues.find(item => item.id === prerequisiteAnchor.id), prerequisiteAnchor);
+    assert.deepEqual(issues.find(item => item.id === prerequisite.id), prerequisite);
+  };
+  await verifyPrerequisite(pilot.url);
   const locked = cli('backup',source,backup);
   assert.equal(locked.status,75,locked.stderr);
   assert.equal(existsSync(backup),false);
@@ -1084,6 +1112,7 @@ async function runStandardPilot() {
   await verifyLinkedPaste(copy.url);
   await verifyDecisionDraft(copy.url);
   await verifyDocumentProperties(copy.url);
+  await verifyPrerequisite(copy.url);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

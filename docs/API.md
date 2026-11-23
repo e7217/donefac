@@ -121,6 +121,14 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `PATCH /api/dependencies/:id`로 `{expectedVersion,type?,lagDays?,reverse?}`를 보내 연결 유형과 간격을 바꾼다. `reverse: true`는 같은 연결 ID에서 선행 업무와 후행 업무를 서로 바꾼다. 반대 방향이 순환을 만들면 변경을 거절한다. 기존 자료에서 `version`이 생략된 경우 버전 1을 사용한다. `DELETE /api/dependencies/:id?expectedVersion=...`로 조회 당시 버전을 검사하고 연결을 해제할 수 있다. `/api/v1`의 해제 요청에는 이 쿼리 값이 필요하다. 현재 버전이 바뀌면 `409`와 최신 버전을 반환한다. 연결의 변경은 업무 날짜를 유지하며, 날짜를 변경하는 자동 일정은 별도 미리보기와 적용을 사용한다.
 
+### 새 선행·후행 업무 만들기
+
+브라우저의 `POST /api/issues/:id/schedule-predecessors`에 `{requestId,expectedSuccessorVersion,expectedCalendarVersion,type,lagDays,issue}`를 보낸다. 주소의 티켓 ID는 기존 후행 업무다. `issue`에는 제목·유형·상태·담당자·일정 등 일반 업무 양식의 값을 넣는다. `projectId`를 보내면 후행 업무와 같은 프로젝트여야 한다. 네 연결 유형과 −3,650~3,650 정수 근무일 간격을 지원한다. 기존 선행 업무를 기준으로 새 후행 업무를 만들 때는 `POST /api/issues/:id/schedule-successors`와 `expectedPredecessorVersion`을 사용한다.
+
+새 티켓의 번호·양식·날짜·이력·알림과 연결을 같은 트랜잭션에서 저장한다. 주소에 지정한 티켓의 날짜나 버전은 유지한다. 후행 업무가 없어졌으면 `404`의 `details.reason`은 `successor_missing`이다. 후행 업무나 달력이 달라진 `409`는 `successor_changed` 또는 `calendar_changed`와 `currentVersion`을 반환한다. 이후 최신 값에서 새 요청을 검토한다.
+
+최초 `201`은 새 `Issue`를 반환한다. 같은 작업자가 같은 UUIDv4·주소·입력으로 재시도하면 `200`으로 이미 만든 업무를 읽는다. 재시도는 나중에 편집하거나 해제한 연결에 새 쓰기를 수행하지 않는다. 물리 백업에는 요청 기록과 연결을 보존한다. [간트의 새 선행 업무](SCHEDULING.md#새-선행-업무-만들기)
+
 ## 일정 여유 분석
 
 `GET /projects/:id/schedule-analysis`는 프로젝트의 저장된 업무·근무 달력·선후행 연결을 읽는다. `projectedFinish`는 계산 가능한 진행 업무의 예상 완료일이며, `tasks`는 업무별 가장 이른 시작·종료, 가장 늦은 시작·종료, `slackDays`와 `critical`을 포함한다. `criticalDependencyIds`는 여유 0일 업무 사이에서 완료일에 영향을 주는 연결이다.

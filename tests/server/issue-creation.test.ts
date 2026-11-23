@@ -495,6 +495,133 @@ test('successor creation validates versions and the workflow, and rolls back the
   assert.deepEqual(receiptAndEffects(), before.map((value, index) => value + (index === 2 ? 3 : 1)));
 });
 
+const prerequisitePath = (id: string) => `/issues/${id}/schedule-predecessors`;
+function prerequisiteRequest(successor: Issue, calendar: WorkCalendar, issue: Record<string, unknown>,
+  type: DependencyType = 'FS', lagDays = 0) {
+  return { requestId: randomUUID(), expectedSuccessorVersion: successor.version, expectedCalendarVersion: calendar.version,
+    type, lagDays, issue };
+}
+
+test('new prerequisites use normal issue fields and preserve the existing successor for every dependency type', async t => {
+  const { call } = await fixture(t);
+  const { data: successor } = await call<Issue>('/issues', 'POST', {
+    projectId, title: '기존 후행 업무', startDate: '2026-11-24', endDate: '2026-11-26',
+  }, 201);
+  const { data: calendar } = await call<WorkCalendar>(`/projects/${projectId}/calendar`);
+  for (const [type, lagDays] of [['FS', 0], ['SS', -3650], ['FF', 2], ['SF', 3650]] as const) {
+    const fields = { title: `${type} 선행 업무`, startDate: '2026-11-30', endDate: '2026-11-30', assigneeId };
+    const { data: prerequisite } = await call<Issue>(prerequisitePath(successor.id), 'POST',
+      prerequisiteRequest(successor, calendar, fields, type, lagDays), 201);
+    assert.equal(prerequisite.projectId, projectId);
+    assert.equal(prerequisite.parentId, null);
+    assert.equal(prerequisite.reporterId, actorId);
+    assert.equal(prerequisite.assigneeId, assigneeId);
+    assert.equal(prerequisite.startDate, fields.startDate);
+    assert.equal(prerequisite.endDate, fields.endDate);
+    const { data: saved } = await call<WorkspaceSnapshot>('/workspace');
+    assert.deepEqual(saved.issues.find(issue => issue.id === successor.id), successor);
+    assert.deepEqual(saved.dependencies.filter(link => link.predecessorId === prerequisite.id)
+      .map(({ successorId, type, lagDays, version }) => ({ successorId, type, lagDays, version })),
+    [{ successorId: successor.id, type, lagDays, version: 1 }]);
+    assert.ok(saved.activities.some(activity => activity.resourceId === prerequisite.id && activity.actorId === actorId &&
+      activity.action === '티켓 생성'));
+    assert.ok(saved.activities.some(activity => activity.resourceId === successor.id && activity.actorId === actorId &&
+      activity.action === '선행 업무 연결' && activity.detail === prerequisite.key));
+    assert.ok(saved.activities.some(activity => activity.resourceId === successor.id && activity.actorId === actorId &&
+      activity.action === '선행 업무 생성' && activity.detail === `${prerequisite.key} ${prerequisite.title}`));
+    if (type === 'FS') {
+      const { data: preview } = await call<SchedulePreview>('/schedule/preview', 'POST', { issueIds: [successor.id], days: 0 });
+      assert.ok(preview.warnings.some(warning => warning.startsWith(`${prerequisite.key} → ${successor.key}`)));
+    }
+  }
+});
+
+test('prerequisite receipts bind the actor, successor and direction and replay without recreating a removed link', async t => {
+  const { call, restart } = await fixture(t);
+  const { data: successor } = await call<Issue>('/issues', 'POST', { projectId, title: '요청을 확인할 후행 업무' }, 201);
+  const { data: other } = await call<Issue>('/issues', 'POST', { projectId, title: '다른 후행 업무' }, 201);
+  const calendarPath = `/projects/${projectId}/calendar`;
+  const { data: calendar } = await call<WorkCalendar>(calendarPath);
+  const payload = prerequisiteRequest(successor, calendar, { title: '한번만 만들 선행 업무', endDate: null }, 'SF', -1);
+  const path = prerequisitePath(successor.id);
+  const reordered = { issue: { endDate: null, title: payload.issue.title }, lagDays: payload.lagDays, type: payload.type,
+    expectedCalendarVersion: payload.expectedCalendarVersion, expectedSuccessorVersion: payload.expectedSuccessorVersion,
+    requestId: payload.requestId.toUpperCase() };
+  const results = await Promise.all([payload, reordered].map(input => call<Issue>(path, 'POST', input, [200, 201])));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  const prerequisite = results[0].data;
+  assert.deepEqual(results[1].data, prerequisite);
+  assert.equal(prerequisite.startDate, null);
+  assert.equal(prerequisite.endDate, null);
+
+  const expectConflict = async (route: string, input: unknown, actor?: string) =>
+    assert.equal((await call<Failure>(route, 'POST', input, 409, actor)).data.details.reason, 'request_conflict');
+  await expectConflict(path, { ...payload, lagDays: 0 });
+  await expectConflict(path, payload, assigneeId);
+  await expectConflict(prerequisitePath(other.id), payload);
+  await expectConflict(successorPath(successor.id), { ...successorRequest(successor, calendar, payload.issue, payload.type, payload.lagDays),
+    requestId: payload.requestId });
+  await expectConflict('/issues', { ...payload.issue, projectId, requestId: payload.requestId });
+
+  const { data: saved } = await call<WorkspaceSnapshot>('/workspace');
+  const dependency = saved.dependencies.find(link => link.predecessorId === prerequisite.id);
+  assert.ok(dependency);
+  await call(`/dependencies/${dependency.id}?expectedVersion=${dependency.version}`, 'DELETE');
+  await call(`/issues/${successor.id}`, 'PATCH', { title: '재시도 전 수정한 후행 업무', expectedVersion: successor.version });
+  await call(calendarPath, 'PATCH', { name: '재시도 전 수정한 달력', expectedVersion: calendar.version });
+  await restart();
+  assert.deepEqual((await call<Issue>(path, 'POST', reordered)).data, prerequisite);
+  const { data: current } = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(current.issues.filter(issue => issue.title === payload.issue.title), [prerequisite]);
+  assert.ok(!current.dependencies.some(link => link.predecessorId === prerequisite.id));
+  await call(`/issues/${prerequisite.id}?expectedVersion=${prerequisite.version}`, 'DELETE');
+  assert.equal((await call<Failure>(path, 'POST', payload, 409)).data.details.reason, 'result_unavailable');
+});
+
+test('prerequisite creation rejects stale versions and rolls back workflow errors and failed writes', async t => {
+  const { call, enableOutbox, observer, sideEffects } = await fixture(t);
+  await enableOutbox();
+  const { data: successor } = await call<Issue>('/issues', 'POST', { projectId, title: '선행 업무를 만들 대상' }, 201);
+  const { data: calendar } = await call<WorkCalendar>(`/projects/${projectId}/calendar`);
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const { data: workflow } = await call<ProjectWorkflow>(workflowPath);
+  await call(workflowPath, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [...workflow.fieldRules, { issueType: successor.type, statusId: workflow.initialStatusId, requiredFields: ['description'] }] });
+  const path = prerequisitePath(successor.id);
+  const payload = prerequisiteRequest(successor, calendar, { title: '원자적으로 만들 선행 업무', assigneeId, type: successor.type });
+  const persisted = () => [...sideEffects(), Number(observer.prepare('SELECT COUNT(*) AS total FROM dependencies').get()?.total)];
+  const before = persisted();
+  const { data: missing } = await call<Failure>(prerequisitePath('unknown-successor'), 'POST', payload, 404);
+  assert.equal(missing.details.reason, 'successor_missing');
+  for (const input of [
+    { ...payload, requestId: undefined }, { ...payload, expectedSuccessorVersion: '1' }, { ...payload, expectedCalendarVersion: 0 },
+    { ...payload, lagDays: -3651 }, { ...payload, type: 'unknown' }, { ...payload, successorId: 'spoofed' },
+    { ...payload, issue: null }, { ...payload, issue: { ...payload.issue, projectId: 'project-team' } },
+  ]) await call(path, 'POST', input, 400);
+  for (const [field, reason, currentVersion] of [
+    ['expectedSuccessorVersion', 'successor_changed', successor.version],
+    ['expectedCalendarVersion', 'calendar_changed', calendar.version],
+  ] as const) {
+    const { data } = await call<Failure>(path, 'POST', { ...payload, [field]: currentVersion + 1 }, 409);
+    assert.deepEqual(data.details, { reason, currentVersion });
+  }
+  await call(path, 'POST', payload, 422);
+  assert.deepEqual(persisted(), before);
+
+  const complete = { ...payload, issue: { ...payload.issue, description: '워크플로에서 요구하는 설명' } };
+  for (const table of ['dependencies', 'issue_creation_requests']) {
+    observer.exec(`CREATE TRIGGER fail_prerequisite_write BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT,'synthetic prerequisite write failure'); END`);
+    try {
+      await call(path, 'POST', complete, 500);
+      assert.deepEqual(persisted(), before);
+    } finally { observer.exec('DROP TRIGGER fail_prerequisite_write'); }
+  }
+  const { data: prerequisite } = await call<Issue>(path, 'POST', complete, 201);
+  assert.equal(prerequisite.key, `NEO-${before[0]}`);
+  assert.deepEqual((await call<Issue>(path, 'POST', complete)).data, prerequisite);
+  assert.deepEqual(persisted(), before.map((value, index) => value + (index === 2 ? 3 : 1)));
+});
+
 test('document create retries bind imported section links once with one draft and one revision', async t => {
   const { call, observer, restart } = await fixture(t);
   const sectionId = markdownImportSectionId(1), missingSectionId = markdownImportSectionId(2);

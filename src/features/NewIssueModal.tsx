@@ -7,7 +7,7 @@ import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LAB
 import { fieldApplies, hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { CalendarError, createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
-import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyScheduleWarning, isDependencyLag, isDependencyType, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
+import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyPredecessorBound, dependencyScheduleWarning, isDependencyLag, isDependencyType, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { api, ApiError } from '../lib/api';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -25,22 +25,36 @@ import './issue-schedule-successor.css';
 
 export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & { sourceSelection?: DocumentSourceSelection };
 type ParentIssue = Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version'>;
-export type SchedulePredecessor = Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version' | 'startDate' | 'endDate'>;
+export type ScheduleIssueLink = {
+  direction: 'predecessor' | 'successor';
+  issue: ParentIssue & Pick<Issue, 'startDate' | 'endDate'>;
+};
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStatus?: IssueStatus;
   onClose: () => void;
 } & (
-  { sourceDocument?: FollowUpSource; parentIssue?: never; predecessorIssue?: never; onSuccessorCreated?: never; cloneIssue?: never; onCloneCreated?: never } |
-  { sourceDocument?: never; parentIssue: ParentIssue; predecessorIssue?: never; onSuccessorCreated?: never; cloneIssue?: never; onCloneCreated?: never } |
-  { sourceDocument?: never; parentIssue?: never; predecessorIssue: SchedulePredecessor; onSuccessorCreated?: (issue: Issue) => void; cloneIssue?: never; onCloneCreated?: never } |
-  { sourceDocument?: never; parentIssue?: never; predecessorIssue?: never; onSuccessorCreated?: never; cloneIssue: Issue; onCloneCreated?: (issue: Issue) => void }
+  { sourceDocument?: FollowUpSource; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never } |
+  { sourceDocument?: never; parentIssue: ParentIssue; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never } |
+  { sourceDocument?: never; parentIssue?: never; scheduleLink: ScheduleIssueLink; onScheduleIssueCreated?: (issue: Issue) => void; cloneIssue?: never; onCloneCreated?: never } |
+  { sourceDocument?: never; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue: Issue; onCloneCreated?: (issue: Issue) => void }
 );
 type ParentReview = { state: 'available'; issue: ParentIssue } | { state: 'missing' | 'moved' | 'failed' };
 type CloneReview = { state: 'available'; issue: Issue } | { state: 'missing' | 'moved' | 'failed' };
-type ReviewedSchedule = { issue: SchedulePredecessor; calendar: WorkCalendar };
+type ReviewedSchedule = ScheduleIssueLink & { calendar: WorkCalendar };
 type ScheduleReview = { state: 'available'; schedule: ReviewedSchedule } | { state: 'missing' | 'moved' | 'failed' };
 type ScheduleDates = Record<ScheduleDependencyEndpoint, string>;
 type CloneDates = ScheduleDates & { dueDate: string };
+
+const scheduleCreation = {
+  predecessor: {
+    role: '선행', anchorRole: '후행', path: 'schedule-predecessors', versionField: 'expectedSuccessorVersion',
+    changed: 'successor_changed', missing: 'successor_missing',
+  },
+  successor: {
+    role: '후행', anchorRole: '선행', path: 'schedule-successors', versionField: 'expectedPredecessorVersion',
+    changed: 'predecessor_changed', missing: 'predecessor_missing',
+  },
+} as const;
 
 function cloneReviewFrom(data: WorkspaceSnapshot, previous: Issue): CloneReview | null {
   const issue = data.issues.find(candidate => candidate.id === previous.id);
@@ -92,9 +106,10 @@ function scheduleReviewFrom(data: WorkspaceSnapshot, previous: ReviewedSchedule,
   if (!issue) return { state: 'missing' };
   if (issue.projectId !== previous.issue.projectId) return { state: 'moved' };
   const calendar = calendarFor(data, issue.projectId);
-  if (authoritative) return { state: 'available', schedule: { issue, calendar } };
+  if (authoritative) return { state: 'available', schedule: { direction: previous.direction, issue, calendar } };
   if (issue.version <= previous.issue.version && calendar.version <= previous.calendar.version) return null;
   return { state: 'available', schedule: {
+    direction: previous.direction,
     issue: issue.version >= previous.issue.version ? issue : previous.issue,
     calendar: calendar.version >= previous.calendar.version ? calendar : previous.calendar,
   } };
@@ -103,14 +118,19 @@ function scheduleReviewFrom(data: WorkspaceSnapshot, previous: ReviewedSchedule,
 function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagDays: number | null, dates?: ScheduleDates) {
   if (lagDays === null) return {};
   const relation = { type, lagDays };
-  const endpoint = DEPENDENCY_ENDPOINTS[type].predecessor;
-  if (!schedule.issue[endpoint]) return { message: `선행 업무의 ${SCHEDULE_DATE_LABELS[endpoint]}이 비어 있어 날짜를 제안할 수 없습니다.` };
+  const direction = schedule.direction;
+  const { role, anchorRole } = scheduleCreation[direction];
+  const endpoint = DEPENDENCY_ENDPOINTS[type][direction === 'predecessor' ? 'successor' : 'predecessor'];
+  if (!schedule.issue[endpoint]) return { message: `${anchorRole} 업무의 ${SCHEDULE_DATE_LABELS[endpoint]}이 비어 있어 날짜를 제안할 수 없습니다.` };
   try {
     const math = createCalendarMath(schedule.calendar);
-    const suggestion = dependencyBound(relation, schedule.issue, math);
-    const warning = dates && dependencyScheduleWarning(relation, schedule.issue, {
-      key: '후행 업무', startDate: dates.startDate || null, endDate: dates.endDate || null,
-    }, math);
+    const suggestion = direction === 'predecessor'
+      ? dependencyPredecessorBound(relation, schedule.issue, math)
+      : dependencyBound(relation, schedule.issue, math);
+    const draft = dates && { key: `${role} 업무`, startDate: dates.startDate || null, endDate: dates.endDate || null };
+    const warning = draft && (direction === 'predecessor'
+      ? dependencyScheduleWarning(relation, draft, schedule.issue, math)
+      : dependencyScheduleWarning(relation, schedule.issue, draft, math));
     return { suggestion, warning };
   } catch (cause) {
     if (!(cause instanceof CalendarError)) throw cause;
@@ -118,7 +138,7 @@ function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagD
   }
 }
 
-export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, predecessorIssue, onSuccessorCreated, cloneIssue, onCloneCreated, onClose, refresh, notify, openIssue }: Props) {
+export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [description, setDescription] = useState(cloneIssue?.description ?? '');
@@ -132,7 +152,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
     if (parentIssue) return parentIssue.projectId;
-    if (predecessorIssue) return predecessorIssue.projectId;
+    if (scheduleLink) return scheduleLink.issue.projectId;
     if (cloneIssue) return cloneIssue.projectId;
     if (sourceDocument) return sourceDocument.projectId ?? '';
     return !projectId || projectId === 'all' ? data.projects[0]?.id || '' : projectId;
@@ -150,8 +170,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [reviewedClone, setReviewedClone] = useState(cloneIssue);
   const [cloneReview, setCloneReview] = useState<CloneReview | null>(null);
   const [cloneDates, setCloneDates] = useState<CloneDates>({ startDate: '', endDate: '', dueDate: '' });
-  const [reviewedSchedule, setReviewedSchedule] = useState<ReviewedSchedule | null>(() => predecessorIssue
-    ? { issue: predecessorIssue, calendar: calendarFor(data, predecessorIssue.projectId) } : null);
+  const [reviewedSchedule, setReviewedSchedule] = useState<ReviewedSchedule | null>(() => scheduleLink
+    ? { ...scheduleLink, calendar: calendarFor(data, scheduleLink.issue.projectId) } : null);
   const [scheduleReview, setScheduleReview] = useState<ScheduleReview | null>(null);
   const [dependencyType, setDependencyType] = useState<DependencyType>('FS');
   const [lag, setLag] = useState('0');
@@ -159,7 +179,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     const date = reviewedSchedule ? scheduleProposal(reviewedSchedule, 'FS', 0).suggestion?.date ?? '' : '';
     return { startDate: date, endDate: date };
   });
-  const [scheduleEndEdited, setScheduleEndEdited] = useState(false);
+  const [scheduleDatesCustomized, setScheduleDatesCustomized] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [replayRejected, setReplayRejected] = useState(false);
   const [versionConflict, setVersionConflict] = useState(false);
@@ -180,7 +200,11 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const canReviewVersion = versionConflict && currentDocument && (Boolean(sourceSelection) || currentDocument.version !== sourceVersion);
   const needsSourceReview = Boolean(canReviewVersion || (versionConflict && sourceSelection));
   const childMode = Boolean(parentIssue);
-  const successorMode = Boolean(reviewedSchedule);
+  const scheduleMode = Boolean(reviewedSchedule);
+  const scheduleDirection = reviewedSchedule?.direction ?? 'successor';
+  const scheduleCopy = scheduleCreation[scheduleDirection];
+  const scheduleRole = scheduleCopy.role;
+  const scheduleAnchorRole = scheduleCopy.anchorRole;
   const cloneMode = Boolean(reviewedClone);
   const rangeDates = cloneMode ? cloneDates : scheduleDates;
   const rangeCalendar = reviewedSchedule?.calendar ?? data.calendars?.find(calendar => calendar.projectId === selectedProject);
@@ -195,33 +219,33 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const lagDays = lag.trim() && isDependencyLag(Number(lag)) ? Number(lag) : null;
   const proposal = reviewedSchedule ? scheduleProposal(reviewedSchedule, dependencyType, lagDays, scheduleDates) : {};
   const linkedPath = reviewedParent ? `/issues/${encodeURIComponent(reviewedParent.id)}/children`
-    : reviewedSchedule ? `/issues/${encodeURIComponent(reviewedSchedule.issue.id)}/schedule-successors`
+    : reviewedSchedule ? `/issues/${encodeURIComponent(reviewedSchedule.issue.id)}/${scheduleCopy.path}`
     : reviewedClone ? `/issues/${encodeURIComponent(reviewedClone.id)}/clone`
     : sourceDocument ? `/documents/${encodeURIComponent(sourceDocument.id)}/follow-up-issues` : undefined;
   const linkedCreation = Boolean(linkedPath);
-  const usesIssueReceipt = !linkedCreation || successorMode || cloneMode;
+  const usesIssueReceipt = !linkedCreation || scheduleMode || cloneMode;
   const currentParent = reviewedParent && data.issues.find(issue => issue.id === reviewedParent.id);
   const parentUnavailable = reviewedParent && (!currentParent || currentParent.projectId !== reviewedParent.projectId);
   const needsParentReview = Boolean(parentReview || parentUnavailable);
   const linkedError = error || (parentUnavailable ? '현재 프로젝트에서 상위 업무를 찾을 수 없습니다.' : '') ||
-    (needsScheduleReview ? (pendingScheduleReview?.state === 'missing' ? '선행 업무를 찾을 수 없습니다.' :
-      pendingScheduleReview?.state === 'moved' ? '선행 업무가 다른 프로젝트로 이동했습니다.' :
-        '선행 업무 또는 프로젝트 작업 달력이 변경됐습니다. 최신 선행 일정을 확인해 주세요.') : '') ||
+    (needsScheduleReview ? (pendingScheduleReview?.state === 'missing' ? `${scheduleAnchorRole} 업무를 찾을 수 없습니다.` :
+      pendingScheduleReview?.state === 'moved' ? `${scheduleAnchorRole} 업무가 다른 프로젝트로 이동했습니다.` :
+        `${scheduleAnchorRole} 업무 또는 프로젝트 작업 달력이 변경됐습니다. 최신 ${scheduleAnchorRole} 일정을 확인해 주세요.`) : '') ||
     (needsCloneReview ? (pendingCloneReview?.state === 'missing' ? '원본 업무를 찾을 수 없습니다.' :
       pendingCloneReview?.state === 'moved' ? '원본 업무가 다른 프로젝트로 이동했습니다.' :
       pendingCloneReview?.state === 'failed' ? '최신 원본 업무를 불러오지 못했습니다.' :
         '원본 업무가 변경됐습니다. 최신 원본 버전을 확인해 주세요.') : '');
-  const confirmationLocation = childMode ? '상위 업무의 하위 목록' : successorMode ? '선행 업무의 일정 연결 목록'
+  const confirmationLocation = childMode ? '상위 업무의 하위 목록' : scheduleMode ? `${scheduleAnchorRole} 업무의 일정 연결 목록`
     : cloneMode ? '원본 업무의 관련 업무 목록' : sourceDocument ? '문서의 연결 목록' : '업무 목록';
   const fieldsLocked = busy || recovering || (usesIssueReceipt && replayRejected);
   const refreshAfterClose = useCallback(() => {
     void refresh().catch(() => notify(childMode
       ? '하위 업무 목록을 불러오지 못했습니다. 상위 업무를 다시 열어 확인해 주세요.'
-      : successorMode ? '일정 연결을 불러오지 못했습니다. 선행 업무를 다시 열어 확인해 주세요.'
+      : scheduleMode ? `일정 연결을 불러오지 못했습니다. ${scheduleAnchorRole} 업무를 다시 열어 확인해 주세요.`
       : cloneMode ? '관련 업무를 불러오지 못했습니다. 원본 업무를 다시 열어 확인해 주세요.'
       : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
       : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
-  }, [childMode, successorMode, cloneMode, sourceDocument, refresh, notify]);
+  }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, sourceDocument, refresh, notify]);
 
   function close() {
     if (pendingRef.current) return;
@@ -258,17 +282,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     const unload = (event: BeforeUnloadEvent) => {
       if (dirtyRef.current || pendingRef.current || attempt.current) { event.preventDefault(); event.returnValue = ''; }
     };
-    window.addEventListener('teamspace:navigate', guard, childMode || successorMode || cloneMode);
+    window.addEventListener('teamspace:navigate', guard, childMode || scheduleMode || cloneMode);
     window.addEventListener('beforeunload', unload);
     return () => {
-      window.removeEventListener('teamspace:navigate', guard, childMode || successorMode || cloneMode);
+      window.removeEventListener('teamspace:navigate', guard, childMode || scheduleMode || cloneMode);
       window.removeEventListener('beforeunload', unload);
     };
-  }, [childMode, successorMode, cloneMode, confirmationLocation, usesIssueReceipt, notify, onClose, refreshAfterClose]);
+  }, [childMode, scheduleMode, cloneMode, confirmationLocation, usesIssueReceipt, notify, onClose, refreshAfterClose]);
 
   useEffect(() => {
-    if ((childMode || successorMode || cloneMode) && busy) dialog.current?.focus({ preventScroll: true });
-  }, [busy, childMode, successorMode, cloneMode]);
+    if ((childMode || scheduleMode || cloneMode) && busy) dialog.current?.focus({ preventScroll: true });
+  }, [busy, childMode, scheduleMode, cloneMode]);
 
   useEffect(() => {
     const retry = submitButton.current;
@@ -376,11 +400,11 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
       const review = scheduleReviewFrom(snapshot, previous, true);
       setScheduleReview(review);
-      if (review?.state === 'missing') setError('선행 업무를 찾을 수 없습니다.');
-      if (review?.state === 'moved') setError('선행 업무가 다른 프로젝트로 이동했습니다.');
+      if (review?.state === 'missing') setError(`${scheduleAnchorRole} 업무를 찾을 수 없습니다.`);
+      if (review?.state === 'moved') setError(`${scheduleAnchorRole} 업무가 다른 프로젝트로 이동했습니다.`);
     } catch {
       setScheduleReview({ state: 'failed' });
-      setError('최신 선행 일정과 프로젝트 작업 달력을 불러오지 못했습니다.');
+      setError(`최신 ${scheduleAnchorRole} 일정과 프로젝트 작업 달력을 불러오지 못했습니다.`);
     }
   }
 
@@ -423,7 +447,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
 
   function editScheduleDate(endpoint: ScheduleDependencyEndpoint, date: string) {
     setScheduleDates(previous => ({ ...previous, [endpoint]: date }));
-    if (successorMode && endpoint === 'endDate') setScheduleEndEdited(true);
+    if (scheduleMode && (scheduleDirection === 'predecessor' || endpoint === 'endDate')) setScheduleDatesCustomized(true);
   }
 
   function applyCalculatedDates(dates: ScheduleDates) {
@@ -432,7 +456,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     if (cloneMode) setCloneDates(previous => ({ ...previous, ...dates }));
     else {
       setScheduleDates(dates);
-      if (successorMode) setScheduleEndEdited(true);
+      if (scheduleMode) setScheduleDatesCustomized(true);
     }
   }
 
@@ -441,7 +465,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     if (!suggestion) return;
     dirtyRef.current = true;
     setScheduleDates(previous => {
-      if (dependencyType === 'FS' && previous.startDate === previous.endDate && !scheduleEndEdited) {
+      if ((scheduleDirection === 'predecessor' || dependencyType === 'FS') &&
+          previous.startDate === previous.endDate && !scheduleDatesCustomized) {
         return { startDate: suggestion.date, endDate: suggestion.date };
       }
       return { ...previous, [suggestion.endpoint]: suggestion.date };
@@ -452,7 +477,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     event.preventDefault();
     if (pendingRef.current || !selectedProject || needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || replayRejected) return;
     const replay = Boolean(attempt.current);
-    if (successorMode && lagDays === null && !replay) return;
+    if (scheduleMode && lagDays === null && !replay) return;
     const form = event.currentTarget;
     pendingRef.current = true;
     setBusy(true);
@@ -461,7 +486,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     try {
       if (reviewedSchedule && linkedPath) {
         const request = attempt.current ?? createIssueAttempt(actorId, {
-          expectedPredecessorVersion: reviewedSchedule.issue.version,
+          [scheduleCopy.versionField]: reviewedSchedule.issue.version,
           expectedCalendarVersion: reviewedSchedule.calendar.version,
           type: dependencyType,
           lagDays,
@@ -477,7 +502,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         notify(replay ? `${issue.key} 업무의 생성 결과를 확인했습니다.` : `${issue.key} 업무를 만들고 일정에 연결했습니다.`);
         pendingRef.current = false;
         onClose();
-        if (onSuccessorCreated) onSuccessorCreated(issue);
+        if (onScheduleIssueCreated) onScheduleIssueCreated(issue);
         else openIssue(issue.id);
       } else if (reviewedClone && linkedPath) {
         const request = attempt.current ?? createIssueAttempt(actorId, {
@@ -555,7 +580,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         setRecovering(true);
         if (confirmed) {
           setError(childMode ? '하위 업무를 만들었습니다. 목록을 다시 불러와 결과를 확인해 주세요.'
-            : successorMode ? '후행 업무를 만들었습니다. 일정을 다시 불러와 연결 결과를 확인해 주세요.'
+            : scheduleMode ? `${scheduleRole} 업무를 만들었습니다. 일정을 다시 불러와 연결 결과를 확인해 주세요.`
             : cloneMode ? '복제 업무를 만들었습니다. 관련 업무를 다시 불러와 결과를 확인해 주세요.'
             : sourceDocument ? '업무를 만들었습니다. 목록을 다시 불러와 연결 결과를 확인해 주세요.'
             : '업무를 만들었습니다. 목록을 다시 불러와 결과를 확인해 주세요.');
@@ -568,10 +593,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         const templateRejected = typeof details?.reason === 'string' && details.reason.startsWith('issue-template-');
         if (!replay || linkedCreation || templateRejected) attempt.current = null;
         setRecovering(false);
-        if (reviewedSchedule && status === 409 && (details?.reason === 'predecessor_changed' || details?.reason === 'calendar_changed')) {
+        if (reviewedSchedule && status === 409 && (details?.reason === scheduleCopy.changed || details?.reason === 'calendar_changed')) {
           setError(errorMessage(cause));
           await readScheduleReview(reviewedSchedule);
-        } else if (reviewedSchedule && status === 404 && details?.reason === 'predecessor_missing') {
+        } else if (reviewedSchedule && status === 404 && details?.reason === scheduleCopy.missing) {
           setScheduleReview({ state: 'missing' });
           setError(errorMessage(cause));
         } else if (reviewedClone && ((status === 409 && details?.reason === 'source_version_changed') ||
@@ -640,14 +665,14 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     onApply={applyCalculatedDates} disabled={fieldsLocked || needsScheduleReview} />;
 
   return <div className="issue-modal-overlay" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
-    <section ref={dialog} tabIndex={childMode || successorMode || cloneMode ? -1 : undefined} onKeyDown={keyboard} className="issue-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-issue-title">
+    <section ref={dialog} tabIndex={childMode || scheduleMode || cloneMode ? -1 : undefined} onKeyDown={keyboard} className="issue-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-issue-title">
       <form onSubmit={submit} onChange={() => { dirtyRef.current = true; }}>
         <header><div>
           {!linkedCreation && <span className="feature-eyebrow">NEW ISSUE</span>}
-          <h2 id="new-issue-title">{childMode ? '하위 업무 만들기' : successorMode ? '후행 업무 만들기' : cloneMode ? '업무 복제' : sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
+          <h2 id="new-issue-title">{childMode ? '하위 업무 만들기' : scheduleMode ? `${scheduleRole} 업무 만들기` : cloneMode ? '업무 복제' : sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
           {sourceDocument && <p className="issue-follow-up-source">연결할 문서 · <strong>{sourceDocument.title}</strong></p>}
           {reviewedParent && <p className="issue-follow-up-source">상위 업무 · <strong>{reviewedParent.key} {reviewedParent.title}</strong></p>}
-          {reviewedSchedule && <p className="issue-follow-up-source">선행 업무 · <strong>{reviewedSchedule.issue.key} {reviewedSchedule.issue.title}</strong></p>}
+          {reviewedSchedule && <p className="issue-follow-up-source">{scheduleAnchorRole} 업무 · <strong>{reviewedSchedule.issue.key} {reviewedSchedule.issue.title}</strong></p>}
           {reviewedClone && <p className="issue-follow-up-source">원본 업무 · <strong>{reviewedClone.key} {reviewedClone.title}</strong></p>}
         </div><button ref={closeButton} className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
         {sourceSelection && <section className="issue-follow-up-passage" aria-label="선택한 본문">
@@ -657,7 +682,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         <fieldset disabled={fieldsLocked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
-              <select name="projectId" className="field" value={selectedProject} disabled={childMode || successorMode || cloneMode || Boolean(sourceDocument?.projectId)} onChange={event => {
+              <select name="projectId" className="field" value={selectedProject} disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId)} onChange={event => {
                 const next = event.target.value;
                 setSelectedProject(next);
                 setSelectedType(initialIssueType(data, next));
@@ -678,7 +703,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
                 setTemplateNotice('');
               }} />}
             <label className="issue-form-label">업무 제목<input ref={titleInput} autoFocus className="field issue-title-input" name="title" placeholder="무엇을 해야 하나요?" maxLength={300} defaultValue={cloneIssue?.title} required /></label>
-            {successorMode && <section className="issue-successor-schedule" aria-label="선행 일정 연결">
+            {scheduleMode && <section className="issue-successor-schedule" aria-label={`${scheduleAnchorRole} 일정 연결`}>
               <div className="issue-form-grid">
                 <label className="issue-form-label">연결 유형<select className="field" aria-label="연결 유형" value={dependencyType} onChange={event => {
                   if (isDependencyType(event.target.value)) setDependencyType(event.target.value);
@@ -708,11 +733,11 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               <label className="issue-form-label">상태<select name="status" aria-label="새 업무 상태" className="field" value={selectedStatus} onChange={event => setSelectedStatus(event.target.value)}>{states.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></label>
               <label className="issue-form-label">우선순위<select name="priority" className="field" value={priority} onChange={event => setPriority(event.target.value as Priority)}>{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
               <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
-              {!successorMode && dateFields}
+              {!scheduleMode && dateFields}
               <label className="issue-form-label">요청자<IssueReporterSelect value={reporterId === undefined ? actorId || undefined : reporterId}
                 users={data.users} onChange={value => setReporterId(value === actorId ? undefined : value)} /></label>
             </div>
-            {!successorMode && dateRangePicker}
+            {!scheduleMode && dateRangePicker}
             {reviewedClone && <div><button type="button" className="btn" disabled={needsCloneReview || !(reviewedClone.startDate || reviewedClone.endDate || reviewedClone.dueDate)}
               onClick={copyCloneDates}>원본 일정 복사</button></div>}
             <CustomFields data={data} projectId={selectedProject} issueType={selectedType} status={selectedStatus} values={formValues} onChange={next => {
@@ -791,16 +816,16 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               setScheduleReview(null);
               setError('');
               titleInput.current?.focus({ preventScroll: true });
-            }}>최신 선행 일정 사용</button>
+            }}>최신 {scheduleAnchorRole} 일정 사용</button>
           </>}
           {needsScheduleReview && pendingScheduleReview && pendingScheduleReview.state !== 'available' &&
-            <button type="button" className="btn" disabled={busy} onClick={() => void reloadScheduleReview()}>선행 일정 다시 불러오기</button>}
+            <button type="button" className="btn" disabled={busy} onClick={() => void reloadScheduleReview()}>{scheduleAnchorRole} 일정 다시 불러오기</button>}
         </div>}
         <footer>
-          {!successorMode && <span className="muted">{sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : childMode ? '생성한 업무는 상위 업무의 하위 목록에서 열 수 있어요.' : cloneMode ? '복제 업무는 원본의 관련 업무 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>}
+          {!scheduleMode && <span className="muted">{sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : childMode ? '생성한 업무는 상위 업무의 하위 목록에서 열 수 있어요.' : cloneMode ? '복제 업무는 원본의 관련 업무 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>}
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={close}>취소</button>
-          <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType || needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || replayRejected || (successorMode && lagDays === null && !recovering)}>
-            {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument ? '업무 만들고 연결' : childMode ? '하위 업무 만들기' : successorMode ? '업무 만들고 일정 연결' : cloneMode ? '복제 업무 만들기' : '업무 만들기'}</>}
+          <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType || needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || replayRejected || (scheduleMode && lagDays === null && !recovering)}>
+            {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument ? '업무 만들고 연결' : childMode ? '하위 업무 만들기' : scheduleMode ? '업무 만들고 일정 연결' : cloneMode ? '복제 업무 만들기' : '업무 만들기'}</>}
           </button>
         </footer>
       </form>

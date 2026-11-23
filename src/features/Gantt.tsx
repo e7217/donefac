@@ -51,7 +51,7 @@ import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan 
 import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
-import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
+import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { issueReporterFilterLabel, IssueReporterSelect } from './IssueReporterSelect';
 import './issues.css';
 import './gantt.css';
@@ -206,7 +206,7 @@ function ProjectGantt(props: GanttProps) {
   const [datePreviewFocusTarget, setDatePreviewFocusTarget] = useState<HTMLButtonElement | null>(null);
   const [cascade, setCascade] = useState<CascadeReview | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [schedulePredecessor, setSchedulePredecessor] = useState<SchedulePredecessor | null>(null);
+  const [scheduleIssueCreation, setScheduleIssueCreation] = useState<{ link: ScheduleIssueLink; opener: HTMLButtonElement } | null>(null);
   const [busy, setBusy] = useState(false);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const [undoId, setUndoId] = useState<string | null>(null);
@@ -282,7 +282,6 @@ function ProjectGantt(props: GanttProps) {
   const analysisTrigger = useRef<HTMLButtonElement>(null);
   const createTrigger = useRef<HTMLButtonElement>(null);
   const restoreCreateFocus = useRef(false);
-  const successorTrigger = useRef<HTMLButtonElement>(null);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const deadlinesTrigger = useRef<HTMLButtonElement>(null);
   const teamBlockersTrigger = useRef<HTMLButtonElement>(null);
@@ -306,7 +305,7 @@ function ProjectGantt(props: GanttProps) {
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
-    shiftOpen || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || schedulePredecessor || linkEditor || planAssignment || planShift);
+    shiftOpen || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -487,9 +486,13 @@ function ProjectGantt(props: GanttProps) {
   function closeCreateForm() {
     if (canLeave()) finishCreating();
   }
-  function closeSuccessorCreation() {
-    setSchedulePredecessor(null);
-    requestAnimationFrame(() => successorTrigger.current?.focus({ preventScroll: true }));
+  function closeScheduleIssueCreation() {
+    const opener = scheduleIssueCreation?.opener;
+    setScheduleIssueCreation(null);
+    requestAnimationFrame(() => {
+      const target = opener?.isConnected && !opener.disabled ? opener : scrollRef.current;
+      target?.focus({ preventScroll: true });
+    });
   }
   function toggleWorkload(view: 'project' | 'team') {
     const activeDraft = workloadView === 'team' ? TEAM_CAPACITY_DRAFT : PROJECT_CAPACITY_DRAFT;
@@ -1429,7 +1432,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor || teamFollowUp || bulkLinkSelection)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || bulkLinkSelection)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -1600,9 +1603,12 @@ function ProjectGantt(props: GanttProps) {
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={event => openScheduleFocus('hierarchy', selectedAnchor, event.currentTarget)}>
         <ListTree size={15} aria-hidden="true" />하위 업무 일정 보기
       </button>}
-      {selectedAnchor && <button ref={successorTrigger} className="btn" type="button" disabled={busy} onClick={() => {
-        if (canLeave()) setSchedulePredecessor(selectedAnchor);
-      }}><Plus size={15} aria-hidden="true" />새 후행 업무 추가</button>}
+      {selectedAnchor && (['predecessor', 'successor'] as const).map(direction => (
+        <button key={direction} className="btn" type="button" disabled={busy} data-gantt-focus-control=""
+          onPointerDown={keepInlineDateFocus} onClick={event => {
+            if (canLeave()) setScheduleIssueCreation({ link: { direction, issue: selectedAnchor }, opener: event.currentTarget });
+          }}><Plus size={15} aria-hidden="true" />새 {direction === 'predecessor' ? '선행' : '후행'} 업무 추가</button>
+      ))}
     </div>
     {scheduleFocus?.kind === 'dependencies' && <GanttDependencyFocusPanel trace={dependencyTrace} outsideFilterCount={outsideFilterCount} disabled={busy}
       onClose={closeScheduleFocus} onLocate={() => { if (dependencyTrace) locateScheduleFocusRow(dependencyTrace.anchor); }}
@@ -1963,7 +1969,7 @@ function ProjectGantt(props: GanttProps) {
         notify(`선후행 연결 ${result.dependencyChanges ?? 0}건을 추가했습니다.`);
       }}
     />}
-    {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor} onClose={closeSuccessorCreation} />}
+    {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link} onClose={closeScheduleIssueCreation} />}
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
       onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}
   </>;

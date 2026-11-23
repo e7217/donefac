@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar.js';
-import { checkDependencySchedule, dependencyScheduleWarning } from '../../shared/schedule-dependencies.js';
+import { CalendarError, createCalendarMath, defaultWorkCalendar, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
+import { checkDependencySchedule, dependencyPredecessorBound, dependencyScheduleWarning } from '../../shared/schedule-dependencies.js';
 import type { DependencyType } from '../../shared/types.js';
 
 const predecessor = { key: 'TEAM-1', startDate: '2026-11-19', endDate: '2026-11-20' };
@@ -74,4 +74,63 @@ test('invalid dependency rules and calendar bounds retain their prior warnings',
   assert.deepEqual(checkDependencySchedule(dependency, endOfRange, successor, math), { kind: 'invalid', reason: dateReason });
   assert.equal(dependencyScheduleWarning(dependency, endOfRange, successor, math), `TEAM-1 → TEAM-2 · ${dateReason}`);
   assert.equal(dependencyScheduleWarning(dependency, endOfRange, { ...successor, startDate: null }, math), null);
+});
+
+test('new predecessor suggestions invert every connection using the participating successor endpoint', () => {
+  const fixed = { startDate: '2026-11-23', endDate: '2026-11-25' };
+  const cases = [
+    ['FS', 0, 'endDate', '2026-11-20'],
+    ['SS', 1, 'startDate', '2026-11-20'],
+    ['FF', -1, 'endDate', '2026-11-26'],
+    ['SF', 2, 'startDate', '2026-11-23'],
+  ] as const;
+  for (const [type, lagDays, endpoint, date] of cases) {
+    const rule = { type, lagDays };
+    const next = math.shift(date, 1);
+    assert.deepEqual(dependencyPredecessorBound(rule, fixed, math), { endpoint, date });
+    assert.deepEqual(checkDependencySchedule(rule, { startDate: date, endDate: date }, fixed, math), { kind: 'valid' });
+    assert.equal(checkDependencySchedule(rule, { startDate: next, endDate: next }, fixed, math).kind, 'conflict');
+  }
+
+  assert.equal(dependencyPredecessorBound({ type: 'SS', lagDays: 0 }, { ...fixed, startDate: null }, math), null);
+  assert.equal(dependencyPredecessorBound({ type: 'FF', lagDays: 0 }, { ...fixed, endDate: null }, math), null);
+});
+
+test('new predecessor suggestions floor a fixed nonworking date and use project calendar exceptions', () => {
+  const exceptionMath = createCalendarMath({ ...projectCalendar, exceptions: [
+    { date: '2026-11-21', isWorking: true, label: '특별 근무' },
+    { date: '2026-11-23', isWorking: false, label: '휴무' },
+  ] });
+  const fixed = { startDate: '2026-11-23', endDate: '2026-11-23' };
+  const cases = [
+    ['FS', 1, '2026-11-19'],
+    ['FS', 0, '2026-11-20'],
+    ['FS', -1, '2026-11-21'],
+    ['SS', 0, '2026-11-21'],
+    ['SF', -2, '2026-11-25'],
+  ] as const;
+  for (const [type, lagDays, date] of cases) {
+    const rule = { type, lagDays };
+    const next = exceptionMath.shift(date, 1);
+    assert.equal(dependencyPredecessorBound(rule, fixed, exceptionMath)?.date, date);
+    assert.equal(checkDependencySchedule(rule, { startDate: date, endDate: date }, fixed, exceptionMath).kind, 'valid');
+    assert.equal(checkDependencySchedule(rule, { startDate: next, endDate: next }, fixed, exceptionMath).kind, 'conflict');
+  }
+});
+
+test('new predecessor suggestions honor the first and last supported calendar years', () => {
+  const continuousMath = createCalendarMath({ ...projectCalendar, workingWeekdays: [0, 1, 2, 3, 4, 5, 6] });
+  const first = { startDate: MIN_CALENDAR_DATE, endDate: MIN_CALENDAR_DATE };
+  const last = { startDate: MAX_CALENDAR_DATE, endDate: MAX_CALENDAR_DATE };
+  const fs = { type: 'FS', lagDays: 0 } as const;
+  assert.throws(() => dependencyPredecessorBound(fs, first, continuousMath), CalendarError);
+  assert.deepEqual(dependencyPredecessorBound(fs, { ...first, startDate: '0000-01-02' }, continuousMath),
+    { endpoint: 'endDate', date: MIN_CALENDAR_DATE });
+  assert.deepEqual(dependencyPredecessorBound({ ...fs, lagDays: -1 }, first, continuousMath),
+    { endpoint: 'endDate', date: MIN_CALENDAR_DATE });
+  const leads = { type: 'FF', lagDays: -2 } as const;
+  const priorToLast = { ...last, endDate: '9999-12-30' };
+  assert.deepEqual(dependencyPredecessorBound(leads, priorToLast, continuousMath),
+    { endpoint: 'endDate', date: MAX_CALENDAR_DATE });
+  assert.deepEqual(checkDependencySchedule(leads, last, priorToLast, continuousMath), { kind: 'valid' });
 });

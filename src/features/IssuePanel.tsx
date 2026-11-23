@@ -13,7 +13,7 @@ import { findIssueDocumentReferences } from '../../shared/document-references';
 import { issueSearchAliasLabel, issueSearchAliases } from '../../shared/workspace-search';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
-import { NewIssueModal, type SchedulePredecessor } from './NewIssueModal';
+import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
 import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
@@ -156,15 +156,15 @@ function IssuePanelContent(props: IssuePanelProps) {
     await refresh();
     setRelationsRefreshKey(key => key + 1);
   }, [refresh]);
-  const [schedulePredecessor, setSchedulePredecessor] = useState<SchedulePredecessor | null>(null);
-  const successorCreationTrigger = useRef<HTMLButtonElement>(null);
-  function closeSuccessorCreation() {
-    setSchedulePredecessor(null);
-    requestAnimationFrame(() => successorCreationTrigger.current?.focus({ preventScroll: true }));
+  const [scheduleIssueCreation, setScheduleIssueCreation] = useState<{ link: ScheduleIssueLink; opener: HTMLButtonElement } | null>(null);
+  function closeScheduleIssueCreation() {
+    const opener = scheduleIssueCreation?.opener;
+    setScheduleIssueCreation(null);
+    requestAnimationFrame(() => opener?.focus({ preventScroll: true }));
   }
-  function focusCreatedSuccessor(successor: Issue) {
+  function focusCreatedScheduleIssue(linkedIssue: Issue) {
     requestAnimationFrame(() => {
-      const button = issuePanel.current?.querySelector<HTMLButtonElement>(`[data-related-schedule-issue="${CSS.escape(successor.id)}"]`);
+      const button = issuePanel.current?.querySelector<HTMLButtonElement>(`[data-related-schedule-issue="${CSS.escape(linkedIssue.id)}"]`);
       button?.focus();
     });
   }
@@ -203,7 +203,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLinkedDocumentCreation(false);
     if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
   }, [trackLinkedDocumentDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || schedulePredecessor || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
@@ -840,8 +840,12 @@ function IssuePanelContent(props: IssuePanelProps) {
               onClick={event => openDependencyEditor(event.currentTarget, 'predecessor')}><Plus size={14} aria-hidden="true" />선행 업무 추가</button>
             <button className="btn" type="button" disabled={!hasOtherIssueInProject || saving || dependencyBusy}
               onClick={event => openDependencyEditor(event.currentTarget, 'successor')}><Link2 size={14} aria-hidden="true" />기존 후행 업무 연결</button>
-            <button ref={successorCreationTrigger} className="btn" type="button" disabled={saving || dependencyBusy}
-              onClick={() => setSchedulePredecessor(issue)}><Plus size={14} aria-hidden="true" />새 후행 업무 추가</button>
+            {(['predecessor', 'successor'] as const).map(direction => (
+              <button key={direction} className="btn" type="button" disabled={saving || dependencyBusy}
+                onClick={event => setScheduleIssueCreation({ link: { direction, issue }, opener: event.currentTarget })}>
+                <Plus size={14} aria-hidden="true" />새 {direction === 'predecessor' ? '선행' : '후행'} 업무 추가
+              </button>
+            ))}
           </div>
         </div>
         {!dependencies.length && <p className="issue-section-empty">연결된 선행·후행 업무가 없습니다.</p>}
@@ -977,8 +981,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       onDraftChange={trackProjectMoveDraft} onClose={closeProjectMove} refresh={refreshIssueRelations} />}
     {linkedDocumentCreation && <IssueLinkedDocumentCreate data={data} issue={issue} actorId={props.actorId} refresh={refresh}
       onDraftChange={trackLinkedDocumentDraft} onClose={closeLinkedDocumentCreation} onCreated={showCreatedLinkedDocument} />}
-    {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor}
-      onClose={closeSuccessorCreation} onSuccessorCreated={focusCreatedSuccessor} />}
+    {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link}
+      onClose={closeScheduleIssueCreation} onScheduleIssueCreated={focusCreatedScheduleIssue} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       issues={data.issues} dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
