@@ -170,7 +170,11 @@ test('public reads and replay hide pinned decision text, and public deletion pre
   assert.deepEqual(after.resourceLinks.find(value => value.id === link.id), link);
   assert.deepEqual(after.activities, before.activities);
 
-  await f.call(`/resource-links/${link.id}`, 200, 'DELETE');
+  assert.ok(link.documentSource);
+  const { revisionId, from, to } = link.documentSource;
+  const reviewed = `${link.id}?${new URLSearchParams({ expectedDecisionRevisionId: revisionId, expectedDecisionFrom: String(from), expectedDecisionTo: String(to) })}`;
+  await f.call(`${publicLinks}/${reviewed}`, 400, 'DELETE', undefined, writer);
+  await f.call(`/resource-links/${reviewed}`, 200, 'DELETE');
   assert.deepEqual(await f.call(documentLinks(document), 200, 'GET', undefined, reader), []);
 });
 

@@ -210,6 +210,15 @@
   margin-bottom: 12px;
 }
 
+.issue-link-notice {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin-block: 6px 10px;
+}
+
+.issue-link-notice .issue-form-error { margin: 0; }
+
 .issue-linked-documents-heading h3 { margin: 0; }
 
 .issue-schedule-warnings {

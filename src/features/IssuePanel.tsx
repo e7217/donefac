@@ -231,6 +231,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
   const [linking, setLinking] = useState(false);
+  const [linkNotice, setLinkNotice] = useState<{ message: string; reload?: boolean } | null>(null);
   const linkingRef = useRef(false);
   const [loadedVersion, setLoadedVersion] = useState(issue?.version);
   const dirty = Boolean(draft && baseDraft && JSON.stringify(editableIssue(draft, labels)) !== JSON.stringify(editableIssue(baseDraft, baseDraft.labels.join(', '))));
@@ -654,6 +655,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     if (linkingRef.current) return false;
     linkingRef.current = true;
     setLinking(true);
+    setLinkNotice(null);
     let linked = false;
     try {
       await post('/resource-links', { issueId, documentId, kind: 'related' });
@@ -678,16 +680,75 @@ function IssuePanelContent(props: IssuePanelProps) {
       else linkedDocumentOpener.current?.focus({ preventScroll: true });
     });
   }
-  async function unlinkDocument(id: string) {
+  function restoreLinkedDocumentFocus(opener: HTMLButtonElement) {
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body && document.activeElement !== opener) return;
+      const target = opener.isConnected && !opener.disabled ? opener : linkedDocumentOpener.current;
+      if (target && !target.closest('[inert]')) target.focus({ preventScroll: true });
+    });
+  }
+  async function reloadLinkedDocuments(opener: HTMLButtonElement) {
     if (linkingRef.current) return;
     linkingRef.current = true;
     setLinking(true);
     try {
-      await remove(`/resource-links/${id}`);
       await refresh();
-      notify('문서 연결을 해제했습니다.');
-    } catch (err) { notify(errorMessage(err), 'error'); }
-    finally { linkingRef.current = false; setLinking(false); }
+      setLinkNotice(null);
+    } catch {
+      setLinkNotice({ message: '최신 문서 연결을 불러오지 못했습니다.', reload: true });
+    } finally {
+      linkingRef.current = false;
+      setLinking(false);
+      restoreLinkedDocumentFocus(opener);
+    }
+  }
+  async function unlinkDocument(link: ResourceLink, title: string, opener: HTMLButtonElement) {
+    if (linkingRef.current || savingRef.current) return;
+    const source = link.documentSource;
+    if (source && !window.confirm(`‘${title}’ 문서 연결과 결정 근거를 해제할까요?`)) return;
+    const expected = source && new URLSearchParams({ expectedDecisionRevisionId: source.revisionId,
+      expectedDecisionFrom: String(source.from), expectedDecisionTo: String(source.to) });
+    const path = `/resource-links/${encodeURIComponent(link.id)}${expected ? `?${expected}` : ''}`;
+    linkingRef.current = true;
+    setLinking(true);
+    setLinkNotice(null);
+    try {
+      let failure: string | undefined;
+      try { await remove(path); }
+      catch (cause) {
+        if (cause instanceof ApiError && cause.status === 409) failure = errorMessage(cause);
+        else if (cause instanceof ApiError && cause.status === 404) failure = '이미 해제된 문서 연결입니다.';
+        else if (cause instanceof ApiError && cause.status < 500 && ![408, 425, 429, 499].includes(cause.status)) {
+          setLinkNotice({ message: errorMessage(cause) });
+          return;
+        } else {
+          try {
+            const state = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
+            const current = state.resourceLinks.find(candidate => candidate.id === link.id);
+            if (current) {
+              const actual = current.documentSource;
+              const same = actual?.revisionId === source?.revisionId && actual?.from === source?.from && actual?.to === source?.to;
+              failure = same ? '문서 연결이 남아 있습니다. 확인한 뒤 다시 해제할 수 있습니다.'
+                : '결정 근거가 바뀌었습니다. 최신 연결을 확인해 주세요.';
+            }
+          } catch {
+            setLinkNotice({ message: '문서 연결 해제 결과를 확인하지 못했습니다.', reload: true });
+            return;
+          }
+        }
+      }
+      try { await refresh(); }
+      catch {
+        setLinkNotice({ message: failure ?? '문서 연결을 해제했습니다. 최신 목록을 불러오지 못했습니다.', reload: true });
+        return;
+      }
+      if (failure) setLinkNotice({ message: failure });
+      else notify('문서 연결을 해제했습니다.');
+    } finally {
+      linkingRef.current = false;
+      setLinking(false);
+      restoreLinkedDocumentFocus(opener);
+    }
   }
   function openDependencyEditor(opener: HTMLButtonElement, otherRole: RelatedIssueDirection, dependency?: Dependency) {
     if (savingRef.current || dependencyBusyRef.current) return;
@@ -768,7 +829,8 @@ function IssuePanelContent(props: IssuePanelProps) {
         onClick={event => {
           if (onPreviewDocument(doc.id)) previewOpener.current = event.currentTarget;
         }}><Eye size={14} aria-hidden="true" />미리보기</button>
-      {link && <button type="button" className="issue-icon-button" disabled={linking} onClick={() => unlinkDocument(link.id)}
+      {link && <button type="button" className="issue-icon-button" disabled={linking || saving}
+        onClick={event => void unlinkDocument(link, title, event.currentTarget)}
         aria-label={`${title} 연결 해제`} title="연결 해제"><X size={14} /></button>}
     </div>;
   }
@@ -940,6 +1002,11 @@ function IssuePanelContent(props: IssuePanelProps) {
             <Plus size={14} aria-hidden="true" />새 연결 문서 만들기
           </button>
         </div>
+        {linkNotice && <div className="issue-link-notice">
+          <p className="issue-form-error" role="alert">{linkNotice.message}</p>
+          {linkNotice.reload && <button className="btn" type="button" disabled={linking}
+            onClick={event => void reloadLinkedDocuments(event.currentTarget)}>문서 연결 다시 불러오기</button>}
+        </div>}
         {linkedDocuments.map(link => {
           const doc = data.documents.find(d => d.id === link.documentId);
           if (!doc) return null;

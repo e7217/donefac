@@ -2441,7 +2441,30 @@ export function createApp(options: {
     });
     res.status(created?201:200).json({id:link.id,issueId:link.issueId,documentId:link.documentId,kind:link.kind});
   });
-  app.delete('/api/resource-links/:id',(req,res)=>{const l=get('resource_links',req.params.id);store.transaction(()=>{store.remove('resource_links',l.id);activity(req,'issue',l.issueId,'문서 연결 해제');});res.json({ok:true});});
+  app.delete('/api/resource-links/:id',(req,res)=>{
+    const { expectedDecisionRevisionId: revisionId, expectedDecisionFrom, expectedDecisionTo } = req.query;
+    let expected: Omit<NonNullable<ResourceLink['documentSource']>, 'text'> | undefined;
+    if (revisionId !== undefined || expectedDecisionFrom !== undefined || expectedDecisionTo !== undefined) {
+      const invalid = '확인한 결정 근거의 저장본 ID와 발췌 범위를 보내 주세요.';
+      if (typeof revisionId !== 'string' || !revisionId.trim() || revisionId.length > 200 || !revisionId.isWellFormed() ||
+          /[\u0000-\u001f\u007f]/u.test(revisionId) || typeof expectedDecisionFrom !== 'string' || !/^\d+$/u.test(expectedDecisionFrom) ||
+          typeof expectedDecisionTo !== 'string' || !/^\d+$/u.test(expectedDecisionTo)) return fail(invalid);
+      const from = Number(expectedDecisionFrom), to = Number(expectedDecisionTo);
+      if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to <= from) return fail(invalid);
+      expected = { revisionId, from, to };
+    }
+    store.transaction(()=>{
+      const link=get<ResourceLink>('resource_links',req.params.id);
+      const pin = link.documentSource;
+      const matches = expected ? pin?.revisionId === expected.revisionId && pin.from === expected.from && pin.to === expected.to : pin === undefined;
+      if (!matches) {
+        fail('문서 연결의 결정 근거가 변경되었습니다. 최신 연결과 근거를 확인해 주세요.',409,{reason:'decision_source_changed'});
+      }
+      store.remove('resource_links',link.id);
+      activity(req,'issue',link.issueId,'문서 연결 해제');
+    });
+    res.json({ok:true});
+  });
   app.get('/api/projects/:id/dependencies',(req,res)=>{
     const projectId=get<Project>('projects',req.params.id).id;
     const rows=store.db.prepare(`SELECT d.json FROM dependencies d

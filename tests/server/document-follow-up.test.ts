@@ -79,6 +79,10 @@ function decisionLink(document: DocPage, issue: Issue, sourceSelection: Document
   return { requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id, sourceSelection };
 }
 
+function decisionRemovalQuery({ revisionId, from, to }: Omit<NonNullable<ResourceLink['documentSource']>, 'text'>) {
+  return new URLSearchParams({ expectedDecisionRevisionId: revisionId, expectedDecisionFrom: String(from), expectedDecisionTo: String(to) });
+}
+
 function issueSummaryBody(project: string): RichContent {
   return { ...content, content: [...content.content, { type: 'issueSummary', attrs: {
     projectId: project, savedViewId: null, label: '다른 프로젝트의 업무 현황', groupBy: 'status',
@@ -450,6 +454,76 @@ test('attaching a decision to an existing cross-project issue preserves the whol
   assert.deepEqual(await call<DocRevision[]>(`/documents/${doc.id}/revisions`), [initialRevision]);
 });
 
+test('unlinking a document requires the exact pinned revision and excerpt the browser reviewed', async t => {
+  const { call } = await fixture(t);
+  const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '동시 변경으로 확인할 결정', content }, 201);
+  const issue = await call<Issue>('/issues', 'POST', { projectId: commonTarget, title: '기존 문서 연결을 제거할 업무' }, 201);
+  const ordinary = await call<ResourceLink>('/resource-links', 'POST', { issueId: issue.id, documentId: doc.id }, 201);
+  const deletePath = `/resource-links/${ordinary.id}`;
+  const input = decisionLink(doc, issue);
+  const { from, to } = input.sourceSelection;
+  const withRevision = (revisionId: string, range = { from, to }) => `${deletePath}?${decisionRemovalQuery({ revisionId, ...range })}`;
+  const conflict = { reason: 'decision_source_changed' };
+  const checkConflict = async (path: string, body?: unknown) => {
+    const response = await call<{ details: unknown }>(path, 'DELETE', body, 409);
+    assert.deepEqual(response.details, conflict);
+  };
+  await checkConflict(withRevision('previously-reviewed-revision'));
+
+  const { link } = await call<Created>(decisionPathFor(doc.id), 'POST', input, 201, { 'X-Actor-Id': 'user-jun' });
+  assert.equal(link.id, ordinary.id);
+  assert.ok(link.documentSource);
+  const previousRevisionId = link.documentSource.revisionId;
+  const before = await call<WorkspaceSnapshot>('/workspace');
+  await checkConflict(deletePath);
+  await checkConflict(deletePath, { expectedDecisionRevisionId: previousRevisionId, expectedDecisionFrom: from, expectedDecisionTo: to });
+  await checkConflict(withRevision('x'.repeat(200)));
+  await checkConflict(withRevision(previousRevisionId, { from: from + 1, to }));
+  await checkConflict(withRevision(previousRevisionId, { from, to: to - 1 }));
+  await checkConflict(withRevision(previousRevisionId, { from: 0, to }));
+  for (const malformed of ['', ' ', 'x'.repeat(201), 'revision\u0000id']) {
+    await call(withRevision(malformed), 'DELETE', undefined, 400);
+  }
+  await call(`${withRevision(previousRevisionId)}&expectedDecisionRevisionId=duplicate`, 'DELETE', undefined, 400);
+  await call(`${deletePath}?expectedDecisionRevisionId=${previousRevisionId}`, 'DELETE', undefined, 400);
+  await call(`${deletePath}?expectedDecisionFrom=1&expectedDecisionTo=2`, 'DELETE', undefined, 400);
+  for (const range of [{ from: -1, to }, { from: 1.25, to }, { from, to: from }, { from, to: Number.MAX_SAFE_INTEGER + 1 }]) {
+    await call(withRevision(previousRevisionId, range), 'DELETE', undefined, 400);
+  }
+  await call(`${withRevision(previousRevisionId)}&expectedDecisionFrom=1`, 'DELETE', undefined, 400);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+
+  const backup = await call<Backup & { revisions: DocRevision[] }>('/export');
+  const alternateText = '합성 결정';
+  const alternate = { from, to: from + alternateText.length, text: alternateText };
+  const linksWithPin = (revisionId: string) => backup.resourceLinks.map(existing => existing.id === link.id
+    ? { ...existing, documentSource: { ...alternate, revisionId } } : existing);
+  await call('/import', 'POST', { data: { ...backup, resourceLinks: linksWithPin(previousRevisionId) } });
+  const sameRevision = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(sameRevision.resourceLinks.find(existing => existing.id === link.id)?.documentSource, { ...alternate, revisionId: previousRevisionId });
+  await checkConflict(withRevision(previousRevisionId));
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), sameRevision);
+
+  const legacyRevisionId = '결정-저장본-legacy-17';
+  await call('/import', 'POST', { data: {
+    ...backup,
+    revisions: backup.revisions.map(revision => revision.id === previousRevisionId ? { ...revision, id: legacyRevisionId } : revision),
+    resourceLinks: linksWithPin(legacyRevisionId),
+  } });
+  const restored = await call<WorkspaceSnapshot>('/workspace');
+  await checkConflict(withRevision(previousRevisionId, alternate));
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), restored);
+
+  await call(withRevision(legacyRevisionId, alternate), 'DELETE');
+  await call(withRevision(legacyRevisionId, alternate), 'DELETE', undefined, 404);
+  const after = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.resourceLinks, restored.resourceLinks.filter(existing => existing.id !== link.id));
+  const activities = after.activities.filter(entry => !restored.activities.some(prior => prior.id === entry.id));
+  assert.deepEqual(activities.map(({ action, actorId, resourceId }) => ({ action, actorId, resourceId })),
+    [{ action: '문서 연결 해제', actorId, resourceId: issue.id }]);
+  assert.ok((await call<DocRevision[]>(`/documents/${doc.id}/revisions`)).some(revision => revision.id === legacyRevisionId));
+});
+
 test('an existing-issue decision receipt survives document edits and restart and cannot resurrect an unlinked relation', async t => {
   const { call, restart } = await fixture(t);
   const doc = await call<DocPage>('/documents', 'POST', { projectId, title: '결정 연결 재시도', content }, 201);
@@ -473,7 +547,7 @@ test('an existing-issue decision receipt survives document edits and restart and
   await call(path, 'POST', { ...input, expectedDocumentVersion: edited.version }, 409);
   await call(path, 'POST', { ...input, requestId: randomUUID() }, 409);
 
-  await call(`/resource-links/${attached.link.id}`, 'DELETE');
+  await call(`/resource-links/${attached.link.id}?${decisionRemovalQuery(attached.link.documentSource)}`, 'DELETE');
   await call(path, 'POST', input, 409);
   assert.equal((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.some(link => link.documentId === doc.id), false);
   const reattached = await call<Created>(path, 'POST', decisionLink(edited, issue), 201);

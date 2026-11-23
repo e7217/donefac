@@ -109,6 +109,8 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `DELETE /api/v1/resource-links/:id`는 양쪽 대상에 접근할 수 있는 쓰기 키를 사용하며 성공하면 `{ok: true}`를 반환한다. 결정 근거가 붙은 연결의 해제를 요청하면 `409`를 반환한다. 해당 근거는 티켓 화면에서 원문과 함께 확인할 수 있다.
 
+브라우저의 `DELETE /api/resource-links/:id`는 일반 연결을 해제할 때 쿼리를 생략한다. 결정 근거를 확인하고 해제할 때는 당시의 `expectedDecisionRevisionId`, `expectedDecisionFrom`, `expectedDecisionTo`를 보낸다. 서버는 현재 근거가 요청한 저장본과 발췌 범위에 일치할 때 연결 해제와 업무 이력을 함께 저장한다. 근거가 새로 붙거나 변경된 경우 `409`와 `details.reason: "decision_source_changed"`를 반환한다.
+
 ## 팀 간트의 프로젝트 간 차단
 
 브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 원본 방향과 양쪽 업무 연결이 확인된 Jira 차단 관계에는 `origin: 'jira'`가 추가된다. 같은 방향의 Teamspace 차단이 있으면 그 항목을 반환한다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. Teamspace 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)

@@ -341,6 +341,116 @@ test('기존 티켓에 결정 근거를 추가하고 응답 유실 뒤 같은 �
   }
 });
 
+test('360px 티켓에서 동료가 고정한 결정 근거를 확인한 뒤 문서 연결만 해제한다', async ({ page, request }) => {
+  test.setTimeout(70_000);
+  const { projects: [project], users: [actor, peer] } = await workspace(request);
+  const token = randomUUID().slice(0, 8);
+  const title = `설계 결정 ${token}`, issueTitle = `합의 내용 검토 ${token}`;
+  const quote = '장비를 바꾸기 전에 기준 온도를 다시 측정한다.';
+  const document = await createDecision(request, project.id, title, {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: quote }] }],
+  });
+  try {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: issueTitle } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    const linked = await request.post('/api/resource-links', { data: { issueId: issue.id, documentId: document.id, kind: 'related' } });
+    expect(linked.status(), await linked.text()).toBe(201);
+    const plain = await linked.json() as ResourceLink;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    const route = `#/${project.id}/issues?issue=${issue.id}`;
+    await page.goto(`/${route}`);
+    const panel = page.getByRole('dialog', { name: issueTitle, exact: true });
+    const documents = panel.getByRole('region', { name: '연결된 문서', exact: true });
+    const unlink = documents.getByRole('button', { name: `${title} 연결 해제`, exact: true });
+    const evidence = documents.getByRole('region', { name: '결정 근거', exact: true });
+    const titleDraft = panel.getByRole('textbox', { name: '제목', exact: true });
+    const commentDraft = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const draftTitle = `${issueTitle} 편집 중`, draftComment = '검토가 끝나면 공유할 댓글';
+    await expect(unlink).toBeVisible();
+    await titleDraft.fill(draftTitle);
+    await commentDraft.fill(draftComment);
+
+    const selection = { from: 1, to: quote.length + 1, text: quote };
+    const attaching = await request.post(`/api/documents/${document.id}/decision-links`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id, sourceSelection: selection },
+    });
+    expect(attaching.status(), await attaching.text()).toBe(201);
+    const pinned = (await attaching.json() as DocumentIssueLinkResult).link;
+    const pinnedSource = pinned.documentSource!;
+    expect(pinned.id).toBe(plain.id);
+    expect(pinnedSource).toMatchObject(selection);
+    await expect(evidence).toHaveCount(0);
+
+    const path = `/api/resource-links/${plain.id}`;
+    const removalRequests: string[] = [];
+    page.on('request', sent => {
+      if (new URL(sent.url()).pathname === path && sent.method() === 'DELETE') removalRequests.push(sent.url());
+    });
+    const nextRemoval = () => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'DELETE');
+    const rejecting = nextRemoval();
+    await unlink.click();
+    const rejected = await rejecting;
+    expect(new URL(rejected.url()).search).toBe('');
+    expect(rejected.status(), await rejected.text()).toBe(409);
+    expect(await rejected.json()).toMatchObject({ details: { reason: 'decision_source_changed' } });
+    await expect(documents.getByRole('alert')).toContainText('결정 근거');
+    await expect(evidence.locator('blockquote')).toHaveText(quote);
+    expect((await workspace(request)).resourceLinks.find(link => link.id === plain.id)).toEqual(pinned);
+    await expect(titleDraft).toHaveValue(draftTitle);
+    await expect(commentDraft).toHaveValue(draftComment);
+    await expect(page).toHaveURL(url => url.hash === route);
+
+    async function confirmRemoval(approve: boolean) {
+      const confirmation = page.waitForEvent('dialog').then(async dialog => {
+        const message = dialog.message();
+        await (approve ? dialog.accept() : dialog.dismiss());
+        expect(message).toContain('문서 연결과 결정 근거를 해제할까요?');
+      });
+      await Promise.all([unlink.click(), confirmation]);
+    }
+    await confirmRemoval(false);
+    await expect(evidence.locator('blockquote')).toHaveText(quote);
+    expect(removalRequests).toHaveLength(1);
+
+    const committedStatuses: number[] = [];
+    await page.route(url => url.pathname === path, async intercepted => {
+      if (intercepted.request().method() !== 'DELETE') return intercepted.continue();
+      committedStatuses.push((await intercepted.fetch()).status());
+      await intercepted.fulfill({ status: 408, json: { error: '합성 응답 유실' } });
+    });
+    const deleting = nextRemoval();
+    await confirmRemoval(true);
+    const deleted = await deleting;
+    expect(deleted.status(), await deleted.text()).toBe(408);
+    expect(Object.fromEntries(new URL(deleted.url()).searchParams)).toEqual({
+      expectedDecisionRevisionId: pinnedSource.revisionId,
+      expectedDecisionFrom: String(pinnedSource.from),
+      expectedDecisionTo: String(pinnedSource.to),
+    });
+    await expect(evidence).toHaveCount(0);
+    await expect(unlink).toHaveCount(0);
+    await expect(documents.getByRole('button', { name: '새 연결 문서 만들기', exact: true })).toBeFocused();
+    await expect(titleDraft).toHaveValue(draftTitle);
+    await expect(commentDraft).toHaveValue(draftComment);
+    await expect(page).toHaveURL(url => url.hash === route);
+    expect(removalRequests).toHaveLength(2);
+    expect(committedStatuses).toEqual([200]);
+
+    const after = await workspace(request);
+    expect(after.resourceLinks.some(link => link.id === plain.id)).toBe(false);
+    expect(after.documents.find(item => item.id === document.id)).toEqual(document);
+    expect(after.issues.find(item => item.id === issue.id)).toEqual(issue);
+    const revisions = await request.get(`/api/documents/${document.id}/revisions`);
+    expect(revisions.status(), await revisions.text()).toBe(200);
+    expect((await revisions.json() as DocRevision[]).find(item => item.id === pinnedSource.revisionId)?.plainText).toBe(quote);
+  } finally {
+    await cleanupDecision(request, document.id, issueTitle);
+  }
+});
+
 test('공동 편집에서 문장이 바뀌면 기존 업무에 연결하기 전에 최신 원문을 다시 선택한다', async ({ page, context, request }) => {
   test.setTimeout(75_000);
   const { projects: [project] } = await workspace(request);
