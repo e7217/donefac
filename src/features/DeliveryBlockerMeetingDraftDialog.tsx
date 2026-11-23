@@ -30,7 +30,7 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
   const primary = useRef<HTMLButtonElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
   const request = useRef<AbortController | null>(null);
-  const [initialTitle] = useState(() => `진행 차단 회의 · ${report.generatedAt.slice(0, 10)}`);
+  const [initialTitle] = useState(() => `${report.release ? '릴리스 준비 회의' : '진행 차단 회의'} · ${report.generatedAt.slice(0, 10)}`);
   const [title, setTitle] = useState(initialTitle);
   const [scope, setScope] = useState(report);
   const [stage, setStage] = useState<Stage>({ kind: 'editing' });
@@ -140,6 +140,7 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
         requestId: newRequestId(), revision: scope.revision, title: trimmed,
         ...(scope.savedView ? { savedViewId: scope.savedView.id } : {}),
         ...(scope.reason ? { reason: scope.reason } : {}),
+        ...(scope.release ? { releaseId: scope.release.id } : {}),
       });
       let savedDocument: DocPage;
       try {
@@ -187,7 +188,8 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
       }
       setScope(latest);
       setStage({ kind: 'editing' });
-      setNotice(latest.total ? '최신 보고서의 범위와 업무를 확인하고 저장해 주세요.' : '이 조건에 해당하는 차단 업무가 없습니다.');
+      setNotice(latest.total ? '최신 보고서의 범위와 업무를 확인하고 저장해 주세요.'
+        : latest.release ? '이 조건에서 준비를 확인할 업무가 없습니다.' : '이 조건에 해당하는 차단 업무가 없습니다.');
     });
   }
 
@@ -202,6 +204,12 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
               onChange={event => setTitle(event.target.value)} />
           </label>
           <dl aria-label="회의 초안 조건">
+            {scope.release && <>
+              <div><dt>릴리스</dt><dd>{scope.release.name}</dd></div>
+              <div><dt>{scope.release.deadlineSource === 'endDate' ? '릴리스 종료일' : scope.release.deadline ? '릴리스 목표일' : '릴리스 기한'}</dt>
+                <dd>{scope.release.deadline ? <time dateTime={scope.release.deadline}>{scope.release.deadline}</time> : '미정'}</dd>
+              </div>
+            </>}
             <div><dt>공유 보기</dt><dd>{scope.savedView?.name ?? '프로젝트 전체'}</dd></div>
             <div><dt>차단 원인</dt><dd>{reasonLabel}</dd></div>
             <div><dt>대상 업무</dt><dd>{scope.total.toLocaleString('ko-KR')}개</dd></div>
@@ -216,6 +224,9 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
                 row.scheduleConflicts.total ? `간트 일정 충돌 ${row.scheduleConflicts.total}건` : '',
                 row.gitlab.blockedMergeRequests ? `병합 확인이 필요한 MR ${row.gitlab.blockedMergeRequests}건` : '',
                 row.gitlab.failedPipelines ? `실패한 파이프라인 ${row.gitlab.failedPipelines}건` : '',
+                row.releaseSchedule?.missing.includes('startDate') ? '시작일 미정' : '',
+                row.releaseSchedule?.missing.includes('endDate') ? '종료일 미정' : '',
+                row.releaseSchedule?.afterDeadline ? `릴리스 기한 초과 · 종료일 ${row.releaseSchedule.endDate}` : '',
               ].filter(Boolean).join(' · ')}</p>
             </li>)}</ol>
           </details>}

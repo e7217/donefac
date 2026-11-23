@@ -9,7 +9,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
   ApiKeyCreated, DeliveryBlockerDraftResult, DeliveryBlockerReport, DocPage, DocRevision, GitlabLink, Issue, IssueRelation,
-  SavedView, SavedViewState, WorkspaceSnapshot,
+  PlanningItem, SavedView, SavedViewState, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -58,7 +58,9 @@ async function fixture(t: TestContext) {
   const makeKey = (projectIds: string[] | null) => create<ApiKeyCreated>('/api-keys', {
     name: '합성 진행 보고서', access: 'read', projectIds, expiresAt: null,
   });
-  return { database, request, create, makeIssue, block, makeView, makeKey };
+  const makeRelease = (name: string, fields: Partial<PlanningItem> = {}) =>
+    create<PlanningItem>('/planning-items', { projectId, name, kind: 'release', ...fields });
+  return { database, request, create, makeIssue, block, makeView, makeKey, makeRelease };
 }
 
 test('progress blockers apply saved views and exclude unauthorized causes from both evidence and totals', async t => {
@@ -159,6 +161,171 @@ test('progress blocker report respects a saved GitLab filter and latest recorded
   assert.deepEqual(result.counts, { open: 1, affected: 1, reasons: { issue_block: 0, schedule_conflict: 0, gitlab: 1 } });
   assert.deepEqual(result.items.map(row => [row.issue.id, row.gitlab]), [[recentFailure.id, { blockedMergeRequests: 0, failedPipelines: 1 }]]);
   assert.ok(!JSON.stringify(result).includes('hidden-log'));
+});
+
+test('release readiness scopes existing causes and checks planned dates against the configured cutoff', async t => {
+  const { database, request, create, makeIssue, block, makeView, makeKey, makeRelease } = await fixture(t);
+  const release = await makeRelease('릴리스 준비 점검', { startDate: '2030-01-01', endDate: '2030-01-20', targetDate: '2030-01-11' });
+  const unrelatedRelease = await makeRelease('다른 릴리스');
+  const foreignRelease = await makeRelease('다른 프로젝트의 릴리스', { projectId: otherProjectId });
+  const wrongKind = await makeRelease('릴리스가 아닌 계획', { kind: 'module' });
+  const [late, missingEnd, missingStartLate, onCutoff, externalOnly, terminal, otherMember] = await Promise.all([
+    makeIssue('기한을 넘긴 배포 업무', { releaseId: release.id, startDate: '2030-01-07', endDate: '2030-01-14', dueDate: '2030-01-09' }),
+    makeIssue('종료일 없는 배포 업무', { releaseId: release.id, startDate: '2030-01-07', dueDate: '2030-01-11' }),
+    makeIssue('시작일 없이 기한을 넘긴 업무', { releaseId: release.id, endDate: '2030-01-14' }),
+    makeIssue('목표일에 끝날 업무', { releaseId: release.id, startDate: '2030-01-07', endDate: '2030-01-11', dueDate: '2030-02-01' }),
+    makeIssue('다른 프로젝트 승인만 남은 업무', { releaseId: release.id, startDate: '2030-01-07', endDate: '2030-01-10' }),
+    makeIssue('이미 종료된 배포 업무', { releaseId: release.id, status: 'done' }),
+    makeIssue('다른 릴리스의 일정 미정 업무', { releaseId: unrelatedRelease.id }),
+  ]);
+  const internal = await makeIssue('릴리스 밖의 선행 준비', { startDate: '2030-01-07', endDate: '2030-01-10' });
+  const external = await makeIssue('허가된 경우에만 보이는 외부 승인', { projectId: otherProjectId });
+  await block(internal, late);
+  await block(external, late);
+  await block(external, externalOnly);
+  await create('/dependencies', { predecessorId: internal.id, successorId: late.id, type: 'FS', lagDays: 0 });
+  const pipeline: GitlabLink = {
+    id: `gitlab:123abc123abc:17:pipeline:121:${late.id}`, issueId: late.id, projectId: 17, iid: 121, kind: 'pipeline',
+    title: '실패한 배포 파이프라인', webUrl: 'https://gitlab.example.test/hidden-release-log',
+    state: 'failed', sourceBranch: 'release-test', updatedAt: '2026-11-20T00:00:00Z',
+  };
+  database.prepare('INSERT INTO gitlab_links(id,issue_id,json) VALUES(?,?,?)').run(pipeline.id, pipeline.issueId, JSON.stringify(pipeline));
+
+  const url = `${route()}?releaseId=${release.id}`;
+  const { result: browser, headers } = await request<DeliveryBlockerReport>(url);
+  assert.equal(headers.get('cache-control'), 'no-store');
+  assert.deepEqual(browser.release, { id: release.id, name: release.name, version: release.version,
+    deadline: '2030-01-11', deadlineSource: 'targetDate' });
+  assert.deepEqual(browser.counts, { open: 5, affected: 4, reasons: {
+    issue_block: 2, schedule_conflict: 1, gitlab: 1, missing_schedule: 2, after_release_date: 2,
+  } });
+  const row = (report: DeliveryBlockerReport, issue: Issue) => report.items.find(item => item.issue.id === issue.id);
+  for (const excluded of [onCutoff, terminal, otherMember, internal, external]) assert.equal(row(browser, excluded), undefined);
+  assert.deepEqual(row(browser, late)?.releaseSchedule, {
+    startDate: '2030-01-07', endDate: '2030-01-14', missing: [], afterDeadline: true,
+  });
+  assert.deepEqual(row(browser, missingEnd)?.releaseSchedule, {
+    startDate: '2030-01-07', endDate: null, missing: ['endDate'], afterDeadline: false,
+  });
+  assert.deepEqual(row(browser, missingStartLate)?.releaseSchedule, {
+    startDate: null, endDate: '2030-01-14', missing: ['startDate'], afterDeadline: true,
+  });
+  assert.equal(row(browser, externalOnly)?.releaseSchedule, undefined);
+  assert.deepEqual(row(browser, late)?.scheduleConflicts.items.map(item => item.predecessor.id), [internal.id]);
+  assert.deepEqual(row(browser, late)?.gitlab, { blockedMergeRequests: 0, failedPipelines: 1 });
+  assert.ok(!JSON.stringify(browser).includes('hidden-release-log'));
+
+  const scopedKey = await makeKey([projectId]);
+  const crossKey = await makeKey([projectId, otherProjectId]);
+  const { result: scoped } = await request<DeliveryBlockerReport>(`/v1${url}`, 200, { token: scopedKey.token });
+  assert.deepEqual(scoped.counts, { ...browser.counts, affected: 3, reasons: { ...browser.counts.reasons, issue_block: 1 } });
+  assert.deepEqual(row(scoped, late)?.blockers.items.map(item => item.id), [internal.id]);
+  assert.equal(row(scoped, externalOnly), undefined);
+  assert.ok(!JSON.stringify(scoped).includes(external.title));
+  const { result: cross } = await request<DeliveryBlockerReport>(`/v1${url}`, 200, { token: crossKey.token });
+  assert.equal(cross.revision, browser.revision);
+  assert.deepEqual(cross.items, browser.items);
+  await request(`/v1${route(otherProjectId)}?releaseId=${foreignRelease.id}`, 403, { token: scopedKey.token });
+
+  const view = await makeView(missingEnd.title);
+  const { result: narrowed } = await request<DeliveryBlockerReport>(`${url}&savedViewId=${view.id}&reason=missing_schedule`);
+  assert.equal(narrowed.counts.open, 1);
+  assert.deepEqual(narrowed.items.map(item => item.issue.id), [missingEnd.id]);
+  const { result: lateOnly } = await request<DeliveryBlockerReport>(`${url}&reason=after_release_date`);
+  assert.deepEqual(new Set(lateOnly.items.map(item => item.issue.id)), new Set([late.id, missingStartLate.id]));
+  assert.deepEqual(lateOnly.counts, browser.counts);
+  for (const id of ['missing-release', foreignRelease.id, wrongKind.id]) {
+    await request(`${route()}?releaseId=${id}`, 404);
+    await request(`/v1${route()}?releaseId=${id}`, 404, { token: scopedKey.token });
+  }
+  for (const invalid of [`${route()}?reason=missing_schedule`, `${route()}?releaseId=`, `${url}&releaseId=${release.id}`]) {
+    await request(invalid, 400);
+    await request(`/v1${invalid}`, 400, { token: scopedKey.token });
+  }
+  await request(draftRoute, 400, { method: 'POST', body: {
+    requestId: randomUUID(), revision: browser.revision, reason: 'after_release_date', title: '범위 없는 회의',
+  } });
+
+  const { result: fallback } = await request<PlanningItem>(`/planning-items/${release.id}`, 200, {
+    method: 'PATCH', body: { expectedVersion: release.version, targetDate: null, status: 'archived' },
+  });
+  const { result: archivedReport } = await request<DeliveryBlockerReport>(url);
+  assert.deepEqual(archivedReport.release, { id: release.id, name: release.name, version: fallback.version,
+    deadline: '2030-01-20', deadlineSource: 'endDate' });
+  assert.equal(archivedReport.counts.reasons.after_release_date, 0);
+  assert.equal(archivedReport.counts.reasons.missing_schedule, 2);
+  await request(`/planning-items/${release.id}`, 200, { method: 'PATCH', body: { expectedVersion: fallback.version, endDate: null } });
+  const { result: noCutoff } = await request<DeliveryBlockerReport>(url);
+  assert.equal(noCutoff.release?.deadline, null);
+  assert.equal(noCutoff.release?.deadlineSource, null);
+  assert.equal(noCutoff.counts.reasons.after_release_date, 0);
+  assert.equal(noCutoff.counts.reasons.missing_schedule, 2);
+  const { result: unscoped } = await request<DeliveryBlockerReport>(route());
+  assert.equal(Object.hasOwn(unscoped, 'release'), false);
+  assert.deepEqual(Object.keys(unscoped.counts.reasons).sort(), ['gitlab', 'issue_block', 'schedule_conflict']);
+  assert.equal(unscoped.items.some(item => Object.hasOwn(item, 'releaseSchedule')), false);
+});
+
+test('release membership, healthy issue revisions and cutoff changes invalidate old reads and new draft requests', async t => {
+  const { request, makeIssue, makeRelease } = await fixture(t);
+  const release = await makeRelease('배포 회의 기준', { targetDate: '2030-02-09' });
+  const differentRelease = await makeRelease('다른 배포 회의 기준');
+  const missing = await makeIssue('점검할 배포 업무', { releaseId: release.id, startDate: '2030-02-07' });
+  const healthy = await makeIssue('문제없는 배포 업무', { releaseId: release.id, startDate: '2030-02-07', endDate: '2030-02-08' });
+  const replacement = await makeIssue('같은 일정의 교체 업무', { startDate: '2030-02-07', endDate: '2030-02-08' });
+  const read = `${route()}?releaseId=${release.id}&reason=missing_schedule`;
+  const { result: first } = await request<DeliveryBlockerReport>(read);
+  const { result: next } = await request<DeliveryBlockerReport>(`${read}&offset=20&revision=${first.revision}`);
+  assert.equal(next.revision, first.revision);
+  assert.deepEqual(next.items, []);
+
+  const { result: corrected } = await request<Issue>(`/issues/${healthy.id}`, 200, {
+    method: 'PATCH', body: { expectedVersion: healthy.version, title: '문제없는 업무의 변경된 제목' },
+  });
+  await request(`${read}&offset=20&revision=${first.revision}`, 409);
+  const { result: revised } = await request<DeliveryBlockerReport>(read);
+  assert.deepEqual(revised.counts, first.counts);
+  assert.deepEqual(revised.items, first.items);
+  await request(`/planning-items/${release.id}/issues`, 200, { method: 'POST', body: {
+    expectedVersion: release.version, assignments: [
+      { issueId: corrected.id, expectedVersion: corrected.version, assigned: false },
+      { issueId: replacement.id, expectedVersion: replacement.version, assigned: true },
+    ],
+  } });
+  await request(`${read}&offset=20&revision=${revised.revision}`, 409);
+  const { result: replaced } = await request<DeliveryBlockerReport>(read);
+  assert.deepEqual(replaced.counts, first.counts);
+  assert.deepEqual(replaced.items, first.items);
+
+  const body = { requestId: randomUUID(), title: '릴리스 날짜 검토 회의', releaseId: release.id, reason: 'missing_schedule',
+    revision: replaced.revision };
+  await request(`/planning-items/${release.id}`, 200, { method: 'PATCH', body: {
+    expectedVersion: release.version, targetDate: '2030-02-10',
+  } });
+  await request(`${read}&offset=20&revision=${replaced.revision}`, 409);
+  const stale = await request<Conflict>(draftRoute, 409, { method: 'POST', body });
+  assert.equal(stale.result.details.reason, 'stale_report');
+  assert.ok(!(await request<WorkspaceSnapshot>('/workspace')).result.documents.some(document => document.title === body.title));
+
+  const { result: current } = await request<DeliveryBlockerReport>(read);
+  assert.equal(current.release?.deadline, '2030-02-10');
+  const reviewed = { ...body, revision: current.revision };
+  const { result: created } = await request<DeliveryBlockerDraftResult>(draftRoute, 201, { method: 'POST', body: reviewed });
+  assert.equal(created.duplicate, false);
+  assert.equal(created.document.projectId, projectId);
+  assert.ok(created.document.plainText.includes(release.name));
+  assert.ok(created.document.plainText.includes('2030-02-10'));
+  assert.ok(created.document.plainText.includes('종료일 미정'));
+  const backLink = new URL(`http://local.test/#/${projectId}/reports/blockers?release=${release.id}&reason=missing_schedule`);
+  const content = JSON.stringify(created.document.content);
+  assert.ok(content.includes(backLink.hash));
+  const { result: state } = await request<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(state.resourceLinks.filter(link => link.documentId === created.document.id).map(link => link.issueId), [missing.id]);
+  assert.deepEqual((await request<DeliveryBlockerDraftResult>(draftRoute, 200, { method: 'POST', body: reviewed })).result,
+    { duplicate: true, document: created.document });
+  assert.equal((await request<Conflict>(draftRoute, 409, { method: 'POST', body: {
+    ...reviewed, releaseId: differentRelease.id,
+  } })).result.details.reason, 'request_conflict');
 });
 
 test('meeting draft captures reviewed causes, rejects stale reports and replays one document after changes and backup', async t => {

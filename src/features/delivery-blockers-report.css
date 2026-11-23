@@ -38,6 +38,10 @@
 
 .delivery-blockers-controls .btn { justify-content: center; }
 
+.delivery-blockers-controls.has-release {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+}
+
 .delivery-blockers-report > .reports-error,
 .delivery-blockers-notice {
   margin: 0;
@@ -56,6 +60,37 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.75rem;
   margin: 0;
+}
+
+.delivery-blockers-summary.has-release {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.delivery-blockers-release {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.8rem 1rem;
+}
+
+.delivery-blockers-release h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.delivery-blockers-release p {
+  margin: 0.2rem 0 0;
+  color: #526c65;
+  font-size: 0.875rem;
+}
+
+.delivery-blockers-release-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .delivery-blockers-summary > div {
@@ -259,9 +294,11 @@
 .delivery-blocker-draft-content li > p { color: #526c65; font-size: 0.8125rem; }
 
 @media (max-width: 620px) {
-  .delivery-blockers-controls { grid-template-columns: minmax(0, 1fr); }
+  .delivery-blockers-controls,
+  .delivery-blockers-controls.has-release { grid-template-columns: minmax(0, 1fr); }
   .delivery-blockers-controls .btn { justify-self: start; }
   .delivery-blockers-summary,
+  .delivery-blockers-summary.has-release,
   .delivery-blockers-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .delivery-blockers-query,
   .delivery-blockers-card,

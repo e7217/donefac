@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import {
-  DELIVERY_BLOCKER_REASONS, type DeliveryBlockerDraftResult, type DeliveryBlockerReason, type DeliveryBlockerReport,
+  DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, type DeliveryBlockerDraftResult, type DeliveryBlockerReason, type DeliveryBlockerRelease, type DeliveryBlockerReport,
   type DeliveryBlockerRow, type Dependency, type DocPage, type GitlabLink, type Issue, type IssueRelation,
-  type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
+  type PlanningItem, type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
 } from '../shared/types.js';
+import { isRelationId } from '../shared/issue-relations.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
 import type { CalendarService } from './calendars.js';
 import { buildDeliveryBlockers } from './delivery-blockers.js';
@@ -17,9 +18,10 @@ const PAGE_SIZE = 20;
 const TARGET_LIMIT = 10_000;
 const CONNECTION_LIMIT = 50_000;
 const GITLAB_LIMIT = 100_000;
-const parameters = new Set(['savedViewId', 'reason', 'offset', 'revision']);
-const draftFields = new Set(['savedViewId', 'reason', 'revision', 'title', 'requestId']);
-type Selection = { savedViewId: string | null; reason: DeliveryBlockerReason | null; offset: number; revision: string | null };
+const parameters = new Set(['savedViewId', 'releaseId', 'reason', 'offset', 'revision']);
+const draftFields = new Set(['savedViewId', 'releaseId', 'reason', 'revision', 'title', 'requestId']);
+const reasons = [...DELIVERY_BLOCKER_REASONS, ...RELEASE_BLOCKER_REASONS];
+type Selection = { savedViewId: string | null; releaseId: string | null; reason: DeliveryBlockerReason | null; offset: number; revision: string | null };
 type DocumentCapture = Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>;
 type Sources = {
   store: Store;
@@ -36,19 +38,24 @@ class DeliveryBlockerQueryError extends Error {
 }
 
 function selectionFor(query: Request['query']): Selection {
-  const { savedViewId, reason, offset, revision } = query;
+  const { savedViewId, releaseId, reason, offset, revision } = query;
+  const selectedReason = reasons.find(value => value === reason);
   if (Object.keys(query).some(key => !parameters.has(key)) ||
-      (savedViewId !== undefined && (typeof savedViewId !== 'string' || !savedViewId.trim() ||
-        savedViewId.length > 200 || /[\u0000-\u001f\u007f]/u.test(savedViewId))) ||
-      (reason !== undefined && !DELIVERY_BLOCKER_REASONS.some(value => value === reason)) ||
+      (savedViewId !== undefined && !isRelationId(savedViewId)) ||
+      (releaseId !== undefined && !isRelationId(releaseId)) ||
+      (reason !== undefined && !selectedReason) ||
       (offset !== undefined && (typeof offset !== 'string' || !/^\d{1,5}$/.test(offset) || Number(offset) > TARGET_LIMIT)) ||
       (revision !== undefined && (typeof revision !== 'string' || !/^[0-9a-f]{64}$/u.test(revision)))) {
     throw new DeliveryBlockerQueryError(400, '진행 차단 보고서 조회 조건을 확인해 주세요.');
   }
   if (Number(offset) > 0 && !revision) throw new DeliveryBlockerQueryError(400, '다음 페이지를 읽으려면 조회한 보고서의 버전이 필요합니다.');
+  if (!releaseId && RELEASE_BLOCKER_REASONS.some(value => value === selectedReason)) {
+    throw new DeliveryBlockerQueryError(400, '릴리스 일정 원인을 보려면 릴리스를 선택해 주세요.');
+  }
   return {
-    savedViewId: typeof savedViewId === 'string' ? savedViewId : null,
-    reason: DELIVERY_BLOCKER_REASONS.find(value => value === reason) ?? null,
+    savedViewId: savedViewId ?? null,
+    releaseId: releaseId ?? null,
+    reason: selectedReason ?? null,
     offset: Number(offset ?? 0),
     revision: typeof revision === 'string' ? revision : null,
   };
@@ -59,6 +66,8 @@ function matchesReason(row: DeliveryBlockerRow, reason: DeliveryBlockerReason | 
     case 'issue_block': return row.blockers.total > 0;
     case 'schedule_conflict': return row.scheduleConflicts.total > 0;
     case 'gitlab': return row.gitlab.blockedMergeRequests > 0 || row.gitlab.failedPipelines > 0;
+    case 'missing_schedule': return Boolean(row.releaseSchedule?.missing.length);
+    case 'after_release_date': return row.releaseSchedule?.afterDeadline === true;
     default: return true;
   }
 }
@@ -74,11 +83,21 @@ function reportFor(
   if (selection.savedViewId && view?.projectId !== projectId) {
     throw new DeliveryBlockerQueryError(404, '이 프로젝트에서 저장된 보기를 찾을 수 없습니다.');
   }
+  const releaseItem = selection.releaseId ? store.get<PlanningItem>('planning_items', selection.releaseId) : undefined;
+  if (selection.releaseId && (releaseItem?.projectId !== projectId || releaseItem.kind !== 'release')) {
+    throw new DeliveryBlockerQueryError(404, '이 프로젝트에서 릴리스를 찾을 수 없습니다.');
+  }
+  const deadlineSource = releaseItem?.targetDate ? 'targetDate' : releaseItem?.endDate ? 'endDate' : null;
+  const release: DeliveryBlockerRelease | undefined = releaseItem && {
+    id: releaseItem.id, name: releaseItem.name, version: releaseItem.version,
+    deadline: deadlineSource ? releaseItem[deadlineSource] : null, deadlineSource,
+  };
   const users = store.all<User>('users');
   const issueSchemas = [schema];
   const candidateMatch = view ? createIssueViewMatcher({ ...view.filters, gitlab: undefined }, { issueSchemas, users }, schema) : null;
   const candidates: Issue[] = [];
-  for (const result of store.db.prepare('SELECT json FROM issues WHERE project_id=?').iterate(projectId)) {
+  for (const result of store.db.prepare(`SELECT json FROM issues WHERE project_id=?
+    AND (? IS NULL OR json_extract(json,'$.releaseId')=?)`).iterate(projectId, selection.releaseId, selection.releaseId)) {
     const issue = decode<Issue>(result);
     if (candidateMatch && !candidateMatch(issue)) continue;
     if (candidates.length >= TARGET_LIMIT) {
@@ -115,38 +134,42 @@ function reportFor(
     JOIN issues AS issue ON issue.id=selected.value`).all(JSON.stringify(sourceIds)).map(row => decode<Issue>(row));
 
   const { rows, counts } = buildDeliveryBlockers({
-    targets, sources, relations, dependencies, gitlabLinks, calendar: calendars.get(projectId),
+    targets, sources, relations, dependencies, gitlabLinks, calendar: calendars.get(projectId), release,
     data: { issueSchemas, users, workflows: store.all<ProjectWorkflow>('workflows') },
   });
   const savedView = view ? { id: view.id, name: view.name, version: view.version } : null;
-  const revision = createHash('sha256').update(JSON.stringify([projectId, savedView, selection.reason, counts, rows])).digest('hex');
+  const releaseRevision = release ? [release, targets.map(({ id, version }) => [id, version] as const)
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)] : [];
+  const revision = createHash('sha256').update(JSON.stringify([projectId, savedView, selection.reason, counts, rows, ...releaseRevision])).digest('hex');
   if (selection.revision && selection.revision !== revision) {
     throw new DeliveryBlockerQueryError(409, '조회 이후 진행 차단 내용이 바뀌었습니다. 첫 페이지부터 다시 조회해 주세요.', { reason: 'stale_report' });
   }
   const selectedRows = rows.filter(row => matchesReason(row, selection.reason));
   return {
-    projectId, generatedAt: new Date().toISOString(), savedView, reason: selection.reason, revision, counts,
+    projectId, generatedAt: new Date().toISOString(), savedView, ...(release ? { release } : {}), reason: selection.reason, revision, counts,
     total: selectedRows.length, offset: selection.offset, limit: PAGE_SIZE,
     items: selectedRows.slice(selection.offset, selection.offset + PAGE_SIZE),
   };
 }
 
 function createDraft(req: Request, projectId: string, sources: Sources): DeliveryBlockerDraftResult {
-  const { savedViewId, reason, revision, title: inputTitle, requestId } = req.body;
+  const { savedViewId, releaseId, reason, revision, title: inputTitle, requestId } = req.body;
   if (Object.keys(req.body).some(field => !draftFields.has(field)) || Object.keys(req.query).length) {
     throw new DeliveryBlockerQueryError(400, '진행 차단 회의 초안의 입력을 확인해 주세요.');
   }
   const title = typeof inputTitle === 'string' ? inputTitle.trim() : '';
   if (!title || title.length > 200) throw new DeliveryBlockerQueryError(400, '회의 초안 제목을 1~200자로 입력해 주세요.');
-  const selection = selectionFor({ savedViewId, reason, revision });
+  const selection = selectionFor({ savedViewId, releaseId, reason, revision });
   if (!selection.revision) throw new DeliveryBlockerQueryError(400, '조회한 진행 차단 보고서의 버전이 필요합니다.');
   const actorId = sources.actor(req);
   return sources.documentCreation.create(actorId, {
     requestId, projectId, title, savedViewId: selection.savedViewId, reason: selection.reason, revision: selection.revision,
+    ...(selection.releaseId ? { releaseId: selection.releaseId } : {}),
   }, () => {
     const report = reportFor(projectId, selection, sources.projectScope(req), sources);
     if (!report.total) throw new DeliveryBlockerQueryError(422, '회의 초안에 담을 차단 업무가 없습니다.');
     const filters = new URLSearchParams();
+    if (selection.releaseId) filters.set('release', selection.releaseId);
     if (selection.savedViewId) filters.set('savedView', selection.savedViewId);
     if (selection.reason) filters.set('reason', selection.reason);
     const href = `#/${encodeURIComponent(projectId)}/reports/blockers${filters.size ? `?${filters}` : ''}`;

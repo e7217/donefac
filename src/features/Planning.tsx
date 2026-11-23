@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, Layers3, LoaderCircle, PackageCheck, Plus, RefreshCw, Save, Search, SquareChartGantt, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, ClipboardCheck, Layers3, LoaderCircle, PackageCheck, Plus, RefreshCw, Save, Search, SquareChartGantt, Trash2 } from 'lucide-react';
 import type { FeatureProps, Issue, PlanningItem, PlanningKind, PlanningStatus } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, dateLabel, patch, post, remove } from '../lib/api';
@@ -19,10 +19,20 @@ type Assignment = { issueId: string; expectedVersion: number; assigned: boolean;
 function draftOf(item?: PlanningItem): PlanDraft { return item ? { name: item.name, description: item.description, status: item.status, ownerId: item.ownerId, startDate: item.startDate, endDate: item.endDate, targetDate: item.targetDate } : { name: '', description: '', status: 'planned', ownerId: null, startDate: null, endDate: null, targetDate: null }; }
 function progress(data: FeatureProps['data'], issues: Issue[]) { const eligible = issues.filter(issue => statusMeta(data, issue.projectId, issue.status).category !== 'cancelled'); const done = eligible.filter(issue => statusMeta(data, issue.projectId, issue.status).category === 'done').length; return { done, total: eligible.length, percent: eligible.length ? Math.round(done / eligible.length * 100) : 0 }; }
 
-type PlanningProps = FeatureProps & { initialPlanningId?: string | null; onOpenGantt?: (id: string) => void; onOpenCycleBoard?: (id?: string) => void };
+type PlanningProps = FeatureProps & {
+  initialPlanningId?: string | null;
+  onOpenGantt?: (id: string) => void;
+  onOpenCycleBoard?: (id?: string) => void;
+  onOpenReleaseReadiness?: (id: string) => void;
+};
+function followPlanLink(event: MouseEvent<HTMLAnchorElement>, id: string, open?: (id: string) => void) {
+  if (!open || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  open(id);
+}
 export function Planning(props: PlanningProps) { return <ProjectPlanning key={`${props.projectId}:${props.initialPlanningId ?? ''}`} {...props} />; }
 function ProjectPlanning(props: PlanningProps) {
-  const { data, projectId, initialPlanningId, onOpenGantt, onOpenCycleBoard } = props;
+  const { data, projectId, initialPlanningId, onOpenGantt, onOpenCycleBoard, onOpenReleaseReadiness } = props;
   const initial = data.planningItems?.find(item => item.projectId === projectId && item.id === initialPlanningId);
   const [kind, setKind] = useState<PlanningKind>(initial?.kind ?? 'cycle');
   const [selectedId, setSelectedId] = useState<string | null>(() => initial?.id ?? data.planningItems?.find(item => item.projectId === projectId && item.kind === 'cycle' && item.status !== 'archived')?.id ?? null);
@@ -47,11 +57,14 @@ function ProjectPlanning(props: PlanningProps) {
     </div></div><div className="planning-kind-tabs">{(['cycle', 'module', 'release'] as const).map(value => { const KindIcon = KIND_ICONS[value]; return <button key={value} className={kind === value ? 'active' : ''} onClick={() => changeKind(value)}><KindIcon size={16} />{PLAN_LABELS[value]}<span>{(data.planningItems || []).filter(item => item.projectId === projectId && item.kind === value && item.status !== 'archived').length}</span></button>; })}</div>
     <div className="planning-layout"><aside className="planning-list"><div className="planning-list-heading"><h2><Icon size={16} />{PLAN_LABELS[kind]}</h2><p>{KIND_DESCRIPTIONS[kind]}</p><div className="planning-search"><Search size={14} /><input aria-label="계획 항목 검색" placeholder="이름 또는 설명 검색" value={query} onChange={event => setQuery(event.target.value)} /></div><label className="planning-archive-toggle"><input type="checkbox" checked={showArchived} onChange={event => setShowArchived(event.target.checked)} />보관된 항목 포함</label></div><div className="planning-list-content">{visible.map(item => { const linked = data.issues.filter(issue => issue[PLAN_ID_FIELDS[kind]] === item.id); const stats = progress(data, linked); return <button className={`planning-item-card ${currentId === item.id && !creating ? 'active' : ''}`} key={item.id} onClick={() => select(item.id)}><span className="planning-item-meta"><span className={`planning-status is-${item.status}`}>{STATE_LABELS[item.status]}</span><span>{dateLabel(item.startDate)} — {dateLabel(item.endDate || item.targetDate)}</span></span><strong>{item.name}</strong>{item.description && <p>{item.description}</p>}<span className="planning-progress-track"><i style={{ width: `${stats.percent}%` }} /></span><span className="planning-card-footer"><span>연결 {linked.length}개 · 완료 {stats.done}/{stats.total}</span><strong>{stats.percent}%</strong></span></button>; })}{!visible.length && <div className="planning-list-empty"><CircleDashed size={27} /><p>{query ? '검색 결과가 없습니다.' : `${PLAN_LABELS[kind]}을 만들어 업무를 모아보세요.`}</p><button className="btn btn-ghost" onClick={create}><Plus size={14} />새 {PLAN_LABELS[kind]}</button></div>}</div></aside>
       {creating || currentId ? <div className="planning-detail-column">
-        {current && <a className="btn planning-gantt-link" href={`#/${encodeURIComponent(projectId)}/gantt/${encodeURIComponent(current.id)}`} onClick={event => {
-          if (!onOpenGantt || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-          event.preventDefault();
-          onOpenGantt(current.id);
-        }}><SquareChartGantt size={15} />간트에서 열기</a>}
+        {current && <div className="planning-detail-actions">
+          {current.kind === 'release' && <a className="btn" href={`#/${encodeURIComponent(projectId)}/reports/blockers?${new URLSearchParams({ release: current.id })}`}
+            onClick={event => followPlanLink(event, current.id, onOpenReleaseReadiness)}>
+            <ClipboardCheck size={15} aria-hidden="true" />릴리스 준비 점검
+          </a>}
+          <a className="btn" href={`#/${encodeURIComponent(projectId)}/gantt/${encodeURIComponent(current.id)}`}
+            onClick={event => followPlanLink(event, current.id, onOpenGantt)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 열기</a>
+        </div>}
         <PlanningEditor key={`${creating ? `new:${kind}` : currentId}:${props.actorId}`} {...props} kind={kind} item={current} existingId={creating ? null : currentId || null} onCreated={item => { setCreating(false); setSelectedId(item.id); }} onDeleted={() => { setSelectedId(null); setCreating(false); }} />
       </div> : <div className="planning-detail-column">
         {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={props.actorId} issues={data.issues} openIssue={props.openIssue} />}

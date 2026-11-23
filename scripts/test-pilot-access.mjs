@@ -287,6 +287,21 @@ async function verifyIntegrations(session, anonymous, origin) {
   assert.equal(weeklyDocument.status, 'draft');
   assert.ok(JSON.stringify(weeklyDocument.content).includes(`#/project-neo/reports/${snapshot.id}`));
 
+  const release = await (await call(session, 'POST', '/api/planning-items', 201, {
+    headers: { Origin: origin }, data: { projectId: 'project-neo', kind: 'release', name: 'HTTPS 파일럿 릴리스', targetDate: '2026-11-20' },
+  })).json();
+  const scheduleRisk = await (await call(session, 'POST', '/api/issues', 201, {
+    headers: { Origin: origin }, data: { projectId: 'project-neo', releaseId: release.id, title: 'HTTPS 릴리스 일정 점검' },
+  })).json();
+  const readinessQuery = new URLSearchParams({ releaseId: release.id, reason: 'missing_schedule' });
+  const readinessPath = `/api/v1/projects/project-neo/delivery-blockers?${readinessQuery}`;
+  await call(session, 'GET', readinessPath, 401);
+  const readiness = await (await call(anonymous, 'GET', readinessPath, 200, { headers: bearer })).json();
+  assert.deepEqual(readiness.release, { id: release.id, name: release.name, version: release.version, deadline: release.targetDate, deadlineSource: 'targetDate' });
+  assert.equal(readiness.counts.reasons.missing_schedule, 1);
+  assert.deepEqual(readiness.items.map(row => row.issue.id), [scheduleRisk.id]);
+  await call(anonymous, 'GET', readinessPath.replace('project-neo', 'project-team'), 403, { headers: bearer });
+
   const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
   await call(anonymous, 'GET', `/api${findings}`, 401);
   await call(anonymous, 'GET', `/api${findings}`, 401, { headers: bearer });
@@ -447,7 +462,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups and weekly reports, integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups, weekly reports and release readiness, integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();

@@ -10,6 +10,8 @@ const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
   issue_block: '수동 차단',
   schedule_conflict: '간트 일정 충돌',
   gitlab: 'GitLab 조치',
+  missing_schedule: '일정 미정',
+  after_release_date: '릴리스 기한 초과',
 };
 
 const numberLabel = (value: number) => value.toLocaleString('ko-KR');
@@ -41,25 +43,29 @@ export function buildDeliveryBlockerDraftContent(
   const asOf = Number.isFinite(captured.valueOf())
     ? captured.toISOString().replace('T', ' ').replace(/Z$/, ' UTC')
     : report.generatedAt;
-  const scope = report.savedView?.name ?? '프로젝트 전체';
+  const scope = report.savedView?.name ?? (report.release ? '릴리스 연결 업무' : '프로젝트 전체');
   const reason = report.reason ? REASON_LABELS[report.reason] : '전체 원인';
   const { open, affected, reasons } = report.counts;
   const omitted = report.total - rows.length;
+  const release = report.release;
+  const releaseDeadlineLabel = release?.deadlineSource === 'endDate' ? '계획 종료일' : '목표일';
   const content: RichContent[] = [
     paragraph(`보고서 기준 시각 ${asOf}`),
     paragraph(`보기 ${scope} · 원인 ${reason}`),
+    ...(release ? [paragraph(`릴리스 ${release.name} · ${release.deadline ? `${releaseDeadlineLabel} ${release.deadline}` : '기준일 미정'}`)] : []),
     { type: 'paragraph', content: [{
       ...text('진행 차단 보고서 열기'), marks: [{ type: 'link', attrs: { href: sourceHref, target: '_self' } }],
     }, text(' (현재 상태)')] },
     heading('집계'),
     paragraph(`미완료 업무 ${numberLabel(open)}개 · 차단된 업무 ${numberLabel(affected)}개`),
     paragraph(`수동 차단 ${numberLabel(reasons.issue_block)}개 · 간트 일정 충돌 ${numberLabel(reasons.schedule_conflict)}개 · GitLab 조치 ${numberLabel(reasons.gitlab)}개`),
+    ...(release ? [paragraph(`${REASON_LABELS.missing_schedule} ${numberLabel(reasons.missing_schedule ?? 0)}개 · ${REASON_LABELS.after_release_date} ${numberLabel(reasons.after_release_date ?? 0)}개`)] : []),
     heading('차단 업무'),
     paragraph(`선택한 조건에 해당하는 업무 ${numberLabel(report.total)}개 중 ${numberLabel(rows.length)}개를 기록했습니다.`),
   ];
   if (omitted > 0) content.push(paragraph(`초안에서 생략한 업무 ${numberLabel(omitted)}개`));
 
-  for (const { issue, deadline, priority, blockers, scheduleConflicts, gitlab } of rows) {
+  for (const { issue, deadline, priority, blockers, scheduleConflicts, gitlab, releaseSchedule } of rows) {
     const sourceLabel = deadline?.source === 'endDate' ? '종료일' : '목표 마감일';
     content.push(
       heading(issueLabel(issue), 3),
@@ -82,6 +88,12 @@ export function buildDeliveryBlockerDraftContent(
     if (gitlab.blockedMergeRequests) gitlabActions.push(`병합 확인이 필요한 MR ${numberLabel(gitlab.blockedMergeRequests)}건`);
     if (gitlab.failedPipelines) gitlabActions.push(`실패한 파이프라인 ${numberLabel(gitlab.failedPipelines)}건`);
     if (gitlabActions.length) content.push(paragraph(`${REASON_LABELS.gitlab} · ${gitlabActions.join(' · ')}`));
+    if (releaseSchedule) {
+      content.push(paragraph(`계획 일정 · 시작일 ${releaseSchedule.startDate ?? '미정'} · 종료일 ${releaseSchedule.endDate ?? '미정'}`));
+      if (releaseSchedule.afterDeadline && release?.deadline) {
+        content.push(paragraph(`${REASON_LABELS.after_release_date} · ${releaseDeadlineLabel} ${release.deadline}`));
+      }
+    }
   }
 
   const references = new Map<string, DeliveryBlockerIssue>();

@@ -3,7 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, ClipboardList, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Star, Trash2, Users, X } from 'lucide-react';
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
-import { DELIVERY_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
+import { DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
@@ -118,6 +118,7 @@ function routeHash(route: WorkspaceRoute) {
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'reports' && route.blockerScope) {
+    if (route.blockerScope.releaseId) query.set('release', route.blockerScope.releaseId);
     if (route.blockerScope.savedViewId) query.set('savedView', route.blockerScope.savedViewId);
     if (route.blockerScope.reason) query.set('reason', route.blockerScope.reason);
   }
@@ -170,7 +171,7 @@ function hasDocumentIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'documents' && route.documentId && route.issueId);
 }
 function sameBlockerScope(a?: DeliveryBlockerDraftScope | null, b?: DeliveryBlockerDraftScope | null): boolean {
-  return Boolean(a) === Boolean(b) && a?.savedViewId === b?.savedViewId && a?.reason === b?.reason;
+  return Boolean(a) === Boolean(b) && a?.savedViewId === b?.savedViewId && a?.releaseId === b?.releaseId && a?.reason === b?.reason;
 }
 function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'reports' && next.view === 'reports' && previous.projectId === next.projectId &&
@@ -260,9 +261,14 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     canPreviewIssueDocument(snapshot, issueId, requestedDocumentPreview) ? requestedDocumentPreview : null;
   const reportId = view === 'reports' && projectId === parts[0] && /^[0-9a-f-]{36}$/i.test(parts[2] || '') ? parts[2] : null;
   const blockerView = parameters.get('savedView');
-  const blockerReason = DELIVERY_BLOCKER_REASONS.find(reason => reason === parameters.get('reason'));
+  const requestedRelease = parameters.get('release');
+  const blockerRelease = isRelationId(requestedRelease) ? requestedRelease : undefined;
+  const requestedBlockerReason = parameters.get('reason');
+  const blockerReason = DELIVERY_BLOCKER_REASONS.find(reason => reason === requestedBlockerReason) ??
+    (blockerRelease ? RELEASE_BLOCKER_REASONS.find(reason => reason === requestedBlockerReason) : undefined);
   const blockerScope = view === 'reports' && projectId === parts[0] && parts[2] === 'blockers' ? {
     ...(isRelationId(blockerView) ? { savedViewId: blockerView } : {}),
+    ...(blockerRelease ? { releaseId: blockerRelease } : {}),
     ...(blockerReason ? { reason: blockerReason } : {}),
   } : null;
   const decisionFollowUpScope = view === 'reports' && parts[2] === 'decision-follow-ups' &&
@@ -663,6 +669,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     return current?.view === 'search' && !current.issueId && requestRoute({ ...current, searchFilters: filters });
   };
+  const changeBlockerScope = (scope: DeliveryBlockerDraftScope | null) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'reports' && !current.issueId && requestRoute({ ...current, reportId: null, blockerScope: scope,
+      decisionFollowUpScope: null, fieldBreakdownScope: null });
+  };
   const changeDecisionFollowUpScope = (scope: DecisionFollowUpScope | null) => {
     const current = acceptedRouteRef.current;
     return current?.view === 'reports' && requestRoute({ ...current, reportId: null, blockerScope: null,
@@ -713,6 +724,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) =>
     requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
+  const openReleaseReadiness = (id: string) =>
+    requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, blockerScope: { releaseId: id } });
   const openDocument = (id: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
     if (!document) return;
@@ -910,10 +923,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeGanttView={id => requestRoute({projectId,view:'gantt',documentId:null,issueId,planningId,savedViewId:id})}
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
-          <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)} onOpenCycleBoard={id => openPlanIn('backlog', id)} />
+          <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}
+            onOpenCycleBoard={id => openPlanIn('backlog', id)} onOpenReleaseReadiness={openReleaseReadiness} />
         </Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>
           <Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope} decisionFollowUpScope={decisionFollowUpScope}
+            onChangeBlockerScope={changeBlockerScope} onOpenReleasePlan={id => openPlanIn('planning', id)} onOpenReleaseGantt={id => openPlanIn('gantt', id)}
             onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} fieldBreakdownScope={fieldBreakdownScope}
             onChangeFieldBreakdownScope={changeFieldBreakdownScope} onPublishFieldBreakdownScope={publishFieldBreakdownScope}
             onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}

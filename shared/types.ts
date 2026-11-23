@@ -80,9 +80,11 @@ export interface ReportOpenStatusIssue {
   elapsedHours: number | null;
 }
 export const DELIVERY_BLOCKER_REASONS = ['issue_block', 'schedule_conflict', 'gitlab'] as const;
-export type DeliveryBlockerReason = typeof DELIVERY_BLOCKER_REASONS[number];
+export const RELEASE_BLOCKER_REASONS = ['missing_schedule', 'after_release_date'] as const;
+export type DeliveryBlockerReason = typeof DELIVERY_BLOCKER_REASONS[number] | typeof RELEASE_BLOCKER_REASONS[number];
 export interface DeliveryBlockerDraftScope {
   savedViewId?: string;
+  releaseId?: string;
   reason?: DeliveryBlockerReason;
 }
 export interface DeliveryBlockerDraftResult {
@@ -111,18 +113,30 @@ export interface DeliveryBlockerRow {
   blockers: { total: number; items: DeliveryBlockerIssue[] };
   scheduleConflicts: { total: number; items: DeliveryScheduleConflict[] };
   gitlab: { blockedMergeRequests: number; failedPipelines: number };
+  releaseSchedule?: {
+    startDate: string | null;
+    endDate: string | null;
+    missing: ('startDate' | 'endDate')[];
+    afterDeadline: boolean;
+  };
 }
 
 export interface DeliveryBlockerCounts {
   open: number;
   affected: number;
-  reasons: Record<DeliveryBlockerReason, number>;
+  reasons: Record<typeof DELIVERY_BLOCKER_REASONS[number], number> & Partial<Record<typeof RELEASE_BLOCKER_REASONS[number], number>>;
 }
+
+export type DeliveryBlockerRelease = Pick<PlanningItem, 'id' | 'name' | 'version'> & {
+  deadline: string | null;
+  deadlineSource: 'targetDate' | 'endDate' | null;
+};
 
 export interface DeliveryBlockerReport {
   projectId: string;
   generatedAt: string;
   savedView: Pick<SavedView, 'id' | 'name' | 'version'> | null;
+  release?: DeliveryBlockerRelease;
   reason: DeliveryBlockerReason | null;
   counts: DeliveryBlockerCounts;
   revision: string;

@@ -29,6 +29,9 @@ import './reports.css';
 type Props = FeatureProps & {
   snapshotId?: string | null;
   initialBlockerScope?: DeliveryBlockerDraftScope | null;
+  onChangeBlockerScope: (scope: DeliveryBlockerDraftScope | null) => boolean;
+  onOpenReleasePlan: (id: string) => boolean;
+  onOpenReleaseGantt: (id: string) => boolean;
   decisionFollowUpScope: DecisionFollowUpScope | null;
   onChangeDecisionFollowUpScope: (scope: DecisionFollowUpScope | null) => boolean;
   fieldBreakdownScope: FieldBreakdownScope | null;
@@ -101,7 +104,7 @@ function remember(cache: Map<string, ReportSnapshot>, value: ReportSnapshot) {
 }
 
 export function Reports(props: Props) {
-  return <ProjectReports key={JSON.stringify([props.projectId, props.actorId, props.initialBlockerScope ?? null])} {...props} />;
+  return <ProjectReports key={JSON.stringify([props.projectId, props.actorId])} {...props} />;
 }
 function ProjectReports(props: Props) {
   const { data, projectId, actorId, notify } = props;
@@ -119,10 +122,10 @@ function ProjectReports(props: Props) {
   const [selected, setSelected] = useState<ReportSnapshot | null>(null),
     [detailLoading, setDetailLoading] = useState(false),
     [detailError, setDetailError] = useState('');
-  const [standardView, setView] = useState<'live' | 'saved' | 'worklogs' | 'blockers'>(props.snapshotId ? 'saved' : props.initialBlockerScope ? 'blockers' : 'live'),
+  const [standardView, setView] = useState<'live' | 'saved' | 'worklogs'>(props.snapshotId ? 'saved' : 'live'),
     [snapshotSearch, setSnapshotSearch] = useState(''),
     [snapshotOffset, setSnapshotOffset] = useState(0);
-  const view = props.decisionFollowUpScope ? 'decisions' : props.fieldBreakdownScope ? 'fields' : standardView;
+  const view = props.decisionFollowUpScope ? 'decisions' : props.fieldBreakdownScope ? 'fields' : props.initialBlockerScope ? 'blockers' : standardView;
   const [creating, setCreating] = useState(false),
     [createError, setCreateError] = useState('');
   const active = useRef(true),
@@ -347,10 +350,16 @@ function ProjectReports(props: Props) {
       props.onChangeFieldBreakdownScope({});
       return;
     }
+    if (next === 'blockers') {
+      props.onChangeBlockerScope({});
+      return;
+    }
     if (view === 'decisions') {
       if (!props.onChangeDecisionFollowUpScope(null)) return;
     } else if (view === 'fields') {
       if (!props.onChangeFieldBreakdownScope(null)) return;
+    } else if (view === 'blockers') {
+      if (!props.onChangeBlockerScope(null)) return;
     } else if ((view === 'worklogs' || next === 'worklogs') &&
         !window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
     setView(next);
@@ -590,7 +599,8 @@ function ProjectReports(props: Props) {
         </section>
       ) : view === 'blockers' ? (
         <section role="tabpanel" id="report-blockers-panel" aria-labelledby="report-blockers-tab">
-          <DeliveryBlockersReport {...props} initialScope={props.initialBlockerScope ?? undefined} />
+          <DeliveryBlockersReport {...props} initialScope={props.initialBlockerScope ?? undefined} onChangeScope={props.onChangeBlockerScope}
+            onOpenReleasePlan={props.onOpenReleasePlan} onOpenReleaseGantt={props.onOpenReleaseGantt} />
         </section>
       ) : props.decisionFollowUpScope ? (
         <section role="tabpanel" id="report-decisions-panel" aria-labelledby="report-decisions-tab">

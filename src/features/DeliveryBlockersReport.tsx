@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { FileText, RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarRange, FileText, PackageCheck, RefreshCw } from 'lucide-react';
 import {
-  DELIVERY_BLOCKER_REASONS, PRIORITY, type DeliveryBlockerDraftScope, type DeliveryBlockerIssue, type DeliveryBlockerReason,
+  DELIVERY_BLOCKER_REASONS, PRIORITY, RELEASE_BLOCKER_REASONS, type DeliveryBlockerDraftScope, type DeliveryBlockerIssue, type DeliveryBlockerReason,
   type DeliveryBlockerReport, type DeliveryBlockerRow, type FeatureProps,
 } from '../../shared/types';
 import { SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
@@ -12,21 +12,31 @@ import { dependencyLabel } from './schedule-utils';
 import { DeliveryBlockerMeetingDraftDialog } from './DeliveryBlockerMeetingDraftDialog';
 import './delivery-blockers-report.css';
 
-type Scope = { savedViewId: string; reason: DeliveryBlockerReason | '' };
+type Scope = { savedViewId: string; reason: DeliveryBlockerReason | ''; releaseId: string };
 type LoadOptions = { offset?: number; revision?: string; openDraft?: boolean };
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'openDocument' | 'refresh'> & {
   initialScope?: DeliveryBlockerDraftScope;
+  onChangeScope?: (scope: DeliveryBlockerDraftScope) => boolean;
+  onOpenReleasePlan?: (id: string) => boolean;
+  onOpenReleaseGantt?: (id: string) => boolean;
 };
+const ALL_REASONS = [...DELIVERY_BLOCKER_REASONS, ...RELEASE_BLOCKER_REASONS];
 const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
   issue_block: '수동 차단',
   schedule_conflict: '간트 일정 충돌',
   gitlab: 'GitLab 조치',
+  missing_schedule: '일정 미정',
+  after_release_date: '릴리스 기한 초과',
 };
 const numberLabel = (value: number) => value.toLocaleString('ko-KR');
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : '진행 차단 보고서를 불러오지 못했습니다.';
 
-export function DeliveryBlockersReport({ data, projectId, actorId, notify, openIssue, openDocument, refresh, initialScope }: Props) {
-  const [initial] = useState<Scope>(() => ({ savedViewId: initialScope?.savedViewId ?? '', reason: initialScope?.reason ?? '' }));
+export function DeliveryBlockersReport({
+  data, projectId, actorId, notify, openIssue, openDocument, refresh, initialScope, onChangeScope, onOpenReleasePlan, onOpenReleaseGantt,
+}: Props) {
+  const { savedViewId = '', reason = '', releaseId = '' } = initialScope ?? {};
+  const initial = useMemo<Scope>(() => ({ savedViewId, reason, releaseId }), [savedViewId, reason, releaseId]);
+  const [syncedScope, setSyncedScope] = useState(initial);
   const [scope, setScope] = useState(initial);
   const [page, setPage] = useState<DeliveryBlockerReport | null>(null);
   const [draftReport, setDraftReport] = useState<DeliveryBlockerReport | null>(null);
@@ -34,13 +44,29 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [openingIssue, setOpeningIssue] = useState<string | null>(null);
+  if (syncedScope !== initial) {
+    setSyncedScope(initial);
+    setScope(initial);
+    setPage(null);
+    setError('');
+    setNotice('');
+    setLoading(true);
+  }
   const reportRequest = useRef<AbortController | null>(null);
   const issueRequest = useRef<symbol | null>(null);
   const resultsHeading = useRef<HTMLHeadingElement>(null);
   const focusResults = useRef(false);
   const views = (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((left, right) => left.name.localeCompare(right.name, 'ko'));
+  const releases = (data.planningItems ?? []).filter(plan => plan.projectId === projectId && plan.kind === 'release')
+    .sort((left, right) => left.name.localeCompare(right.name, 'ko'));
+  const releaseMode = Boolean(scope.releaseId);
+  const showReleaseFilter = releaseMode || releases.length > 0;
+  const reasonOptions = releaseMode ? ALL_REASONS : DELIVERY_BLOCKER_REASONS;
+  const title = releaseMode ? '릴리스 준비 점검' : '진행 차단';
+  const affectedLabel = releaseMode ? '준비 확인 업무' : '차단된 업무';
   const unavailableView = scope.savedViewId && !views.some(view => view.id === scope.savedViewId);
+  const unavailableRelease = scope.releaseId && !releases.some(release => release.id === scope.releaseId);
 
   const load = useCallback(async (next: Scope, { offset = 0, revision, openDraft = false }: LoadOptions = {}) => {
     reportRequest.current?.abort();
@@ -57,6 +83,7 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
       const params = new URLSearchParams();
       if (next.savedViewId) params.set('savedViewId', next.savedViewId);
       if (next.reason) params.set('reason', next.reason);
+      if (next.releaseId) params.set('releaseId', next.releaseId);
       if (position?.offset) params.set('offset', String(position.offset));
       if (position) params.set('revision', position.revision);
       const suffix = params.size ? `?${params}` : '';
@@ -113,9 +140,22 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
   }, [page]);
 
   function changeScope(next: Scope) {
+    if (onChangeScope) {
+      onChangeScope({
+        ...(next.savedViewId ? { savedViewId: next.savedViewId } : {}),
+        ...(next.reason ? { reason: next.reason } : {}),
+        ...(next.releaseId ? { releaseId: next.releaseId } : {}),
+      });
+      return;
+    }
     setScope(next);
     setPage(null);
     void load(next);
+  }
+
+  function changeRelease(nextReleaseId: string) {
+    const nextReason = !nextReleaseId && RELEASE_BLOCKER_REASONS.some(value => value === scope.reason) ? '' : scope.reason;
+    changeScope({ ...scope, releaseId: nextReleaseId, reason: nextReason });
   }
 
   function changePage(offset: number) {
@@ -154,13 +194,21 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
 
   return <div className="delivery-blockers-report">
     <header className="card delivery-blockers-query">
-      <h2>진행 차단</h2>
-      <p>다른 업무에 막혔거나 저장된 간트 일정이 충돌하거나 GitLab 조치가 필요한 업무를 확인하세요.</p>
-      <div className="delivery-blockers-controls">
+      <h2>{title}</h2>
+      <p>{releaseMode ? '릴리스에 연결된 열린 업무의 일정과 차단 원인을 확인하세요.' : '다른 업무에 막혔거나 저장된 간트 일정이 충돌하거나 GitLab 조치가 필요한 업무를 확인하세요.'}</p>
+      <div className={`delivery-blockers-controls${showReleaseFilter ? ' has-release' : ''}`}>
+        {showReleaseFilter && <label>릴리스
+          <select className="field" aria-label="진행 차단 릴리스" value={scope.releaseId}
+            onChange={event => changeRelease(event.target.value)}>
+            <option value="">릴리스 제한 없음</option>
+            {unavailableRelease && <option value={scope.releaseId}>{page?.release?.name ?? '현재 릴리스 없음'}</option>}
+            {releases.map(release => <option key={release.id} value={release.id}>{release.name}{release.status === 'archived' ? ' · 보관됨' : ''}</option>)}
+          </select>
+        </label>}
         <label>공유 보기
           <select className="field" aria-label="진행 차단 공유 보기" value={scope.savedViewId}
             onChange={event => changeScope({ ...scope, savedViewId: event.target.value })}>
-            <option value="">프로젝트 전체</option>
+            <option value="">{releaseMode ? '릴리스 연결 업무 전체' : '프로젝트 전체'}</option>
             {unavailableView && <option value={scope.savedViewId}>{page?.savedView?.name ?? '현재 공유 보기 없음'}</option>}
             {views.map(view => <option key={view.id} value={view.id}>{view.name}</option>)}
           </select>
@@ -169,7 +217,7 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
           <select className="field" aria-label="진행 차단 원인" value={scope.reason}
             onChange={event => changeScope({ ...scope, reason: event.target.value as Scope['reason'] })}>
             <option value="">전체 원인</option>
-            {DELIVERY_BLOCKER_REASONS.map(reason => <option key={reason} value={reason}>{REASON_LABELS[reason]}</option>)}
+            {reasonOptions.map(reason => <option key={reason} value={reason}>{REASON_LABELS[reason]}</option>)}
           </select>
         </label>
         <button type="button" className="btn" disabled={loading} onClick={() => void load(scope)}>
@@ -183,18 +231,19 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
     {loading && <p className="delivery-blockers-notice" role="status">진행 차단을 불러오는 중입니다.</p>}
     {openingIssue && <p className="delivery-blockers-notice" role="status">업무를 불러오는 중입니다.</p>}
     {page && <div aria-busy={loading}>
-      <dl className="delivery-blockers-summary" aria-label="진행 차단 요약">
-        <div className="card"><dt>차단된 업무</dt><dd>{numberLabel(page.counts.affected)}개</dd></div>
-        {DELIVERY_BLOCKER_REASONS.map(reason => <div className="card" key={reason}>
-          <dt>{REASON_LABELS[reason]}</dt><dd>{numberLabel(page.counts.reasons[reason])}개</dd>
+      {page.release && <ReleaseContext release={page.release} openPlan={onOpenReleasePlan} openGantt={onOpenReleaseGantt} />}
+      <dl className={`delivery-blockers-summary${page.release ? ' has-release' : ''}`} aria-label={`${title} 요약`}>
+        <div className="card"><dt>{affectedLabel}</dt><dd>{numberLabel(page.counts.affected)}개</dd></div>
+        {reasonOptions.map(reason => <div className="card" key={reason}>
+          <dt>{REASON_LABELS[reason]}</dt><dd>{numberLabel(page.counts.reasons[reason] ?? 0)}개</dd>
         </div>)}
       </dl>
       <p className="delivery-blockers-scope">
-        <strong>{page.savedView?.name ?? '프로젝트 전체'}</strong> · 열린 업무 {numberLabel(page.counts.open)}개 기준 · 조회 <time dateTime={page.generatedAt}>{new Date(page.generatedAt).toLocaleString('ko-KR')}</time>
+        <strong>{page.savedView?.name ?? (page.release ? '릴리스 연결 업무' : '프로젝트 전체')}</strong> · 열린 업무 {numberLabel(page.counts.open)}개 기준 · 조회 <time dateTime={page.generatedAt}>{new Date(page.generatedAt).toLocaleString('ko-KR')}</time>
       </p>
       <section className="delivery-blockers-results" aria-labelledby="delivery-blockers-results-heading">
         <header>
-          <h3 id="delivery-blockers-results-heading" ref={resultsHeading} tabIndex={-1}>차단된 업무</h3>
+          <h3 id="delivery-blockers-results-heading" ref={resultsHeading} tabIndex={-1}>{affectedLabel}</h3>
           <div className="delivery-blockers-results-actions">
             <span>{page.reason ? REASON_LABELS[page.reason] : '전체 원인'} · {numberLabel(page.total)}개</span>
             <button className="btn" type="button" aria-disabled={loading || !page.total} onClick={beginDraft}>
@@ -202,10 +251,10 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
             </button>
           </div>
         </header>
-        {page.items.length > 0 ? <ol className="delivery-blockers-list" role="list" aria-label="차단된 업무 목록">
-          {page.items.map(row => <li key={row.issue.id}><BlockerCard row={row} linkBusy={loading || Boolean(openingIssue)} open={open} /></li>)}
-        </ol> : <p className="card delivery-blockers-empty">이 조건에 해당하는 차단 업무가 없습니다.</p>}
-        {page.total > page.limit && <nav className="delivery-blockers-pagination" aria-label="차단된 업무 페이지">
+        {page.items.length > 0 ? <ol className="delivery-blockers-list" role="list" aria-label={`${affectedLabel} 목록`}>
+          {page.items.map(row => <li key={row.issue.id}><BlockerCard row={row} affectedLabel={affectedLabel} linkBusy={loading || Boolean(openingIssue)} open={open} /></li>)}
+        </ol> : <p className="card delivery-blockers-empty">{releaseMode ? '이 조건에서 준비를 확인할 업무가 없습니다.' : '이 조건에 해당하는 차단 업무가 없습니다.'}</p>}
+        {page.total > page.limit && <nav className="delivery-blockers-pagination" aria-label={`${affectedLabel} 페이지`}>
           <span role="status">{numberLabel(page.offset + 1)}–{numberLabel(page.offset + page.items.length)} / {numberLabel(page.total)}개</span>
           <button type="button" className="btn" disabled={loading || !page.offset}
             onClick={() => changePage(Math.max(0, page.offset - page.limit))}>이전 페이지</button>
@@ -216,9 +265,27 @@ export function DeliveryBlockersReport({ data, projectId, actorId, notify, openI
     </div>}
     {draftReport && <DeliveryBlockerMeetingDraftDialog report={draftReport} actorId={actorId} refresh={refresh} notify={notify} openDocument={openDocument}
       reasonLabel={draftReport.reason ? REASON_LABELS[draftReport.reason] : '전체 원인'}
-      reloadReport={() => load({ savedViewId: draftReport.savedView?.id ?? '', reason: draftReport.reason ?? '' })}
+      reloadReport={() => load({ savedViewId: draftReport.savedView?.id ?? '', reason: draftReport.reason ?? '', releaseId: draftReport.release?.id ?? '' })}
       onClose={() => setDraftReport(null)} />}
   </div>;
+}
+
+function ReleaseContext({ release, openPlan, openGantt }: {
+  release: NonNullable<DeliveryBlockerReport['release']>;
+  openPlan?: Props['onOpenReleasePlan'];
+  openGantt?: Props['onOpenReleaseGantt'];
+}) {
+  const deadlineLabel = release.deadlineSource === 'endDate' ? '릴리스 종료일' : release.deadline ? '릴리스 목표일' : '릴리스 기한';
+  return <section className="card delivery-blockers-release" aria-label="릴리스 범위">
+    <div>
+      <h3>{release.name}</h3>
+      <p>{deadlineLabel} {release.deadline ? <time dateTime={release.deadline}>{release.deadline}</time> : '미정'}</p>
+    </div>
+    {(openPlan || openGantt) && <div className="delivery-blockers-release-actions">
+      {openPlan && <button className="btn" type="button" onClick={() => openPlan(release.id)}><PackageCheck size={15} aria-hidden="true" />릴리스 계획 열기</button>}
+      {openGantt && <button className="btn" type="button" onClick={() => openGantt(release.id)}><CalendarRange size={15} aria-hidden="true" />릴리스 간트 열기</button>}
+    </div>}
+  </section>;
 }
 
 type IssueAction = { linkBusy: boolean; open: (issue: DeliveryBlockerIssue) => void };
@@ -230,9 +297,9 @@ function BlockerIssueButton({ issue, linkBusy, open }: IssueAction & { issue: De
   </button>;
 }
 
-function BlockerCard({ row, ...action }: IssueAction & { row: DeliveryBlockerRow }) {
-  const { issue, deadline, blockers, scheduleConflicts, gitlab } = row;
-  return <article className="card delivery-blockers-card" aria-label={`차단된 업무 ${issue.key}`}>
+function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: DeliveryBlockerRow; affectedLabel: string }) {
+  const { issue, deadline, blockers, scheduleConflicts, gitlab, releaseSchedule } = row;
+  return <article className="card delivery-blockers-card" aria-label={`${affectedLabel} ${issue.key}`}>
     <h4><BlockerIssueButton issue={issue} {...action} /></h4>
     <dl className="delivery-blockers-properties">
       <div><dt>상태</dt><dd>{issue.statusLabel}</dd></div>
@@ -243,6 +310,14 @@ function BlockerCard({ row, ...action }: IssueAction & { row: DeliveryBlockerRow
       </div>
     </dl>
     <div className="delivery-blockers-causes">
+      {releaseSchedule && <section>
+        <h5>릴리스 일정</h5>
+        <ul>
+          <li>시작일 {releaseSchedule.startDate ? <time dateTime={releaseSchedule.startDate}>{releaseSchedule.startDate}</time> : '미정'}</li>
+          <li>종료일 {releaseSchedule.endDate ? <time dateTime={releaseSchedule.endDate}>{releaseSchedule.endDate}</time> : '미정'}</li>
+          {releaseSchedule.afterDeadline && <li>{REASON_LABELS.after_release_date}</li>}
+        </ul>
+      </section>}
       {blockers.total > 0 && <section>
         <h5>{REASON_LABELS.issue_block} <span>{numberLabel(blockers.total)}건</span></h5>
         <ul>{blockers.items.map(source => <li key={source.id}><BlockerIssueButton issue={source} {...action} /></li>)}</ul>

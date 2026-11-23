@@ -4,7 +4,7 @@ import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { checkDependencySchedule } from '../shared/schedule-dependencies.js';
 import {
-  PRIORITY, type DeliveryBlockerCounts, type DeliveryBlockerIssue, type DeliveryBlockerRow, type DeliveryScheduleConflict,
+  PRIORITY, type DeliveryBlockerCounts, type DeliveryBlockerIssue, type DeliveryBlockerRelease, type DeliveryBlockerRow, type DeliveryScheduleConflict,
   type Dependency, type GitlabLink, type Issue, type IssueRelation, type Priority, type WorkCalendar, type WorkflowStatus,
   type WorkspaceSnapshot,
 } from '../shared/types.js';
@@ -17,6 +17,7 @@ interface DeliveryBlockersInput {
   dependencies: readonly Dependency[];
   gitlabLinks: readonly GitlabLink[];
   calendar: WorkCalendar;
+  release?: DeliveryBlockerRelease;
   data: Pick<WorkspaceSnapshot, 'users' | 'workflows' | 'issueSchemas'>;
 }
 
@@ -41,7 +42,7 @@ function compareConflict(a: DeliveryScheduleConflict, b: DeliveryScheduleConflic
 
 /** Sources can be outside the saved view. The caller supplies only issues the reader may see. */
 export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: DeliveryBlockerRow[]; counts: DeliveryBlockerCounts } {
-  const { targets, sources, relations, dependencies, gitlabLinks, calendar, data } = input;
+  const { targets, sources, relations, dependencies, gitlabLinks, calendar, release, data } = input;
   const statusCache = new Map<string, WorkflowStatus>();
   const usersById = new Map(data.users.map(user => [user.id, user.name]));
   function statusOf(issue: Issue) {
@@ -66,7 +67,7 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
 
   const sourcesById = new Map([...sources, ...targets].map(issue => [issue.id, issue]));
   const activeTargets = new Map(targets
-    .filter(issue => issue.projectId === calendar.projectId && active(issue))
+    .filter(issue => issue.projectId === calendar.projectId && (!release || issue.releaseId === release.id) && active(issue))
     .map(issue => [issue.id, issue]));
   const rowsById = new Map<string, DeliveryBlockerRow>();
   function rowFor(issue: Issue) {
@@ -80,6 +81,18 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
       rowsById.set(issue.id, row);
     }
     return row;
+  }
+
+  if (release) {
+    for (const issue of activeTargets.values()) {
+      const startDate = issue.startDate ?? null;
+      const endDate = issue.endDate ?? null;
+      const missing: ('startDate' | 'endDate')[] = [];
+      if (startDate === null) missing.push('startDate');
+      if (endDate === null) missing.push('endDate');
+      const afterDeadline = endDate !== null && release.deadline !== null && endDate > release.deadline;
+      if (missing.length || afterDeadline) rowFor(issue).releaseSchedule = { startDate, endDate, missing, afterDeadline };
+    }
   }
 
   const seenBlocks = new Set<string>();
@@ -120,7 +133,8 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
   const rows = [...rowsById.values()].sort(compareRow);
   const counts: DeliveryBlockerCounts = { open: activeTargets.size, affected: rows.length,
     reasons: { issue_block: 0, schedule_conflict: 0, gitlab: 0 } };
-  for (const { blockers, scheduleConflicts, gitlab } of rows) {
+  const releaseCounts = { missing_schedule: 0, after_release_date: 0 };
+  for (const { blockers, scheduleConflicts, gitlab, releaseSchedule } of rows) {
     blockers.total = blockers.items.length;
     blockers.items = blockers.items.sort(compareIssue).slice(0, detailLimit);
     scheduleConflicts.total = scheduleConflicts.items.length;
@@ -128,6 +142,11 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
     counts.reasons.issue_block += Number(blockers.total > 0);
     counts.reasons.schedule_conflict += Number(scheduleConflicts.total > 0);
     counts.reasons.gitlab += Number(gitlab.blockedMergeRequests > 0 || gitlab.failedPipelines > 0);
+    if (releaseSchedule) {
+      releaseCounts.missing_schedule += Number(releaseSchedule.missing.length > 0);
+      releaseCounts.after_release_date += Number(releaseSchedule.afterDeadline);
+    }
   }
+  if (release) Object.assign(counts.reasons, releaseCounts);
   return { rows, counts };
 }

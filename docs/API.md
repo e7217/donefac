@@ -26,7 +26,7 @@ curl --fail-with-body \
 | `GET /projects/:id/issue-order` · `PATCH /projects/:id/issue-order` | 프로젝트 업무 순서 조회, 이웃 티켓 기준 이동과 선택적 상태 전이 |
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
-| `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
+| `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치, 릴리스 일정 위험과 페이지 조회 |
 | `GET /projects/:id/report` · `GET /projects/:id/report-snapshots` · `GET /projects/:id/report-snapshots/:snapshotId` | 기간별 업무 집계 조회와 저장된 보고서 목록·상세 |
 | `POST /projects/:id/report-snapshots` | 기간별 보고서 보관본과 연결된 주간 문서 초안 생성. UUID v4 요청 ID로 재시도 |
 | `GET /decision-follow-ups` · `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 팀·프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
@@ -127,11 +127,13 @@ curl --fail-with-body \
 
 ## 진행 차단 보고서
 
-`GET /projects/:id/delivery-blockers`의 `savedViewId`를 생략하면 프로젝트 전체의 미완료 업무를 집계한다. `reason`을 생략하면 모든 원인을 표시하며 `issue_block`·`schedule_conflict`·`gitlab`으로 좁힐 수 있다. `counts.open`은 현재 보기의 미완료 업무 수, `counts.affected`는 원인이 있는 업무의 중복 없는 합계다. `counts.reasons`는 원인별 업무 수이며 한 업무가 여러 원인에 포함될 수 있다. `total`은 선택한 원인의 업무 수다.
+`GET /projects/:id/delivery-blockers`에 `savedViewId`나 `releaseId`를 보내면 조건이 모두 맞는 미완료 업무를 집계한다. 둘 다 생략하면 프로젝트 전체에 적용한다. `reason`을 생략하면 모든 원인을 표시하며 `issue_block`·`schedule_conflict`·`gitlab`으로 좁힐 수 있다. `counts.open`은 선택 범위의 미완료 업무 수, `counts.affected`는 원인이 있는 업무의 중복 없는 합계다. `counts.reasons`는 원인별 업무 수이며 한 업무가 여러 원인에 포함될 수 있다. `total`은 선택한 원인의 업무 수다.
+
+`releaseId`에는 같은 프로젝트의 릴리스 ID를 지정한다. 보관한 릴리스도 조회할 수 있다. 선택한 릴리스의 목표일을 `release.deadline`으로 쓰고, 목표일이 비어 있으면 릴리스 종료일을 사용한다. `deadlineSource`는 `targetDate`, `endDate`, `null` 중 하나다. `missing_schedule`은 시작일이나 종료일이 미정인 업무다. `after_release_date`는 업무 종료일이 릴리스 기준일 뒤인 경우다. 종료일이 같은 날이면 포함하지 않으며 기준일이 비어 있으면 초과를 집계하지 않는다. 릴리스 ID와 함께 두 원인으로 필터를 적용할 수 있다. 해당 업무의 `releaseSchedule`에 실제 `startDate`, `endDate`와 `missing`, `afterDeadline`을 반환한다. 연결된 차단 원인 업무는 릴리스 범위 밖에 있어도 키가 허용하는 경우 표시한다.
 
 응답의 `limit`은 20이다. 다음 페이지에는 `offset`과 이전 응답의 `revision`을 보낸다. 그동안 결과가 바뀌어 `409`를 받으면 `offset`과 `revision`을 생략하고 첫 페이지부터 읽는다. 프로젝트 제한 키는 양쪽 프로젝트를 읽을 수 있는 업무 관계만 보고서의 건수와 근거에 포함한다. GitLab 근거는 이미 저장된 상태를 사용한다.
 
-브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 보고서가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
+브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`releaseId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 릴리스 범위에서는 기준일과 일정 근거를 함께 기록하고 문서 링크로 같은 릴리스의 현재 보고서를 연다. 검토한 릴리스·연결 업무·결과가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
 
 ## 담당자 작업량
 

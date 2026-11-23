@@ -310,7 +310,7 @@ export class ApiKeyService {
     }
     const deliveryBlockers = /^\/api\/projects\/([^/]+)\/delivery-blockers$/.exec(path);
     if (request.method === 'GET' && deliveryBlockers) {
-      this.query(request, ['savedViewId', 'reason', 'offset', 'revision']);
+      this.query(request, ['savedViewId', 'releaseId', 'reason', 'offset', 'revision']);
       this.allowedProject(key, this.decode(deliveryBlockers[1]));
       this.used(key);
       return next();
