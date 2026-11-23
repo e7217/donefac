@@ -34,8 +34,9 @@ function report(overrides: Partial<DeliveryBlockerReport> = {}): DeliveryBlocker
 test('blocker draft preserves the reviewed scope, counts, display facts and cause examples as editable text', () => {
   const target = issue('TEAM-7', { title: '대상 <검토> & 확정', statusLabel: '검토 중', assigneeName: '이지현' });
   const next = issue('TEAM-8', { assigneeName: null });
-  const manual = [issue('OTHER-2', { projectId: 'other-private-id' }), issue('TEAM-1'), issue('TEAM-2'), issue('OMITTED-MANUAL')];
-  const predecessor = [manual[0], issue('TEAM-3'), issue('TEAM-4'), issue('OMITTED-SCHEDULE')];
+  const causes = [{ ...issue('OTHER-2', { projectId: 'other-private-id' }), origin: 'jira' as const },
+    issue('TEAM-1'), issue('TEAM-2'), issue('OMITTED-CAUSE')];
+  const predecessor = [issue('OTHER-2', { projectId: 'other-private-id' }), issue('TEAM-3'), issue('TEAM-4'), issue('OMITTED-SCHEDULE')];
   const conflicts: DeliveryScheduleConflict[] = predecessor.map(value => ({
     predecessor: value, type: 'FF', lagDays: 2, endpoint: 'endDate',
     scheduledDate: '2026-11-25', requiredDate: '2026-11-28',
@@ -45,10 +46,10 @@ test('blocker draft preserves the reviewed scope, counts, display facts and caus
     counts: { open: 5, affected: 4, reasons: { issue_block: 2, schedule_conflict: 3, gitlab: 1 } }, total: 2,
     items: [
       row(target, {
-        deadline: { source: 'dueDate', value: '2026-11-30' }, blockers: { total: 6, items: manual },
+        deadline: { source: 'dueDate', value: '2026-11-30' }, blockers: { total: 6, items: causes },
         scheduleConflicts: { total: 7, items: conflicts }, gitlab: { blockedMergeRequests: 2, failedPipelines: 1 },
       }),
-      row(next, { deadline: { source: 'endDate', value: '2026-12-01' }, blockers: { total: 1, items: [manual[0]] } }),
+      row(next, { deadline: { source: 'endDate', value: '2026-12-01' }, blockers: { total: 1, items: [causes[0]] } }),
     ],
   });
   const before = structuredClone(captured);
@@ -59,13 +60,13 @@ test('blocker draft preserves the reviewed scope, counts, display facts and caus
   const nodes = [...documentNodes(normalizeDocumentContent(draft.content).content)];
   const prose = nodes.filter(node => node.type === 'text').map(node => node.text).join('\n');
   assert.match(prose, /보고서 기준 시각 2026-11-20 00:10:20\.123 UTC/);
-  assert.match(prose, /보기 이번 주 작업 · 원인 수동 차단/);
+  assert.match(prose, /보기 이번 주 작업 · 원인 업무 차단/);
   assert.match(prose, /미완료 업무 5개 · 차단된 업무 4개/);
-  assert.match(prose, /수동 차단 2개 · 간트 일정 충돌 3개 · GitLab 조치 1개/);
+  assert.match(prose, /업무 차단 2개 · 간트 일정 충돌 3개 · GitLab 조치 1개/);
   assert.match(prose, /선택한 조건에 해당하는 업무 2개 중 2개를 기록했습니다/);
   assert.match(prose, /TEAM-7 · 대상 <검토> & 확정\n상태 검토 중 · 담당자 이지현 · 우선순위 높음 · 목표 마감일 2026-11-30/);
   assert.match(prose, /TEAM-8 · 업무 TEAM-8\n상태 할 일 · 담당자 미지정 · 우선순위 높음 · 종료일 2026-12-01/);
-  assert.match(prose, /수동 차단 6건[\s\S]*OTHER-2 · 업무 OTHER-2[\s\S]*예시 외 3건/);
+  assert.match(prose, /업무 차단 6건[\s\S]*OTHER-2 · 업무 OTHER-2[^\n]*Jira 이관 관계[\s\S]*예시 외 3건/);
   assert.match(prose, /간트 일정 충돌 7건[\s\S]*완료 후 완료 \(FF\) · \+2근무일 · 종료일 2026-11-25 · 2026-11-28부터 가능[\s\S]*예시 외 4건/);
   assert.match(prose, /GitLab 조치 · 병합 확인이 필요한 MR 2건 · 실패한 파이프라인 1건/);
   assert.doesNotMatch(prose, /OMITTED-|private-/);
@@ -74,7 +75,7 @@ test('blocker draft preserves the reviewed scope, counts, display facts and caus
   assert.equal(sourceLink?.marks?.[0].attrs?.target, '_self');
   assert.match(prose, /진행 차단 보고서 열기\n \(현재 상태\)/);
 
-  assert.deepEqual(draft.issueIds, [target, next, ...manual.slice(0, 3), ...predecessor.slice(1, 3)].map(value => value.id));
+  assert.deepEqual(draft.issueIds, [target, next, ...causes.slice(0, 3), ...predecessor.slice(1, 3)].map(value => value.id));
   assert.deepEqual(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), draft.issueIds);
   assert.ok((draft.content.content?.findIndex(node => node.type === 'issueReference') ?? -1) >
     (draft.content.content?.findIndex(node => node.content?.[0].text === '관련 업무') ?? -1));

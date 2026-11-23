@@ -220,7 +220,7 @@ export function DeliveryBlockerMeetingDraftDialog({ report, reasonLabel, actorId
             <ol>{scope.items.slice(0, ROW_LIMIT).map(row => <li key={row.issue.id}>
               <strong>{row.issue.key} · {row.issue.title}</strong>
               <p>{[
-                row.blockers.total ? `수동 차단 ${row.blockers.total}건` : '',
+                row.blockers.total ? `업무 차단 ${row.blockers.total}건` : '',
                 row.scheduleConflicts.total ? `간트 일정 충돌 ${row.scheduleConflicts.total}건` : '',
                 row.gitlab.blockedMergeRequests ? `병합 확인이 필요한 MR ${row.gitlab.blockedMergeRequests}건` : '',
                 row.gitlab.failedPipelines ? `실패한 파이프라인 ${row.gitlab.failedPipelines}건` : '',

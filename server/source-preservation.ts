@@ -428,8 +428,21 @@ export class SourcePreservationService {
 
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
 
-  jiraTeamScheduleBlockers(): TeamScheduleBlocker[] {
-    const rows = this.store.db.prepare(`SELECT relation.id,
+  jiraIssueBlockers({ issueIds, allowedProjects = null, crossProjectOnly = false }: {
+    issueIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean;
+  } = {}): TeamScheduleBlocker[] {
+    if (issueIds?.length === 0 || allowedProjects?.length === 0) return [];
+    const incidentSql = issueIds ? `WITH selected AS MATERIALIZED (SELECT value FROM json_each(?)),
+      incident AS MATERIALIZED (
+        SELECT relation.id FROM selected JOIN issue_relations relation ON relation.source_issue_id=selected.value
+        UNION
+        SELECT relation.id FROM selected JOIN issue_relations relation ON relation.target_issue_id=selected.value
+      )` : '';
+    // Imports can retain the inverse storage order. Narrow by either stored endpoint
+    // first and still read every archive row for the remaining relation IDs.
+    const relationSql = issueIds ? 'incident JOIN issue_relations relation ON relation.id=incident.id' : 'issue_relations relation';
+    const scope = allowedProjects ? JSON.stringify(allowedProjects) : null;
+    const rows = this.store.db.prepare(`${incidentSql} SELECT relation.id,
       relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
       json_extract(relation.json,'$.version') AS version, json_extract(relation.json,'$.type') AS type,
       source.project_id AS sourceProjectId, target.project_id AS targetProjectId,
@@ -437,13 +450,16 @@ export class SourcePreservationService {
       CASE WHEN json_valid(receipt.json) THEN
         CASE WHEN json_type(receipt.json,'$.projectIds')='array' THEN json_extract(receipt.json,'$.projectIds') END
       END AS receiptProjects
-      FROM source_records archive JOIN issue_relations relation ON relation.id=json_extract(archive.json,'$.jiraRelationId')
+      FROM ${relationSql}
+      JOIN source_records archive ON json_extract(archive.json,'$.jiraRelationId')=relation.id
       JOIN issues source ON source.id=relation.source_issue_id
       JOIN issues target ON target.id=relation.target_issue_id
       JOIN source_imports receipt ON receipt.id=archive.import_id
       WHERE archive.product='jira' AND archive.kind='relation' AND json_valid(archive.json) AND json_type(archive.json,'$.jiraRelationId')='text'
-        AND json_type(relation.json,'$.origin') IS NULL AND source.project_id<>target.project_id
-      ORDER BY relation.id, archive.id`).all() as (Omit<TeamScheduleBlocker, 'origin'> & {
+        AND json_type(relation.json,'$.origin') IS NULL AND source.id<>target.id
+        AND (?=0 OR source.project_id<>target.project_id)
+        AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
+      ORDER BY relation.id, archive.id`).all(...(issueIds ? [JSON.stringify(issueIds)] : []), Number(crossProjectOnly), scope, scope, scope) as (Omit<TeamScheduleBlocker, 'origin'> & {
         type: string; sourceProjectId: string; targetProjectId: string; instanceKey: string; importId: string;
         archiveJson: string; receiptProjects: string | null;
       })[];

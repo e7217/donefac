@@ -205,6 +205,15 @@
 .delivery-blockers-causes h5 > span { margin-inline-start: 0.2rem; color: #526c65; font-weight: 500; }
 .delivery-blockers-causes ul { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
 .delivery-blockers-causes p { margin: 0.2rem 0 0; color: #526c65; }
+.delivery-blockers-origin {
+  display: block;
+  width: fit-content;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: #e8eef9;
+  color: #3f5584;
+  font-size: 0.75rem;
+}
 .delivery-blockers-empty { margin: 0; color: #526c65; }
 
 .delivery-blockers-pagination {

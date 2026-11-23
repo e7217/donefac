@@ -96,6 +96,7 @@ export interface DeliveryBlockerIssue extends Pick<Issue, 'id' | 'projectId' | '
   statusLabel: string;
   assigneeName: string | null;
 }
+export type DeliveryBlockerCause = DeliveryBlockerIssue & { origin?: 'jira' };
 
 export interface DeliveryScheduleConflict {
   predecessor: DeliveryBlockerIssue;
@@ -110,7 +111,7 @@ export interface DeliveryBlockerRow {
   issue: DeliveryBlockerIssue;
   priority: Priority;
   deadline: { value: string; source: 'dueDate' | 'endDate' } | null;
-  blockers: { total: number; items: DeliveryBlockerIssue[] };
+  blockers: { total: number; items: DeliveryBlockerCause[] };
   scheduleConflicts: { total: number; items: DeliveryScheduleConflict[] };
   gitlab: { blockedMergeRequests: number; failedPipelines: number };
   releaseSchedule?: {
@@ -368,6 +369,9 @@ export interface AttachmentVersion extends Attachment { attachmentId:string;vers
 export type IssueRelationType = 'related' | 'blocks' | 'duplicates';
 export type IssueRelationDirection = 'outgoing' | 'incoming';
 export interface IssueRelation { id:string;sourceIssueId:string;targetIssueId:string;type:string;version:number;createdAt:string;origin?:'teamspace' }
+export interface IssueRelationView extends IssueRelation {
+  verifiedBlockerDirection?: IssueRelationDirection;
+}
 export type TeamScheduleBlocker = Pick<IssueRelation, 'id' | 'sourceIssueId' | 'targetIssueId' | 'version'> & { origin?: 'jira' };
 export interface MigrationApplyResult { import:SourceImport;duplicate:boolean }
 export type SourceRecordSummary=Omit<SourceRecordArchive,'record'>&{record:LegacyRecordSummary;originalAuthorName:string|null};

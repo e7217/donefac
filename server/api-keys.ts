@@ -4,7 +4,6 @@ import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Commen
 import { Store } from './store.js';
 import { creationRequestId } from './creation-request.js';
 import { normalizeDocumentContent } from './document-content.js';
-import { listIssueRelations } from './issue-relations.js';
 import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS } from './decision-follow-ups.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 import { documentChildLists } from '../shared/document-child-list.js';
@@ -400,18 +399,9 @@ export class ApiKeyService {
       }
       if (issueRelations && !issueRelations[2]) {
         this.query(request, []);
-        const id = this.decode(issueRelations[1]);
-        this.resource(key, 'issues', id);
-        const projects = key.projectIds;
-        const relations = listIssueRelations(this.store, id).filter(relation => {
-          if (projects === null) return true;
-          const otherId = relation.sourceIssueId === id ? relation.targetIssueId : relation.sourceIssueId;
-          const other = this.store.get<Issue>('issues', otherId);
-          return Boolean(other && projects.includes(other.projectId));
-        });
+        this.resource(key, 'issues', this.decode(issueRelations[1]));
         this.used(key);
-        response.set('Cache-Control', 'no-store').json(relations);
-        return;
+        return next();
       }
       const gitlabLinks = /^\/api\/issues\/([^/]+)\/gitlab-links$/.exec(path);
       if (gitlabLinks) {

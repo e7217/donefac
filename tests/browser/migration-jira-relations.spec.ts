@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test';
 import type {
-  AutomaticSchedulePreview, Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
-  SchedulePasteApplyResult, TeamScheduleBlocker, WorkspaceSnapshot,
+  AutomaticSchedulePreview, DeliveryBlockerDraftResult, Dependency, Issue, IssueRelation, IssueRelationView, LegacyPackageSummary,
+  MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow, SchedulePasteApplyResult,
+  TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 
 async function read<T>(request: APIRequestContext, path: string): Promise<T> {
@@ -218,6 +219,7 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
   ];
   const packages: LegacyPackageSummary[] = [];
   const tickets: Issue[] = [];
+  const meetingTitle = `Jira 이관 차단 회의 ${suffix}`;
 
   async function upload(fixture: typeof projects[number], withRelation = false) {
     const filename = `jira-cross-project-${fixture.key}${withRelation ? '-relation' : ''}.json`;
@@ -312,8 +314,8 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     for (const ticket of tickets) expect(unchanged.find(issue => issue.id === ticket.id)).toEqual(ticket);
 
     const linksPath = `/api/issues/${blocked.id}/relations`;
-    const [restoredLink] = await read<IssueRelation[]>(request, linksPath);
-    expect(restoredLink).toMatchObject({ sourceIssueId: blocker.id, targetIssueId: blocked.id, type: 'Blocks' });
+    const [restoredLink] = await read<IssueRelationView[]>(request, linksPath);
+    expect(restoredLink).toMatchObject({ sourceIssueId: blocker.id, targetIssueId: blocked.id, type: 'Blocks', verifiedBlockerDirection: 'incoming' });
     const dates = [
       { issue: blocker, startDate: '2026-11-19', endDate: '2026-11-20' },
       { issue: blocked, startDate: '2026-11-16', endDate: '2026-11-17' },
@@ -392,9 +394,21 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     await form.getByRole('combobox', { name: '차단되는 업무', exact: true }).selectOption(blocked.id);
     const saveBlock = form.getByRole('button', { name: '차단 관계 저장', exact: true });
     const senderPath = `/api/issues/${blocker.id}/relations`;
-    await page.route(url => url.pathname === senderPath, route => route.abort('failed'), { times: 1 });
-    await saveBlock.click();
-    await expect(form.getByRole('alert')).toBeVisible();
+    const senderRoute = (url: URL) => url.pathname === senderPath;
+    let failedSave: unknown;
+    const failFirstSave = async (route: Route) => {
+      if (route.request().method() !== 'POST' || failedSave) return route.continue();
+      failedSave = route.request().postDataJSON();
+      await route.abort('failed');
+    };
+    await page.route(senderRoute, failFirstSave);
+    try {
+      await saveBlock.click();
+      await expect(form.getByRole('alert')).toBeVisible();
+    } finally {
+      await page.unroute(senderRoute, failFirstSave);
+    }
+    expect(failedSave).toEqual({ otherIssueId: blocked.id, type: 'blocks', direction: 'outgoing' });
     expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
     const savingBlock = page.waitForResponse(response => new URL(response.url()).pathname === senderPath && response.request().method() === 'POST');
     await saveBlock.click();
@@ -403,8 +417,76 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     const nativeBlock = await savedBlock.json() as IssueRelation;
     await expect(blockersPanel.locator(`[data-team-blocker-id="${nativeBlock.id}"]`)).toBeVisible();
     await expect(pair).toHaveCount(0);
-    expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink, nativeBlock]);
+    const withNative = await read<IssueRelationView[]>(request, linksPath);
+    expect(withNative.map(relation => relation.id)).toEqual([restoredLink.id, nativeBlock.id]);
+    expect(withNative[0]).not.toHaveProperty('verifiedBlockerDirection');
+    expect(withNative[1]).toEqual(nativeBlock);
+    const removedNative = await request.delete(`${senderPath}/${nativeBlock.id}?expectedVersion=${nativeBlock.version}`);
+    expect(removedNative.ok(), await removedNative.text()).toBe(true);
+
+    const reportHash = `#/${blocked.projectId}/reports/blockers?reason=issue_block`;
+    await page.goto(`/${reportHash}`);
+    const report = page.getByRole('tabpanel', { name: '진행 차단', exact: true });
+    const card = report.getByRole('article', { name: `차단된 업무 ${blocked.key}`, exact: true });
+    await expect(card.getByText('Jira 이관 관계', { exact: true })).toBeVisible();
+    const sourceButton = card.getByRole('button', { name: `${blocker.key} ${blocker.title} 업무 열기`, exact: true });
+    await sourceButton.click();
+    const sourcePanel = page.getByRole('dialog', { name: blocker.title, exact: true });
+    await expect(sourcePanel.getByText('Jira 이관 관계 · 이 업무가 차단함', { exact: true })).toBeVisible();
+    await sourcePanel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(sourcePanel).toHaveCount(0);
+    await expect(sourceButton).toBeFocused();
+
+    await report.getByRole('button', { name: '회의 초안 만들기', exact: true }).click();
+    const meeting = page.getByRole('dialog', { name: '회의 초안 만들기', exact: true });
+    await meeting.getByRole('textbox', { name: '회의 초안 제목', exact: true }).fill(meetingTitle);
+    const savingMeeting = page.waitForResponse(response => new URL(response.url()).pathname ===
+      `/api/projects/${blocked.projectId}/delivery-blockers/meeting-draft` && response.request().method() === 'POST');
+    await meeting.getByRole('button', { name: '회의 초안 저장', exact: true }).click();
+    const meetingResponse = await savingMeeting;
+    expect(meetingResponse.status(), await meetingResponse.text()).toBe(201);
+    const { document } = await meetingResponse.json() as DeliveryBlockerDraftResult;
+    expect(document.plainText).toContain('Jira 이관 관계');
+    expect(document.plainText).toContain(blocker.title);
+    await meeting.getByRole('button', { name: '문서 열기', exact: true }).click();
+    const meetingSource = page.locator('[aria-label="문서 본문"]').getByRole('link', { name: '진행 차단 보고서 열기', exact: true });
+    await expect(meetingSource).toHaveAttribute('href', reportHash);
+
+    const workflowPath = `/api/projects/${blocked.projectId}/workflow`;
+    const workflow = await read<ProjectWorkflow>(request, workflowPath);
+    const completion = { id: 'review-complete', category: 'done', label: '검토 완료', color: '#428655' };
+    const guarded = await request.patch(workflowPath, { data: {
+      ...workflow, expectedVersion: workflow.version, statuses: [...workflow.statuses, completion],
+      transitions: [...workflow.transitions, {
+        from: blocked.status, to: completion.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: true,
+      }],
+    } });
+    expect(guarded.ok(), await guarded.text()).toBe(true);
+    await page.goto(`/#/${blocked.projectId}/issues?issue=${blocked.id}`);
+    await page.reload();
+    const targetPanel = page.getByRole('dialog', { name: blocked.title, exact: true });
+    await targetPanel.getByRole('combobox', { name: '상태', exact: true }).selectOption(completion.id);
+    const transitioning = page.waitForResponse(response => new URL(response.url()).pathname ===
+      `/api/issues/${blocked.id}` && response.request().method() === 'PATCH');
+    await targetPanel.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    const rejected = await transitioning;
+    expect(rejected.status(), await rejected.text()).toBe(422);
+    expect(await rejected.json()).toMatchObject({ details: { reason: 'open_issue_blockers' } });
+    await targetPanel.getByRole('button', { name: '차단 업무 보기', exact: true }).click();
+    const targetRelations = targetPanel.getByRole('region', { name: '업무 관계', exact: true });
+    await expect(targetRelations).toBeFocused();
+    await expect(targetRelations.getByText('Jira 이관 관계 · 이 업무가 차단됨', { exact: true })).toBeVisible();
+    await expect(targetRelations.getByText('열린 차단 업무', { exact: true })).toBeVisible();
+    await expect(targetRelations.getByRole('button', { name: `${blocker.key} 업무 열기`, exact: true })).toBeVisible();
   } finally {
+    const state = await read<WorkspaceSnapshot>(request, '/api/workspace');
+    for (const document of state.documents.filter(value => value.title === meetingTitle)) {
+      const removed = await request.delete(`/api/documents/${document.id}?expectedVersion=${document.version}`);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
     for (const issue of tickets) {
       const removed = await request.delete(`/api/issues/${issue.id}`);
       if (removed.ok()) {

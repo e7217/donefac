@@ -9,9 +9,10 @@ import { test, type TestContext } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { createApp } from '../../server/app.js';
 import type {
-  AutomaticSchedulePreview, Dependency, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
-  MigrationOptions, MigrationPreview, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive,
-  TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
+  ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
+  IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem,
+  ProjectWorkflow, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive, TeamScheduleBlocker,
+  WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const ACTOR = 'user-seo';
@@ -53,9 +54,9 @@ async function fixture(t: TestContext) {
   assert.ok(address && typeof address !== 'string');
   const base = `http://127.0.0.1:${address.port}/api`;
 
-  async function request<T = unknown>(path: string, method = 'GET', input?: unknown, actor = ACTOR) {
+  async function request<T = unknown>(path: string, method = 'GET', input?: unknown, actor = ACTOR, token?: string) {
     const response = await fetch(base + path, {
-      method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor },
+      method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: input === undefined ? undefined : JSON.stringify(input),
     });
     return { status: response.status, data: await response.json() as T };
@@ -84,7 +85,12 @@ async function fixture(t: TestContext) {
   }, actor);
   const workspace = () => call<WorkspaceSnapshot>('/workspace');
   const backup = () => call<Backup>('/export');
-  const relations = (issue: Issue) => call<IssueRelation[]>(`/issues/${issue.id}/relations`);
+  async function relations(issue: Issue): Promise<IssueRelation[]> {
+    const projected = await call<IssueRelationView[]>(`/issues/${issue.id}/relations`);
+    // Existing migration checks compare the archived fields across both ends.
+    for (const relation of projected) delete relation.verifiedBlockerDirection;
+    return projected;
+  }
   async function importInitial(issues: ReturnType<typeof sourceIssue>[], sharedProjectKey?: string, instanceKey = INSTANCE) {
     const pkg = await upload('initial', issues, instanceKey);
     const { defaultConfiguration } = await options(pkg);
@@ -110,7 +116,7 @@ async function fixture(t: TestContext) {
       },
     };
   }
-  return { dataDir, call, upload, uploadBytes, options, preview, apply, workspace, backup, relations, importInitial, appendConfiguration };
+  return { dataDir, call, request, upload, uploadBytes, options, preview, apply, workspace, backup, relations, importInitial, appendConfiguration };
 }
 
 function original(workspace: WorkspaceSnapshot, sourceId: string, project = 'OLD') {
@@ -413,6 +419,144 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.ok(final.dependencies.some(dependency => dependency.id === local.id));
   assert.deepEqual((await f.backup()).issueRelations, archivedRelations);
   assert.deepEqual((await f.call<SourceReconciliationAudit>(auditPath)).targetContent.issueRelations, sourceAudit.targetContent.issueRelations);
+});
+
+test('proven Jira blockers keep canonical direction in reports, release readiness and protected transitions', async t => {
+  const f = await fixture(t);
+  await f.importInitial([sourceIssue('100')], 'ALPHA');
+  await f.importInitial([
+    sourceIssue('201', [], 'OTHER'),
+    sourceIssue('203', [], 'OTHER'),
+    sourceIssue('202', [
+      link('901', '201', 'inward'),
+      link('903', '203', 'inward', { ...BLOCKS, id: '10002', inward: 'depends on', outward: 'depends on' }),
+    ], 'OTHER'),
+  ], 'BRAVO');
+  const delta = await f.upload('report-proven-cross-link', [sourceIssue('202', [link('902', '100', 'inward')], 'OTHER')]);
+  const config = await f.appendConfiguration(delta);
+  config.appendTo!.refreshRelations = true;
+  const migration = await f.apply(await f.preview(config));
+  assert.equal(migration.status, 201, JSON.stringify(migration.data));
+
+  const workspace = await f.workspace();
+  const cross = original(workspace, '100');
+  const local = original(workspace, '201', 'OTHER');
+  const target = original(workspace, '202', 'OTHER');
+  const ambiguous = original(workspace, '203', 'OTHER');
+  const unprovenSource = await f.call<Issue>('/issues', 'POST', { projectId: target.projectId, title: '원본 기록이 없는 차단 이름' }, 201);
+  const unproven: IssueRelation = { id: randomUUID(), sourceIssueId: unprovenSource.id, targetIssueId: target.id,
+    type: 'Blocks', version: 1, createdAt: CREATED };
+  const beforeRestore = await f.backup();
+  const inverted = beforeRestore.issueRelations.find(relation => relation.sourceIssueId === cross.id && relation.targetIssueId === target.id);
+  assert.ok(inverted);
+  [inverted.sourceIssueId, inverted.targetIssueId] = [target.id, cross.id];
+  beforeRestore.issueRelations.push(unproven);
+  await f.call('/import', 'POST', { data: beforeRestore });
+
+  const reportPath = `/projects/${target.projectId}/delivery-blockers`;
+  const reason = '?reason=issue_block';
+  const report = (path = reportPath + reason) => f.call<DeliveryBlockerReport>(path);
+  const targetRelations = `/issues/${target.id}/relations`;
+  const crossRelations = `/issues/${cross.id}/relations`;
+  const incoming = await f.call<IssueRelationView[]>(targetRelations);
+  const crossInbound = incoming.find(relation => relation.id === inverted.id);
+  assert.deepEqual(crossInbound, { ...inverted, verifiedBlockerDirection: 'incoming' });
+  assert.deepEqual(await f.call<IssueRelationView[]>(crossRelations), [{ ...inverted, verifiedBlockerDirection: 'outgoing' }]);
+  const relationWith = (issue: Issue) => incoming.find(relation =>
+    relation.sourceIssueId === issue.id || relation.targetIssueId === issue.id);
+  assert.deepEqual(incoming.filter(relation => relation.verifiedBlockerDirection).map(relation => relation.id).sort(),
+    [relationWith(local)!.id, inverted.id].sort());
+  for (const candidate of [ambiguous, unprovenSource]) {
+    const raw = relationWith(candidate);
+    assert.ok(raw);
+    assert.equal(raw.verifiedBlockerDirection, undefined);
+  }
+  const incomingIssues = (value: DeliveryBlockerReport) => value.items.find(row => row.issue.id === target.id)?.blockers.items;
+  const initial = await report();
+  assert.equal(initial.total, 1);
+  assert.deepEqual(new Map(incomingIssues(initial)?.map(source => [source.id, source.origin])), new Map([[cross.id, 'jira'], [local.id, 'jira']]));
+  assert.equal((await report(`/projects/${cross.projectId}/delivery-blockers${reason}`)).total, 0);
+
+  const scoped = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '릴리스 범위 쓰기', access: 'write', projectIds: [target.projectId] }, 201);
+  const crossScope = await f.call<ApiKeyCreated>('/api-keys', 'POST', {
+    name: '두 프로젝트 범위 읽기', access: 'read', projectIds: [target.projectId, cross.projectId],
+  }, 201);
+  const readWithKey = <T>(path: string, token: string) => f.request<T>(`/v1${path}`, 'GET', undefined, ACTOR, token);
+  const localReport = await readWithKey<DeliveryBlockerReport>(reportPath + reason, scoped.token);
+  assert.equal(localReport.status, 200);
+  assert.deepEqual(incomingIssues(localReport.data)?.map(source => [source.id, source.origin]), [[local.id, 'jira']]);
+  assert.ok(!JSON.stringify(localReport.data).includes(cross.title));
+  const visibleReport = await readWithKey<DeliveryBlockerReport>(reportPath + reason, crossScope.token);
+  assert.equal(visibleReport.status, 200);
+  assert.deepEqual(visibleReport.data.items, initial.items);
+  assert.equal(visibleReport.data.revision, initial.revision);
+  const hiddenRelation = await readWithKey<IssueRelationView[]>(targetRelations, scoped.token);
+  assert.equal(hiddenRelation.status, 200);
+  assert.ok(!hiddenRelation.data.some(relation => relation.id === inverted.id));
+
+  const native = await f.call<IssueRelation>(crossRelations, 'POST', {
+    otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+  }, 201);
+  const withNative = await report();
+  assert.equal(withNative.total, 1);
+  assert.deepEqual(new Map(incomingIssues(withNative)?.map(source => [source.id, source.origin])), new Map([[cross.id, undefined], [local.id, 'jira']]));
+  assert.equal((await f.call<IssueRelationView[]>(targetRelations)).find(relation => relation.id === inverted.id)?.verifiedBlockerDirection, undefined);
+  assert.notEqual(withNative.revision, initial.revision);
+  await f.call(`${crossRelations}/${native.id}?expectedVersion=${native.version}`, 'DELETE');
+  assert.equal((await report()).revision, initial.revision);
+
+  const release = await f.call<PlanningItem>('/planning-items', 'POST', {
+    projectId: target.projectId, name: '이관 차단 검증 릴리스', kind: 'release', targetDate: '2030-02-09',
+  }, 201);
+  const restored = (await f.workspace()).issues.find(issue => issue.id === target.id)!;
+  const assigned = await f.call<Issue>(`/issues/${target.id}`, 'PATCH', {
+    expectedVersion: restored.version, releaseId: release.id, startDate: '2030-02-01', endDate: '2030-02-03',
+  });
+  const scope = `?releaseId=${release.id}&reason=issue_block`;
+  const readiness = await report(reportPath + scope);
+  assert.equal(readiness.counts.open, 1);
+  assert.deepEqual(incomingIssues(readiness)?.map(source => source.origin), ['jira', 'jira']);
+  assert.equal(readiness.items[0].releaseSchedule, undefined);
+  const created = await f.call<DeliveryBlockerDraftResult>(`${reportPath}/meeting-draft`, 'POST', {
+    requestId: randomUUID(), title: '확인된 Jira 차단 회의', releaseId: release.id, reason: 'issue_block', revision: readiness.revision,
+  }, 201);
+  assert.match(created.document.plainText, /Jira 이관 관계/u);
+  assert.ok(created.document.plainText.includes(cross.title));
+  assert.ok(created.document.plainText.includes(local.title));
+  assert.ok(!created.document.plainText.includes(unprovenSource.title));
+  assert.ok(JSON.stringify(created.document.content).includes(`reports/blockers?release=${release.id}&reason=issue_block`));
+
+  const completed = { id: 'completed-test', color: '#428655', label: '검증 완료', category: 'done' } as const;
+  async function addCompletion(projectId: string, from: string, guarded = false) {
+    const path = `/projects/${projectId}/workflow`;
+    const current = await f.call<ProjectWorkflow>(path);
+    await f.call<ProjectWorkflow>(path, 'PATCH', {
+      ...current, expectedVersion: current.version, statuses: [...current.statuses, completed],
+      transitions: [...current.transitions, { from, to: completed.id, requiredFields: [], issueTypes: [],
+        ...(guarded ? { requireResolvedBlockers: true } : {}) }],
+    });
+  }
+  await addCompletion(target.projectId, target.status, true);
+  await addCompletion(cross.projectId, cross.status);
+  const close = (issue: Issue, status = 200) => f.call<Issue>(`/issues/${issue.id}`, 'PATCH', {
+    expectedVersion: issue.version, status: completed.id,
+  }, status);
+  const afterConfiguration = await f.workspace();
+  const current = (issue: Issue) => afterConfiguration.issues.find(value => value.id === issue.id)!;
+  await close(current(local));
+  const hiddenOnly = await readWithKey<DeliveryBlockerReport>(reportPath + scope, scoped.token);
+  assert.equal(hiddenOnly.data.total, 0);
+  const protectedResult = await f.request(`/v1/issues/${assigned.id}`, 'PATCH', {
+    expectedVersion: current(assigned).version, status: completed.id,
+  }, ACTOR, scoped.token);
+  assert.deepEqual(protectedResult, { status: 422, data: {
+    error: '열린 차단 업무를 해결한 뒤 상태를 변경해 주세요.', details: { reason: 'open_issue_blockers' },
+  } });
+  await close(current(cross));
+  assert.equal((await report(reportPath + scope)).total, 0);
+  assert.equal((await close(current(assigned))).status, completed.id);
+  const after = await f.backup();
+  assert.deepEqual(after.issueRelations, beforeRestore.issueRelations);
 });
 
 test('relation-only Jira administrator XML needs a proven project to anchor a cross-project review', async t => {

@@ -7,7 +7,7 @@ const ISSUE_LIMIT = 20;
 const EXAMPLE_LIMIT = 3;
 const REFERENCE_LIMIT = 30;
 const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
-  issue_block: '수동 차단',
+  issue_block: '업무 차단',
   schedule_conflict: '간트 일정 충돌',
   gitlab: 'GitLab 조치',
   missing_schedule: '일정 미정',
@@ -58,7 +58,7 @@ export function buildDeliveryBlockerDraftContent(
     }, text(' (현재 상태)')] },
     heading('집계'),
     paragraph(`미완료 업무 ${numberLabel(open)}개 · 차단된 업무 ${numberLabel(affected)}개`),
-    paragraph(`수동 차단 ${numberLabel(reasons.issue_block)}개 · 간트 일정 충돌 ${numberLabel(reasons.schedule_conflict)}개 · GitLab 조치 ${numberLabel(reasons.gitlab)}개`),
+    paragraph(`${REASON_LABELS.issue_block} ${numberLabel(reasons.issue_block)}개 · 간트 일정 충돌 ${numberLabel(reasons.schedule_conflict)}개 · GitLab 조치 ${numberLabel(reasons.gitlab)}개`),
     ...(release ? [paragraph(`${REASON_LABELS.missing_schedule} ${numberLabel(reasons.missing_schedule ?? 0)}개 · ${REASON_LABELS.after_release_date} ${numberLabel(reasons.after_release_date ?? 0)}개`)] : []),
     heading('차단 업무'),
     paragraph(`선택한 조건에 해당하는 업무 ${numberLabel(report.total)}개 중 ${numberLabel(rows.length)}개를 기록했습니다.`),
@@ -74,7 +74,8 @@ export function buildDeliveryBlockerDraftContent(
 
     const blockerExamples = blockers.items.slice(0, EXAMPLE_LIMIT);
     sources.push(...blockerExamples);
-    content.push(...causeDetails(REASON_LABELS.issue_block, blockers.total, blockerExamples.map(issueLabel)));
+    content.push(...causeDetails(REASON_LABELS.issue_block, blockers.total, blockerExamples.map(source =>
+      `${issueLabel(source)}${source.origin === 'jira' ? ' · Jira 이관 관계' : ''}`)));
 
     const conflicts = scheduleConflicts.items.slice(0, EXAMPLE_LIMIT);
     sources.push(...conflicts.map(conflict => conflict.predecessor));

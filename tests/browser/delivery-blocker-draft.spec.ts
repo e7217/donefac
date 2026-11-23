@@ -160,9 +160,9 @@ test('360px 진행 차단 보고서에서 변경된 조건을 다시 검토하�
     const body = page.locator('[aria-label="문서 본문"]');
     await expect(body.getByRole('heading', { name: '차단 업무', exact: true })).toBeVisible();
     await expect(body.getByRole('heading', { name: '회의 메모', exact: true })).toBeVisible();
-    await expect(body.getByText(`보기 ${savedView.name} · 원인 수동 차단`, { exact: true })).toBeVisible();
+    await expect(body.getByText(`보기 ${savedView.name} · 원인 업무 차단`, { exact: true })).toBeVisible();
     await expect(body.getByText('미완료 업무 3개 · 차단된 업무 3개', { exact: true })).toBeVisible();
-    await expect(body.getByText('수동 차단 2개 · 간트 일정 충돌 1개 · GitLab 조치 0개', { exact: true })).toBeVisible();
+    await expect(body.getByText('업무 차단 2개 · 간트 일정 충돌 1개 · GitLab 조치 0개', { exact: true })).toBeVisible();
     await expect(body.getByText('선택한 조건에 해당하는 업무 2개 중 2개를 기록했습니다.', { exact: true })).toBeVisible();
     await expect(body.getByText(`${cause.key} · ${cause.title}`, { exact: false }).first()).toBeVisible();
     await expect(body.getByRole('button', { name: `참조 업무 열기 ${cause.key} ${cause.title}`, exact: true })).toHaveCount(1);

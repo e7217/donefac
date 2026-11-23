@@ -1,11 +1,10 @@
 import { createCalendarMath } from '../shared/calendar.js';
 import { summarizeIssueGitlabLinks } from '../shared/issue-gitlab-view.js';
-import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { checkDependencySchedule } from '../shared/schedule-dependencies.js';
 import {
   PRIORITY, type DeliveryBlockerCounts, type DeliveryBlockerIssue, type DeliveryBlockerRelease, type DeliveryBlockerRow, type DeliveryScheduleConflict,
-  type Dependency, type GitlabLink, type Issue, type IssueRelation, type Priority, type WorkCalendar, type WorkflowStatus,
+  type Dependency, type GitlabLink, type Issue, type Priority, type TeamScheduleBlocker, type WorkCalendar, type WorkflowStatus,
   type WorkspaceSnapshot,
 } from '../shared/types.js';
 import { statusMeta } from '../shared/workflow-helpers.js';
@@ -13,7 +12,7 @@ import { statusMeta } from '../shared/workflow-helpers.js';
 interface DeliveryBlockersInput {
   targets: readonly Issue[];
   sources: readonly Issue[];
-  relations: readonly IssueRelation[];
+  blockers: readonly TeamScheduleBlocker[];
   dependencies: readonly Dependency[];
   gitlabLinks: readonly GitlabLink[];
   calendar: WorkCalendar;
@@ -40,9 +39,9 @@ function compareConflict(a: DeliveryScheduleConflict, b: DeliveryScheduleConflic
     a.endpoint.localeCompare(b.endpoint) || a.scheduledDate.localeCompare(b.scheduledDate) || a.requiredDate.localeCompare(b.requiredDate);
 }
 
-/** Sources can be outside the saved view. The caller supplies only issues the reader may see. */
+/** Sources can be outside the saved view. The caller supplies confirmed blockers and readable issues. */
 export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: DeliveryBlockerRow[]; counts: DeliveryBlockerCounts } {
-  const { targets, sources, relations, dependencies, gitlabLinks, calendar, release, data } = input;
+  const { targets, sources, blockers, dependencies, gitlabLinks, calendar, release, data } = input;
   const statusCache = new Map<string, WorkflowStatus>();
   const usersById = new Map(data.users.map(user => [user.id, user.name]));
   function statusOf(issue: Issue) {
@@ -96,15 +95,14 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
   }
 
   const seenBlocks = new Set<string>();
-  for (const relation of relations) {
-    if (!isTeamspaceIssueRelation(relation) || relation.type !== 'blocks') continue;
-    const target = activeTargets.get(relation.targetIssueId);
-    const source = sourcesById.get(relation.sourceIssueId);
+  for (const { sourceIssueId, targetIssueId, origin } of blockers) {
+    const target = activeTargets.get(targetIssueId);
+    const source = sourcesById.get(sourceIssueId);
     if (!target || !source || source.id === target.id || !active(source)) continue;
     const pair = JSON.stringify([source.id, target.id]);
     if (seenBlocks.has(pair)) continue;
     seenBlocks.add(pair);
-    rowFor(target).blockers.items.push(summarize(source));
+    rowFor(target).blockers.items.push({ ...summarize(source), ...(origin === 'jira' ? { origin } : {}) });
   }
 
   const math = createCalendarMath(calendar);

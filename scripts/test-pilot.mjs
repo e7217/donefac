@@ -418,18 +418,20 @@ async function applyPilotCrossProjectJiraRelation(url, actorId, sourceIssue) {
     [sourceIssue.key, targetIssue.key, '파일럿 합성 이관', '파일럿 다른 Jira 프로젝트']);
   const receipt = await apply(preview);
   assert.deepEqual(new Set(receipt.projectIds), new Set([sourceIssue.projectId, targetIssue.projectId]));
-  return { receipt, sourceIssueId: sourceIssue.id, targetIssueId: targetIssue.id };
+  return { receipt, sourceIssueId: sourceIssue.id, targetIssueId: targetIssue.id, targetProjectId: targetIssue.projectId };
 }
 
-async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId, targetIssueId }) {
-  const [source, target, audit, blockers] = await Promise.all([
+async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId, targetIssueId, targetProjectId }) {
+  const [source, target, audit, blockers, report] = await Promise.all([
     call(url, `/issues/${sourceIssueId}/relations`),
     call(url, `/issues/${targetIssueId}/relations`),
     call(url, `/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`),
     call(url, '/schedule/team-blockers'),
+    call(url, `/projects/${targetProjectId}/delivery-blockers?reason=issue_block`),
   ].map(response => response.then(item => item.json())));
   assert.equal(source.length, 1);
-  assert.deepEqual(source, target);
+  assert.equal(source[0].verifiedBlockerDirection, 'outgoing');
+  assert.deepEqual(target, [{ ...source[0], verifiedBlockerDirection: 'incoming' }]);
   const [relation] = source;
   assert.deepEqual([relation.sourceIssueId, relation.targetIssueId, relation.type], [sourceIssueId, targetIssueId, 'Blocks']);
   assert.equal(audit.integrity.status, 'verified');
@@ -437,7 +439,10 @@ async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId
   assert.match(audit.targetContent.issueRelations.sha256, /^[a-f0-9]{64}$/);
   const blocker = blockers.find(row => row.id === relation.id);
   assert.deepEqual(blocker, { id: relation.id, sourceIssueId, targetIssueId, version: relation.version, origin: 'jira' });
-  return { relation, blocker, evidence: audit.targetContent.issueRelations };
+  const reported = report.items.find(row => row.issue.id === targetIssueId)?.blockers;
+  assert.equal(reported?.total, 1);
+  assert.deepEqual(reported.items.map(({ id, origin }) => ({ id, origin })), [{ id: sourceIssueId, origin: 'jira' }]);
+  return { relation, blocker, reported, evidence: audit.targetContent.issueRelations };
 }
 
 async function browser(url, teamFixture, accessFile) {

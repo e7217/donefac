@@ -40,7 +40,7 @@ test('업무 생성과 상태·댓글·검색이 API에 저장된다', async ({ 
     await panel.getByRole('button',{name:'업무 상세 닫기'}).click();
     await expect(panel).toHaveCount(0);
     await page.getByRole('button',{name:'통합 검색',exact:true}).click();
-    await page.getByPlaceholder('티켓 번호, 업무 제목, 문서 내용 검색…').fill(title);
+    await page.getByRole('dialog', { name: '통합 검색' }).getByRole('textbox', { name: '통합 검색어' }).fill(title);
     await expect(page.locator('.search-result').filter({hasText:title})).toBeVisible();
     await page.keyboard.press('Escape');
     await page.reload();

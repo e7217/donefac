@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildDeliveryBlockers } from '../../server/delivery-blockers.js';
 import { defaultWorkCalendar } from '../../shared/calendar.js';
-import type { Dependency, GitlabLink, Issue, IssueRelation } from '../../shared/types.js';
+import type { Dependency, GitlabLink, Issue, TeamScheduleBlocker } from '../../shared/types.js';
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
 
 const now = '2026-11-20T00:00:00.000Z';
@@ -18,10 +18,10 @@ function issue(key: string, fields: Partial<Issue> = {}): Issue {
   };
 }
 
-function relation(source: Issue, target: Issue, fields: Partial<IssueRelation> = {}): IssueRelation {
+function blocker(source: Issue, target: Issue, fields: Partial<TeamScheduleBlocker> = {}): TeamScheduleBlocker {
   return {
     id: `block:${source.id}:${target.id}`, sourceIssueId: source.id, targetIssueId: target.id,
-    origin: 'teamspace', type: 'blocks', version: 1, createdAt: now, ...fields,
+    version: 1, ...fields,
   };
 }
 
@@ -47,7 +47,7 @@ function pipeline(issue: Issue, id: number, branch: string, state: string): Gitl
 
 function input(overrides: Partial<Parameters<typeof buildDeliveryBlockers>[0]> = {}): Parameters<typeof buildDeliveryBlockers>[0] {
   return {
-    targets: [], sources: [], relations: [], dependencies: [], gitlabLinks: [], calendar: defaultWorkCalendar(projectId),
+    targets: [], sources: [], blockers: [], dependencies: [], gitlabLinks: [], calendar: defaultWorkCalendar(projectId),
     data: { users: [], workflows: [], issueSchemas: [] },
     ...overrides,
   };
@@ -67,11 +67,10 @@ test('delivery blockers aggregate only active targets and authorize sources inde
   const configuration = input({
     targets: [target, closed, cancelled, clear, target, external],
     sources: [external, legacy, missingDate, acceptedSource, invalidSchedule],
-    relations: [
-      relation(external, target), relation(hidden, target), relation(legacy, target, { origin: undefined }),
-      relation(legacy, target, { origin: undefined, type: 'Is Blocked By' }),
-      relation(legacy, target, { type: 'related' }), relation(target, legacy), relation(closed, target),
-      relation(legacy, closed), relation(legacy, cancelled), relation(target, target),
+    blockers: [
+      blocker(external, target, { origin: 'jira' }), blocker(hidden, target, { origin: 'jira' }),
+      blocker(target, legacy), blocker(closed, target),
+      blocker(legacy, closed), blocker(legacy, cancelled), blocker(target, target),
     ],
     dependencies: [
       dependency(closed, target), dependency(external, target), dependency(hidden, target), dependency(missingDate, target),
@@ -107,7 +106,7 @@ test('delivery blockers aggregate only active targets and authorize sources inde
     id: target.id, projectId, key: target.key, title: target.title, status: 'team_review',
     statusLabel: '팀 검토', assigneeId: 'member', assigneeName: '팀 담당자', version: target.version,
   });
-  assert.deepEqual(row.blockers.items.map(blocker => [blocker.key, blocker.projectId]), [['OTHER-1', 'authorized-other']]);
+  assert.deepEqual(row.blockers.items.map(value => [value.key, value.projectId, value.origin]), [['OTHER-1', 'authorized-other', 'jira']]);
   assert.equal(row.blockers.total, 1);
   assert.deepEqual(row.scheduleConflicts, {
     total: 1,
@@ -124,13 +123,13 @@ test('delivery blockers aggregate only active targets and authorize sources inde
 test('delivery blockers caps ordered examples while preserving distinct counts', () => {
   const target = issue('TEAM-100', { startDate: '2026-11-20' });
   const sources = Array.from({ length: 24 }, (_, index) => issue(`TEAM-${index + 1}`, { endDate: '2026-11-20' }));
-  const relations = sources.map(source => relation(source, target));
+  const blockers = sources.map(source => blocker(source, target));
   const dependencies = sources.map(source => dependency(source, target));
-  relations.push({ ...relations[0], id: 'duplicate-relation' });
+  blockers.push({ ...blockers[0], id: 'duplicate-relation' });
   dependencies.push({ ...dependencies[0] });
-  const result = buildDeliveryBlockers(input({ targets: [target], sources, relations, dependencies }));
+  const result = buildDeliveryBlockers(input({ targets: [target], sources, blockers, dependencies }));
   assert.deepEqual(result, buildDeliveryBlockers(input({
-    targets: [target], sources: [...sources].reverse(), relations: [...relations].reverse(), dependencies: [...dependencies].reverse(),
+    targets: [target], sources: [...sources].reverse(), blockers: [...blockers].reverse(), dependencies: [...dependencies].reverse(),
   })));
   assert.deepEqual(result.counts, { open: 1, affected: 1, reasons: { issue_block: 1, schedule_conflict: 1, gitlab: 0 } });
   const [row] = result.rows;
@@ -162,7 +161,7 @@ test('delivery blockers clears reasons when saved state resolves the blockers', 
   const source = issue('TEAM-1', { endDate: '2026-11-20' });
   const target = issue('TEAM-2', { startDate: '2026-11-20' });
   const configuration = input({
-    targets: [target], sources: [source], relations: [relation(source, target)], dependencies: [dependency(source, target)],
+    targets: [target], sources: [source], blockers: [blocker(source, target)], dependencies: [dependency(source, target)],
     gitlabLinks: [link(target), pipeline(target, 100, 'feature/TEAM-2', 'failed')],
   });
   assert.deepEqual(buildDeliveryBlockers(configuration).counts.reasons, { issue_block: 1, schedule_conflict: 1, gitlab: 1 });

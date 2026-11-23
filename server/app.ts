@@ -205,7 +205,9 @@ export function createApp(options: {
   files.recover(store.setting('attachmentImportGeneration'));
   if (options.seed !== false) seed(store);
   const issueSchemas=new IssueSchemaService(store);
-  const workflows=new WorkflowService(store,issueSchemas),savedViews=new SavedViewService(store,issueSchemas);
+  const sourcePreservation=new SourcePreservationService(store);
+  const issueRelations=new IssueRelationsService(store,sourcePreservation);
+  const workflows=new WorkflowService(store,issueSchemas,issueRelations),savedViews=new SavedViewService(store,issueSchemas);
   const savedFieldBreakdowns = new SavedFieldBreakdownService(store, issueSchemas);
   const documentContent=new DocumentContentService(store);
   const documentFollowUp=new DocumentFollowUpService(store);
@@ -279,8 +281,6 @@ export function createApp(options: {
   const schedulePaste=new SchedulePasteService(store);
   const planScheduleShift=new PlanScheduleShiftService(store);
   const legacyImport=new LegacyImportService(store,dataDir);
-  const sourcePreservation=new SourcePreservationService(store);
-  const issueRelations=new IssueRelationsService(store,sourcePreservation);
   const workspaceRevisions = new WorkspaceRevisions(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);
@@ -954,7 +954,7 @@ export function createApp(options: {
     return document;
   }
   registerDeliveryBlockerRoutes(app, {
-    store, schemas: issueSchemas, calendars, actor, documentCreation, projectScope: req => apiKeys.projectScope(req),
+    store, schemas: issueSchemas, calendars, issueRelations, actor, documentCreation, projectScope: req => apiKeys.projectScope(req),
     createDocument: (req, capture, content, issueIds) => createReportDocument(req, capture, content, issueIds, '진행 차단 회의'),
   });
   reports.registerRoutes(app,{
@@ -2227,7 +2227,7 @@ export function createApp(options: {
     res.set('Cache-Control', 'no-store').json(result);
   });
   app.get('/api/issues/:id/relations',(req,res)=>{
-    res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id));
+    res.set('Cache-Control','no-store').json(issueRelations.list(req.params.id, apiKeys.projectScope(req)));
   });
   app.get('/api/schedule/team-blockers',(_req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.teamScheduleBlockers());

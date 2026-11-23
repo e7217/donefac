@@ -22,7 +22,7 @@ type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'o
 };
 const ALL_REASONS = [...DELIVERY_BLOCKER_REASONS, ...RELEASE_BLOCKER_REASONS];
 const REASON_LABELS: Record<DeliveryBlockerReason, string> = {
-  issue_block: '수동 차단',
+  issue_block: '업무 차단',
   schedule_conflict: '간트 일정 충돌',
   gitlab: 'GitLab 조치',
   missing_schedule: '일정 미정',
@@ -320,7 +320,10 @@ function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: Del
       </section>}
       {blockers.total > 0 && <section>
         <h5>{REASON_LABELS.issue_block} <span>{numberLabel(blockers.total)}건</span></h5>
-        <ul>{blockers.items.map(source => <li key={source.id}><BlockerIssueButton issue={source} {...action} /></li>)}</ul>
+        <ul>{blockers.items.map(source => <li key={source.id}>
+          <BlockerIssueButton issue={source} {...action} />
+          {source.origin === 'jira' && <small className="delivery-blockers-origin">Jira 이관 관계</small>}
+        </li>)}</ul>
         {blockers.total > blockers.items.length && <p>앞 {numberLabel(blockers.items.length)}건을 표시합니다.</p>}
       </section>}
       {scheduleConflicts.total > 0 && <section>

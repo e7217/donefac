@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type Ref } from 'react';
 import { Link2, Pencil, Plus, RefreshCw, SquareChartGantt, Unlink2 } from 'lucide-react';
 import { issueRelationScheduleMode, type IssueRelationScheduleMode } from '../../shared/issue-relations';
-import type { FeatureProps, Issue, IssueCloseAsDuplicateInput, IssueCloseAsDuplicateResult, IssueRelation, IssueRelationDirection, IssueRelationType, WorkspaceSnapshot } from '../../shared/types';
+import type { FeatureProps, Issue, IssueCloseAsDuplicateInput, IssueCloseAsDuplicateResult, IssueRelation, IssueRelationDirection, IssueRelationType, IssueRelationView, WorkspaceSnapshot } from '../../shared/types';
 import { allowedNextStatuses, isTerminalStatus, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import './issue-relations.css';
@@ -68,7 +68,7 @@ function RelationList({
 }: Props) {
   const { id: issueId } = currentIssue;
   const editHeading = useId(), removeHeading = useId(), duplicateHeading = useId();
-  const [relations, setRelations] = useState<IssueRelation[]>([]);
+  const [relations, setRelations] = useState<IssueRelationView[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
@@ -124,8 +124,10 @@ function RelationList({
     const statuses = new Map<string, string>();
     if (!highlightOpenBlockers) return statuses;
     for (const relation of relations) {
-      if (relation.origin !== 'teamspace' || relation.type !== 'blocks' || relation.targetIssueId !== issueId) continue;
-      const source = issueById.get(relation.sourceIssueId);
+      const incoming = relation.origin === 'teamspace' && relation.type === 'blocks' && relation.targetIssueId === issueId ||
+        relation.verifiedBlockerDirection === 'incoming';
+      if (!incoming) continue;
+      const source = issueById.get(otherId(relation, issueId));
       if (!source || source.id === issueId) continue;
       const status = statusMeta({ workflows, issueSchemas }, source.projectId, source.status);
       if (status.category !== 'done' && status.category !== 'cancelled') statuses.set(relation.id, status.label);
@@ -155,7 +157,7 @@ function RelationList({
     getRequest.current = request;
     setLoading(true);
     try {
-      const rows = await api<IssueRelation[]>(path, { signal: request.signal });
+      const rows = await api<IssueRelationView[]>(path, { signal: request.signal });
       if (!request.signal.aborted) {
         setRelations(rows);
         setOffset(previous => Math.min(previous, lastOffset(rows.length)));
@@ -326,7 +328,7 @@ function RelationList({
     void mutate(async () => {
       const [snapshot, rows] = await Promise.all([
         api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' }),
-        api<IssueRelation[]>(path, { cache: 'no-store' }),
+        api<IssueRelationView[]>(path, { cache: 'no-store' }),
       ]);
       const latestIssue = snapshot.issues.find(issue => issue.id === issueId);
       const latestOriginal = snapshot.issues.find(issue => issue.id === captured.otherIssueId);
@@ -477,7 +479,9 @@ function RelationList({
           <div className="issue-relations-label">
             <strong id={labelId}>{label}</strong>
             {blockerStatus !== undefined && <small className="issue-relations-open-blocker"><strong>열린 차단 업무</strong><span> · {blockerStatus}</span></small>}
-            {!local && <small>이관 관계 · {relation.sourceIssueId === issueId ? '이 업무가 출발' : '이 업무가 도착'}</small>}
+            {!local && <small>{relation.verifiedBlockerDirection
+              ? `Jira 이관 관계 · ${relation.verifiedBlockerDirection === 'incoming' ? '이 업무가 차단됨' : '이 업무가 차단함'}`
+              : `이관 관계 · ${relation.sourceIssueId === issueId ? '이 업무가 출발' : '이 업무가 도착'}`}</small>}
             {Number.isFinite(created.getTime()) && <time dateTime={relation.createdAt}>{dateFormat.format(created)}</time>}
           </div>
           {other ? <button className="btn btn-ghost issue-relations-target" type="button"

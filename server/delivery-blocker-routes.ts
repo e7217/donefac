@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import {
   DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, type DeliveryBlockerDraftResult, type DeliveryBlockerReason, type DeliveryBlockerRelease, type DeliveryBlockerReport,
-  type DeliveryBlockerRow, type Dependency, type DocPage, type GitlabLink, type Issue, type IssueRelation,
+  type DeliveryBlockerRow, type Dependency, type DocPage, type GitlabLink, type Issue,
   type PlanningItem, type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
 } from '../shared/types.js';
 import { isRelationId } from '../shared/issue-relations.js';
@@ -11,6 +11,7 @@ import type { CalendarService } from './calendars.js';
 import { buildDeliveryBlockers } from './delivery-blockers.js';
 import { buildDeliveryBlockerDraftContent } from './delivery-blocker-draft-content.js';
 import type { DocumentCreationService } from './document-creation.js';
+import type { IssueRelationsService } from './issue-relations.js';
 import type { IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
 
@@ -27,6 +28,7 @@ type Sources = {
   store: Store;
   schemas: IssueSchemaService;
   calendars: CalendarService;
+  issueRelations: Pick<IssueRelationsService, 'directBlockers'>;
   projectScope: (request: Request) => readonly string[] | null;
   actor: (request: Request) => string;
   documentCreation: DocumentCreationService;
@@ -76,7 +78,7 @@ const decode = <T>(row: { json?: unknown }): T => JSON.parse(String(row.json)) a
 
 function reportFor(
   projectId: string, selection: Selection, allowedProjects: readonly string[] | null,
-  { store, schemas, calendars }: Sources,
+  { store, schemas, calendars, issueRelations }: Sources,
 ): DeliveryBlockerReport {
   const schema = schemas.get(projectId);
   const view = selection.savedViewId ? store.get<SavedView>('saved_views', selection.savedViewId) : undefined;
@@ -113,28 +115,22 @@ function reportFor(
   const targets = view?.filters.gitlab
     ? candidates.filter(createIssueViewMatcher(view.filters, { issueSchemas, users, gitlabLinks }, schema))
     : candidates;
-  const targetIds = JSON.stringify(targets.map(issue => issue.id));
-  const relationRows = store.db.prepare(`SELECT relation.json FROM json_each(?) AS choices
-    JOIN issue_relations AS relation ON relation.target_issue_id=choices.value
-    JOIN issues AS source ON source.id=relation.source_issue_id
-    WHERE json_extract(relation.json,'$.origin')='teamspace' AND json_extract(relation.json,'$.type')='blocks'
-      AND (? IS NULL OR source.project_id IN (SELECT value FROM json_each(?))) LIMIT ?`)
-    .all(targetIds, allowedProjects ? 1 : null, JSON.stringify(allowedProjects), CONNECTION_LIMIT + 1);
+  const targetIssueIds = targets.map(issue => issue.id);
+  const blockers = issueRelations.directBlockers(targetIssueIds, allowedProjects, CONNECTION_LIMIT + 1);
   const dependencyRows = store.db.prepare(`SELECT dependency.json FROM json_each(?) AS choices
     JOIN dependencies AS dependency ON dependency.successor_id=choices.value
     JOIN issues AS source ON source.id=dependency.predecessor_id AND source.project_id=? LIMIT ?`)
-    .all(targetIds, projectId, CONNECTION_LIMIT + 1);
-  if (relationRows.length + dependencyRows.length > CONNECTION_LIMIT) {
+    .all(JSON.stringify(targetIssueIds), projectId, CONNECTION_LIMIT + 1);
+  if (blockers.length + dependencyRows.length > CONNECTION_LIMIT) {
     throw new DeliveryBlockerQueryError(413, '한 번에 업무와 일정 연결 50,000개까지 확인할 수 있습니다. 저장된 보기로 대상을 좁혀 주세요.');
   }
-  const relations = relationRows.map(row => decode<IssueRelation>(row));
   const dependencies = dependencyRows.map(row => decode<Dependency>(row));
-  const sourceIds = [...new Set([...relations.map(relation => relation.sourceIssueId), ...dependencies.map(dependency => dependency.predecessorId)])];
+  const sourceIds = [...new Set([...blockers.map(blocker => blocker.sourceIssueId), ...dependencies.map(dependency => dependency.predecessorId)])];
   const sources = store.db.prepare(`SELECT issue.json FROM json_each(?) AS selected
     JOIN issues AS issue ON issue.id=selected.value`).all(JSON.stringify(sourceIds)).map(row => decode<Issue>(row));
 
   const { rows, counts } = buildDeliveryBlockers({
-    targets, sources, relations, dependencies, gitlabLinks, calendar: calendars.get(projectId), release,
+    targets, sources, blockers, dependencies, gitlabLinks, calendar: calendars.get(projectId), release,
     data: { issueSchemas, users, workflows: store.all<ProjectWorkflow>('workflows') },
   });
   const savedView = view ? { id: view.id, name: view.name, version: view.version } : null;

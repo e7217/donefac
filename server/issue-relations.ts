@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isIssueRelationDirection, isIssueRelationType, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, type TeamspaceIssueRelation } from '../shared/issue-relations.js';
-import type { Issue, IssueRelation, TeamScheduleBlocker } from '../shared/types.js';
+import type { Issue, IssueRelation, IssueRelationView, TeamScheduleBlocker } from '../shared/types.js';
 import { findTeamspaceIssueRelation, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
 import type { SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
@@ -35,10 +35,54 @@ function verifyVersion(relation: IssueRelation, version: unknown) {
   }
 }
 
-export function listIssueRelations(store: Store, issueId: string): IssueRelation[] {
-  const rows = store.db.prepare('SELECT json FROM issue_relations WHERE source_issue_id=? OR target_issue_id=? ORDER BY rowid')
-    .all(issueId, issueId) as Row[];
+export function listIssueRelations(store: Store, issueId: string, allowedProjects: readonly string[] | null = null): IssueRelation[] {
+  const scope = allowedProjects ? JSON.stringify(allowedProjects) : null;
+  const rows = store.db.prepare(`SELECT relation.json FROM issue_relations relation
+    JOIN issues source ON source.id=relation.source_issue_id
+    JOIN issues target ON target.id=relation.target_issue_id
+    WHERE (relation.source_issue_id=? OR relation.target_issue_id=?)
+      AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
+    ORDER BY relation.rowid`).all(issueId, issueId, scope, scope, scope) as Row[];
   return rows.map(row => JSON.parse(row.json) as IssueRelation);
+}
+
+function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, crossProjectOnly = false, limit }: {
+  targetIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean; limit?: number;
+}): TeamScheduleBlocker[] {
+  if (targetIds?.length === 0 || allowedProjects?.length === 0 || limit === 0) return [];
+  const scope = allowedProjects ? JSON.stringify(allowedProjects) : null;
+  const targetSql = targetIds ? 'AND relation.target_issue_id IN (SELECT value FROM json_each(?))' : '';
+  return store.db.prepare(`SELECT relation.id,
+    relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
+    json_extract(relation.json, '$.version') AS version
+    FROM issue_relations AS relation
+    JOIN issues AS source ON source.id=relation.source_issue_id
+    JOIN issues AS target ON target.id=relation.target_issue_id
+    WHERE json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'
+      AND source.id<>target.id ${targetSql}
+      AND (?=0 OR source.project_id<>target.project_id)
+      AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
+    ORDER BY relation.source_issue_id, relation.target_issue_id LIMIT ?`)
+    .all(...(targetIds ? [JSON.stringify(targetIds)] : []), Number(crossProjectOnly), scope, scope, scope, limit ?? -1) as TeamScheduleBlocker[];
+}
+
+export function directTeamspaceBlockers(store: Store, targetIds: readonly string[], allowedProjects: readonly string[] | null = null,
+  limit?: number): TeamScheduleBlocker[] {
+  return teamspaceBlockers(store, { targetIds, allowedProjects, limit });
+}
+
+function mergeBlockers(native: TeamScheduleBlocker[], imported: TeamScheduleBlocker[], limit = Infinity): TeamScheduleBlocker[] {
+  const pair = ({ sourceIssueId, targetIssueId }: TeamScheduleBlocker) => JSON.stringify([sourceIssueId, targetIssueId]);
+  const seen = new Set(native.map(pair));
+  const blockers = [...native];
+  for (const relation of imported) {
+    if (blockers.length >= limit) break;
+    const key = pair(relation);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    blockers.push(relation);
+  }
+  return blockers;
 }
 
 const labels = {
@@ -48,33 +92,46 @@ const labels = {
 } as const;
 
 export class IssueRelationsService {
-  constructor(private readonly store: Store, private readonly sources: Pick<SourcePreservationService, 'jiraTeamScheduleBlockers'>) {}
+  constructor(private readonly store: Store, private readonly sources: Pick<SourcePreservationService, 'jiraIssueBlockers'>) {}
 
-  list(issueId: string): IssueRelation[] {
-    this.requireIssue(issueId);
-    return listIssueRelations(this.store, issueId);
+  list(issueId: string, allowedProjects: readonly string[] | null = null): IssueRelationView[] {
+    const issue = this.requireIssue(issueId);
+    if (allowedProjects && !allowedProjects.includes(issue.projectId)) {
+      throw new IssueRelationError(403, '이 프로젝트의 업무 관계를 확인할 수 없습니다.');
+    }
+    const relations = listIssueRelations(this.store, issueId, allowedProjects).map(relation => {
+      const view: IssueRelationView = { ...relation };
+      // Direction is derived from live proof, including for old archived rows.
+      delete view.verifiedBlockerDirection;
+      return view;
+    });
+    if (!relations.some(relation => relation.origin === undefined)) return relations;
+    const native = relations.filter(isTeamspaceIssueRelation)
+      .filter(relation => relation.type === 'blocks')
+      .map(({ id, sourceIssueId, targetIssueId, version }) => ({ id, sourceIssueId, targetIssueId, version }));
+    const imported = this.sources.jiraIssueBlockers({ issueIds: [issueId], allowedProjects });
+    const directions = new Map(mergeBlockers(native, imported).filter(relation => relation.origin === 'jira')
+      .map(relation => [relation.id, relation.sourceIssueId === issueId ? 'outgoing' : 'incoming'] as const));
+    return relations.map(relation => {
+      const verifiedBlockerDirection = directions.get(relation.id);
+      if (verifiedBlockerDirection) relation.verifiedBlockerDirection = verifiedBlockerDirection;
+      return relation;
+    });
+  }
+
+  directBlockers(targetIds: readonly string[], allowedProjects: readonly string[] | null = null, limit?: number): TeamScheduleBlocker[] {
+    if (!targetIds.length || allowedProjects?.length === 0 || limit === 0) return [];
+    const native = directTeamspaceBlockers(this.store, targetIds, allowedProjects, limit);
+    if (limit !== undefined && native.length >= limit) return native;
+    const targets = new Set(targetIds);
+    const imported = this.sources.jiraIssueBlockers({ issueIds: targetIds, allowedProjects })
+      .filter(relation => targets.has(relation.targetIssueId));
+    return mergeBlockers(native, imported, limit);
   }
 
   teamScheduleBlockers(): TeamScheduleBlocker[] {
-    const blockers = this.store.db.prepare(`SELECT relation.id,
-      relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
-      json_extract(relation.json, '$.version') AS version
-      FROM issue_relations AS relation
-      JOIN issues AS source ON source.id=relation.source_issue_id
-      JOIN issues AS target ON target.id=relation.target_issue_id
-      WHERE json_extract(relation.json, '$.origin')='teamspace'
-        AND json_extract(relation.json, '$.type')='blocks'
-        AND source.project_id<>target.project_id
-      ORDER BY relation.source_issue_id, relation.target_issue_id`).all() as TeamScheduleBlocker[];
-    const pair = ({ sourceIssueId, targetIssueId }: TeamScheduleBlocker) => JSON.stringify([sourceIssueId, targetIssueId]);
-    const seen = new Set(blockers.map(pair));
-    for (const imported of this.sources.jiraTeamScheduleBlockers()) {
-      const key = pair(imported);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      blockers.push(imported);
-    }
-    return blockers;
+    const scope = { crossProjectOnly: true };
+    return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {

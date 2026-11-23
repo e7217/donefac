@@ -4,6 +4,7 @@ import { MAX_WORKING_DURATION_DAYS } from '../shared/calendar.js';
 import { defaultWorkflow, MAX_WORKFLOW_WIP_LIMIT, STATUS_CATEGORY_LABELS } from '../shared/workflow-helpers.js';
 import { BASE_REQUIRED_FIELD_LABELS, defaultIssueSchema, fieldApplies, hasCustomValue, requiredFieldLabels } from '../shared/issue-schema.js';
 import { visibilityFieldsWithMissingStatuses, type IssueSchemaService } from './issue-schema.js';
+import { directTeamspaceBlockers, type IssueRelationsService } from './issue-relations.js';
 import type { Store } from './store.js';
 
 export class WorkflowError extends Error {
@@ -97,7 +98,10 @@ export function validateWorkflowImport(value: unknown, projects: Project[], issu
 type Hooks = { actor?: (request: Request) => string; activity?: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => void };
 
 export class WorkflowService {
-  constructor(private readonly store: Store, private readonly issueSchemas?: IssueSchemaService) { store.db.exec('CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,json TEXT NOT NULL)'); }
+  constructor(private readonly store: Store, private readonly issueSchemas?: IssueSchemaService,
+    private readonly issueRelations?: Pick<IssueRelationsService, 'directBlockers'>) {
+    store.db.exec('CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,json TEXT NOT NULL)');
+  }
   get(projectId: string): ProjectWorkflow {
     const project = this.store.get<Project>('projects', projectId); if (!project) invalid('프로젝트를 찾을 수 없습니다.', 404);
     return this.store.get<ProjectWorkflow>('workflows', projectId) || defaultWorkflow(projectId, project.createdAt);
@@ -153,11 +157,11 @@ export class WorkflowService {
     if (missing.length) invalid(`필수 속성을 입력해 주세요: ${requiredFieldLabels({ issueSchemas: [schema] }, next.projectId, missing).join(', ')}`, 422, { requiredFields: missing });
   }
   private hasOpenBlockers(issueId: string, targetWorkflow: ProjectWorkflow): boolean {
+    const blockers = this.issueRelations?.directBlockers([issueId]) ?? directTeamspaceBlockers(this.store, [issueId]);
+    if (!blockers.length) return false;
     const sources = this.store.db.prepare(`SELECT source.project_id AS projectId, json_extract(source.json, '$.status') AS status
-      FROM issue_relations AS relation JOIN issues AS source ON source.id=relation.source_issue_id
-      WHERE relation.target_issue_id=? AND relation.source_issue_id<>relation.target_issue_id
-        AND json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'`)
-      .iterate(issueId) as Iterable<{ projectId: string; status: string }>;
+      FROM json_each(?) AS verified JOIN issues AS source ON source.id=verified.value`)
+      .iterate(JSON.stringify(blockers.map(({ sourceIssueId }) => sourceIssueId))) as Iterable<{ projectId: string; status: string }>;
     const workflows = new Map([[targetWorkflow.projectId, targetWorkflow]]);
     for (const { projectId, status } of sources) {
       let workflow = workflows.get(projectId);

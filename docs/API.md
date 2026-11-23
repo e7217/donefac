@@ -81,11 +81,13 @@ curl --fail-with-body \
 
 ## 티켓 사이의 업무 관계
 
-`GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelation[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.
+`GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.
 
 직접 만든 관계에는 `origin: "teamspace"`가 있다. `PATCH /api/issues/:id/relations/:relationId`에 `{expectedVersion,type,direction}`을 보내 유형과 방향을 변경한다. `DELETE`는 같은 경로의 `?expectedVersion=…`을 사용한다. 버전이 바뀌면 `409`로 최신 버전을 알려준다. 이관한 관계는 원래 이름을 반환하며 읽기 전용이다. 관계 자체와 양쪽 활동 이력은 함께 저장한다. 자체 백업 형식 51은 직접 만든 관계를 보존하고 복원 시 버전을 높인다.
 
 `/api/v1`의 동일한 경로에서 양쪽 프로젝트가 키의 허용 범위에 있어야 한다. 조회에는 읽기 키를 사용할 수 있으며, 관계 추가·수정·해제에는 쓰기 키가 필요하다.
+
+Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `verifiedBlockerDirection`을 포함한다. 값은 요청한 티켓 기준 `incoming` 또는 `outgoing`이다. 이관한 관계의 `sourceIssueId`, `targetIssueId`, `type`은 원래 저장값을 반환한다. 같은 방향의 직접 만든 차단 관계가 있으면 그 관계를 우선하며, Jira 관계는 원래 이름으로 계속 조회할 수 있다.
 
 ### 중복 업무 종료
 
@@ -132,6 +134,8 @@ curl --fail-with-body \
 `releaseId`에는 같은 프로젝트의 릴리스 ID를 지정한다. 보관한 릴리스도 조회할 수 있다. 선택한 릴리스의 목표일을 `release.deadline`으로 쓰고, 목표일이 비어 있으면 릴리스 종료일을 사용한다. `deadlineSource`는 `targetDate`, `endDate`, `null` 중 하나다. `missing_schedule`은 시작일이나 종료일이 미정인 업무다. `after_release_date`는 업무 종료일이 릴리스 기준일 뒤인 경우다. 종료일이 같은 날이면 포함하지 않으며 기준일이 비어 있으면 초과를 집계하지 않는다. 릴리스 ID와 함께 두 원인으로 필터를 적용할 수 있다. 해당 업무의 `releaseSchedule`에 실제 `startDate`, `endDate`와 `missing`, `afterDeadline`을 반환한다. 연결된 차단 원인 업무는 릴리스 범위 밖에 있어도 키가 허용하는 경우 표시한다.
 
 응답의 `limit`은 20이다. 다음 페이지에는 `offset`과 이전 응답의 `revision`을 보낸다. 그동안 결과가 바뀌어 `409`를 받으면 `offset`과 `revision`을 생략하고 첫 페이지부터 읽는다. 프로젝트 제한 키는 양쪽 프로젝트를 읽을 수 있는 업무 관계만 보고서의 건수와 근거에 포함한다. GitLab 근거는 이미 저장된 상태를 사용한다.
+
+`issue_block`은 직접 만든 차단 관계와 이관 원본으로 방향 및 연결 대상을 확인한 Jira 관계를 집계한다. 같은 방향의 같은 두 업무는 직접 만든 관계를 우선해 한 번 센다. 이관 관계가 집계 근거인 경우 해당 `blockers.items` 항목에 `origin: "jira"`가 포함된다.
 
 브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`releaseId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 릴리스 범위에서는 기준일과 일정 근거를 함께 기록하고 문서 링크로 같은 릴리스의 현재 보고서를 연다. 검토한 릴리스·연결 업무·결과가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
 
@@ -302,7 +306,7 @@ curl --fail-with-body \
 
 브라우저의 `PATCH /api/projects/:projectId/workflow`에서 전이 항목에 `requireResolvedBlockers: true`를 보내면 해당 경로와 업무 유형에 규칙을 적용한다. `false`는 규칙을 해제하고, 생략하면 같은 출발·도착 경로에 저장된 설정을 유지한다. 기본값은 꺼짐이다. 형식 81의 자체 백업에 저장한다.
 
-실제 상태 변경에서 대상 티켓으로 들어오는 Teamspace의 직접 차단 관계를 확인한다. 원인 티켓이 있는 프로젝트의 상태 분류가 완료 또는 취소일 때 해결된 것으로 본다. 열린 원인이 있으면 일반 업무 저장과 보드 이동은 `422` 및 `details.reason: "open_issue_blockers"`를 반환한다. 일괄 편집은 미리보기와 적용 시점에 다시 확인하며, 열린 원인은 먼저 별도로 해결해야 한다. GitLab은 미리보기와 실제 이벤트에 차단 사유를 기록하며 다음 새 이벤트부터 현재 상태를 평가한다. 워크플로의 상태 일괄 이관은 관리용 상태 매핑 규칙을 사용한다.
+실제 상태 변경은 대상 티켓으로 들어오는 직접 차단 관계를 확인한다. Teamspace에서 만든 관계와 이관 원본에서 연결 대상과 방향을 확인한 Jira 관계가 적용된다. 원인 티켓이 있는 프로젝트의 상태 분류가 완료 또는 취소일 때 해결된 것으로 본다. 열린 원인이 있으면 일반 업무 저장과 보드 이동은 `422` 및 `details.reason: "open_issue_blockers"`를 반환한다. 범위 제한 쓰기 키에도 같은 규칙을 적용하며 응답은 원인 티켓의 식별자나 제목을 포함하지 않는다. 일괄 편집은 미리보기와 적용 시점에 다시 확인한다. GitLab은 미리보기와 실제 이벤트에 차단 사유를 기록하며 다음 새 이벤트부터 현재 상태를 평가한다. 워크플로의 상태 일괄 이관은 관리용 상태 매핑 규칙을 사용한다.
 
 ## 상태별 자동 목표 마감일
 

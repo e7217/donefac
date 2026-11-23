@@ -3,7 +3,7 @@ import type { Issue, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/typ
 
 test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생성과 업무 보드·상세에 적용된다', async ({ page, request }) => {
   const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
-  const project = snapshot.projects.at(-1)!;
+  const project = snapshot.projects.find(item => item.id === 'project-team')!;
   const original = await (await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
   const suffix = Date.now().toString(36), stateId = `qa_${suffix}`, label = `품질 확인 ${suffix}`;
   let created: Issue | undefined;
