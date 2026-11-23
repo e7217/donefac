@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { GitlabLink, GitlabPipelineJobs, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { GitlabLink, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const repositoryId = 42;
 const pipelineId = 802;
@@ -20,7 +20,9 @@ const updatedAt = new Date(Date.now() - 60_000).toISOString();
 const repositoryPath = `/forge/api/v4/projects/${repositoryId}`;
 const pipelinePath = `${repositoryPath}/pipelines/${pipelineId}`;
 const jobsPath = `${pipelinePath}/jobs`;
+const testReportPath = `${pipelinePath}/test_report_summary`;
 const route = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-jobs`;
+const reportRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-test-report`;
 
 type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string> };
 type JobFixture = { id: number; name: string; stage: string; allow_failure: boolean; status: string; failure_reason: string | null;
@@ -36,6 +38,9 @@ async function fixture(t: TestContext) {
   let jobsStatus = 200;
   let paginationHeaders = false;
   let holdJobs: (() => Promise<void>) | undefined;
+  let testReport: unknown;
+  let testReportStatus = 200;
+  let holdTestReport: (() => Promise<void>) | undefined;
   const repoUrl = () => `${baseUrl}/team/app`;
   const pipelineUrl = () => `${repoUrl()}/-/pipelines/${pipelineId}`;
   const jobUrl = (id: number) => `${repoUrl()}/-/jobs/${id}`;
@@ -51,6 +56,11 @@ async function fixture(t: TestContext) {
       response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: repoUrl() }));
     } else if (url.pathname === pipelinePath) {
       response.end(JSON.stringify({ ...pipeline, web_url: pipelineUrl() }));
+    } else if (url.pathname === testReportPath) {
+      await holdTestReport?.();
+      if (response.destroyed) return;
+      if (testReportStatus === 302) response.setHeader('Location', `${baseUrl}/private-redirect-target`);
+      response.writeHead(testReportStatus).end(JSON.stringify(testReportStatus === 200 ? testReport : { message: `${privateUpstream} ${token}` }));
     } else if (url.pathname === jobsPath) {
       await holdJobs?.();
       if (response.destroyed) return;
@@ -110,10 +120,12 @@ async function fixture(t: TestContext) {
   calls.length = 0;
 
   return { call, request, issue, link, createIssue, configure, baseUrl, calls, job, jobUrl,
-    path: route(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
+    path: route(issue.id, link.id), reportPath: reportRoute(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     setJobs(value: JobFixture[], withPagination = false) { jobs = value; paginationHeaders = withPagination; },
     setJobsStatus(status: number) { jobsStatus = status; }, setJobGate(gate?: () => Promise<void>) { holdJobs = gate; },
+    setTestReport(value: unknown, status = 200) { testReport = value; testReportStatus = status; },
+    setTestReportGate(gate?: () => Promise<void>) { holdTestReport = gate; },
   };
 }
 
@@ -150,6 +162,108 @@ test('looks up the connected pipeline by global ID and returns only live CI meta
   assert.equal(query.get('page'), '1');
   assert.equal(query.get('per_page'), '50');
   assert.deepEqual(await f.snapshot(), before);
+});
+
+function reportTotals(count: number, passed = count, failed = 0, skipped = 0, errors = 0, suiteError: string | null = null) {
+  return { time: 12, count, success: passed, failed, skipped, error: errors, suite_error: suiteError };
+}
+
+function reportSuite(name: string, count: number, passed = count, failed = 0, skipped = 0, errors = 0, suiteError: string | null = null) {
+  return { name, total_time: 12, total_count: count, success_count: passed, failed_count: failed, skipped_count: skipped,
+    error_count: errors, suite_error: suiteError, build_ids: [123] };
+}
+
+test('reads linked pipeline test counts without case details, secrets or changes to the workspace', async t => {
+  const f = await fixture(t);
+  const before = await f.snapshot();
+  f.setPipeline({ status: 'failed' });
+  f.setTestReport({ total: reportTotals(7, 4, 1, 1, 1, privateUpstream), test_suites: [
+    { ...reportSuite('Smoke tests', 4, 2, 1, 1), test_cases: [{ stack_trace: privateUpstream }] },
+    { ...reportSuite('Integration tests', 3, 2, 0, 0, 1, `${privateUpstream} ${token}`), system_output: privateUpstream },
+  ] });
+  const response = await f.request<GitlabPipelineTestReport>(f.reportPath);
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.match(response.headers.get('cache-control') ?? '', /\bno-store\b/);
+  const { checkedAt, ...report } = response.data;
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(report, {
+    linkId: f.link.id, repositoryId, pipelineId, status: 'failed', hasMore: false,
+    total: { count: 7, passed: 4, failed: 1, skipped: 1, errors: 1, reportError: true },
+    suites: [
+      { name: 'Smoke tests', count: 4, passed: 2, failed: 1, skipped: 1, errors: 0, reportError: false },
+      { name: 'Integration tests', count: 3, passed: 2, failed: 0, skipped: 0, errors: 1, reportError: true },
+    ],
+  });
+  assert.deepEqual(f.calls.map(({ method, url, credential }) => [method, url.pathname, url.search, credential]),
+    [repositoryPath, pipelinePath, testReportPath, pipelinePath].map(path => ['GET', path, '', token]));
+
+  f.setTestReport({ total: reportTotals(0), test_suites: [] });
+  const empty = await f.call<GitlabPipelineTestReport>(f.reportPath);
+  assert.deepEqual(empty.total, { count: 0, passed: 0, failed: 0, skipped: 0, errors: 0, reportError: false });
+  assert.deepEqual(empty.suites, []);
+  assert.equal(empty.hasMore, false);
+
+  f.setTestReport({ total: reportTotals(1), test_suites: [reportSuite(`suite ${token}`, 1)] });
+  const redacted = await f.call<GitlabPipelineTestReport>(f.reportPath);
+  assert.equal(redacted.suites[0].name, '이름 미확인');
+  assert.ok(!JSON.stringify(redacted).includes(token));
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('bounds the test suite preview and rejects malformed reports or unverified ticket paths', async t => {
+  const f = await fixture(t);
+  const unrelated = await f.createIssue('Unlinked report ticket');
+  await f.call(reportRoute(unrelated.id, f.link.id), undefined, 404);
+  await f.call(reportRoute(f.issue.id, 'missing'), undefined, 404);
+  await f.call(`${f.reportPath}?pipelineId=13`, undefined, 400);
+  assert.equal(f.calls.length, 0);
+
+  const suites = Array.from({ length: 51 }, (_, index) => reportSuite(`Suite ${index + 1}`, 1));
+  f.setTestReport({ total: reportTotals(suites.length), test_suites: suites });
+  const bounded = await f.call<GitlabPipelineTestReport>(f.reportPath);
+  assert.equal(bounded.total.count, 51);
+  assert.equal(bounded.hasMore, true);
+  assert.deepEqual(bounded.suites.map(({ name }) => name), suites.slice(0, 50).map(({ name }) => name));
+  assert.equal(f.calls.filter(({ url }) => url.pathname === testReportPath).length, 1);
+
+  for (const total of [reportTotals(-1), reportTotals(2, 1), { ...reportTotals(1), count: Number.MAX_SAFE_INTEGER + 1 }]) {
+    f.setTestReport({ total, test_suites: [] });
+    await f.call(f.reportPath, undefined, 502);
+  }
+  f.setTestReport({ total: reportTotals(1), test_suites: [{ ...reportSuite('bad suite', 1), total_count: '1' }] });
+  await f.call(f.reportPath, undefined, 502);
+  for (const [status, expected] of [[302, 502], [403, 403], [404, 404], [429, 429]]) {
+    f.setTestReport(null, status);
+    const result = await f.call(f.reportPath, undefined, expected);
+    assert.ok(!JSON.stringify(result).includes(privateUpstream));
+    assert.ok(!JSON.stringify(result).includes(token));
+  }
+  assert.ok(f.calls.every(({ url }) => [repositoryPath, pipelinePath, testReportPath].includes(url.pathname)));
+});
+
+test('rejects a test report if the pipeline or current GitLab link changes during the read', async t => {
+  const f = await fixture(t);
+  f.setTestReport({ total: reportTotals(1), test_suites: [reportSuite('Smoke', 1)] });
+  async function whileReading(change: () => void | Promise<unknown>) {
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.setTestReportGate(() => { reached.resolve(); return release.promise; });
+    const pending = f.request(f.reportPath);
+    try {
+      await Promise.race([reached.promise, pending.then(response => assert.fail(`Report request ended early (${response.status})`))]);
+      await change();
+    } finally {
+      release.resolve();
+      f.setTestReportGate();
+    }
+    const result = await pending;
+    assert.equal(result.status, 409, JSON.stringify(result.data));
+    assert.ok(!Object.hasOwn(result.data as object, 'suites'));
+  }
+  await whileReading(() => f.setPipeline({ updated_at: new Date(Date.parse(updatedAt) + 1000).toISOString() }));
+  await whileReading(() => f.configure({ token: 'rotated-synthetic-report-read-token' }));
+  await whileReading(() => f.call(`/issues/${f.issue.id}/gitlab-links/${encodeURIComponent(f.link.id)}?expectedManualLinkId=${f.link.manualLinkId}`, { method: 'DELETE' }));
+  await f.call(f.reportPath, undefined, 404);
 });
 
 test('reports the bounded ordered job list and fails closed on an ambiguous or out-of-scope result', async t => {

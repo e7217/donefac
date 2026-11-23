@@ -730,6 +730,12 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 조회 앞뒤의 파이프라인 정보나 연결 설정, 업무 위치 또는 파이프라인 연결이 바뀌면 `409`를 반환한다. 현재 연결에서 저장소를 조회할 수 없으면 `403`, 연결이나 원본 파이프라인을 찾지 못하면 `404`, GitLab 요청 한도에 도달하면 `429`, 원본 응답을 검증할 수 없으면 `502`, 조회 시간이 지나면 `504`다. 응답은 `Cache-Control: no-store`를 사용한다.
 
+### 파이프라인 테스트 결과 확인
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-test-report`는 업무에 연결된 파이프라인의 GitLab 테스트 결과 요약을 읽는다. 응답에는 `linkId`, `repositoryId`, `pipelineId`, `status`, `checkedAt`, `total`, 처음 50개까지의 `suites`와 나머지 스위트의 여부인 `hasMore`가 포함된다. `total`과 각 스위트는 `count`, `passed`, `failed`, `skipped`, `errors`, `reportError`를 제공하며 스위트에는 `name`이 추가된다. 보고서 처리 오류는 `reportError`로 표시한다. GitLab에서 빈 요약을 반환하면 개수 0과 빈 목록으로 응답한다. [GitLab 테스트 결과 요약 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-test-report-summary-for-a-pipeline)
+
+CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 코드를 사용한다. GitLab이 요약 자체에 `404`를 반환하면 결과를 제공하지 않는다는 메시지를 표시한다. 응답은 `Cache-Control: no-store`를 사용한다.
+
 ### 티켓에서 GitLab 브랜치 만들기
 
 브라우저의 `POST /api/issues/:id/gitlab-branch/preview`에 `{expectedSettingsVersion,repositoryId,branch,ref?,accessToken?}`을 보낸다. 저장한 GitLab 설정의 버전과 저장소 ID를 사용한다. `ref`를 생략하면 기본 브랜치를 사용하며 브랜치 이름이나 전체 커밋 SHA를 지정할 수 있다. 조회 토큰을 별도로 입력하면 해당 요청에서만 사용한다. 같은 이름의 브랜치가 아직 없으면 응답의 `state`는 `ready`이고 `target`, `previewId`, `expiresAt`을 반환한다. `target`에는 저장소 ID·경로, 브랜치 이름, 기준 참조와 고정 SHA, 확인한 GitLab 주소가 담긴다. 같은 이름이 이미 있으면 `existing`과 현재 SHA를 반환한다. [GitLab Branches API](https://docs.gitlab.com/api/branches/)

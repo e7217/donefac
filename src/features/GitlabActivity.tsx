@@ -1,11 +1,14 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
-import type { FeatureProps, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs } from '../../shared/types';
+import type {
+  FeatureProps, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs,
+  GitlabPipelineTestReport, GitlabTestCounts,
+} from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './gitlab-activity.css';
 import './gitlab-pipeline-jobs.css';
@@ -67,7 +70,7 @@ function activityTime(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0;
 }
 
-type JobTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
+type PipelineTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
 type ReviewTarget = { linkId: string; issueId: string; repositoryId: number; mergeRequestIid: number; url: URL };
 type ActivityLookup<Value> = { kind: 'loading' } | { kind: 'stale' } | { kind: 'failed'; message: string } | { kind: 'ready'; result: Value };
 type ReviewPerson = GitlabMergeRequestReview['reviewers'][number];
@@ -118,7 +121,7 @@ const failureReasonLabels = new Map([
   ['scheduler_failure', '작업 예약 오류'],
 ]);
 
-function pipelineJobsTarget(link: GitlabLink, url: URL | null): JobTarget | null {
+function pipelineTarget(link: GitlabLink, url: URL | null): PipelineTarget | null {
   if (link.kind !== 'pipeline' || !url || !link.issueId) return null;
   const object = /^gitlab:[a-f0-9]{12}:([1-9]\d*):pipeline:([1-9]\d*):/u.exec(link.id);
   const route = /^\/.+?\/(?:-\/)?pipelines\/([1-9]\d*)\/?$/u.exec(url.pathname);
@@ -132,7 +135,7 @@ function pipelineJobsTarget(link: GitlabLink, url: URL | null): JobTarget | null
   return { linkId: link.id, issueId: link.issueId, repositoryId: link.projectId, pipelineId, url: pipelineUrl };
 }
 
-function isPipelineJobsResult(result: GitlabPipelineJobs | undefined, target: JobTarget): result is GitlabPipelineJobs {
+function isPipelineJobsResult(result: GitlabPipelineJobs | undefined, target: PipelineTarget): result is GitlabPipelineJobs {
   if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId || result.pipelineId !== target.pipelineId ||
       typeof result.status !== 'string' || !result.status || typeof result.checkedAt !== 'string' || !Number.isFinite(Date.parse(result.checkedAt)) ||
       typeof result.configurationError !== 'boolean' || typeof result.hasMore !== 'boolean' || !Array.isArray(result.jobs)) return false;
@@ -146,7 +149,7 @@ function isPipelineJobsResult(result: GitlabPipelineJobs | undefined, target: Jo
   });
 }
 
-function pipelineJobUrl(job: GitlabPipelineJob, target: JobTarget): URL | null {
+function pipelineJobUrl(job: GitlabPipelineJob, target: PipelineTarget): URL | null {
   const url = gitlabActivityUrl(job.webUrl, 'pipeline');
   const suffix = `/-/jobs/${job.id}`;
   return url && url.origin === target.url.origin && !url.search && !url.hash && url.pathname.length > suffix.length &&
@@ -210,7 +213,7 @@ function useActivityLookup<Value>(revision: string, read: (signal: AbortSignal) 
   return { view, toggle, load };
 }
 
-function PipelineJobs({ target, revision }: { target: JobTarget; revision: string }) {
+function PipelineJobs({ target, revision }: { target: PipelineTarget; revision: string }) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-jobs`;
@@ -234,7 +237,7 @@ function PipelineJobs({ target, revision }: { target: JobTarget; revision: strin
   </div>;
 }
 
-function PipelineJobsResult({ result, target }: { result: GitlabPipelineJobs; target: JobTarget }) {
+function PipelineJobsResult({ result, target }: { result: GitlabPipelineJobs; target: PipelineTarget }) {
   return <>
     <p className="gitlab-activity-inspection-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
       <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time>
@@ -257,6 +260,95 @@ function PipelineJobsResult({ result, target }: { result: GitlabPipelineJobs; ta
         </li>;
       })}</ul>}
     {result.hasMore && <p>조회 한도를 넘은 작업은 <a href={target.url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
+  </>;
+}
+
+function isTestCounts(value: unknown): value is GitlabTestCounts {
+  if (!value || typeof value !== 'object') return false;
+  const { count, passed, failed, skipped, errors, reportError } = value as Partial<GitlabTestCounts>;
+  return typeof reportError === 'boolean' && [count, passed, failed, skipped, errors].every(item =>
+    typeof item === 'number' && Number.isSafeInteger(item) && item >= 0);
+}
+
+function isPipelineTestReport(result: GitlabPipelineTestReport | undefined, target: PipelineTarget): result is GitlabPipelineTestReport {
+  return Boolean(result && result.linkId === target.linkId && result.repositoryId === target.repositoryId &&
+    result.pipelineId === target.pipelineId && typeof result.status === 'string' && result.status &&
+    typeof result.checkedAt === 'string' && Number.isFinite(Date.parse(result.checkedAt)) && typeof result.hasMore === 'boolean' &&
+    isTestCounts(result.total) && Array.isArray(result.suites) &&
+    result.suites.every(suite => isTestCounts(suite) && typeof suite.name === 'string' && suite.name.trim()));
+}
+
+function pipelineTestReportMessage(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 테스트 결과 조회 권한을 확인해 주세요.';
+    if (cause.status === 404) {
+      if (cause.message === 'GitLab에서 이 파이프라인의 테스트 결과를 제공하지 않습니다.') return cause.message;
+      return '연결된 GitLab 파이프라인을 찾을 수 없습니다.';
+    }
+    if (cause.status === 409) return '파이프라인이나 GitLab 연결이 변경되었습니다. 다시 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
+  }
+  return 'GitLab 테스트 결과를 불러오지 못했습니다. 다시 확인해 주세요.';
+}
+
+function PipelineTestReport({ target, revision }: { target: PipelineTarget; revision: string }) {
+  const panelId = useId();
+  const { view, toggle, load } = useActivityLookup(revision, async signal => {
+    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-test-report`;
+    const result = await api<GitlabPipelineTestReport | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    return isPipelineTestReport(result, target) ? result : null;
+  }, '연결된 파이프라인의 테스트 결과 응답을 확인할 수 없습니다.', pipelineTestReportMessage);
+
+  return <div className="gitlab-activity-inspection">
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+      <FlaskConical aria-hidden="true" size={14} />{view ? '테스트 결과 닫기' : '테스트 결과 확인'}
+    </button>
+    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab 테스트 결과" aria-busy={view.kind === 'loading'}>
+      {view.kind === 'loading' && <p role="status">GitLab 테스트 결과를 확인하고 있습니다.</p>}
+      {view.kind === 'stale' && <p role="status">파이프라인이 변경되었습니다. 테스트 결과를 다시 확인해 주세요.</p>}
+      {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
+      {view.kind === 'ready' && <PipelineTestReportResult result={view.result} />}
+      <div className="gitlab-test-report-actions">
+        <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+          <RefreshCw aria-hidden="true" size={14} />테스트 결과 다시 확인
+        </button>
+        <a className="gitlab-test-report-link" href={target.url.href} target="_blank" rel="noopener noreferrer">
+          GitLab에서 파이프라인 열기 <ExternalLink aria-hidden="true" size={13} />
+        </a>
+      </div>
+    </section>}
+  </div>;
+}
+
+const testCount = new Intl.NumberFormat('ko-KR');
+
+function TestCounts({ counts, label }: { counts: GitlabTestCounts; label?: string }) {
+  return <div className="gitlab-test-counts" role={label ? 'group' : undefined} aria-label={label}>
+    <span>전체 {testCount.format(counts.count)}개</span>
+    <span>성공 {testCount.format(counts.passed)}개</span>
+    <span>실패 {testCount.format(counts.failed)}개</span>
+    <span>건너뜀 {testCount.format(counts.skipped)}개</span>
+    <span>오류 {testCount.format(counts.errors)}개</span>
+  </div>;
+}
+
+function PipelineTestReportResult({ result }: { result: GitlabPipelineTestReport }) {
+  const reportError = result.total.reportError || result.suites.some(suite => suite.reportError);
+  return <>
+    <p className="gitlab-activity-inspection-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
+      <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time>
+    </p>
+    <TestCounts counts={result.total} label="전체 테스트" />
+    {reportError && <p className="gitlab-activity-inspection-warning">GitLab에서 테스트 보고서 오류를 보고했습니다.</p>}
+    {result.total.count === 0 && !reportError && !result.hasMore && <p>GitLab에서 확인한 테스트가 없습니다.</p>}
+    {result.suites.length > 0 && <ul className="gitlab-test-suite-list" role="list" aria-label="테스트 스위트">
+      {result.suites.map((suite, index) => <li className="gitlab-test-suite" key={`${suite.name}:${index}`}>
+        <strong>{suite.name}</strong>
+        <TestCounts counts={suite} />
+        {suite.reportError && <span className="gitlab-activity-inspection-warning">보고서 오류</span>}
+      </li>)}
+    </ul>}
+    {result.hasMore && <p>일부 테스트 스위트만 표시합니다.</p>}
   </>;
 }
 
@@ -394,7 +486,8 @@ function ActivityGroup({ group, links, issueContext, heading: Heading, manualAct
 
 function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; issueContext?: IssueContext; manualActions?: ManualLinkActions }) {
   const url = gitlabActivityUrl(link.webUrl, link.kind);
-  const jobsTarget = pipelineJobsTarget(link, url);
+  const pipeline = pipelineTarget(link, url);
+  const pipelineRevision = JSON.stringify([link.state, link.updatedAt, link.pipelineObservedAt, link.sourceBranch, link.sourceSha]);
   const reviewTarget = mergeRequestReviewTarget(link, url);
   const deleted = link.kind === 'branch' && link.state === 'deleted';
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
@@ -431,8 +524,10 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
       <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
       {pipelineSource && <span className="gitlab-activity-source">{pipelineSource}</span>}
     </div>
-    {jobsTarget && <PipelineJobs key={`${link.id}:${link.manualLinkId ?? ''}:${jobsTarget.url.href}`} target={jobsTarget}
-      revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha])} />}
+    {pipeline && <>
+      <PipelineJobs key={`jobs:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />
+      <PipelineTestReport key={`tests:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />
+    </>}
     {reviewTarget && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${reviewTarget.url.href}`} target={reviewTarget}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}

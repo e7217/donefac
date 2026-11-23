@@ -1,14 +1,15 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch,
-  GitlabReviewParticipant, GitlabReviewState } from '../shared/types.js';
+import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabRepositoryCandidate,
+  GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
-  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'merge-request-review';
+  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'pipeline-test-report' | 'merge-request-review';
+type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report'>;
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -30,6 +31,7 @@ const MAX_MERGE_REQUEST_PAGES = 10;
 const PIPELINE_PAGE_SIZE = 50;
 const PIPELINE_JOB_PAGE_SIZE = 50;
 const MAX_PIPELINE_JOB_PAGES = 4;
+const PIPELINE_TEST_SUITE_LIMIT = 50;
 const MR_REVIEW_PARTICIPANT_LIMIT = 50;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
@@ -56,6 +58,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   deployments: '배포',
   'deployment-merge-requests': '배포에 포함된 MR',
   'pipeline-jobs': '파이프라인 작업',
+  'pipeline-test-report': '파이프라인 테스트 결과',
   'merge-request-review': 'MR 검토',
 };
 
@@ -843,9 +846,9 @@ function pipelineJob(row: GitlabReadObject, repository: { id: number; path: stri
     status, failureReason, allowFailure, webUrl };
 }
 
-export async function readGitlabPipelineJobs(connection: Connection, repositoryId: number, pipelineId: number,
-  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore'>> {
-  if (!Number.isSafeInteger(pipelineId) || pipelineId < 1) invalidPipelineJobs();
+async function pipelineInspection(connection: Connection, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, stage: PipelineInspectionStage, signal?: AbortSignal) {
+  if (!Number.isSafeInteger(pipelineId) || pipelineId < 1) throw new GitlabReadError(stage, 'invalid-response');
   const context = await readVerifiedProject(connection, repositoryId, signal);
   async function readPipeline() {
     const { object, webUrl } = await readExactWorkflowObject(context, repositoryId,
@@ -854,12 +857,25 @@ export async function readGitlabPipelineJobs(connection: Connection, repositoryI
     const sha = gitlabObjectSha(object.sha);
     if (!sha || /^0+$/u.test(sha) || typeof status !== 'string' || !/^[a-z][a-z0-9_]{0,39}$/u.test(status) ||
       (updated != null && (typeof updated !== 'string' || !Number.isFinite(Date.parse(updated)))) ||
-      (yamlErrors != null && typeof yamlErrors !== 'string') || includesGitlabCredential(connection.token, [webUrl, status])) invalidPipelineJobs();
-    return { status, sha, updatedAt: typeof updated === 'string' ? updated : null,
+      (yamlErrors != null && typeof yamlErrors !== 'string') || includesGitlabCredential(connection.token, [webUrl, status])) {
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
+    return { status, sha, webUrl, updatedAt: typeof updated === 'string' ? updated : null,
       configurationError: typeof yamlErrors === 'string' && Boolean(yamlErrors.trim()) };
   }
   const observed = await readPipeline();
-  if (expectedSha !== null && observed.sha !== gitlabObjectSha(expectedSha)) invalidPipelineJobs();
+  if (expectedSha !== null && observed.sha !== gitlabObjectSha(expectedSha)) throw new GitlabReadError(stage, 'invalid-response');
+  async function recheck() {
+    const latest = await readPipeline();
+    if (latest.sha !== observed.sha || latest.webUrl !== observed.webUrl || latest.status !== observed.status ||
+        latest.updatedAt !== observed.updatedAt || latest.configurationError !== observed.configurationError) throw new GitlabReadError(stage, 'changed');
+  }
+  return { context, observed, recheck };
+}
+
+export async function readGitlabPipelineJobs(connection: Connection, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore'>> {
+  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-jobs', signal);
   const repository = { id: repositoryId, path: context.repositoryPath, base: context.base };
   const pipeline = { id: pipelineId, sha: observed.sha };
   const jobsUrl = new URL(context.projectUrl);
@@ -881,10 +897,41 @@ export async function readGitlabPipelineJobs(connection: Connection, repositoryI
     hasMore = pipelineJobsNextPage(pagination, jobsUrl, page, rows.length);
     if (!hasMore) break;
   }
-  const latest = await readPipeline();
-  if (latest.sha !== observed.sha || latest.status !== observed.status || latest.updatedAt !== observed.updatedAt ||
-      latest.configurationError !== observed.configurationError) throw new GitlabReadError('pipeline-jobs', 'changed');
+  await recheck();
   return { status: observed.status, configurationError: observed.configurationError, jobs, hasMore };
+}
+
+function pipelineTestCounts(row: GitlabReadObject, fields: readonly string[]): GitlabTestCounts {
+  const [count, passed, failed, skipped, errors] = fields.map(field => {
+    const value = row[field];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new GitlabReadError('pipeline-test-report', 'invalid-response');
+    return value;
+  });
+  const reportError = row.suite_error;
+  if (count !== passed + failed + skipped + errors || (reportError != null && typeof reportError !== 'string')) {
+    throw new GitlabReadError('pipeline-test-report', 'invalid-response');
+  }
+  return { count, passed, failed, skipped, errors, reportError: typeof reportError === 'string' && Boolean(reportError.trim()) };
+}
+
+export async function readGitlabPipelineTestReport(connection: Connection, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineTestReport, 'status' | 'total' | 'suites' | 'hasMore'>> {
+  const stage = 'pipeline-test-report';
+  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, stage, signal);
+  const url = new URL(context.projectUrl);
+  url.pathname += `/pipelines/${pipelineId}/test_report_summary`;
+  const payload = await readJson(url, context.headers, stage, signal);
+  if (!isReadObject(payload) || !isReadObject(payload.total) || !Array.isArray(payload.test_suites)) {
+    throw new GitlabReadError(stage, 'invalid-response');
+  }
+  const total = pipelineTestCounts(payload.total, ['count', 'success', 'failed', 'skipped', 'error']);
+  const suites = payload.test_suites.slice(0, PIPELINE_TEST_SUITE_LIMIT).map(row => {
+    if (!isReadObject(row) || typeof row.name !== 'string') throw new GitlabReadError(stage, 'invalid-response');
+    return { name: gitlabDisplayLabel(row.name, 255, connection.token, '이름 미확인'),
+      ...pipelineTestCounts(row, ['total_count', 'success_count', 'failed_count', 'skipped_count', 'error_count']) };
+  });
+  await recheck();
+  return { status: observed.status, total, suites, hasMore: payload.test_suites.length > PIPELINE_TEST_SUITE_LIMIT };
 }
 
 export async function readGitlabManualObject(

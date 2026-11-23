@@ -1338,6 +1338,24 @@ export interface GitlabPipelineJobs {
   hasMore: boolean;
   jobs: GitlabPipelineJob[];
 }
+export interface GitlabTestCounts {
+  count: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+  reportError: boolean;
+}
+export interface GitlabPipelineTestReport {
+  linkId: string;
+  repositoryId: number;
+  pipelineId: number;
+  status: string;
+  checkedAt: string;
+  total: GitlabTestCounts;
+  suites: (GitlabTestCounts & { name: string })[];
+  hasMore: boolean;
+}
 export type GitlabReviewState = 'unreviewed' | 'review_started' | 'reviewed' | 'requested_changes' | 'approved' | 'unapproved' | 'unknown';
 export interface GitlabReviewParticipant {
   id: number;
