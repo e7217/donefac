@@ -79,21 +79,21 @@ test('typed HTTP conditions preserve zero and false, combine all/any, and distin
   } finally { await f.close(); }
 });
 
-test('typed issue query combines exact labels, priorities and custom fields under project-scoped read access', async () => {
+test('typed issue query combines selected statuses, exact labels, priorities and custom fields under project-scoped read access', async () => {
   const f = await fixture();
   try {
-    const fixtures: [Issue, Issue['priority'], string[]][] = [
-      [f.a, 'urgent', ['Ops', 'ready']],
-      [f.b, 'urgent', ['ops', 'ready', 'blocked']],
-      [f.c, 'low', ['Ops']],
-      [f.d, 'urgent', []],
+    const fixtures: [Issue, Issue['status'], Issue['priority'], string[]][] = [
+      [f.a, 'todo', 'urgent', ['Ops', 'ready']],
+      [f.b, 'review', 'urgent', ['ops', 'ready', 'blocked']],
+      [f.c, 'done', 'low', ['Ops']],
+      [f.d, 'cancelled', 'urgent', []],
     ];
-    for (const [issue, priority, labels] of fixtures) {
-      const updated = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, priority, labels });
+    for (const [issue, status, priority, labels] of fixtures) {
+      const updated = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, status, priority, labels });
       assert.equal(updated.status, 200, JSON.stringify(updated.data));
     }
     const outside = await f.call<Issue>('/issues', 'POST', {
-      projectId: 'project-team', title: '합성 외부 프로젝트 일치 업무', priority: 'urgent', labels: ['Ops', 'ready'],
+      projectId: 'project-team', title: '합성 외부 프로젝트 일치 업무', status: 'review', priority: 'urgent', labels: ['Ops', 'ready'],
     });
     assert.equal(outside.status, 201, JSON.stringify(outside.data));
     const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '합성 업무 조건 조회 키', access: 'read', projectIds: [f.project.id], expiresAt: null });
@@ -103,6 +103,8 @@ test('typed issue query combines exact labels, priorities and custom fields unde
     const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
     const condition = filter({ fieldId: 'score', operator: 'gte', value: 0 });
     const cases: [Record<string, unknown>, Issue[]][] = [
+      [{ statusIds: ['review', 'todo', 'review'] }, [f.a, f.b]],
+      [{ statusIds: ['retired-status'] }, []],
       [{ priorities: ['urgent'] }, [f.a, f.b, f.d]],
       [{ labels: { include: ['Ops'] } }, [f.a, f.c]],
       [{ labels: { include: ['Ops', 'ready'], match: 'all' } }, [f.a]],
@@ -110,7 +112,7 @@ test('typed issue query combines exact labels, priorities and custom fields unde
       [{ labels: { exclude: ['blocked'] } }, [f.a, f.c, f.d]],
       [{ labels: { exclude: ['blocked'], presence: 'set' } }, [f.a, f.c]],
       [{ labels: { presence: 'empty' } }, [f.d]],
-      [{ priorities: ['urgent'], labels: { include: ['Ops'] }, fieldFilter: condition }, [f.a]],
+      [{ statusIds: ['review', 'todo'], priorities: ['urgent'], labels: { include: ['Ops'] }, fieldFilter: condition }, [f.a]],
     ];
     for (const [criteria, expected] of cases) {
       const response = await f.call<Issue[]>(path, 'POST', { ...body, ...criteria }, key.data.token);
@@ -119,9 +121,12 @@ test('typed issue query combines exact labels, priorities and custom fields unde
     }
     for (const criteria of [
       {}, { priorities: [], labels: {} }, { labels: { match: 'all' } }, { priorities: [null] }, { labels: { include: [123] } },
-      { priorities: ['urgent'], fieldFilter: null },
+      { priorities: ['urgent'], fieldFilter: null }, { statusIds: [] }, { statusIds: 'review' }, { statusIds: ['all'] },
     ]) assert.equal((await f.call(path, 'POST', { ...body, ...criteria }, key.data.token)).status, 400);
-    assert.equal((await f.call(path, 'POST', { projectId: 'project-team', labels: { include: ['Ops'] } }, key.data.token)).status, 403);
+    const browser = await f.call<Issue[]>('/issues/query', 'POST', { ...body, statusIds: ['review', 'done'] });
+    assert.equal(browser.status, 200);
+    assert.deepEqual(browser.data.map(issue => issue.id), [f.b.id, f.c.id]);
+    assert.equal((await f.call(path, 'POST', { projectId: 'project-team', statusIds: ['review'] }, key.data.token)).status, 403);
     assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, before);
   } finally { await f.close(); }
 });

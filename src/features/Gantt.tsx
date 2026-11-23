@@ -24,6 +24,7 @@ import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
 import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
+import { issueStatusFilterLabel } from './IssueStatusFilter';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
@@ -762,6 +763,7 @@ function ProjectGantt(props: GanttProps) {
   }, [data, ganttViewId, projectId]);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
   const sharedFilters = sharedView?.filters;
+  const sharedStatusLabel = sharedFilters ? issueStatusFilterLabel(sharedFilters, projectStatuses(data, projectId)) : undefined;
   const sharedGitlabFilter = sharedFilters?.gitlab;
   const sharedReporterLabel = sharedFilters?.reporter ? issueReporterFilterLabel(sharedFilters.reporter, data.users) : undefined;
   const sharedPlanningFilter = sharedFilters?.planning;
@@ -1031,13 +1033,10 @@ function ProjectGantt(props: GanttProps) {
       if (hierarchyTrace?.span) filters.push(`하위 업무 범위 · ${hierarchyTrace.span.startDate} ~ ${hierarchyTrace.span.endDate}`);
       if (outsideFilterCount) filters.push(`기존 보기 밖 업무 ${outsideFilterCount}개 포함`);
     } else if (sharedView) {
-      const { query: savedQuery, status, type, assigneeId, fieldFilter } = sharedView.filters;
+      const { query: savedQuery, type, assigneeId, fieldFilter } = sharedView.filters;
       filters.push(`공유 보기 · ${sharedView.name}`);
       if (savedQuery) filters.push(`공유 보기 검색 · ${savedQuery}`);
-      if (status !== 'all') {
-        const label = projectStatuses(data, projectId).find(value => value.id === status)?.label;
-        filters.push(`상태 · ${label ?? '현재 상태 없음'}`);
-      }
+      if (sharedStatusLabel) filters.push(sharedStatusLabel);
       if (type !== 'all') {
         const label = projectIssueTypes(data, projectId, { includeArchived: true }).find(value => value.id === type)?.name;
         filters.push(`유형 · ${label ?? '현재 유형 없음'}`);
@@ -1927,6 +1926,9 @@ function ProjectGantt(props: GanttProps) {
       {sharedView && onOpenSavedIssueView && <button type="button" className="btn btn-ghost" disabled={busy}
         onClick={() => onOpenSavedIssueView(sharedView.id)}>업무 보기에서 열기 <ArrowRight size={14} aria-hidden="true" /></button>}
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+      {sharedStatusLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 상태 조건">
+        <li>{sharedStatusLabel}</li>
+      </ul>}
       {sharedReporterLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 요청자 조건">
         <li>{sharedReporterLabel}</li>
       </ul>}

@@ -554,9 +554,15 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 선택한 Teamspace 프로젝트가 Jira 원본 프로젝트 하나와 연결되면 현재 프로젝트의 이관 업무와 적용 영수증에서 원래 상태·업무 유형의 이름과 ID, 담당자·요청자 계정의 사용자 이름·사용자 키·계정 ID·확인된 이메일을 찾는다. Jira에서 담당자나 요청자로 확인한 같은 계정은 두 조건 모두에 사용할 수 있다. 여러 원본 값이 하나의 Teamspace 값에 합쳐졌거나, 하나의 검색값이 서로 다른 현재 값에 해당하면 변환을 보류한다. 미리보기에는 현재 이름을 표시하고, 저장한 보기에는 Teamspace ID를 사용한다. [Atlassian Jira Data Center JQL 필드](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html)
 
-최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 현재 조건으로 표현할 수 없는 조합, `OR`, 상대 날짜, `currentUser()` 같은 동적 함수, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
+최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 상태 외 조건이 들어간 `OR`, 상대 날짜, `currentUser()` 같은 동적 함수, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
 미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. 원본에 `ORDER BY`가 있으면 `acceptProjectOrder:true`를 보내 Teamspace의 프로젝트 순서를 사용한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 기존 공유 보기와 같은 형식으로 저장하고 원래 JQL은 보기 데이터에 포함하지 않는다.
+
+## 공유 보기의 여러 상태
+
+`POST /api/views`와 `PATCH /api/views/:id`의 `filters`에 `status: 'all'`과 `statusIds`를 함께 보내면, 지정한 ID 중 하나에 해당하는 업무를 고른다. 배열은 최대 40개 값이며 중복을 제거한다. 상태가 하나면 기존 `status` 필드로 저장한다. 여러 상태를 저장한 보기에서 이전 클라이언트가 `status: 'all'`만 보내면 배열을 유지한다. 모든 상태를 보려면 `statusIds: []`와 `status: 'all'`을 보내고, 단일 상태로 바꾸려면 해당 `status`를 보낸다. 현재 워크플로에서 사라진 ID는 조건에 남겨둔다. 상태 목록이 포함된 자체 백업은 형식 103을 사용한다.
+
+`POST /api/issues/query`와 읽기 키의 `POST /api/v1/issues/query`는 `projectId`와 `statusIds` 배열로 프로젝트 업무를 조회한다. 우선순위·라벨·사용자 정의 필드와 함께 보내면 그 조건도 모두 적용한다. 빈 배열과 함께 조회하려면 다른 유효한 조건이 필요하다.
 
 ## 공유 보기의 보드 그룹
 
@@ -1149,7 +1155,7 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 ## 업무 우선순위와 라벨 조건
 
-`POST /api/v1/issues/query`와 브라우저용 `/api/issues/query`는 `projectId`와 함께 `priorities`, `labels`, `fieldFilter` 중 유효한 조건을 하나 이상 받는다. 요청에서 지정한 조건에 모두 일치하는 업무를 반환한다.
+`POST /api/v1/issues/query`와 브라우저용 `/api/issues/query`는 `projectId`와 함께 `statusIds`, `priorities`, `labels`, `fieldFilter` 중 유효한 조건을 하나 이상 받는다. 요청에서 지정한 조건에 모두 일치하는 업무를 반환한다.
 
 ```json
 {

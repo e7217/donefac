@@ -225,6 +225,57 @@ test('Jira project criteria recognize active archived original keys and numeric 
   assert.equal((await f.preview(`project = "${merged}"`, merged)).total, 2);
 });
 
+test('Jira multi-status saved views preserve original aliases while reviewing current workflow names', async t => {
+  const f = await fixture(t);
+  const origin = { id: '40300', key: 'LEGSTAT' };
+  const [intake, review, closed] = [
+    { id: '13101', name: 'Requested' }, { id: '13102', name: 'Legacy review' }, { id: '13103', name: 'Finished' },
+  ];
+  const projectId = await f.migrateJira('multi-status-source', [intake, review, closed].map((status, index) => ({
+    ...origin, issueId: String(1100 + index), fields: { status, summary: status.name },
+  })), 'TEAMINTAKE');
+  const sourceIssues = (await f.snapshot()).issues.filter(issue => issue.projectId === projectId);
+  const expectedIssues = sourceIssues.filter(issue => issue.title !== closed.name);
+  assert.equal(expectedIssues.length, 2);
+  const expectedStatuses = expectedIssues.map(issue => issue.status).sort();
+  const jql = `project = ${origin.key} AND status IN (${intake.id}, "${review.name}", "${intake.name}")`;
+  const or = `project = ${origin.key} AND (status = ${intake.id} OR status = "${review.name}")`;
+  const initial = await f.preview(jql, projectId);
+  assert.deepEqual(initial.issues.map(issue => issue.id).sort(), expectedIssues.map(issue => issue.id).sort());
+  assert.deepEqual(initial.filters.statusIds, expectedStatuses);
+  assert.deepEqual((await f.preview(or, projectId)).filters, initial.filters);
+  await f.request(PREVIEW, 'POST', { projectId, jql: `project = ${origin.key} AND status = ${intake.id} OR status = "${review.name}"` }, 400);
+  await f.request(PREVIEW, 'POST', { projectId, jql: `status IN (${intake.id}, 99999) AND status = ${intake.id}` }, 400);
+
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const workflow = await f.request<ProjectWorkflow>(workflowPath);
+  const labels = ['현재 접수', '현재 기술 검토'];
+  await f.request(workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    statuses: workflow.statuses.map(status => {
+      const index = expectedStatuses.indexOf(status.id);
+      return index < 0 ? status : { ...status, label: labels[index] };
+    }),
+  });
+  const input = { projectId, jql, name: 'Migrated status union', layout: 'board', acceptProjectOrder: false };
+  const stale = await f.request<{ details: unknown }>(IMPORT, 'POST', { ...input, revision: initial.revision }, 409);
+  assert.deepEqual(stale.details, STALE);
+  const next = await f.preview(jql, projectId);
+  assert.deepEqual(next.issues, initial.issues);
+  assert.deepEqual(next.criteria.find(value => value.field === 'status'), { field: 'status', label: `상태 · ${labels.join(', ')}` });
+  const one = await f.preview(`${or} AND status = "${review.name}"`, projectId);
+  assert.equal(one.filters.status, expectedIssues.find(issue => issue.title === review.name)?.status);
+  assert.equal(one.filters.statusIds, undefined);
+
+  const saved = await f.request<SavedView>(IMPORT, 'POST', { ...input, revision: next.revision }, 201);
+  assert.deepEqual(saved.filters, next.filters);
+  const backup = await f.request<WorkspaceSnapshot>('/export');
+  assert.deepEqual(backup.savedViews, [saved]);
+  await f.request(`/views/${saved.id}?expectedVersion=${saved.version}`, 'DELETE');
+  await f.request('/import', 'POST', { data: backup });
+  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [saved]);
+});
+
 test('Jira source user, status, and type values survive team renames, append, and backup restore', async t => {
   const f = await fixture(t);
   const origin = { id: '30500', key: 'OLDDEV' };

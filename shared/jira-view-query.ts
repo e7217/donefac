@@ -1,4 +1,7 @@
-import { ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, issuePriorityLabelFilterLabels, parseIssueViewLabelFilter } from './issue-view.js';
+import {
+  ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
+  issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter,
+} from './issue-view.js';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type IssueTypeDefinition, type IssueViewLabelFilter, type JiraSavedViewPreview, type Project, type User, type WorkflowStatus } from './types.js';
 
 export interface JiraViewQueryContext {
@@ -25,10 +28,17 @@ export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: str
 type ScalarField = 'project' | JiraViewAliasField;
 type Field = ScalarField | 'labels';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
-type Clause = { field: Field; offset: number } & (
+type BasicClause = { field: Field; offset: number } & (
   | { operator: '=' | '!=' | 'in' | 'not in'; values: Token[] }
   | { operator: 'empty' | 'set' }
 );
+type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
+  | { field: 'status'; offset: number; branches: StatusClause[][] };
+type Clause = BasicClause | StatusClause;
+
+function isStatusClause(clause: Clause): clause is StatusClause {
+  return clause.field === 'status' && ('branches' in clause || clause.operator === '=' || clause.operator === 'in');
+}
 
 const MAX_TOKENS = 512;
 const MAX_NESTING = 16;
@@ -119,16 +129,16 @@ function parseField(token: Token): Field {
 
 class QueryParser {
   private index = 0;
-  private readonly clauses: Clause[] = [];
+  private clauseCount = 0;
 
   constructor(private readonly tokens: Token[]) {}
 
   parse(): { clauses: Clause[]; orderBy: Translation['orderBy'] } {
-    if (!isBare(this.current(), 'order')) this.conjunction(0);
+    const clauses = isBare(this.current(), 'order') ? [] : this.disjunction(0);
     const orderBy = this.consume('order') ? this.sort() : [];
     const rest = this.current();
-    if (rest.kind !== 'end') throw new JiraViewQueryError('조건은 AND로 연결하고, 정렬은 마지막에 ORDER BY로 지정해 주세요.', rest.offset);
-    return { clauses: this.clauses, orderBy };
+    if (rest.kind !== 'end') throw new JiraViewQueryError('조건 연결과 괄호를 확인하고, 정렬은 마지막에 ORDER BY로 지정해 주세요.', rest.offset);
+    return { clauses, orderBy };
   }
 
   private current(): Token {
@@ -155,29 +165,53 @@ class QueryParser {
     return token;
   }
 
-  private conjunction(depth: number) {
-    do {
-      if (this.consume('(')) {
-        if (depth === MAX_NESTING) throw new JiraViewQueryError('JQL 괄호가 너무 깊게 중첩되어 있습니다.', this.current().offset);
-        this.conjunction(depth + 1);
-        this.expect(')', '괄호 안에는 AND 조건만 사용할 수 있으며 닫는 괄호가 필요합니다.');
-      } else {
-        if (this.clauses.length === MAX_CLAUSES) throw new JiraViewQueryError(`JQL 조건은 최대 ${MAX_CLAUSES}개까지 지정할 수 있습니다.`, this.current().offset);
-        this.clauses.push(this.clause());
-      }
-    } while (this.consume('and'));
+  private disjunction(depth: number): Clause[] {
+    const first = this.conjunction(depth);
+    const offset = this.current().offset;
+    if (!this.consume('or')) return first;
+    const message = 'OR는 상태 조건끼리만 연결할 수 있습니다. 다른 조건과 AND로 연결할 때는 상태 OR 조건을 괄호로 묶어 주세요.';
+    if (!first.every(isStatusClause)) throw new JiraViewQueryError(message, offset);
+    const branches = [first];
+    let separator = offset;
+    while (true) {
+      const branch = this.conjunction(depth);
+      if (!branch.every(isStatusClause)) throw new JiraViewQueryError(message, separator);
+      branches.push(branch);
+      separator = this.current().offset;
+      if (!this.consume('or')) break;
+    }
+    return [{ field: 'status', offset, branches }];
+  }
+
+  private conjunction(depth: number): Clause[] {
+    const clauses = this.primary(depth);
+    while (this.consume('and')) clauses.push(...this.primary(depth));
+    return clauses;
+  }
+
+  private primary(depth: number): Clause[] {
+    if (this.consume('(')) {
+      if (depth === MAX_NESTING) throw new JiraViewQueryError('JQL 괄호가 너무 깊게 중첩되어 있습니다.', this.current().offset);
+      const clauses = this.disjunction(depth + 1);
+      this.expect(')', '조건을 마치는 닫는 괄호가 필요합니다.');
+      return clauses;
+    }
+    if (this.clauseCount === MAX_CLAUSES) throw new JiraViewQueryError(`JQL 조건은 최대 ${MAX_CLAUSES}개까지 지정할 수 있습니다.`, this.current().offset);
+    this.clauseCount++;
+    return [this.clause()];
   }
 
   private clause(): Clause {
     const start = this.literal('JQL 조건 필드를 입력해 주세요.');
     const base = { field: parseField(start), offset: start.offset };
     if (this.consume('=')) return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
+    if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
     if (base.field === 'labels') {
       if (this.consume('!=')) return { ...base, operator: '!=', values: [this.literal('제외할 라벨을 입력해 주세요.')] };
-      if (this.consume('in')) return { ...base, operator: 'in', values: this.list() };
+      if (this.consume('in')) return { ...base, operator: 'in', values: this.list('라벨', ISSUE_VIEW_LABEL_FILTER_LIMIT) };
       if (this.consume('not')) {
         this.expect('in', '라벨 제외 목록에는 NOT IN을 사용해 주세요.');
-        return { ...base, operator: 'not in', values: this.list() };
+        return { ...base, operator: 'not in', values: this.list('라벨', ISSUE_VIEW_LABEL_FILTER_LIMIT) };
       }
     }
     if ((base.field === 'assignee' || base.field === 'reporter' || base.field === 'labels') && this.consume('is')) {
@@ -188,14 +222,14 @@ class QueryParser {
     throw new JiraViewQueryError('이 JQL 연산자는 해당 필드의 저장된 보기에서 지원되지 않습니다.', this.current().offset);
   }
 
-  private list(): Token[] {
-    this.expect('(', '라벨 목록을 괄호로 감싸 주세요.');
+  private list(label: string, limit: number): Token[] {
+    this.expect('(', `${label} 목록을 괄호로 감싸 주세요.`);
     const values: Token[] = [];
     do {
-      if (values.length === ISSUE_VIEW_LABEL_FILTER_LIMIT) throw new JiraViewQueryError(`라벨 목록은 최대 ${ISSUE_VIEW_LABEL_FILTER_LIMIT}개까지 지정할 수 있습니다.`, this.current().offset);
-      values.push(this.literal('라벨 목록에 값을 입력해 주세요.'));
+      if (values.length === limit) throw new JiraViewQueryError(`${label} 목록은 최대 ${limit}개까지 지정할 수 있습니다.`, this.current().offset);
+      values.push(this.literal(`${label} 목록에 값을 입력해 주세요.`));
     } while (this.consume(','));
-    this.expect(')', '라벨 목록에 닫는 괄호가 필요합니다.');
+    this.expect(')', `${label} 목록에 닫는 괄호가 필요합니다.`);
     return values;
   }
 
@@ -251,16 +285,11 @@ function projectCriterion(context: JiraViewQueryContext, value?: Token) {
   return `프로젝트 · ${project.key} ${project.name}`;
 }
 
-function scalarCondition(field: ScalarField, clause: Clause, context: JiraViewQueryContext,
+function scalarCondition(field: Exclude<ScalarField, 'status'>, clause: BasicClause, context: JiraViewQueryContext,
   resolveSourceAlias?: JiraViewSourceAliasResolver): { id: string; label: string } {
   if (!('values' in clause)) return { id: '', label: `${fieldLabels[field]} 없음` };
   const [value] = clause.values;
   if (field === 'project') return { id: context.project.id, label: projectCriterion(context, value) };
-  if (field === 'status') {
-    const status = resolveValue(field, value, context.statuses, item => [item.id, item.label], resolveSourceAlias);
-    if (!isSelectableId(status.id)) throw new JiraViewQueryError('이 상태는 저장된 보기에서 개별 값으로 선택할 수 없습니다.', value.offset);
-    return { id: status.id, label: `상태 · ${status.label}` };
-  }
   if (field === 'type') {
     const type = resolveValue(field, value, context.issueTypes, item => [item.id, item.name], resolveSourceAlias);
     if (type.archived || !isSelectableId(type.id)) throw new JiraViewQueryError('이슈 유형은 현재 프로젝트에서 개별 값으로 선택할 수 있어야 합니다.', value.offset);
@@ -273,6 +302,27 @@ function scalarCondition(field: ScalarField, clause: Clause, context: JiraViewQu
   return { id: user.id, label: `${fieldLabels[field]} · ${user.name}` };
 }
 
+function statusIntersection(clauses: readonly StatusClause[], context: JiraViewQueryContext, resolveSourceAlias?: JiraViewSourceAliasResolver) {
+  let selected: Map<string, string> | undefined;
+  for (const clause of clauses) {
+    const options = new Map<string, string>();
+    if ('branches' in clause) {
+      for (const branch of clause.branches) {
+        for (const [id, label] of statusIntersection(branch, context, resolveSourceAlias)) options.set(id, label);
+      }
+    } else {
+      for (const value of clause.values) {
+        const { id, label } = resolveValue('status', value, context.statuses, item => [item.id, item.label], resolveSourceAlias);
+        if (!isSelectableId(id)) throw new JiraViewQueryError('이 상태는 저장된 보기에서 개별 값으로 선택할 수 없습니다.', value.offset);
+        options.set(id, label);
+      }
+    }
+    if (!selected) selected = options;
+    else for (const id of selected.keys()) if (!options.has(id)) selected.delete(id);
+  }
+  return selected ?? new Map<string, string>();
+}
+
 function checkLabel(value: Token): string {
   if (value.value.length > ISSUE_VIEW_LABEL_MAX_LENGTH) {
     throw new JiraViewQueryError(`라벨은 최대 ${ISSUE_VIEW_LABEL_MAX_LENGTH}자까지 지정할 수 있습니다.`, value.offset);
@@ -280,7 +330,7 @@ function checkLabel(value: Token): string {
   return value.value;
 }
 
-function labelFilter(clauses: Clause[]): IssueViewLabelFilter | undefined {
+function labelFilter(clauses: BasicClause[]): IssueViewLabelFilter | undefined {
   if (!clauses.length) return undefined;
   const required = new Set<string>();
   const excluded = new Set<string>();
@@ -344,35 +394,53 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const { clauses, orderBy } = new QueryParser(tokenize(query)).parse();
   const aliasFields = new Set<JiraViewAliasField>();
   if (context.prepareSourceAliases) for (const clause of clauses) {
-    if (clause.field !== 'project' && clause.field !== 'labels' && 'values' in clause) aliasFields.add(clause.field);
+    if (clause.field !== 'project' && clause.field !== 'labels' && ('values' in clause || 'branches' in clause)) aliasFields.add(clause.field);
   }
   const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
   const conditions = new Map<ScalarField, { id: string; label: string }>();
-  const labelClauses: Clause[] = [];
+  const labelClauses: BasicClause[] = [];
+  const statusClauses: StatusClause[] = [];
   for (const clause of clauses) {
+    if (isStatusClause(clause)) {
+      statusClauses.push(clause);
+      continue;
+    }
     const { field } = clause;
     if (field === 'labels') {
       labelClauses.push(clause);
       continue;
     }
+    if (field === 'status') throw new JiraViewQueryError('지원하지 않는 상태 조건입니다.', clause.offset);
     const condition = scalarCondition(field, clause, context, resolveSourceAlias);
     const previous = conditions.get(field);
     if (previous && previous.id !== condition.id) throw new JiraViewQueryError(`${fieldLabels[field]}에 서로 충돌하는 조건이 있습니다.`, clause.offset);
     conditions.set(field, condition);
     switch (field) {
-      case 'status': filters.status = condition.id; break;
       case 'type': filters.type = condition.id; break;
       case 'assignee': filters.assigneeId = condition.id || 'none'; break;
       case 'reporter': filters.reporter = condition.id ? { kind: 'member', memberId: condition.id } : { kind: 'unset' }; break;
     }
   }
+  let statusLabel: string | undefined;
+  if (statusClauses.length) {
+    const statuses = statusIntersection(statusClauses, context, resolveSourceAlias);
+    if (!statuses.size) throw new JiraViewQueryError('상태 조건에 공통으로 일치하는 상태가 없습니다.', statusClauses.at(-1)?.offset);
+    if (statuses.size > ISSUE_VIEW_STATUS_LIMIT) throw new JiraViewQueryError(`상태는 최대 ${ISSUE_VIEW_STATUS_LIMIT}개까지 지정할 수 있습니다.`, statusClauses[0].offset);
+    const ids = [...statuses.keys()].sort();
+    Object.assign(filters, issueViewStatusCriteria(ids));
+    statusLabel = `상태 · ${ids.map(id => statuses.get(id)).join(', ')}`;
+  }
   const labels = labelFilter(labelClauses);
   if (labels) filters.labels = labels;
-  conditions.delete('project');
+  const fields = new Set(clauses.map(clause => clause.field));
   const criteria: Translation['criteria'] = [
     { field: 'project', label: projectCriterion(context) },
-    ...[...conditions].map(([field, condition]) => ({ field, label: condition.label })),
+    ...[...fields].flatMap(field => {
+      if (field === 'project' || field === 'labels') return [];
+      const label = field === 'status' ? statusLabel : conditions.get(field)?.label;
+      return label === undefined ? [] : [{ field, label }];
+    }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),
   ];
   return { filters, criteria, orderBy };

@@ -64,6 +64,70 @@ test('saved view validation rejects invalid filters and duplicate project names 
   }finally{await f.close();rmSync(f.dir,{recursive:true,force:true});}
 });
 
+test('saved multi-status views keep exact conditions and restore them with native format 103', async () => {
+  const f = await fixture();
+  try {
+    const project = await f.request('/projects', 'POST', { key: 'MSV', name: '여러 상태 보기 검증' });
+    assert.equal(project.status, 201);
+    const projectId = project.data.id as string;
+    for (const status of ['todo', 'review', 'done']) {
+      const issue = await f.request('/issues', 'POST', { projectId, title: `상태 ${status} 업무`, status });
+      assert.equal(issue.status, 201, JSON.stringify(issue.data));
+    }
+    const base = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
+    const input = { projectId, name: '열린 상태 보기', layout: 'list', filters: { ...base, statusIds: ['todo', 'retired-status', 'review', 'todo'] } };
+    const created = await f.request('/views', 'POST', input);
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const expected = { ...base, statusIds: ['retired-status', 'review', 'todo'] };
+    assert.deepEqual(created.data.filters, expected);
+    const path = `/views/${created.data.id}`;
+    const listPath = `/views?projectId=${projectId}`;
+
+    for (const changes of [
+      { statusIds: 'todo' }, { statusIds: null }, { statusIds: ['all'] }, { statusIds: [''] }, { statusIds: [null] },
+      { statusIds: ['x'.repeat(81)] }, { statusIds: Array.from({ length: 41 }, (_, index) => `status-${index}`) },
+      { statusIds: ['review', 'todo'], status: 'done' },
+    ]) {
+      const filters = { ...base, ...changes };
+      assert.equal((await f.request('/views', 'POST', { ...input, name: '거절할 보기', filters })).status, 400);
+      assert.equal((await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters })).status, 400);
+    }
+    assert.deepEqual((await f.request(listPath)).data, [created.data]);
+    const breakdownPath = `/projects/${projectId}/field-breakdown`;
+    const report = await f.request(breakdownPath, 'POST', { groupBy: 'status', savedViewId: created.data.id });
+    assert.equal(report.status, 200, JSON.stringify(report.data));
+    assert.equal(report.data.totalIssues, 2);
+    assert.deepEqual(report.data.groups.filter((group: { count: number }) => group.count > 0)
+      .map((group: { label: string }) => group.label).sort(), ['검토', '할 일']);
+
+    const edited = await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters: { ...base, query: '상태' } });
+    assert.equal(edited.status, 200);
+    assert.deepEqual(edited.data.filters, { ...expected, query: '상태' });
+    assert.equal((await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters: { ...base, statusIds: [] } })).status, 409);
+
+    const { data: backup } = await f.request('/export');
+    assert.equal(backup.schemaVersion, 103);
+    assert.deepEqual(backup.savedViews[0].filters, edited.data.filters);
+    const single = await f.request(path, 'PATCH', { expectedVersion: edited.data.version, filters: { ...base, status: 'done' } });
+    assert.equal(single.status, 200);
+    assert.deepEqual(single.data.filters, { ...base, status: 'done' });
+
+    const older = { ...structuredClone(backup), schemaVersion: 102 };
+    const badVersion = await f.request('/import', 'POST', { data: older });
+    assert.equal(badVersion.status, 400);
+    assert.match(badVersion.data.error, /schemaVersion 103/);
+    assert.deepEqual((await f.request(listPath)).data, [single.data]);
+    assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);
+    const [restored] = (await f.request(listPath)).data as SavedView[];
+    assert.deepEqual(restored.filters, edited.data.filters);
+    assert.ok(restored.version > single.data.version);
+    assert.equal((await f.request(path, 'PATCH', { expectedVersion: single.data.version, filters: { ...base, statusIds: [] } })).status, 409);
+    const cleared = await f.request(path, 'PATCH', { expectedVersion: restored.version, filters: { ...base, statusIds: [] } });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(cleared.data.filters, base);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('saved views preserve exact priority and label criteria across legacy edits and clear explicit empty values', async () => {
   const f = await fixture();
   try {

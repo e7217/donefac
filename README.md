@@ -149,11 +149,17 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 작성 중인 변경·댓글이 있으면 이동 전에 확인합니다. 상세를 열어 둔 채 브라우저의 뒤로 가기를 누르면 검토를 시작한 보기로 돌아갑니다. 간트와 전체 프로젝트 보드의 필터, 공유 보기 주소도 그대로 사용합니다.
 
+## 여러 상태로 업무 보기
+
+프로젝트의 **업무 → 여러 상태 선택**에서 예를 들어 **진행 중**과 **검토 중**을 고르면 둘 중 하나에 해당하는 업무가 표시됩니다. **현재 보기 저장**을 누르면 목록·보드·간트·문서의 업무 목록과 보고서에서 같은 조건을 쓸 수 있습니다. 단일 상태나 **모든 상태**로 돌아가려면 **상태 필터**에서 선택합니다.
+
 ## Jira 필터를 공유 보기로 옮기기
 
 옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Teamspace 프로젝트와 현재 상태·유형·팀원·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
 
 원본 프로젝트와 이관 매핑을 확인할 수 있으면 `assignee = old_login`, `status = "In Review"` 같은 기존 조건을 그대로 붙여넣을 수 있습니다. 현재 Teamspace에서 이름을 바꾼 뒤에도 미리보기에는 연결된 팀원·상태·업무 유형의 현재 이름이 표시됩니다. 원본이나 현재 값에 충돌이 있으면 저장 전에 해당 조건을 검토합니다.
+
+`status IN ("Open", "In Review")`처럼 여러 상태에 해당하는 조건도 옮길 수 있습니다. `(status = Open OR status = "In Review")`처럼 `OR`로 이어진 상태 조건도 같은 방식으로 미리봅니다. [Atlassian JQL 연산자 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html)
 
 예를 들어 `project = OLD AND status = "Open" AND labels NOT IN ("hold") ORDER BY Rank ASC`를 검토할 수 있습니다. 이관 기록으로 `OLD`의 소속을 확인하고 라벨이 있는 업무에서 `hold`를 제외합니다. `ORDER BY`가 있으면 **프로젝트 정렬 사용**을 선택해 현재 Teamspace 업무 순서를 적용합니다. 지원되는 조건과 요청 형식은 API 사용법에 정리했습니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
 

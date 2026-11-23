@@ -21,11 +21,43 @@ export class IssueViewReporterFilterError extends Error {
   readonly status = 400;
 }
 
+export class IssueViewStatusFilterError extends Error {
+  readonly status = 400;
+}
+
+export const ISSUE_VIEW_STATUS_LIMIT = 40;
 export const ISSUE_VIEW_LABEL_FILTER_LIMIT = 20;
 export const ISSUE_VIEW_LABEL_MAX_LENGTH = 60;
 
 const issueViewPriorities = Object.keys(PRIORITY) as Priority[];
 type IssuePriorityLabelCriteria = Pick<SavedViewState['filters'], 'priorities' | 'labels'>;
+type IssueViewStatusCriteria = Pick<SavedViewState['filters'], 'status' | 'statusIds'>;
+
+function normalizeStatusIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)].sort();
+}
+
+export function parseIssueViewStatusIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > ISSUE_VIEW_STATUS_LIMIT) {
+    throw new IssueViewStatusFilterError(`상태 조건은 최대 ${ISSUE_VIEW_STATUS_LIMIT}개의 ID 배열이어야 합니다.`);
+  }
+  for (const statusId of value) {
+    if (typeof statusId !== 'string' || !statusId || statusId.length > 80 || statusId === 'all' ||
+        statusId.trim() !== statusId || !statusId.isWellFormed() || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(statusId)) {
+      throw new IssueViewStatusFilterError('상태 조건의 ID를 확인해 주세요.');
+    }
+  }
+  return value.length ? normalizeStatusIds(value) : undefined;
+}
+
+export function issueViewStatusIds({ status, statusIds }: IssueViewStatusCriteria): readonly string[] {
+  return status === 'all' ? statusIds ?? [] : [status];
+}
+
+export function issueViewStatusCriteria(ids: readonly string[]): IssueViewStatusCriteria {
+  const statusIds = normalizeStatusIds(ids);
+  return statusIds.length > 1 ? { status: 'all', statusIds } : { status: statusIds[0] ?? 'all' };
+}
 
 export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilter | undefined {
   if (value === undefined || isIssueViewGitlabFilter(value)) return value;
@@ -222,7 +254,8 @@ export function createIssueViewMatcher(
   data: Pick<WorkspaceSnapshot, 'issueSchemas' | 'users'> & Partial<Pick<WorkspaceSnapshot, 'gitlabLinks'>>,
   schema: ProjectIssueSchema,
 ): (issue: Issue) => boolean {
-  const {status,assigneeId,type,planning,gitlab,reporter} = filters;
+  const {assigneeId,type,planning,gitlab,reporter} = filters;
+  const selectedStatuses = new Set(issueViewStatusIds(filters));
   const search = filters.query.toLowerCase();
   const matchFields = createIssueFieldMatcher(filters.fieldFilter, schema);
   const matchPriorityLabels = createIssuePriorityLabelMatcher(filters);
@@ -232,7 +265,7 @@ export function createIssueViewMatcher(
     return selected === undefined ? [] : [{ idField, selected }];
   }) : [];
   return issue =>
-    (status === 'all' || issue.status === status) &&
+    (selectedStatuses.size === 0 || selectedStatuses.has(issue.status)) &&
     (assigneeId === 'all' || (assigneeId === 'none' ? !issue.assigneeId : issue.assigneeId === assigneeId)) &&
     (!reporter || matchesReporterFilter(reporter, issue.reporterId)) &&
     (type === 'all' || issue.type === type) &&

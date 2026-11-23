@@ -1596,6 +1596,7 @@ export interface SavedViewState {
     priorities?: Priority[];
     labels?: IssueViewLabelFilter;
     reporter?: IssueViewReporterFilter;
+    statusIds?: string[];
   };
 }
 export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type', 'reporter'] as const;

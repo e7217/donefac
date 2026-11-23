@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
-import { createIssueViewMatcher } from '../../shared/issue-view.js';
+import { createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT } from '../../shared/issue-view.js';
 import { JiraViewQueryError, translateJiraViewQuery, type JiraViewQueryContext } from '../../shared/jira-view-query.js';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type Issue } from '../../shared/types.js';
 
@@ -77,6 +77,52 @@ test('JQL original aliases resolve to current options without overriding conflic
   assert.throws(() => translateJiraViewQuery('assignee = old-login OR status = 14', sourceContext), JiraViewQueryError);
 });
 
+test('JQL status lists and status-only OR groups form exact unions and AND intersections', () => {
+  const multi = 'project = OLD AND status IN (review, done, "In Review") AND labels = release';
+  const equivalent = 'project = OLD AND (status = 완료 OR (status IN (review))) AND labels = release';
+  const translated = translateJiraViewQuery(multi, context);
+  assert.deepEqual(translated.filters, {
+    ...noFilters, statusIds: ['done', 'review'], labels: { include: ['release'], match: 'all' },
+  });
+  assert.deepEqual(translateJiraViewQuery(equivalent, context), translated);
+  assert.equal(translated.criteria.find(item => item.field === 'status')?.label, '상태 · 완료, In Review');
+  const matches = match(equivalent);
+  assert.equal(matches(issue({ status: 'done', labels: ['release'] })), true);
+  assert.equal(matches(issue({ status: 'review', labels: ['release'] })), true);
+  assert.equal(matches(issue({ status: 'todo', labels: ['release'] })), false);
+  assert.equal(matches(issue({ status: 'review', labels: [] })), false);
+
+  const wider = { ...context, statuses: [...context.statuses, { id: 'todo', label: 'To Do' }] };
+  assert.deepEqual(translateJiraViewQuery('status IN (review, done) AND status IN (todo, "In Review")', wider).filters,
+    { ...noFilters, status: 'review' });
+  assert.deepEqual(translateJiraViewQuery('status = done OR status = review AND status = todo', wider).filters,
+    { ...noFilters, status: 'done' });
+  assert.throws(() => translateJiraViewQuery('status IN (review, done) AND status = todo', wider), JiraViewQueryError);
+});
+
+test('JQL status unions check every original alias before reducing to current states', () => {
+  const checked: string[] = [];
+  const sourceContext: JiraViewQueryContext = {
+    ...context,
+    prepareSourceAliases: fields => {
+      assert.deepEqual(fields, ['status']);
+      return (_field, value) => {
+        checked.push(value);
+        if (value === 'Legacy review') return { kind: 'mapped', sourceId: '14', targetId: 'review' };
+        if (value === '13') return { kind: 'mapped', sourceId: '13', targetId: 'done' };
+        if (value === 'unmapped') return { kind: 'unmapped' };
+        if (value === 'ambiguous') return { kind: 'ambiguous' };
+      };
+    },
+  };
+  const result = translateJiraViewQuery('(status IN ("Legacy review", 13) OR status = review) AND status = "In Review"', sourceContext);
+  assert.deepEqual(result.filters, { ...noFilters, status: 'review' });
+  assert.deepEqual(checked, ['Legacy review', '13', 'review', 'In Review']);
+  for (const value of ['unmapped', 'ambiguous']) {
+    assert.throws(() => translateJiraViewQuery(`status IN ("Legacy review", ${value}) AND status = review`, sourceContext), JiraViewQueryError);
+  }
+});
+
 test('quoted literals preserve case and decode quotes and backslashes without evaluating the content', () => {
   const { filters } = translateJiraViewQuery(String.raw`"labels" = "qa\"review" and labels = 'dev\'s' AND labels = "a\\b" AND labels = "AND"`, context);
   assert.deepEqual(filters.labels, { include: ['AND', 'a\\b', "dev's", 'qa"review'], match: 'all' });
@@ -130,7 +176,10 @@ test('JQL sort descriptors are parsed separately from the saved view filters', (
 
 test('unsupported, contradictory and ambiguous JQL cannot silently become a broader saved view', () => {
   for (const jql of [
-    'project = TEAM OR status = review', '(labels = a OR labels = b)', 'NOT labels = a', 'status IN (review, done)',
+    'project = TEAM OR status = review', '(labels = a OR labels = b)', 'NOT labels = a',
+    'project = TEAM AND status = review OR status = done', 'status = review OR status = done AND project = TEAM',
+    'status = review OR (status = done AND labels = a)', 'status IN ()', 'status IN (review,)',
+    'status IN (currentUser())', 'status IN (review, unknown)', 'issuetype IN (bug, task)',
     'status != done', 'status WAS "In Review"', 'status CHANGED', 'priority = High', 'text = foo', 'key = TEAM-5',
     'assignee = currentUser()', 'labels IN (membersOf("team"))', 'reporter = NULL', 'assignee IS NOT EMPTY',
     'status = review AND status = done', 'reporter IS EMPTY AND reporter = member-a', 'assignee = unknown',
@@ -158,6 +207,8 @@ test('JQL parsing enforces text, list and nesting limits', () => {
     1, {}, null, '\t\r\n', 'x'.repeat(JIRA_SAVED_VIEW_QUERY_LIMIT + 1), 'labels = "\ud800"',
     `${'('.repeat(17)}labels = a${')'.repeat(17)}`,
     Array.from({ length: 41 }, () => 'labels = a').join(' AND '),
+    Array.from({ length: 41 }, () => 'status = review').join(' OR '),
+    `status IN (${Array.from({ length: ISSUE_VIEW_STATUS_LIMIT + 1 }, () => 'review').join(', ')})`,
     Array.from({ length: 15 }, () => `labels IN (${list})`).join(' AND '),
     `labels IN (${list}, extra)`,
     Array.from({ length: 21 }, (_, i) => `labels != label${i}`).join(' AND '),

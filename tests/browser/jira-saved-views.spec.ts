@@ -105,7 +105,7 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     await expect(dialog.getByRole('alert')).toContainText('4,000자');
     await expect(previewButton).toBeDisabled();
     const rejected = postTo(previewPath);
-    await jqlInput.fill(`project = ${originalKey} AND (status = "Open" OR status = "Closed")`);
+    await jqlInput.fill(`project = ${originalKey} AND (status = "Open" OR labels = "api")`);
     await previewButton.click();
     expect((await rejected).status()).toBe(400);
     await expect(dialog.getByRole('alert')).toBeVisible();

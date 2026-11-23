@@ -7,9 +7,9 @@ import type {
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import {
-  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError,
+  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewStatusFilterError,
   createIssueViewMatcher, orderProjectIssues, parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter,
-  parseIssueViewPriorities, parseIssueViewReporterFilter,
+  issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewStatusIds,
 } from '../shared/issue-view.js';
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
 import { planningFields } from '../shared/planning-helpers.js';
@@ -44,6 +44,10 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
   if (type !== 'all' && !schema.issueTypes.some(value => value.id === type)) return fail('지원하지 않는 업무 유형 필터입니다.');
   const fieldFilter = filters.fieldFilter == null ? undefined : parseIssueFieldFilter(filters.fieldFilter, schema, users);
   try {
+    const statusIds = Object.hasOwn(filters, 'statusIds') ? parseIssueViewStatusIds(filters.statusIds)
+      : status === 'all' ? previous?.statusIds : undefined;
+    if (statusIds?.length && status !== 'all') return fail('단일 상태 조건과 여러 상태 조건을 함께 지정할 수 없습니다.');
+    const statusCriteria = statusIds?.length ? issueViewStatusCriteria(statusIds) : { status };
     const planning = parseIssueViewPlanningFilter(Object.hasOwn(filters, 'planning') ? filters.planning : previous?.planning, schema.projectId, planningItems);
     const gitlabInput = Object.hasOwn(filters, 'gitlab') ? filters.gitlab : previous?.gitlab;
     const gitlab = previous && gitlabInput === null ? undefined : parseIssueViewGitlabFilter(gitlabInput);
@@ -51,12 +55,13 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
     const reporter = parseIssueViewReporterFilter(Object.hasOwn(filters, 'reporter') ? filters.reporter : previous?.reporter, users);
     return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), filters: {
-      query, status, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
+      query, ...statusCriteria, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
       ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
     } };
   } catch (error) {
     if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError ||
-        error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewReporterFilterError) return fail(error.message, error.status);
+        error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewReporterFilterError ||
+        error instanceof IssueViewStatusFilterError) return fail(error.message, error.status);
     throw error;
   }
 }

@@ -109,8 +109,8 @@ import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workf
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
 import { calculateProjectWorkload, DEFAULT_DAILY_WORKLOAD_MINUTES, validatePlannedEffortMinutes, WorkloadError } from '../shared/project-workload.js';
 import { fieldApplies, hasCustomValue, issueSearchText, visibleIssueFieldIds } from '../shared/issue-schema.js';
-import { createIssueFieldMatcher, IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
-import { createIssuePriorityLabelMatcher, IssueViewPriorityLabelFilterError, parseIssueViewLabelFilter, parseIssueViewPriorities } from '../shared/issue-view.js';
+import { IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-field-filter.js';
+import { createIssueViewMatcher, IssueViewPriorityLabelFilterError, IssueViewStatusFilterError, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities, parseIssueViewStatusIds } from '../shared/issue-view.js';
 import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
 import { matchingGitlabSearchLinks, normalizeGitlabSearchInput } from '../shared/gitlab-search.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
@@ -1487,16 +1487,17 @@ export function createApp(options: {
     if(typeof projectId!=='string'||!projectId||projectId.length>200)fail('필터를 적용할 프로젝트가 필요합니다.');
     const result=store.transaction(()=>{
       const schema=issueSchemas.get(projectId);
+      const statusIds = Object.hasOwn(input, 'statusIds') ? parseIssueViewStatusIds(input.statusIds) : undefined;
       const priorities = Object.hasOwn(input, 'priorities') ? parseIssueViewPriorities(input.priorities) : undefined;
       const labels = Object.hasOwn(input, 'labels') ? parseIssueViewLabelFilter(input.labels) : undefined;
-      const fieldFilter = Object.hasOwn(input, 'fieldFilter')
-        ? parseIssueFieldFilter(input.fieldFilter, schema, store.all<User>('users'))
-        : undefined;
-      if (!fieldFilter && !priorities && !labels) fail('업무 조회 조건을 하나 이상 지정해 주세요.');
-      const matchesFields = createIssueFieldMatcher(fieldFilter, schema);
-      const matchesCriteria = createIssuePriorityLabelMatcher({ priorities, labels });
+      const hasFieldFilter = Object.hasOwn(input, 'fieldFilter');
+      const users = hasFieldFilter ? store.all<User>('users') : [];
+      const fieldFilter = hasFieldFilter ? parseIssueFieldFilter(input.fieldFilter, schema, users) : undefined;
+      if (!statusIds && !fieldFilter && !priorities && !labels) fail('업무 조회 조건을 하나 이상 지정해 주세요.');
+      const matches = createIssueViewMatcher({ ...issueViewStatusCriteria(statusIds ?? []), query: '', assigneeId: 'all', type: 'all',
+        fieldFilter, priorities, labels }, { issueSchemas: [schema], users }, schema);
       const rows=store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as {json:string}[];
-      return rows.map(row=>JSON.parse(row.json) as Issue).filter(issue => matchesFields(issue) && matchesCriteria(issue));
+      return rows.map(row=>JSON.parse(row.json) as Issue).filter(matches);
     });
     res.json(result);
   });
@@ -2734,6 +2735,9 @@ export function createApp(options: {
     if (data.schemaVersion < 85 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'reporter')
     )) fail('요청자 조건을 포함한 보기는 schemaVersion 85가 필요합니다.');
+    if (data.schemaVersion < 103 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' && Object.hasOwn(view.filters, 'statusIds')
+    )) fail('여러 상태 조건을 포함한 보기는 schemaVersion 103이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {
@@ -3219,7 +3223,7 @@ export function createApp(options: {
     if(error instanceof CycleCompletionRecordsError||error instanceof CycleProgressError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});
-    if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueViewPriorityLabelFilterError||error instanceof IssueViewStatusFilterError)return res.status(error.status).json({error:error.message});
     if (error instanceof MarkdownArchiveImportError) return res.status(error.status).json({ error: error.message, details: error.details });
     if(error instanceof ApiError||error instanceof WorkflowError||error instanceof SavedViewError||error instanceof CollaborationError||error instanceof PlanningError||error instanceof ApiKeyError||error instanceof CalendarError||error instanceof AutomaticScheduleError||error instanceof ScheduleAnalysisError||error instanceof SchedulePasteError||error instanceof PlanScheduleShiftError||error instanceof ScheduleArtifactError||error instanceof IssueSchemaError||error instanceof IssueOrderError||error instanceof DocumentContentError||error instanceof AutomationError||error instanceof OutboundWebhookError||error instanceof GitlabIntegrationError||error instanceof LegacyImportError||error instanceof LegacyArchiveError||error instanceof SourcePreservationError||error instanceof ReportingLedgerError||error instanceof ReportingMetricsError||error instanceof ReportingError||error instanceof WorklogError||error instanceof IssueFieldFilterError||error instanceof FieldBreakdownError||error instanceof DocumentPublicationError||error instanceof TeamNotificationError||error instanceof NotificationSubscriptionError||error instanceof AttachmentVersionError||error instanceof TrashError||error instanceof WorkloadError)return res.status(error.status).json({error:error.message,details:'details'in error?error.details:undefined});
     if(error?.type==='entity.parse.failed')return res.status(400).json({error:'JSON 형식이 올바르지 않습니다.'});

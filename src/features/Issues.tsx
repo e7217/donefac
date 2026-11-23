@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowRightLeft, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, RefreshCw, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowRightLeft, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Layers3, List, ListChecks, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState, type User, type WorkflowStatus } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
@@ -16,6 +16,7 @@ import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
+import { IssueStatusFilter } from './IssueStatusFilter';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { IssuePriorityLabelFilters } from './IssuePriorityLabelFilters';
 import { IssueReporterFilterSelect } from './IssueReporterSelect';
@@ -26,7 +27,7 @@ import { NotificationSubscriptionButton } from './NotificationSubscriptionButton
 import { GitlabActivityRefresh } from './GitlabActivity';
 import { ISSUE_GITLAB_FILTER_LABELS, IssueGitlabSummary } from './IssueGitlabSummary';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
-import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
+import { createIssueViewMatcher, issueViewStatusCriteria, issueViewStatusIds, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-order.css';
@@ -42,7 +43,7 @@ type BoardLane = { id: string | null; name: string; email?: string; color?: stri
 type IssueRowAction = 'details' | 'status';
 type ProjectStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
-type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
+type ProjectFilters = Pick<SavedViewState['filters'], 'statusIds' | 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 const assigneeCollator = new Intl.Collator('ko', { numeric: true });
 const refreshMessages = {
@@ -153,13 +154,15 @@ export function Issues(props: FeatureProps & {
   const [type, setType] = useState('all');
   const [projectFilters, setProjectFilters] = useState(() => new Map<string, ProjectFilters>());
   const [filterEditorEpoch, setFilterEditorEpoch] = useState(0);
-  const { fieldFilter, planning, gitlab, priorities, labels, reporter } = projectFilters.get(projectId) ?? {};
+  const { statusIds, fieldFilter, planning, gitlab, priorities, labels, reporter } = projectFilters.get(projectId) ?? {};
   const planningItems = data.planningItems ?? [];
   const schema = useMemo(() => projectIssueSchema({issueSchemas:data.issueSchemas}, projectId), [data.issueSchemas, projectId]);
   const filters = useMemo(() => ({
-    query, status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
+    query, status: statusIds ? 'all' : status, assigneeId: assignee, type, ...(fieldFilter ? { fieldFilter } : {}), ...(planning ? { planning } : {}),
     ...(gitlab ? { gitlab } : {}), ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
-  }), [query, status, assignee, type, fieldFilter, planning, gitlab, priorities, labels, reporter]);
+    ...(statusIds ? { statusIds } : {}),
+  }), [query, status, statusIds, assignee, type, fieldFilter, planning, gitlab, priorities, labels, reporter]);
+  const selectedStatuses = issueViewStatusIds(filters);
   const gitlabSummary = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
@@ -190,6 +193,8 @@ export function Issues(props: FeatureProps & {
   const notice = orderNotice?.projectId === projectId ? orderNotice : null;
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
+  const createFromFilter = selectedStatuses.length === 1 && statuses.some(value => value.id === selectedStatuses[0])
+    ? selectedStatuses[0] : workflow.initialStatusId;
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
   const showGitlabRefresh = Boolean(gitlab) || projectIssues.some(issue => gitlabSummary.has(issue.id));
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
@@ -250,15 +255,20 @@ export function Issues(props: FeatureProps & {
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     setPasteScope(currentPasteScope);
   }
-  const activeFilters = status !== 'all' || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels || reporter);
+  const activeFilters = selectedStatuses.length > 0 || assignee !== 'all' || type !== 'all' || query !== '' || Boolean(fieldFilter || planning || gitlab || priorities || labels || reporter);
   function updateProjectFilters(change: ProjectFilters) {
     setProjectFilters(previous => {
       const next = new Map(previous);
       const filters = { ...previous.get(projectId), ...change };
-      if (filters.fieldFilter || filters.planning || filters.gitlab || filters.priorities || filters.labels || filters.reporter) next.set(projectId, filters);
+      if (filters.statusIds || filters.fieldFilter || filters.planning || filters.gitlab || filters.priorities || filters.labels || filters.reporter) next.set(projectId, filters);
       else next.delete(projectId);
       return next;
     });
+  }
+  function updateStatusFilter(ids: readonly string[]) {
+    const criteria = issueViewStatusCriteria(ids);
+    setStatus(criteria.status);
+    updateProjectFilters({ statusIds: criteria.statusIds });
   }
   function applySavedView(value: SavedViewState) {
     setView(value.layout);
@@ -267,8 +277,8 @@ export function Issues(props: FeatureProps & {
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
     setType(value.filters.type);
-    const { fieldFilter, planning, gitlab, priorities, labels, reporter } = value.filters;
-    updateProjectFilters({ fieldFilter, planning, gitlab, priorities, labels, reporter });
+    const { statusIds, fieldFilter, planning, gitlab, priorities, labels, reporter } = value.filters;
+    updateProjectFilters({ statusIds, fieldFilter, planning, gitlab, priorities, labels, reporter });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
   if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
@@ -558,7 +568,7 @@ export function Issues(props: FeatureProps & {
         {projectSelected && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
         {projectSelected && view === 'list' && <button className="btn" type="button" disabled={Boolean(busy) || bulk.busy}
           onClick={beginPaste}><ClipboardPaste size={15} aria-hidden="true" />업무 붙여넣기</button>}
-        <button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button>
+        <button className="btn btn-primary" onClick={() => beginCreate(createFromFilter)}><Plus size={16} /> 업무 만들기</button>
       </div>
     </div>
     {feedback && <p className={`issue-refresh-feedback${feedback === 'failed' ? ' issue-form-error' : ''}`}
@@ -572,7 +582,8 @@ export function Issues(props: FeatureProps & {
         }}><option value="">그룹 없음</option><option value="assignee">담당자별</option></select>
       </label>}
       <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} disabled={bulk.locked} onChange={e => setQuery(e.target.value)} /></div>
-      <div className="issue-filter-select"><Filter size={14} /><select aria-label="상태 필터" value={status} disabled={bulk.locked} onChange={e => setStatus(e.target.value)}><option value="all">모든 상태</option>{status !== 'all' && !statuses.some(value => value.id === status) && <option value={status}>{status} (저장된 조건)</option>}{statuses.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></div>
+      <IssueStatusFilter key={`statuses:${projectId}:${filterEditorEpoch}`} selected={selectedStatuses} options={statuses}
+        allowMultiple={projectSelected} disabled={bulk.locked} onChange={updateStatusFilter} />
       <select className="issue-filter" aria-label="담당자 필터" value={assignee} disabled={bulk.locked} onChange={e => setAssignee(e.target.value)}><option value="all">모든 담당자</option><option value="none">미지정</option>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
       <IssueReporterFilterSelect filter={reporter} users={data.users} disabled={bulk.locked}
         onChange={next => updateProjectFilters({ reporter: next })} />
@@ -597,7 +608,7 @@ export function Issues(props: FeatureProps & {
       <IssuePlanningFilters key={`planning:${projectId}:${filterEditorEpoch}`} projectId={projectId} planningItems={planningItems}
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
-    <SavedViews projectId={projectId} project={project} actorId={props.actorId} planningItems={planningItems} users={data.users} views={projectViews} selectedId={savedViewId}
+    <SavedViews projectId={projectId} project={project} actorId={props.actorId} planningItems={planningItems} statuses={statuses} users={data.users} views={projectViews} selectedId={savedViewId}
       current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
@@ -640,7 +651,7 @@ export function Issues(props: FeatureProps & {
         <td className="issue-date-cell">{dateLabel(issue.endDate || issue.dueDate)}</td>
         <td><div className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}{issue.labels.length > 2 && <span className="muted">+{issue.labels.length - 2}</span>}</div></td>
       </tr>;
-    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={15} /> 업무 만들기</button></div>}</div> : <>
+    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={() => beginCreate(createFromFilter)}><Plus size={15} /> 업무 만들기</button></div>}</div> : <>
       <BoardCapacitySummary columns={[...capacities.values()]} open={openCapacity} />
       {selectedCapacity && <BoardCapacityDetails key={selectedCapacity.status.id} value={selectedCapacity}
         visibleIds={new Set(issues.map(issue => issue.id))} users={data.users} heading={capacityHeading}

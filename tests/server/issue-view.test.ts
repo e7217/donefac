@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
-import { createIssueViewMatcher, IssueViewPlanningFilterError, IssueViewReporterFilterError, parseIssueViewPlanningFilter, parseIssueViewReporterFilter } from '../../shared/issue-view.js';
+import {
+  createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT, IssueViewPlanningFilterError, IssueViewReporterFilterError,
+  IssueViewStatusFilterError, issueViewStatusCriteria, issueViewStatusIds, parseIssueViewPlanningFilter,
+  parseIssueViewReporterFilter, parseIssueViewStatusIds,
+} from '../../shared/issue-view.js';
 import type { Issue, PlanningItem, SavedViewState } from '../../shared/types.js';
 
 const projectId = 'team-project';
@@ -21,6 +25,29 @@ function issue(extra: Partial<Issue> = {}): Issue {
 }
 
 const matcher = (criteria: Partial<SavedViewState['filters']> = {}) => createIssueViewMatcher({ ...defaultFilters, ...criteria }, { users: [] }, schema);
+
+test('saved status sets use exact IDs, canonical form, and compose with every other issue condition', () => {
+  assert.equal(parseIssueViewStatusIds([]), undefined);
+  assert.deepEqual(parseIssueViewStatusIds(['review', 'in_progress', 'review']), ['in_progress', 'review']);
+  assert.deepEqual(issueViewStatusCriteria([]), { status: 'all' });
+  assert.deepEqual(issueViewStatusCriteria(['review', 'review']), { status: 'review' });
+  const set = issueViewStatusCriteria(['review', 'in_progress', 'removed', 'review']);
+  assert.deepEqual(set, { status: 'all', statusIds: ['in_progress', 'removed', 'review'] });
+  assert.deepEqual(issueViewStatusIds(set), ['in_progress', 'removed', 'review']);
+  const review = issue({ status: 'review', labels: ['needs-docs'] });
+  const progress = issue({ status: 'in_progress', labels: ['needs-docs'] });
+  const done = issue({ status: 'done', labels: ['needs-docs'] });
+  const noLabel = issue({ status: 'review' });
+  const examples = [review, progress, done, noLabel];
+  assert.deepEqual(examples.filter(matcher({ ...set, labels: { include: ['needs-docs'] } })), [review, progress]);
+  assert.deepEqual(examples.filter(matcher({ status: 'review' })), [review, noLabel]);
+  assert.deepEqual(examples.filter(matcher(issueViewStatusCriteria(['removed', 'pending-new-status']))), []);
+  assert.deepEqual(examples.filter(matcher({ status: 'done', statusIds: ['review', 'in_progress'] })), [done]);
+  for (const invalid of [
+    'review', null, [1], [''], ['all'], [' review'], ['re\nview'], ['\ud800'], ['x'.repeat(81)],
+    Array.from({ length: ISSUE_VIEW_STATUS_LIMIT + 1 }, (_, index) => `status-${index}`),
+  ]) assert.throws(() => parseIssueViewStatusIds(invalid), IssueViewStatusFilterError);
+});
 
 test('reporter filter admits exact member IDs, explicit unset and missing data', () => {
   const parse = (value: unknown) => parseIssueViewReporterFilter(value, [{ id: 'owner' }, { id: 'all' }]);

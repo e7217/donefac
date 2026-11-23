@@ -2,13 +2,14 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { BarChart3, Bookmark, Check, ClipboardPaste, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import type { PlanningItem, Project, SavedView, SavedViewState, User } from '../../shared/types';
-import { issuePriorityLabelFilterLabels } from '../../shared/issue-view';
+import type { PlanningItem, Project, SavedView, SavedViewState, User, WorkflowStatus } from '../../shared/types';
+import { issuePriorityLabelFilterLabels, issueViewStatusCriteria, issueViewStatusIds } from '../../shared/issue-view';
 import { api, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { issueReporterFilterLabel } from './IssueReporterSelect';
+import { issueStatusFilterLabel } from './IssueStatusFilter';
 import { JiraSavedViewDialog } from './JiraSavedViewDialog';
 import './saved-views.css';
 
@@ -17,6 +18,7 @@ type Props = {
   project?: Pick<Project, 'id' | 'key' | 'name'>;
   actorId: string;
   planningItems: readonly PlanningItem[];
+  statuses: readonly WorkflowStatus[];
   users: readonly User[];
   views: SavedView[];
   selectedId: string | null;
@@ -32,14 +34,16 @@ type Props = {
 type ViewEditor = { mode: 'create'; state: SavedViewState } | { mode: 'update'; state: SavedViewState; target: SavedView };
 
 function viewState({ layout, boardGrouping, filters }: SavedViewState): SavedViewState {
-  return { layout, ...(layout === 'board' && boardGrouping ? { boardGrouping } : {}), filters };
+  const { status, statusIds, ...otherFilters } = filters;
+  const statusCriteria = issueViewStatusCriteria(issueViewStatusIds({ status, statusIds }));
+  return { layout, ...(layout === 'board' && boardGrouping ? { boardGrouping } : {}), filters: { ...otherFilters, ...statusCriteria } };
 }
 
 export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, project, actorId, planningItems, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, project, actorId, planningItems, statuses, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -198,7 +202,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, users, v
           name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
             priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
-            reporter: editing.state.filters.reporter ?? null,
+            reporter: editing.state.filters.reporter ?? null, statusIds: editing.state.filters.statusIds ?? [],
           }, expectedVersion: editing.target.version,
         })
         : await post<SavedView>('/views', {projectId, name, ...editing.state});
@@ -320,7 +324,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, users, v
       <div className="card-heading"><h2 id="saved-view-title">{editing.mode === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
       <p className="muted">적용된 검색어와 필터를 {editorState.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
-      <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{editorState.filters.status === 'all' ? '모든 상태' : `상태: ${editorState.filters.status}`}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
+      <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{issueStatusFilterLabel(editorState.filters, statuses) ?? '모든 상태'}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
         {editorState.filters.reporter && <span>{issueReporterFilterLabel(editorState.filters.reporter, users)}</span>}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
