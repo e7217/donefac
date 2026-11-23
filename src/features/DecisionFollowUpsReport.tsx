@@ -1,32 +1,36 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { BookOpen, ChevronRight, RefreshCw, Search } from 'lucide-react';
-import type { DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, FeatureProps } from '../../shared/types';
+import { BookOpen, ChevronRight, FileText, RefreshCw, Search } from 'lucide-react';
+import type { DecisionFollowUpDraftRequest, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, FeatureProps } from '../../shared/types';
 import { api } from '../lib/api';
 import {
   decisionFollowUpQuery, MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH, sameDecisionFollowUpScope, type DecisionFollowUpScope,
 } from '../lib/decision-follow-up-route';
+import { ReportMeetingDraftDialog } from './ReportMeetingDraftDialog';
 import './decision-follow-ups-report.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
-type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'refresh'> & {
+type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'openDocument' | 'refresh'> & {
   scope: DecisionFollowUpScope;
   onScopeChange: (scope: DecisionFollowUpScope) => boolean;
   issueOverlayOpen: boolean;
 };
 type Options = Omit<DecisionFollowUpScope, 'offset'>;
 type Result = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage | null; loading: boolean; error?: string };
+type DraftSelection = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage };
 const numberLabel = (count: number) => count.toLocaleString('ko-KR');
 const workspacePath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/decision-follow-ups`;
+const STATUS_LABEL = { open: '미완료', closed: '종료', all: '전체 상태' };
 function sameOptions(left: Options, right: Options): boolean {
   return left.projectId === right.projectId && left.status === right.status && left.assigneeId === right.assigneeId && left.q === right.q;
 }
 
-export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onScopeChange, issueOverlayOpen, openIssue, refresh, notify }: Props) {
+export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onScopeChange, issueOverlayOpen, openIssue, openDocument, refresh, notify }: Props) {
   const [applied, setApplied] = useState(scope);
   const [options, setOptions] = useState<Options>(scope);
   const [result, setResult] = useState<Result | null>(null);
+  const [draft, setDraft] = useState<DraftSelection | null>(null);
   const [opening, setOpening] = useState<{ scope: DecisionFollowUpScope; token: symbol } | null>(null);
   const [lastIssues, setLastIssues] = useState(data.issues);
   const request = useRef<AbortController | null>(null);
@@ -52,7 +56,10 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     const path = `${projectPath}${parameters.size ? `?${parameters}` : ''}`;
     try {
       const page = await api<DecisionFollowUpPage>(path, { signal: controller.signal, cache: 'no-store', headers: { 'X-Actor-Id': actorId } });
-      if (!controller.signal.aborted) setResult({ scope, page, loading: false });
+      if (!controller.signal.aborted) {
+        setResult({ scope, page, loading: false });
+        return page;
+      }
     } catch (cause) {
       if (!controller.signal.aborted) setResult(previous => ({
         scope, page: previous?.page ?? null, loading: false,
@@ -61,6 +68,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     } finally {
       if (request.current === controller) request.current = null;
     }
+    return null;
   }, [actorId, projectId, scope]);
 
   useEffect(() => {
@@ -165,7 +173,12 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     {loading && <p role="status">결정 후속 업무를 불러오는 중입니다.</p>}
     {openingIssue && <p role="status">업무를 불러오는 중입니다.</p>}
     {page && <section className="decision-follow-ups-results" aria-label="결정 후속 업무 결과" aria-busy={loading}>
-      <h3 ref={resultsHeading} tabIndex={-1}>결정 근거 {numberLabel(page.total)}건</h3>
+      <header>
+        <h3 ref={resultsHeading} tabIndex={-1}>결정 근거 {numberLabel(page.total)}건</h3>
+        <button className="btn" type="button" aria-disabled={loading || !page.items.length} onClick={() => {
+          if (!loading && page.items.length) setDraft({ scope, page });
+        }}><FileText size={15} aria-hidden="true" />회의 초안 만들기</button>
+      </header>
       {page.items.length ? <ul className="decision-follow-ups-list" aria-label="결정 후속 업무 목록">
         {page.items.map(item => <li key={item.linkId}><DecisionFollowUpCard key={`${item.source.revisionId}:${item.source.from}:${item.source.to}`}
           item={item} data={data} showIssueProject={scope.projectId !== undefined} loading={openingIssue} open={showIssue} /></li>)}
@@ -179,7 +192,52 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
           onClick={() => changePage(page.offset + page.limit)}>다음 페이지</button>
       </nav>}
     </section>}
+    {draft && <DecisionMeetingDraftDialog draft={draft} data={data} projectId={projectId} actorId={actorId} refresh={refresh}
+      notify={notify} openDocument={openDocument} reloadReport={load} onClose={() => setDraft(null)} />}
   </div>;
+}
+
+function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...actions }:
+  Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openDocument'> & {
+    draft: DraftSelection;
+    reloadReport: () => Promise<DecisionFollowUpPage | null>;
+    onClose: () => void;
+  }) {
+  const { page, scope } = draft;
+  const reportPath = scope.projectId === undefined ? workspacePath(projectId) : '/decision-follow-ups';
+  const destinations = [{ id: null, name: '팀 공통 문서' }, ...data.projects.map(({ id, name }) => ({ id, name }))];
+  const projectName = (id: string | null) => id === null ? '전체 프로젝트' : data.projects.find(project => project.id === id)?.name ?? id;
+  const assignee = scope.assigneeId === 'unassigned' ? '담당자 미지정'
+    : data.users.find(user => user.id === scope.assigneeId)?.name ?? '전체 담당자';
+  return <ReportMeetingDraftDialog {...actions} report={page} reloadReport={reloadReport} destinations={destinations}
+    initialTitle={`결정 후속 업무 회의 · ${page.generatedAt.slice(0, 10)}`} initialDestinationId={page.projectId}
+    savePath={`${reportPath}/meeting-draft`}
+    requestFields={(review, destinationProjectId): Omit<DecisionFollowUpDraftRequest, 'requestId' | 'title' | 'revision'> => ({
+      destinationProjectId,
+      ...(typeof scope.projectId === 'string' ? { projectId: scope.projectId } : {}),
+      ...(scope.status !== 'open' ? { status: scope.status } : {}),
+      ...(scope.assigneeId ? { assigneeId: scope.assigneeId } : {}),
+      ...(scope.q ? { q: scope.q } : {}),
+      ...(review.offset ? { offset: review.offset } : {}),
+    })}
+    emptyNotice={() => '이 페이지에 표시할 결정 근거가 없습니다.'}
+    renderReport={review => <>
+      <dl aria-label="회의 초안 조건">
+        <div><dt>보고서 범위</dt><dd>{projectName(review.projectId)}</dd></div>
+        <div><dt>업무 상태</dt><dd>{STATUS_LABEL[scope.status]}</dd></div>
+        <div><dt>담당자</dt><dd>{assignee}</dd></div>
+        {scope.q && <div><dt>검색</dt><dd>{scope.q}</dd></div>}
+        <div><dt>결정 근거</dt><dd>{review.items.length > 0 && `${numberLabel(review.offset + 1)}–${numberLabel(review.offset + review.items.length)} / `}{numberLabel(review.total)}건</dd></div>
+      </dl>
+      <p>현재 페이지의 결정 근거와 업무 정보를 선택한 문서 공간에 저장합니다.</p>
+      {review.items.length > 0 && <details>
+        <summary>요약에 포함할 결정 근거 {numberLabel(review.items.length)}건</summary>
+        <ol>{review.items.map(item => <li key={item.linkId}>
+          <strong>{item.issue.key} · {item.issue.title}</strong>
+          <p>{item.source.title} · v{item.source.version}</p>
+        </li>)}</ol>
+      </details>}
+    </>} />;
 }
 
 function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {

@@ -939,8 +939,8 @@ export function createApp(options: {
   timeReservations.registerRoutes(app,{actor,activity});
   const fieldBreakdownMatches = registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId));
   function createReportDocument(
-    req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'projectId' | 'title' | 'actorId' | 'createdAt'>,
-    content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' = '주간 보고서',
+    req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'title' | 'actorId' | 'createdAt'> & { projectId: string | null },
+    content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' | '결정 후속 업무 회의' = '주간 보고서',
   ): DocPage {
     const document = validateDocument({
       id: capture.documentId, projectId: capture.projectId, parentId: null, title: capture.title, content, plainText: '',
@@ -948,7 +948,8 @@ export function createApp(options: {
     });
     store.put('documents', document);
     revision(document, capture.actorId, '보고서에서 작성');
-    activity(req, 'document', document.id, kind === '주간 보고서' ? '주간 문서 생성' : '진행 차단 문서 생성', document.title);
+    const action = { '주간 보고서': '주간 문서 생성', '진행 차단 회의': '진행 차단 문서 생성', '결정 후속 업무 회의': '결정 후속 업무 회의 문서 생성' }[kind];
+    activity(req, 'document', document.id, action, document.title);
     for (const issueId of issueIds) store.put('resource_links', { id: uid(), issueId, documentId: document.id, kind });
     notifyDocumentCreated(document);
     return document;
@@ -1067,10 +1068,11 @@ export function createApp(options: {
     snapshot:()=>({projects:store.all('projects'),issues:store.all('issues'),workflows:workflows.snapshot(),gitlabLinks:store.all('gitlab_links')}),
   });
   registerDecisionFollowUpRoutes(app, {
-    store,
+    store, actor, documentCreation,
     workflow: projectId => workflows.get(projectId),
     projectScope: req => apiKeys.projectScope(req),
     authorizeDocumentBody: (req, content) => apiKeys.authorizeDocumentBody(req, content),
+    createDocument: (req, capture, content, issueIds) => createReportDocument(req, capture, content, issueIds, '결정 후속 업무 회의'),
   });
   app.get('/api/atlassian-links',(req,res)=>{
     if(Object.keys(req.query).some(key=>key!=='targetType'&&key!=='targetId'))return fail('기존 도구 링크 조회 조건을 확인해 주세요.');
@@ -2986,7 +2988,7 @@ export function createApp(options: {
 
   app.use('/api',(_req,res)=>res.status(404).json({error:'API 경로를 찾을 수 없습니다.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
-    if(error instanceof DecisionFollowUpError)return res.status(error.status).json({error:error.message});
+    if(error instanceof DecisionFollowUpError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentTreeMoveError||error instanceof DocumentCopyAssetError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentTreeCopyError||error instanceof DocumentOrderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});

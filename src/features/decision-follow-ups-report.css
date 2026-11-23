@@ -21,7 +21,15 @@
 
 .decision-follow-ups-controls label { min-width: 0; }
 .decision-follow-ups-controls .field { box-sizing: border-box; min-width: 0; }
-.decision-follow-ups-results > h3 { margin: 1rem 0 0.65rem; }
+.decision-follow-ups-results > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin: 1rem 0 0.65rem;
+}
+.decision-follow-ups-results h3 { margin: 0; }
 .decision-follow-ups-list {
   display: grid;
   gap: 0.7rem;
@@ -52,7 +60,7 @@
 
 .decision-follow-up-issue:hover { color: #11675e; }
 .decision-follow-up-issue:focus-visible,
-.decision-follow-ups-results > h3:focus-visible { outline: 2px solid #177c72; outline-offset: 3px; }
+.decision-follow-ups-results h3:focus-visible { outline: 2px solid #177c72; outline-offset: 3px; }
 .decision-follow-up-details {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

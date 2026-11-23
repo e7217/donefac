@@ -792,6 +792,36 @@ async function runStandardPilot() {
     method:'POST',status:201,body:{projectId,title:'파일럿 백업 복원 문서',content:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'고정할 원본 문서'}]}]}},
   })).json();
   const documentPath = `/documents/${document.id}`;
+  const decisionText = '고정할 원본 문서';
+  const decisionLink = (await (await call(pilot.url, `${documentPath}/decision-links`, { method: 'POST', status: 201, body: {
+    requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: routedIssue.id,
+    sourceSelection: { from: 1, to: decisionText.length + 1, text: decisionText },
+  } })).json()).link;
+  const decisionReportPath = `/projects/${parallelProjectId}/decision-follow-ups`;
+  const decisionFilters = { status: 'all', q: document.title };
+  const decisionReportQuery = `${decisionReportPath}?${new URLSearchParams(decisionFilters)}`;
+  const decisions = await (await call(pilot.url, decisionReportQuery)).json();
+  assert.deepEqual(decisions.items.map(item => item.linkId), [decisionLink.id]);
+  const decisionDraftBody = { ...decisionFilters, revision: decisions.revision, requestId: randomUUID(),
+    title: '파일럿 결정 후속 회의 초안', destinationProjectId: null };
+  const decisionDraftPath = `${decisionReportPath}/meeting-draft`;
+  const decisionDraft = await (await call(pilot.url, decisionDraftPath, { method: 'POST', status: 201, body: decisionDraftBody })).json();
+  assert.equal(decisionDraft.document.projectId, null);
+  assert.ok(decisionDraft.document.plainText.includes(decisionText));
+  const verifyDecisionDraft = async url => {
+    const replay = await (await call(url, decisionDraftPath, { method: 'POST', body: decisionDraftBody })).json();
+    assert.deepEqual(replay, { document: decisionDraft.document, duplicate: true });
+    const [workspace, page, revisions] = await Promise.all([
+      call(url, '/workspace').then(response => response.json()),
+      call(url, decisionReportQuery).then(response => response.json()),
+      call(url, `/documents/${decisionDraft.document.id}/revisions`).then(response => response.json()),
+    ]);
+    assert.deepEqual(page.items.map(item => item.linkId), [decisionLink.id]);
+    const backlinks = workspace.resourceLinks.filter(link => link.documentId === decisionDraft.document.id);
+    assert.deepEqual(backlinks.map(item => [item.issueId, item.kind, item.documentSource]), [[routedIssue.id, '결정 후속 업무 회의', undefined]]);
+    assert.deepEqual(revisions.map(revision => revision.content), [decisionDraft.document.content]);
+  };
+  await verifyDecisionDraft(pilot.url);
   const collaboration = await (await call(pilot.url,`${documentPath}/collaboration/enable`,{
     method:'POST',body:{expectedVersion:document.version},
   })).json();
@@ -991,6 +1021,7 @@ async function runStandardPilot() {
   const restoredRouting = (await (await call(copy.url, '/workspace')).json()).issues.find(item => item.id === routedIssue.id);
   assert.deepEqual(restoredRouting.customFields, routedIssue.customFields);
   await verifyFieldBreakdown(copy.url);
+  await verifyDecisionDraft(copy.url);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

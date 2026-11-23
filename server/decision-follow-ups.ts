@@ -1,7 +1,11 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { issueDeadline } from '../shared/my-work.js';
-import type { DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, DocRevision, ProjectWorkflow, ResourceLink, RichContent } from '../shared/types.js';
+import type { DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource,
+  DocPage, DocRevision, Project, ProjectWorkflow, ResourceLink, RichContent, User } from '../shared/types.js';
 import { statusMeta } from '../shared/workflow-helpers.js';
+import { buildDecisionFollowUpDraftContent } from './decision-follow-up-draft-content.js';
+import type { DocumentCreationService } from './document-creation.js';
 import { DocumentFollowUpError, validateDocumentDecisionSource } from './document-follow-up.js';
 import type { Store } from './store.js';
 
@@ -10,17 +14,22 @@ const MAX_OFFSET = 1_000_000;
 const invalidControl = /[\u0000-\u001f\u007f]/u;
 export const DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['status', 'assigneeId', 'q', 'offset'] as const;
 export const TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['projectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS] as const;
+const draftFields = ['requestId', 'title', 'revision', 'destinationProjectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS];
 
 export class DecisionFollowUpError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly details?: { reason: 'stale_report' | 'destination_unavailable' }) { super(message); }
 }
 
 type ProjectScope = readonly string[] | null;
+type DocumentCapture = { documentId: string; projectId: string | null; title: string; actorId: string; createdAt: string };
 type Dependencies = {
   store: Store;
   workflow: (projectId: string) => ProjectWorkflow;
   projectScope: (request: Request) => ProjectScope;
   authorizeDocumentBody: (request: Request, content: RichContent) => void;
+  actor: (request: Request) => string;
+  documentCreation: DocumentCreationService;
+  createDocument: (request: Request, capture: DocumentCapture, content: RichContent, issueIds: string[]) => DocPage;
 };
 
 type Row = {
@@ -45,6 +54,7 @@ type Row = {
 };
 
 const missingSource = () => new DecisionFollowUpError(404, '연결된 결정 근거나 원문 저장본을 찾을 수 없습니다.');
+const projectIdentifier = (value: unknown) => identifier(value, '프로젝트 ID를 확인해 주세요.');
 
 function readSnapshot<T>(store: Store, read: () => T): T {
   if (store.db.isTransaction) return read();
@@ -71,7 +81,15 @@ function searchable(value: string) {
   return value.normalize('NFC').toLowerCase();
 }
 
-function parseQuery(query: Record<string, unknown>, allowed: readonly string[] = DECISION_FOLLOW_UP_QUERY_PARAMETERS) {
+type Filters = {
+  status: NonNullable<DecisionFollowUpDraftRequest['status']>;
+  assigneeId: string | null;
+  query: string;
+  searchTerm: string;
+  offset: number;
+};
+
+function parseQuery(query: Record<string, unknown>, allowed: readonly string[] = DECISION_FOLLOW_UP_QUERY_PARAMETERS): Filters {
   if (Object.keys(query).some(key => !allowed.includes(key))) {
     throw new DecisionFollowUpError(400, '결정 후속 업무의 조회 조건을 확인해 주세요.');
   }
@@ -85,17 +103,21 @@ function parseQuery(query: Record<string, unknown>, allowed: readonly string[] =
   if (typeof offset !== 'string' || !/^[0-9]{1,7}$/u.test(offset) || Number(offset) > MAX_OFFSET) {
     throw new DecisionFollowUpError(400, '조회 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
   }
+  const searchTerm = typeof q === 'string' ? q.trim() : '';
   return {
     status, assigneeId: assigneeId === undefined ? null : identifier(assigneeId, '담당자 ID를 확인해 주세요.'),
-    query: q === undefined ? '' : searchable(q.trim()), offset: Number(offset),
+    query: searchable(searchTerm), searchTerm, offset: Number(offset),
   };
 }
 
-function requireProject(store: Store, projectId: string, scope: ProjectScope) {
+function requireProject(store: Store, projectId: string, scope: ProjectScope, purpose: 'source' | 'destination' = 'source') {
   if (scope !== null && !scope.includes(projectId)) {
     throw new DecisionFollowUpError(403, '이 API 키에서 허용하지 않은 프로젝트입니다.');
   }
   if (!store.db.prepare('SELECT id FROM projects WHERE id=?').get(projectId)) {
+    if (purpose === 'destination') {
+      throw new DecisionFollowUpError(422, '저장 위치의 프로젝트를 찾을 수 없습니다. 다른 저장 위치를 선택해 주세요.', { reason: 'destination_unavailable' });
+    }
     throw new DecisionFollowUpError(404, '프로젝트를 찾을 수 없습니다.');
   }
 }
@@ -111,8 +133,16 @@ function compare(left: DecisionFollowUpItem, right: DecisionFollowUpItem) {
   return sourceOrder || (left.linkId < right.linkId ? -1 : left.linkId > right.linkId ? 1 : 0);
 }
 
-function listDecisions({ store, workflow }: Dependencies, projectId: string | null, scope: ProjectScope,
-  filters: ReturnType<typeof parseQuery>): DecisionFollowUpPage {
+function pageLabels(store: Store, projectId: string | null, assigneeId: string | null, items: DecisionFollowUpItem[]) {
+  const projects = new Set([projectId, ...items.flatMap(item => [item.issue.projectId, item.document.projectId])]);
+  const assignees = new Set([assigneeId === 'unassigned' ? null : assigneeId, ...items.map(item => item.issue.assigneeId)]);
+  return {
+    projectNames: new Map([...projects].flatMap(id => id === null ? [] : [[id, store.get<Project>('projects', id)?.name ?? '프로젝트 정보 없음']])),
+    assigneeNames: new Map([...assignees].flatMap(id => id === null ? [] : [[id, store.get<User>('users', id)?.name ?? '미지정']])),
+  };
+}
+
+function listDecisions({ store, workflow }: Dependencies, projectId: string | null, scope: ProjectScope, filters: Filters, teamReport: boolean) {
   return readSnapshot(store, () => {
     const conditions = [
       "json_type(l.json,'$.documentSource')='object'",
@@ -186,13 +216,20 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
       });
     }
     items.sort(compare);
-    return { projectId, total: items.length, offset: filters.offset, limit: PAGE_SIZE,
-      items: items.slice(filters.offset, filters.offset + PAGE_SIZE) };
+    const visible = items.slice(filters.offset, filters.offset + PAGE_SIZE);
+    const labels = pageLabels(store, projectId, filters.assigneeId, visible);
+    const revision = createHash('sha256').update(JSON.stringify([
+      teamReport, projectId, filters.status, filters.assigneeId, filters.searchTerm, filters.offset, items.length, visible,
+      [...labels.projectNames], [...labels.assigneeNames], store.setting('attachmentImportGeneration'),
+    ])).digest('hex');
+    const page: DecisionFollowUpPage = { projectId, total: items.length, offset: filters.offset, limit: PAGE_SIZE,
+      items: visible, revision, generatedAt: new Date().toISOString() };
+    return { page, ...labels };
   });
 }
 
 function readDecisionSource({ store, authorizeDocumentBody }: Dependencies, request: Request, projectId: string,
-  linkId: string, scope: ProjectScope): DecisionFollowUpSource {
+  linkId: string, scope: ProjectScope, revisions?: Map<string, DocRevision | null>): DecisionFollowUpSource {
   return readSnapshot(store, () => {
     requireProject(store, projectId, scope);
     const row = store.db.prepare(`SELECT l.json, d.id AS documentId, d.project_id AS documentProjectId
@@ -205,7 +242,9 @@ function readDecisionSource({ store, authorizeDocumentBody }: Dependencies, requ
     }
     const { documentId, documentSource } = JSON.parse(row.json) as ResourceLink;
     if (documentId !== row.documentId || typeof documentSource?.revisionId !== 'string') throw missingSource();
-    const revision = store.get<DocRevision>('revisions', documentSource.revisionId);
+    const stored = revisions?.get(documentSource.revisionId);
+    const revision = stored === undefined ? store.get<DocRevision>('revisions', documentSource.revisionId) ?? null : stored;
+    if (stored === undefined) revisions?.set(documentSource.revisionId, revision);
     if (!revision) throw missingSource();
     try {
       validateDocumentDecisionSource(documentSource, documentId, new Map([[revision.id, revision]]), true);
@@ -218,20 +257,93 @@ function readDecisionSource({ store, authorizeDocumentBody }: Dependencies, requ
   });
 }
 
+function draftInput(request: Request, teamReport: boolean) {
+  const body: unknown = request.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(request.query).length ||
+      Object.keys(body).some(key => !draftFields.includes(key) && !(teamReport && key === 'projectId'))) {
+    throw new DecisionFollowUpError(400, '결정 후속 업무 회의 초안의 입력을 확인해 주세요.');
+  }
+  const { title: inputTitle, requestId, revision, destinationProjectId, projectId, status, assigneeId, q, offset } = body as Record<string, unknown>;
+  const title = typeof inputTitle === 'string' ? inputTitle.trim() : '';
+  if (!title || title.length > 200 || !title.isWellFormed() || invalidControl.test(title)) {
+    throw new DecisionFollowUpError(400, '회의 초안 제목을 1~200자로 입력해 주세요.');
+  }
+  if (typeof revision !== 'string' || !/^[a-f0-9]{64}$/u.test(revision)) {
+    throw new DecisionFollowUpError(400, '조회한 결정 후속 업무 보고서의 버전이 필요합니다.');
+  }
+  if (offset !== undefined && (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_OFFSET)) {
+    throw new DecisionFollowUpError(400, '조회 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
+  }
+  return { title, requestId, revision, destination: destinationProjectId === null ? null : projectIdentifier(destinationProjectId),
+    reportProject: teamReport ? (projectId === undefined ? null : projectIdentifier(projectId)) : projectIdentifier(request.params.id),
+    filters: parseQuery({ status, assigneeId, q, offset: String(offset ?? 0) }),
+  };
+}
+
+function reportHref(routeProject: string, reportProject: string | null, filters: Filters, teamReport: boolean) {
+  const parameters = new URLSearchParams();
+  if (filters.status !== 'open') parameters.set('status', filters.status);
+  if (filters.assigneeId) parameters.set('assigneeId', filters.assigneeId);
+  if (filters.searchTerm) parameters.set('q', filters.searchTerm);
+  if (filters.offset) parameters.set('offset', String(filters.offset));
+  if (teamReport) {
+    parameters.set('scope', 'team');
+    if (reportProject) parameters.set('decisionProject', reportProject);
+  }
+  return `#/${encodeURIComponent(routeProject)}/reports/decision-follow-ups${parameters.size ? `?${parameters}` : ''}`;
+}
+
+function createDraft(request: Request, dependencies: Dependencies, teamReport: boolean): DecisionFollowUpDraftResult {
+  const { title, requestId, revision, destination, reportProject, filters } = draftInput(request, teamReport);
+  const { store } = dependencies;
+  const scope = dependencies.projectScope(request);
+  const actorId = dependencies.actor(request);
+  return dependencies.documentCreation.create(actorId, { requestId, title, revision, projectId: destination, teamReport, reportProject, filters }, () => {
+    const { page, projectNames, assigneeNames } = listDecisions(dependencies, reportProject, scope, filters, teamReport);
+    if (destination !== null) requireProject(store, destination, scope, 'destination');
+    if (page.revision !== revision) {
+      throw new DecisionFollowUpError(409, '조회 이후 결정 후속 업무 내용이 바뀌었습니다. 같은 조건으로 다시 조회해 주세요.', { reason: 'stale_report' });
+    }
+    if (!page.items.length) throw new DecisionFollowUpError(422, '회의 초안에 담을 결정 후속 업무가 없습니다.');
+    const excerpts = new Map<string, string>();
+    const revisions = new Map<string, DocRevision | null>();
+    for (const item of page.items) {
+      try {
+        excerpts.set(item.linkId, readDecisionSource(dependencies, request, item.issue.projectId, item.linkId, scope, revisions).source.text);
+      } catch (error) {
+        if (!(error instanceof DecisionFollowUpError) || error.status !== 404) throw error;
+      }
+    }
+    const routeProject = reportProject ?? destination ?? page.items[0].issue.projectId;
+    const { content, issueIds } = buildDecisionFollowUpDraftContent({ page, filters, projectNames, assigneeNames, excerpts,
+      href: reportHref(routeProject, reportProject, filters, teamReport),
+    });
+    return dependencies.createDocument(request, { documentId: randomUUID(), projectId: destination, title, actorId, createdAt: page.generatedAt }, content, issueIds);
+  }, 'decision-follow-up-draft');
+}
+
 export function registerDecisionFollowUpRoutes(app: Express, dependencies: Dependencies): void {
-  const project = (value: unknown) => identifier(value, '프로젝트 ID를 확인해 주세요.');
   app.get('/api/decision-follow-ups', (request, response) => {
     const filters = parseQuery(request.query, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS);
-    const projectId = request.query.projectId === undefined ? null : project(request.query.projectId);
-    response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, projectId, dependencies.projectScope(request), filters));
+    const projectId = request.query.projectId === undefined ? null : projectIdentifier(request.query.projectId);
+    response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, projectId, dependencies.projectScope(request), filters, true).page);
   });
   app.get('/api/projects/:id/decision-follow-ups', (request, response) => {
-    response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, project(request.params.id),
-      dependencies.projectScope(request), parseQuery(request.query)));
+    response.set('Cache-Control', 'no-store').json(listDecisions(dependencies, projectIdentifier(request.params.id),
+      dependencies.projectScope(request), parseQuery(request.query), false).page);
   });
   app.get('/api/projects/:id/decision-follow-ups/:linkId/source', (request, response) => {
     if (Object.keys(request.query).length) throw new DecisionFollowUpError(400, '결정 근거 원문의 조회 조건을 확인해 주세요.');
-    response.set('Cache-Control', 'no-store').json(readDecisionSource(dependencies, request, project(request.params.id),
+    response.set('Cache-Control', 'no-store').json(readDecisionSource(dependencies, request, projectIdentifier(request.params.id),
       identifier(request.params.linkId, '결정 근거 연결 ID를 확인해 주세요.'), dependencies.projectScope(request)));
   });
+  for (const [path, teamReport] of [
+    ['/api/projects/:id/decision-follow-ups/meeting-draft', false], ['/api/decision-follow-ups/meeting-draft', true],
+  ] as const) {
+    app.post(path, (request, response) => {
+      response.set('Cache-Control', 'no-store');
+      const draft = createDraft(request, dependencies, teamReport);
+      response.status(draft.duplicate ? 200 : 201).json(draft);
+    });
+  }
 }

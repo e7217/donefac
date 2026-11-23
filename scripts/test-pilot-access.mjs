@@ -260,12 +260,25 @@ async function verifyIntegrations(session, anonymous, origin) {
   assert.equal(restricted.items[0].source.text, undefined);
   await call(anonymous, 'GET', `/api/v1${teamDecisions}&projectId=project-team`, 403, { headers: bearer });
 
+  const decisionDraftPath = '/api/decision-follow-ups/meeting-draft';
+  const decisionDraftInput = { requestId: randomUUID(), title: 'HTTPS 팀 결정 회의 초안', revision: teamResult.revision,
+    status: 'all', q: title, destinationProjectId: null };
+  await call(anonymous, 'POST', decisionDraftPath, 401, { headers: { Origin: origin }, data: decisionDraftInput });
+  const draft = await (await call(session, 'POST', decisionDraftPath, 201, { headers: { Origin: origin }, data: decisionDraftInput })).json();
+  assert.equal(draft.document.projectId, null);
+  assert.ok(draft.document.plainText.includes(text));
+  assert.deepEqual(new Set(draft.document.content.content.filter(node => node.type === 'issueReference').map(node => node.attrs.issueId)),
+    new Set(['issue-2', 'issue-9']));
+  const duplicateDraft = await (await call(session, 'POST', decisionDraftPath, 200, { headers: { Origin: origin }, data: decisionDraftInput })).json();
+  assert.deepEqual(duplicateDraft, { ...draft, duplicate: true });
+
   const writer = await (await call(session, 'POST', '/api/api-keys', 201, {
     headers: { Origin: origin, 'X-Actor-Id': 'user-seo' },
     data: { name: 'HTTPS 문서 후속 업무', access: 'write', projectIds: ['project-neo'], expiresAt: null },
   })).json();
   protectedValues.push(writer.token);
   const writerHeaders = { Authorization: `Bearer ${writer.token}`, 'X-Actor-Id': 'user-min' };
+  await call(anonymous, 'POST', '/api/v1/decision-follow-ups/meeting-draft', 403, { headers: writerHeaders, data: decisionDraftInput });
   const decisionInput = {
     expectedDocumentVersion: document.version, actorId: 'user-min', sourceSelection: { from: 1, to: text.length + 1, text },
   };

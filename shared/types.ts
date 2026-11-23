@@ -1019,10 +1019,29 @@ export interface DecisionFollowUpItem {
 
 export interface DecisionFollowUpPage {
   projectId: string | null;
+  generatedAt: string;
+  revision: string;
   total: number;
   offset: number;
   limit: number;
   items: DecisionFollowUpItem[];
+}
+
+export interface DecisionFollowUpDraftRequest {
+  requestId: string;
+  revision: string;
+  title: string;
+  destinationProjectId: string | null;
+  projectId?: string;
+  status?: 'open' | 'closed' | 'all';
+  assigneeId?: string;
+  q?: string;
+  offset?: number;
+}
+
+export interface DecisionFollowUpDraftResult {
+  document: DocPage;
+  duplicate: boolean;
 }
 
 export interface DecisionFollowUpSource {

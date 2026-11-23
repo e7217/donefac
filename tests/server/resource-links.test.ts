@@ -5,9 +5,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import { documentNodes } from '../../shared/document-references.js';
+import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const project = 'project-neo';
 const outsideProject = 'project-team';
@@ -60,7 +62,7 @@ async function fixture(t: TestContext) {
     });
     return link;
   }
-  return { call, key, issue, document, connect, cite };
+  return { call, key, issue, document, connect, cite, directory };
 }
 
 test('resource-link reads expose only active pairs whose endpoints are both allowed', async t => {
@@ -346,7 +348,9 @@ test('team decision follow-ups aggregate actual project workflows and enforce bo
   assert.deepEqual(links(await page({}, firstScope)), [firstLink.id]);
   assert.deepEqual(links(await page({}, secondScope)), [localLink.id]);
   assert.deepEqual(links(await page({}, both)), [crossLink.id, localLink.id, firstLink.id]);
-  assert.deepEqual(await page({}, unrestricted), all);
+  const unrestrictedPage = await page({}, unrestricted);
+  assert.ok(Number.isFinite(Date.parse(unrestrictedPage.generatedAt)));
+  assert.deepEqual({ ...unrestrictedPage, generatedAt: all.generatedAt }, all);
   assert.deepEqual(links(await page({ projectId: outsideProject }, both)), [crossLink.id, localLink.id]);
   await f.call(`/v1${path}?projectId=${outsideProject}`, 403, 'GET', undefined, firstScope);
   await f.call(`${path}?projectId=absent-project`, 404);
@@ -357,4 +361,166 @@ test('team decision follow-ups aggregate actual project workflows and enforce bo
   assert.deepEqual(await f.call<DecisionFollowUpSource>(`/v1${sourcePath}`, 200, 'GET', undefined, both), {
     linkId: crossLink.id, documentId: crossDocument.id, source: crossLink.documentSource,
   });
+});
+
+type MeetingDraftResult = { document: DocPage; duplicate: boolean };
+type DraftConflict = { details?: { reason?: string } };
+
+function draftReportUrl(document: DocPage) {
+  const href = [...documentNodes(document.content)].flatMap(node => node.marks ?? [])
+    .find(mark => mark.type === 'link' && String(mark.attrs?.href).includes('/reports/decision-follow-ups'))?.attrs?.href;
+  assert.equal(typeof href, 'string');
+  return new URL(String(href).slice(1), 'http://teamspace.test');
+}
+
+test('project decision meeting draft preserves reviewed original excerpts and atomically records one ordinary backlink', async t => {
+  const f = await fixture(t);
+  const query = '프로젝트 초안 교차 확인 CHECK';
+  const firstText = '편집 전에 고정한 결정 문장입니다.';
+  const secondText = '같은 업무의 다른 결정 문장입니다.';
+  const currentText = '고정 발췌와 별개로 작성한 현재 본문입니다.';
+  const source = await f.document('최초 원문 제목', project, paragraph(firstText));
+  const second = await f.document('추가 검토 원본', outsideProject, paragraph(secondText));
+  const issue = await f.issue(`${query} 대상`, project, { assigneeId: owner, dueDate: '2030-01-04' });
+  const other = await f.issue(`${query} 다른 프로젝트 업무`, outsideProject, { assigneeId: owner });
+  const firstLink = await f.cite(issue, source, firstText);
+  const secondLink = await f.cite(issue, second, secondText);
+  await f.cite(other, source, firstText);
+  await f.call(`/documents/${source.id}`, 200, 'PATCH', {
+    expectedVersion: source.version, title: '현재 원문 제목', content: paragraph(currentText),
+  });
+
+  const path = `/projects/${project}/decision-follow-ups`;
+  const draftPath = `${path}/meeting-draft`;
+  const filters = { status: 'all', assigneeId: owner, q: query };
+  const read = () => f.call<DecisionFollowUpPage>(`${path}?${new URLSearchParams(filters)}`);
+  const prior = await read();
+  assert.equal(prior.total, 2);
+  assert.deepEqual(new Set(prior.items.map(item => item.linkId)), new Set([firstLink.id, secondLink.id]));
+  assert.match(prior.revision, /^[a-f0-9]{64}$/u);
+  assert.ok(Number.isFinite(Date.parse(prior.generatedAt)));
+  assert.ok(!JSON.stringify(prior).includes(firstText));
+
+  const input = { ...filters, requestId: randomUUID(), revision: prior.revision, title: '프로젝트 후속 검토 초안', destinationProjectId: outsideProject };
+  const changed = await f.call<Issue>(`/issues/${issue.id}`, 200, 'PATCH', {
+    expectedVersion: issue.version, dueDate: '2030-01-09',
+  });
+  const stale = await f.call<DraftConflict>(draftPath, 409, 'POST', input);
+  assert.equal(stale.details?.reason, 'stale_report');
+  assert.ok(!(await f.call<WorkspaceSnapshot>('/workspace')).documents.some(document => document.title === input.title));
+  const reviewed = await read();
+  assert.notEqual(reviewed.revision, prior.revision);
+  const body = { ...input, revision: reviewed.revision };
+  const searchChanged = await f.call<DraftConflict>(draftPath, 409, 'POST', { ...body, q: query.toLowerCase() });
+  assert.equal(searchChanged.details?.reason, 'stale_report');
+  const modeChanged = await f.call<DraftConflict>('/decision-follow-ups/meeting-draft', 409, 'POST', { ...body, projectId: project });
+  assert.equal(modeChanged.details?.reason, 'stale_report');
+  const unavailable = await f.call<DraftConflict>(draftPath, 422, 'POST', { ...body, destinationProjectId: 'missing-draft-project' });
+  assert.equal(unavailable.details?.reason, 'destination_unavailable');
+
+  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  try {
+    const counts = () => ['documents', 'revisions', 'resource_links', 'activities', 'document_creation_requests']
+      .map(table => database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count);
+    const before = counts();
+    database.exec("CREATE TRIGGER fail_decision_draft_receipt BEFORE INSERT ON document_creation_requests BEGIN SELECT RAISE(ABORT, 'synthetic decision draft receipt failure'); END");
+    await f.call(draftPath, 500, 'POST', body);
+    assert.deepEqual(counts(), before);
+  } finally {
+    database.exec('DROP TRIGGER IF EXISTS fail_decision_draft_receipt');
+    database.close();
+  }
+
+  const created = await f.call<MeetingDraftResult>(draftPath, 201, 'POST', body);
+  const { document } = created;
+  assert.equal(created.duplicate, false);
+  assert.equal(document.projectId, outsideProject);
+  assert.equal(document.authorId, spoofedActor);
+  assert.equal(document.status, 'draft');
+  assert.equal(document.version, 1);
+  const nodes = [...documentNodes(document.content)];
+  assert.deepEqual(new Set(nodes.filter(node => node.type === 'blockquote')
+    .map(node => node.content?.[0]?.content?.[0]?.text)), new Set([firstText, secondText]));
+  assert.deepEqual(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), [issue.id]);
+  assert.deepEqual(new Set(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId)),
+    new Set([source.id, second.id]));
+  assert.ok(document.plainText.includes('최초 원문 제목'));
+  assert.ok(document.plainText.includes('2030-01-09'));
+  assert.ok(!document.plainText.includes(currentText));
+  assert.ok(!document.plainText.includes(other.title));
+  const backlink = draftReportUrl(document);
+  assert.equal(backlink.pathname, `/${project}/reports/decision-follow-ups`);
+  assert.deepEqual(Object.fromEntries(backlink.searchParams), filters);
+  const [snapshot] = await f.call<DocRevision[]>(`/documents/${document.id}/revisions`);
+  assert.deepEqual(snapshot.content, document.content);
+  const state = await f.call<WorkspaceSnapshot>('/workspace');
+  const links = state.resourceLinks.filter(link => link.documentId === document.id);
+  assert.deepEqual(links.map(link => [link.issueId, link.documentSource]), [[issue.id, undefined]]);
+  assert.deepEqual((await read()).items, reviewed.items);
+
+  await f.call(`/issues/${issue.id}`, 200, 'PATCH', { expectedVersion: changed.version, dueDate: '2030-01-13' });
+  assert.deepEqual(await f.call<MeetingDraftResult>(draftPath, 200, 'POST', body), { document, duplicate: true });
+  assert.equal((await f.call<DraftConflict>(draftPath, 409, 'POST', { ...body, destinationProjectId: project })).details?.reason, 'request_conflict');
+  await f.call(draftPath, 400, 'POST', { ...body, requestId: randomUUID(), projectId: outsideProject });
+  const writeKey = await f.key('write', null);
+  await f.call(`/v1${draftPath}`, 403, 'POST', { ...body, requestId: randomUUID() }, writeKey);
+});
+
+test('team decision meeting draft captures the reviewed offset and preserves valid evidence beside unavailable evidence', async t => {
+  const f = await fixture(t);
+  const query = '팀 회의 자료 페이지 검증';
+  const available = '둘째 결정의 정상적인 고정 발췌입니다.';
+  const broken = '셋째 결정의 원래 발췌입니다.';
+  const corrupted = '다른 저장본에 없는 변조 텍스트입니다.';
+  const first = await f.issue(`${query} 첫 페이지 이전 결정`, project, { dueDate: '2030-06-01' });
+  const second = await f.issue(`${query} 정상 결정`, outsideProject, { dueDate: '2030-06-03' });
+  const third = await f.issue(`${query} 확인 불가 결정`, project, { dueDate: '2030-06-05' });
+  const firstDocument = await f.document('처음 결정 원문', project, paragraph(available));
+  const secondDocument = await f.document('공통 공간 원문', null, paragraph(available));
+  const thirdDocument = await f.document('누락 검증 원문', outsideProject, paragraph(broken));
+  await f.cite(first, firstDocument, available);
+  const secondLink = await f.cite(second, secondDocument, available);
+  const thirdLink = await f.cite(third, thirdDocument, broken);
+
+  const database = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  try {
+    database.prepare("UPDATE resource_links SET json=json_set(json,'$.documentSource.text',?) WHERE id=?")
+      .run(corrupted, thirdLink.id);
+  } finally { database.close(); }
+
+  const path = '/decision-follow-ups';
+  const draftPath = `${path}/meeting-draft`;
+  const page = await f.call<DecisionFollowUpPage>(`${path}?${new URLSearchParams({ q: query, offset: '1' })}`);
+  assert.equal(page.total, 3);
+  assert.equal(page.offset, 1);
+  assert.deepEqual(page.items.map(item => item.linkId), [secondLink.id, thirdLink.id]);
+  const body = { requestId: randomUUID(), revision: page.revision, title: '팀 공통 결정 검토 초안', destinationProjectId: null, q: query, offset: 1 };
+  const { document } = await f.call<MeetingDraftResult>(draftPath, 201, 'POST', body);
+  assert.equal(document.projectId, null);
+  assert.ok(document.plainText.includes(second.title));
+  assert.ok(document.plainText.includes(third.title));
+  assert.ok(!document.plainText.includes(first.title));
+  assert.ok(document.plainText.includes(available));
+  assert.ok(document.plainText.includes('저장된 결정 근거를 확인할 수 없습니다.'));
+  assert.ok(!document.plainText.includes(corrupted));
+  assert.ok(!document.plainText.includes(broken));
+  const link = draftReportUrl(document);
+  assert.match(link.pathname, /^\/[^/]+\/reports\/decision-follow-ups$/u);
+  assert.deepEqual(Object.fromEntries(link.searchParams), { q: query, offset: '1', scope: 'team' });
+  const state = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(state.resourceLinks.filter(link => link.documentId === document.id).map(link => link.issueId), [second.id, third.id]);
+
+  const empty = await f.call<DecisionFollowUpPage>(`${path}?${new URLSearchParams({ q: query, offset: '3' })}`);
+  assert.equal(empty.items.length, 0);
+  await f.call(draftPath, 422, 'POST', { ...body, requestId: randomUUID(), revision: empty.revision, offset: 3 });
+  const scoped = await f.call<DecisionFollowUpPage>(`${path}?${new URLSearchParams({ q: query, projectId: outsideProject })}`);
+  const { document: scopedDraft } = await f.call<MeetingDraftResult>(draftPath, 201, 'POST', {
+    ...body, requestId: randomUUID(), revision: scoped.revision, title: '선택 프로젝트 결정 검토 초안', projectId: outsideProject, offset: 0,
+    destinationProjectId: project,
+  });
+  assert.equal(scopedDraft.projectId, project);
+  assert.deepEqual(Object.fromEntries(draftReportUrl(scopedDraft).searchParams), { q: query, scope: 'team', decisionProject: outsideProject });
+  assert.deepEqual([...documentNodes(scopedDraft.content)].filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), [second.id]);
+  const writeKey = await f.key('write', null);
+  await f.call(`/v1${draftPath}`, 403, 'POST', { ...body, requestId: randomUUID() }, writeKey);
 });
