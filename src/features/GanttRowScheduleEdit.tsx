@@ -2,18 +2,19 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { CalendarRange, Check, Loader2, Plus, RefreshCw, X } from 'lucide-react';
-import { CalendarError, createCalendarMath, defaultWorkCalendar, isCalendarDate, MAX_CALENDAR_DATE } from '../../shared/calendar';
+import { CalendarError, createCalendarMath, defaultWorkCalendar, isCalendarDate, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS } from '../../shared/calendar';
 import {
   DEPENDENCY_LABELS, DEPENDENCY_TYPES, dependencyBound, dependencyGuardFields, isDependencyLag,
   MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS,
 } from '../../shared/schedule-dependencies';
+import { suggestMissingScheduleDates, type MissingScheduleLink } from '../../shared/schedule-missing-dates';
 import {
   MAX_SCHEDULE_ROW_DEPENDENCY_EDITS,
   type Dependency, type DependencyType, type FeatureProps, type Issue, type ScheduleBulkDateChanges,
   type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type WorkCalendar,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
-import { errorMessage } from './schedule-utils';
+import { errorMessage, todayDate } from './schedule-utils';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import './schedule-paste.css';
 import './gantt-row-schedule-edit.css';
@@ -112,6 +113,23 @@ function resolveDraft(draft: LinkDraft, anchor: Issue, projectIssues: ReadonlyMa
   return resolution;
 }
 
+function linksForDateSuggestion(links: readonly ExistingLink[], edits: readonly ScheduleRowDependencyEdit[],
+  projectIssues: ReadonlyMap<string, Issue>): MissingScheduleLink[] {
+  const byId = new Map(links.map(({ dependency: { id, type, lagDays }, role, other }) => [id, { type, lagDays, role, other }]));
+  const added: MissingScheduleLink[] = [];
+  for (const edit of edits) {
+    if (edit.action === 'add') {
+      const other = projectIssues.get(edit.relatedIssue.id);
+      if (other) added.push({ role: edit.direction, type: edit.type, lagDays: edit.lagDays, other });
+    } else if (edit.action === 'remove') byId.delete(edit.id);
+    else {
+      const link = byId.get(edit.id);
+      if (link) byId.set(edit.id, { ...link, type: edit.type, lagDays: edit.lagDays });
+    }
+  }
+  return [...byId.values(), ...added];
+}
+
 function definiteRejection(cause: unknown, recovering: boolean) {
   return cause instanceof ApiError && cause.status >= 400 && cause.status < 500 &&
     ![408, 425, 429, 499].includes(cause.status) &&
@@ -136,6 +154,7 @@ export function GanttRowScheduleEdit({
   const [clock, setClock] = useState(currentTime);
   const modal = useRef<HTMLElement>(null);
   const initialDateInput = useRef<HTMLInputElement>(null);
+  const previewButton = useRef<HTMLButtonElement>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
   const recoverButton = useRef<HTMLButtonElement>(null);
@@ -193,6 +212,8 @@ export function GanttRowScheduleEdit({
   }
 
   const calendarMath = useMemo(() => createCalendarMath(calendar ?? defaultWorkCalendar(issue.projectId)), [calendar, issue.projectId]);
+  const showMissingDateSuggestion = (!nextDates.startDate || !nextDates.endDate) &&
+    (links.length > 0 || resolvedDrafts.some(({ edit }) => edit?.action === 'add'));
   const earliestDates: Partial<Record<keyof typeof SCHEDULE_DATE_LABELS, string>> = {};
   for (const [index, resolved] of resolvedDrafts.entries()) {
     if (!resolved.predecessor || duplicateDraft(resolved)) continue;
@@ -434,6 +455,18 @@ export function GanttRowScheduleEdit({
               </div>
             </div>)}
           </div>
+          {showMissingDateSuggestion && <MissingDateSuggestion
+            startDate={nextDates.startDate} endDate={nextDates.endDate} calendarMath={calendarMath}
+            links={linksValid ? linksForDateSuggestion(links, edits, projectIssues) : null}
+            disabled={editLocked || !currentIssue || reloadNeeded} onUse={range => {
+              setEditedDates(previous => ({
+                ...previous,
+                ...(!nextDates.startDate ? { startDate: range.startDate } : {}),
+                ...(!nextDates.endDate ? { endDate: range.endDate } : {}),
+              }));
+              invalidate();
+              requestAnimationFrame(() => previewButton.current?.focus());
+            }} />}
           <WorkingDayRangePicker calendarMath={calendarMath} startDate={nextDates.startDate ?? null} endDate={nextDates.endDate ?? null}
             disabled={editLocked || !currentIssue} onApply={range => {
               setEditedDates(previous => ({ ...previous, ...range }));
@@ -483,7 +516,7 @@ export function GanttRowScheduleEdit({
           </div>
         </fieldset>
         <div className="gantt-row-edit-actions">
-          <button className="btn btn-primary" type="submit" disabled={editLocked || !canPreview || reloadNeeded}>변경 미리보기</button>
+          <button ref={previewButton} className="btn btn-primary" type="submit" disabled={editLocked || !canPreview || reloadNeeded}>변경 미리보기</button>
           <button className="btn" type="button" disabled={editLocked} onClick={() => void reloadTargets()}>
             <RefreshCw size={15} aria-hidden="true" />최신 업무 불러오기
           </button>
@@ -531,6 +564,42 @@ export function GanttRowScheduleEdit({
       </footer>
     </section>
   </div>;
+}
+
+function MissingDateSuggestion({ startDate, endDate, calendarMath, links, disabled, onUse }: {
+  startDate: string | null;
+  endDate: string | null;
+  calendarMath: ReturnType<typeof createCalendarMath>;
+  links: MissingScheduleLink[] | null;
+  disabled: boolean;
+  onUse: (dates: { startDate: string; endDate: string }) => void;
+}) {
+  const uid = useId();
+  const [duration, setDuration] = useState('3');
+  const workingDays = /^\d+$/u.test(duration.trim()) ? Number(duration) : NaN;
+  const validDuration = Number.isSafeInteger(workingDays) && workingDays >= 1 && workingDays <= MAX_WORKING_DURATION_DAYS;
+  const suggestion = links && validDuration
+    ? suggestMissingScheduleDates({ startDate, endDate, notBefore: todayDate(), workingDays, links, calendarMath })
+    : null;
+  const range = suggestion?.dates;
+  return <section className="gantt-missing-date-suggestion" aria-labelledby={`${uid}-heading`}>
+    <h3 id={`${uid}-heading`}>선후행 연결로 날짜 제안</h3>
+    <div className="gantt-missing-date-suggestion-controls">
+      <label>제안 근무일 수<input className="field" type="text" inputMode="numeric" value={duration}
+        disabled={disabled} aria-invalid={!validDuration || undefined} onChange={event => setDuration(event.currentTarget.value)}
+        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault(); }} /></label>
+      <button className="btn" type="button" disabled={disabled || !range} onClick={() => { if (range) onUse(range); }}>
+        제안 날짜 입력
+      </button>
+    </div>
+    <div aria-live="polite">
+      {range && <p><output aria-label="제안 날짜 범위"><strong>{range.startDate}</strong> ~ <strong>{range.endDate}</strong></output></p>}
+      {!validDuration && <p>근무일 수는 1~3,650 사이의 정수로 입력해 주세요.</p>}
+      {links === null && <p>선후행 연결 입력을 확인한 뒤 날짜를 제안할 수 있습니다.</p>}
+      {suggestion?.pendingKeys.length ? <p>날짜 확인이 필요한 연결 · {suggestion.pendingKeys.join(', ')}</p> : null}
+      {suggestion?.conflicts.length ? <ul>{suggestion.conflicts.map(message => <li key={message}>{message}</li>)}</ul> : null}
+    </div>
+  </section>;
 }
 
 function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links, resolved, duplicateDraft, onChange, onRemove }: {

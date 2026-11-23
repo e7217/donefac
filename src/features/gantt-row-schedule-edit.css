@@ -175,6 +175,45 @@
   font-size: 0.875rem;
 }
 
+.gantt-missing-date-suggestion {
+  margin-block: .5rem;
+  padding: .55rem .7rem;
+  border: 1px solid #dce7e1;
+  border-radius: 7px;
+  background: #f5f9f6;
+  color: #435d51;
+  font-size: .875rem;
+}
+
+.gantt-missing-date-suggestion h3 {
+  margin: 0 0 .35rem;
+  font-size: .875rem;
+}
+
+.gantt-missing-date-suggestion-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: .35rem .65rem;
+}
+
+.gantt-missing-date-suggestion-controls label {
+  margin: 0;
+}
+
+.gantt-missing-date-suggestion-controls .btn {
+  min-height: 40px;
+}
+
+.gantt-missing-date-suggestion p,
+.gantt-missing-date-suggestion ul {
+  margin: .4rem 0 0;
+}
+
+.gantt-missing-date-suggestion ul {
+  padding-inline-start: 1.2rem;
+}
+
 .gantt-row-schedule-edit > .gantt-row-edit-missing {
   margin-inline: 1.5rem;
 }

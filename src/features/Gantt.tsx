@@ -612,10 +612,11 @@ function ProjectGantt(props: GanttProps) {
   const findingsProjectId = focusedTrace?.anchor.projectId ?? chartProjectFilter;
   const calendar = useMemo(() => timelineProjectId ? calendarFor(timelineProjectId) : undefined, [calendarFor, timelineProjectId]);
   const calendarMath = useMemo(() => calendar && createCalendarMath(calendar), [calendar]);
-  const { projectDependencyCount, findings, conflictingIds, outgoingIssueIds } = useMemo(() => {
+  const { projectDependencyCount, findings, conflictingIds, linkedIssueIds, outgoingIssueIds } = useMemo(() => {
     const issuesById = new Map(projectIssues.map(issue => [issue.id, issue]));
     const findings: GanttDependencyFinding[] = [];
     const conflictingIds = new Set<string>();
+    const linkedIssueIds = new Set<string>();
     const outgoingIssueIds = new Set<string>();
     const mathByProject = new Map<string, ReturnType<typeof createCalendarMath>>();
     if (timelineProjectId && calendarMath) mathByProject.set(timelineProjectId, calendarMath);
@@ -625,6 +626,8 @@ function ProjectGantt(props: GanttProps) {
       const successor = issuesById.get(dependency.successorId);
       if (!predecessor || !successor || predecessor.projectId !== successor.projectId) continue;
       const dependencyProjectId = predecessor.projectId;
+      linkedIssueIds.add(predecessor.id);
+      linkedIssueIds.add(successor.id);
       outgoingIssueIds.add(predecessor.id);
       if (!chartProjectFilter || dependencyProjectId === chartProjectFilter) projectDependencyCount++;
       if (findingsProjectId && dependencyProjectId !== findingsProjectId) continue;
@@ -638,7 +641,7 @@ function ProjectGantt(props: GanttProps) {
       findings.push({ dependency, predecessor, successor, check });
       if (check.kind === 'conflict') conflictingIds.add(dependency.id);
     }
-    return { projectDependencyCount, findings, conflictingIds, outgoingIssueIds };
+    return { projectDependencyCount, findings, conflictingIds, linkedIssueIds, outgoingIssueIds };
   }, [projectIssues, data.dependencies, calendarFor, calendarMath, chartProjectFilter, timelineProjectId, findingsProjectId]);
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
@@ -1932,8 +1935,11 @@ function ProjectGantt(props: GanttProps) {
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
         disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
       <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
-      <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)}
-        onClick={event => completeMissingDates(issue, event.currentTarget)}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>
+      {linkedIssueIds.has(issue.id)
+        ? <button type="button" className="btn gantt-missing-date-action" disabled={busy || Boolean(linkPicker || activeDatePicker)}
+          onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><CalendarRange size={13} aria-hidden="true" />연결 기준으로 일정 제안</button>
+        : <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)}
+          onClick={event => completeMissingDates(issue, event.currentTarget)}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>}
     </div>) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
       <section className="gantt-bottom-card" aria-label="업무 연결 목록">
         <div className="gantt-bottom-heading">
