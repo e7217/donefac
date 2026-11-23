@@ -9,7 +9,7 @@ import type { IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
 
 const restoreVersionFloor = 'savedFieldBreakdownRestoreVersion';
-const queryFields = ['fieldId', 'groupBy', 'savedViewId', 'comparisonBy'];
+const queryFields = ['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'comparisonFieldId'];
 const backupFields = ['id', 'projectId', 'name', 'query', 'version', 'createdAt', 'updatedAt'];
 
 function fail(status: number, message: string): never {
@@ -39,7 +39,7 @@ function validId(value: unknown): value is string {
 
 function queryValue(value: unknown): IssueFieldBreakdownQuery {
   const query = parseFieldBreakdownQuery(fields(value, queryFields, '저장할 필드 집계 조건을 확인해 주세요.'));
-  if (query.fieldId !== undefined && !validId(query.fieldId) || query.savedViewId !== undefined && !validId(query.savedViewId)) {
+  if ([query.fieldId, query.comparisonFieldId, query.savedViewId].some(id => id !== undefined && !validId(id))) {
     return fail(400, '필드 또는 저장된 보기의 ID를 확인해 주세요.');
   }
   return query;
@@ -47,7 +47,7 @@ function queryValue(value: unknown): IssueFieldBreakdownQuery {
 
 function sameQuery(left: IssueFieldBreakdownQuery, right: IssueFieldBreakdownQuery): boolean {
   return left.fieldId === right.fieldId && left.groupBy === right.groupBy &&
-    left.savedViewId === right.savedViewId && left.comparisonBy === right.comparisonBy;
+    left.savedViewId === right.savedViewId && left.comparisonBy === right.comparisonBy && left.comparisonFieldId === right.comparisonFieldId;
 }
 
 function isVersion(value: unknown): value is number {

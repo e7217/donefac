@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { ApiKeyCreated, DocPage, Favorite, FavoriteRecord, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const first = 'user-min';
@@ -137,7 +138,7 @@ test('native format 94 restores live and archived actor favorites and rejects in
   const active = await f.mark(issuePath), archived = await f.mark(docPath, second);
   const { trashEntryId } = await f.archive('document', doc.id);
   const backup = await f.exportWorkspace();
-  assert.equal(backup.schemaVersion, 94);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const rows = backup.favorites;
   assert.ok(rows);
   assert.equal(rows.length, 2);
@@ -164,7 +165,7 @@ test('native format 94 restores live and archived actor favorites and rejects in
   assert.deepEqual(await f.list(), []);
   assert.deepEqual(await f.list(second), []);
 
-  await importWorkspace(backup);
+  await importWorkspace({ ...backup, schemaVersion: 94 });
   assert.deepEqual(await f.list(), [active]);
   assert.deepEqual(await f.list(second), []);
   await f.restore(trashEntryId);

@@ -207,6 +207,30 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(anonymous, 'POST', repositorySearchPath, 401, { headers: { ...bearer, Origin: origin }, data: searchWithoutQuery });
   await call(anonymous, 'POST', '/api/v1/integrations/gitlab/repository-search', 403, { headers: bearer, data: searchWithoutQuery });
 
+  const schemaPath = '/api/projects/project-neo/issue-schema';
+  const schema = await (await call(session, 'GET', schemaPath, 200)).json();
+  const comparisonFieldId = 'pilot_area';
+  await call(session, 'PATCH', schemaPath, 200, { headers: { Origin: origin }, data: {
+    ...schema, expectedVersion: schema.version, fields: [...schema.fields, {
+      id: comparisonFieldId, name: 'HTTPS 확인 범위', description: '', kind: 'multi_select', required: false, archived: false, issueTypes: [],
+      options: [{ id: 'client', name: '클라이언트', archived: false }, { id: 'server', name: '서버', archived: false }],
+    }],
+  } });
+  const matrixIssue = await (await call(session, 'POST', '/api/issues', 201, { headers: { Origin: origin }, data: {
+    projectId: 'project-neo', title: 'HTTPS 교차 집계 업무', customFields: { [comparisonFieldId]: ['client', 'server'] },
+  } })).json();
+  const fieldBreakdownPath = '/api/v1/projects/project-neo/field-breakdown';
+  const fieldBreakdownQuery = { groupBy: 'status', comparisonFieldId };
+  const matrix = await (await call(anonymous, 'POST', fieldBreakdownPath, 200, { headers: bearer, data: fieldBreakdownQuery })).json();
+  assert.equal(matrix.comparison.field.id, comparisonFieldId);
+  const column = matrix.comparison.columns.find(item => item.label === '서버');
+  const row = matrix.groups.find(item => matrix.comparison.counts[item.id]?.[column?.id] === 1);
+  assert.ok(row && column);
+  const cellQuery = { ...fieldBreakdownQuery, revision: matrix.revision, bucketId: row.id, comparisonBucketId: column.id };
+  const cell = await (await call(anonymous, 'POST', `${fieldBreakdownPath}/issues`, 200, { headers: bearer, data: cellQuery })).json();
+  assert.deepEqual(cell.issues.map(item => item.id), [matrixIssue.id]);
+  await call(anonymous, 'POST', '/api/v1/projects/project-team/field-breakdown', 403, { headers: bearer, data: fieldBreakdownQuery });
+
   const title = 'HTTPS 팀 결정 조회 검증';
   const text = '외부 전송 없이 저장할 합성 결정 근거입니다.';
   const document = await (await call(session, 'POST', '/api/documents', 201, {
@@ -462,7 +486,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups, weekly reports and release readiness, integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, scoped field breakdowns and decision follow-ups, weekly reports and release readiness, integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();

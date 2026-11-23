@@ -364,3 +364,98 @@ test('custom field by status keeps overlapping memberships and priority by type 
     assert.deepEqual(ids(pair.data.issues), [urgent.id]);
   } finally { await f.close(); }
 });
+
+test('custom comparison columns keep exact scoped cell membership for pages and bulk edits', async () => {
+  const f = await fixture();
+  try {
+    const { id: projectId } = f.project;
+    const path = `/projects/${projectId}/field-breakdown`;
+    const cross = { fieldId: 'tags', comparisonFieldId: 'score' };
+    const { status: crossStatus, data: crossReport } = await f.call<IssueFieldBreakdown>(path, 'POST', cross);
+    assert.equal(crossStatus, 200, JSON.stringify(crossReport));
+    const zero = crossReport.comparison?.columns.find(column => column.label === '0');
+    assert.ok(zero);
+    assert.equal(crossReport.comparison?.columns.find(column => column.id === 'missing')?.count, 1);
+    assert.equal(crossReport.comparison?.columns.find(column => column.id === 'not-applicable')?.count, 1);
+    const redRow = group(crossReport, 'value', '빨강');
+    const zeroCell = await f.call<IssueFieldBreakdownPage>(`${path}/issues`, 'POST', {
+      ...cross, revision: crossReport.revision, bucketId: redRow.id, comparisonBucketId: zero.id,
+    });
+    assert.equal(zeroCell.status, 200, JSON.stringify(zeroCell.data));
+    assert.deepEqual(ids(zeroCell.data.issues), [f.a.id]);
+
+    const added: Issue[] = [];
+    for (let index = 1; index <= 51; index++) {
+      added.push(await f.make(`검증 비교 페이지 ${index}`, { approved: false, tags: ['red'] }));
+    }
+    const foreign = await f.make('검증 다른 프로젝트 업무', {}, { projectId: 'project-team' });
+    const key = await f.call<ApiKeyCreated>('/api-keys', 'POST', {
+      name: '합성 비교 읽기 키', access: 'read', projectIds: [projectId], expiresAt: null,
+    });
+    assert.equal(key.status, 201, JSON.stringify(key.data));
+    const token = key.data.token;
+    const query = { groupBy: 'status', comparisonFieldId: 'tags', savedViewId: f.view.id };
+    const read = async () => {
+      const result = await f.call<IssueFieldBreakdown>(`/v1${path}`, 'POST', query, token);
+      assert.equal(result.status, 200, JSON.stringify(result.data));
+      return result.data;
+    };
+    const matrix = await read();
+    assert.equal(matrix.totalIssues, 53);
+    assert.deepEqual(matrix.comparison?.field, { id: 'tags', kind: 'multi_select', name: '합성 분류', archived: false });
+    const red = matrix.comparison?.columns.find(column => column.label === '빨강');
+    const blue = matrix.comparison?.columns.find(column => column.label === '파랑');
+    const row = matrix.groups.find(bucket => bucket.count === matrix.totalIssues);
+    assert.ok(red && blue && row);
+    assert.deepEqual([red.count, blue.count], [53, 1]);
+    assert.deepEqual(matrix.comparison?.counts[row.id], { [red.id]: 53, [blue.id]: 1 });
+
+    const cell = { ...query, revision: matrix.revision, bucketId: row.id, comparisonBucketId: red.id };
+    const readCell = (offset: number) => f.call<IssueFieldBreakdownPage>(`/v1${path}/issues`, 'POST', {
+      ...cell, offset, includeEditTargets: true,
+    }, token);
+    const [first, next] = await Promise.all([readCell(0), readCell(50)]);
+    assert.equal(first.status, 200, JSON.stringify(first.data));
+    assert.equal(next.status, 200, JSON.stringify(next.data));
+    assert.equal(first.data.total, 53);
+    assert.equal(next.data.total, 53);
+    assert.deepEqual([first.data.issues.length, next.data.issues.length], [50, 3]);
+    assert.deepEqual(ids([...first.data.issues, ...next.data.issues]), ids([f.a, f.e, ...added]));
+    assert.deepEqual(ids(next.data.editTargets ?? []), ids(next.data.issues));
+    for (const suffix of ['', '/issues']) {
+      assert.equal((await f.call(`/v1/projects/project-team/field-breakdown${suffix}`, 'POST', cell, token)).status, 403);
+    }
+    assert.equal((await f.call(path, 'POST', { ...query, comparisonBy: 'assignee' })).status, 400);
+    assert.equal((await f.call(path, 'POST', { ...cross, comparisonFieldId: 'tags' })).status, 400);
+    assert.equal((await f.call(path, 'POST', { ...query, comparisonFieldId: 'absent' })).status, 404);
+    assert.equal((await f.call(`${path}/issues`, 'POST', { ...cell, comparisonFieldId: 'absent' })).status, 404);
+
+    const bulkPath = `/projects/${projectId}/issues/bulk`;
+    const review = (issue: Issue, fieldBreakdown = cell) => f.call<IssueBulkEditPreview>(`${bulkPath}-preview`, 'POST', {
+      issues: [{ id: issue.id, expectedVersion: issue.version }], changes: { priority: 'urgent' }, fieldBreakdown,
+    });
+    assert.equal((await review(f.b)).status, 409);
+    assert.equal((await review(foreign)).status, 409);
+    const reviewed = await review(f.e);
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    assert.ok(reviewed.data.previewId);
+    const changed = await f.call<Issue>(`/issues/${f.a.id}`, 'PATCH', { expectedVersion: f.a.version, customFields: { ...f.a.customFields, tags: ['blue'] } });
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    assert.equal((await readCell(0)).status, 409);
+    const stale = await f.call<{ details: { reason: string } }>(`${bulkPath}-apply`, 'POST', { previewId: reviewed.data.previewId });
+    assert.equal(stale.status, 409, JSON.stringify(stale.data));
+    assert.equal(stale.data.details.reason, 'field_breakdown_stale');
+    const current = (await f.call<WorkspaceSnapshot>('/workspace')).data.issues;
+    assert.deepEqual(current.find(issue => issue.id === f.e.id), f.e);
+    assert.deepEqual(current.find(issue => issue.id === foreign.id), foreign);
+
+    const refreshed = await read();
+    const refreshedCell = { ...cell, revision: refreshed.revision };
+    const fresh = await review(f.e, refreshedCell);
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.data));
+    assert.ok(fresh.data.previewId);
+    const applied = await f.call(`${bulkPath}-apply`, 'POST', { previewId: fresh.data.previewId });
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.id === f.e.id)?.priority, 'urgent');
+  } finally { await f.close(); }
+});

@@ -27,11 +27,14 @@ import { IssueBulkEdit, useIssueBulkEdit } from './IssueBulkEdit';
 import { FieldBreakdownPresets } from './FieldBreakdownPresets';
 import './field-breakdown.css';
 
-type ConfirmedQuery = { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension } & (
+type ComparisonQuery = { comparisonBy?: IssueFieldBreakdownDimension; comparisonFieldId?: never }
+  | { comparisonBy?: never; comparisonFieldId: string };
+type QueryScope = { savedViewId: string | null } & ComparisonQuery;
+type ConfirmedQuery = QueryScope & (
   | { fieldId: string; groupBy?: never }
   | { groupBy: IssueFieldBreakdownDimension; fieldId?: never }
 );
-type Query = ConfirmedQuery | { savedViewId: string | null; comparisonBy?: IssueFieldBreakdownDimension; fieldId?: never; groupBy?: never };
+type Query = ConfirmedQuery | (QueryScope & { fieldId?: never; groupBy?: never });
 type Props = FeatureProps & {
   linkedScope: FieldBreakdownScope | null;
   onPublishScope: (scope: FieldBreakdownScope) => boolean;
@@ -46,6 +49,7 @@ const pagePosition = (page: IssueFieldBreakdownPage): CohortPosition => ({
 const GROUP_PAGE_SIZE = 25;
 const ISSUE_PAGE_SIZE = 50;
 const COMPARISON_PAGE_SIZE = 10;
+const CUSTOM_COMPARISON_PREFIX = 'custom:';
 const DIMENSION_LABELS: Record<IssueFieldBreakdownDimension, string> = {
   status: '상태', priority: '우선순위', assignee: '담당자', reporter: '요청자', type: '유형',
 };
@@ -60,22 +64,28 @@ const KIND_LABELS: Record<CustomFieldKind, string> = {
   url: 'URL',
 };
 const sameQuery = (a: Query, b: Query) => a.fieldId === b.fieldId && a.groupBy === b.groupBy &&
-  a.comparisonBy === b.comparisonBy && a.savedViewId === b.savedViewId;
+  a.comparisonBy === b.comparisonBy && a.comparisonFieldId === b.comparisonFieldId && a.savedViewId === b.savedViewId;
+const comparisonQuery = (comparisonBy?: IssueFieldBreakdownDimension, comparisonFieldId?: string): ComparisonQuery =>
+  comparisonFieldId ? { comparisonFieldId } : { comparisonBy };
+
 function linkedSelection(scope: FieldBreakdownScope | null, firstFieldId: string): { query: Query; automatic: boolean } {
   const valid = scope?.invalid ? null : scope;
   const savedViewId = valid?.savedViewId ?? null;
-  if (valid?.fieldId) return { query: { fieldId: valid.fieldId, savedViewId, comparisonBy: valid.comparisonBy }, automatic: true };
-  if (valid?.groupBy) return { query: { groupBy: valid.groupBy, savedViewId, comparisonBy: valid.comparisonBy }, automatic: true };
+  const filters = { savedViewId, ...comparisonQuery(valid?.comparisonBy, valid?.comparisonFieldId) };
+  if (valid?.fieldId) return { query: { fieldId: valid.fieldId, ...filters }, automatic: true };
+  if (valid?.groupBy) return { query: { groupBy: valid.groupBy, ...filters }, automatic: true };
   if (savedViewId || scope?.invalid) return { query: { savedViewId }, automatic: false };
   return { query: firstFieldId ? { fieldId: firstFieldId, savedViewId } : { groupBy: 'status', savedViewId }, automatic: false };
 }
 
 function scopeOf(query: Query): FieldBreakdownScope {
-  return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined, comparisonBy: query.comparisonBy };
+  return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined,
+    comparisonBy: query.comparisonBy, comparisonFieldId: query.comparisonFieldId };
 }
 
 function reportQuery(report: IssueFieldBreakdown): ConfirmedQuery {
-  const filters = { savedViewId: report.savedView?.id ?? null, comparisonBy: report.comparison?.by };
+  const filters = { savedViewId: report.savedView?.id ?? null,
+    ...comparisonQuery(report.comparison?.by, report.comparison?.field?.id) };
   return report.groupBy ? { groupBy: report.groupBy, ...filters } : { fieldId: report.field.id, ...filters };
 }
 
@@ -144,8 +154,7 @@ function ProjectFieldBreakdown(props: Props) {
   const validProject = data.projects.some((project) => project.id === projectId);
   const views = (reloadedViews ?? data.savedViews ?? []).filter((view) => view.projectId === projectId);
   const fieldBreakdown: IssueFieldBreakdownSelection | undefined = report && page?.editTargets ? {
-    ...(report.groupBy ? { groupBy: report.groupBy } : { fieldId: report.field.id }),
-    savedViewId: report.savedView?.id ?? null, comparisonBy: report.comparison?.by, revision: report.revision,
+    ...reportQuery(report), revision: report.revision,
     bucketId: page.bucket.id, comparisonBucketId: page.comparisonBucket?.id,
   } : undefined;
   const bulk = useIssueBulkEdit({ ...props, refresh: refreshBulkCohort }, verifiedTargets, { fieldBreakdown, pageTargets: page?.editTargets ?? [] });
@@ -256,9 +265,21 @@ function ProjectFieldBreakdown(props: Props) {
 
   function choosePrimary(value: string) {
     const groupBy = ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value);
-    const { savedViewId, comparisonBy } = query;
-    if (groupBy) update({ groupBy, savedViewId, comparisonBy: comparisonBy === groupBy ? undefined : comparisonBy });
-    else if (value === 'custom' && firstFieldId) update({ fieldId: firstFieldId, savedViewId, comparisonBy });
+    const { savedViewId, comparisonBy, comparisonFieldId } = query;
+    if (groupBy) update({ groupBy, savedViewId, ...comparisonQuery(comparisonBy === groupBy ? undefined : comparisonBy, comparisonFieldId) });
+    else if (value === 'custom' && firstFieldId) chooseCustomField(firstFieldId);
+  }
+
+  function chooseCustomField(fieldId: string) {
+    const { savedViewId, comparisonBy, comparisonFieldId } = query;
+    update({ fieldId, savedViewId, ...comparisonQuery(comparisonBy, comparisonFieldId === fieldId ? undefined : comparisonFieldId) });
+  }
+
+  function chooseComparison(value: string) {
+    const comparisonFieldId = value.startsWith(CUSTOM_COMPARISON_PREFIX) ? value.slice(CUSTOM_COMPARISON_PREFIX.length) : undefined;
+    const comparisonBy = ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value && dimension !== query.groupBy);
+    update({ ...query, comparisonBy: undefined, comparisonFieldId: undefined,
+      ...comparisonQuery(comparisonBy, comparisonFieldId === query.fieldId ? undefined : comparisonFieldId) });
   }
 
   const readBucket = useCallback((submitted: Query, revision: string, position: CohortPosition, signal: AbortSignal) =>
@@ -315,7 +336,7 @@ function ProjectFieldBreakdown(props: Props) {
         : nextPage?.editTargets ?? []);
       setCohortNotice(cohort && !nextPage ? '이 그룹에 남은 업무가 없습니다. 최신 집계를 표시합니다.' : '');
       setPageError('');
-      if (!cohort) setGroupsOffset(0);
+      if (!cohort || (result.comparison?.field && cohort.revision !== result.revision)) setGroupsOffset(0);
       setStale(false);
       if (publish) {
         const scope = scopeOf(confirmed);
@@ -355,7 +376,8 @@ function ProjectFieldBreakdown(props: Props) {
   }
 
   function openPreset(preset: SavedFieldBreakdown) {
-    const submitted: ConfirmedQuery = { ...preset.query, savedViewId: preset.query.savedViewId ?? null };
+    const { savedViewId, comparisonBy, comparisonFieldId, ...primary } = preset.query;
+    const submitted: ConfirmedQuery = { ...primary, savedViewId: savedViewId ?? null, ...comparisonQuery(comparisonBy, comparisonFieldId) };
     const scope = scopeOf(submitted);
     if (!sameFieldBreakdownScope(linkedScope, scope)) {
       if (onOpenScope(scope)) focusPresetScope.current = scope;
@@ -459,12 +481,19 @@ function ProjectFieldBreakdown(props: Props) {
   const groups = report?.comparison ? report.groups.filter(bucket => bucket.count > 0) : report?.groups ?? [];
   const start = Math.min(groupsOffset, Math.max(0, Math.floor((groups.length - 1) / GROUP_PAGE_SIZE) * GROUP_PAGE_SIZE));
   const selectedField = schema.fields.find((field) => field.id === query.fieldId);
+  const selectedComparisonField = schema.fields.find(field => field.id === query.comparisonFieldId);
+  const comparisonFields = schema.fields.filter(field => field.id !== query.fieldId);
+  const comparisonLabel = report?.comparison?.by ? DIMENSION_LABELS[report.comparison.by] : report?.comparison?.field?.name;
+  const overlaps = report?.field.kind === 'multi_select' || report?.comparison?.field?.kind === 'multi_select';
   const drillBusy = pageLoading || reportLoading;
   const saveableQuery = report && !dirty && !drillBusy && !bulk.locked && !stale && !queryError ? presetQuery(report) : null;
   const describePresetQuery = (value: IssueFieldBreakdownQuery) => {
     const primary = value.groupBy ? DIMENSION_LABELS[value.groupBy]
       : schema.fields.find(field => field.id === value.fieldId)?.name ?? `${value.fieldId} · 현재 정의 없음`;
-    const comparison = value.comparisonBy ? ` × ${DIMENSION_LABELS[value.comparisonBy]}` : '';
+    const comparisonName = value.comparisonBy ? DIMENSION_LABELS[value.comparisonBy]
+      : value.comparisonFieldId ? schema.fields.find(field => field.id === value.comparisonFieldId)?.name ??
+        `${value.comparisonFieldId} · 현재 정의 없음` : undefined;
+    const comparison = comparisonName ? ` × ${comparisonName}` : '';
     const view = value.savedViewId ? views.find(item => item.id === value.savedViewId)?.name ?? '저장된 보기 · 현재 목록 없음' : '프로젝트 전체 업무';
     return `${primary}${comparison} · ${view}`;
   };
@@ -509,7 +538,7 @@ function ProjectFieldBreakdown(props: Props) {
                 className="field"
                 aria-label="집계할 사용자 정의 필드"
                 value={query.fieldId}
-                onChange={(event) => update({ fieldId: event.currentTarget.value, savedViewId: query.savedViewId, comparisonBy: query.comparisonBy })}
+                onChange={event => chooseCustomField(event.currentTarget.value)}
               >
                 <option value="">필드 선택</option>
                 {query.fieldId && !selectedField && (
@@ -525,14 +554,20 @@ function ProjectFieldBreakdown(props: Props) {
             </label>}
             <label>
               비교 기준
-              <select className="field" aria-label="비교 기준" value={query.comparisonBy ?? ''}
-                onChange={event => {
-                  const value = event.currentTarget.value;
-                  update({ ...query, comparisonBy: ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value && dimension !== query.groupBy) });
-                }}>
+              <select className="field" aria-label="비교 기준"
+                value={query.comparisonFieldId ? `${CUSTOM_COMPARISON_PREFIX}${query.comparisonFieldId}` : query.comparisonBy ?? ''}
+                onChange={event => chooseComparison(event.currentTarget.value)}>
                 <option value="">비교 안 함</option>
                 {ISSUE_FIELD_BREAKDOWN_DIMENSIONS.filter(value => value !== query.groupBy)
                   .map(value => <option key={value} value={value}>{DIMENSION_LABELS[value]}</option>)}
+                {query.comparisonFieldId && !selectedComparisonField && <option value={`${CUSTOM_COMPARISON_PREFIX}${query.comparisonFieldId}`}>
+                  {query.comparisonFieldId} · 현재 정의 없음
+                </option>}
+                {comparisonFields.length > 0 && <optgroup label="사용자 정의 필드">
+                  {comparisonFields.map(field => <option key={field.id} value={`${CUSTOM_COMPARISON_PREFIX}${field.id}`}>
+                    {field.name} · {KIND_LABELS[field.kind]}{field.archived ? ' · 보관됨' : ''}
+                  </option>)}
+                </optgroup>}
               </select>
             </label>
             <label>
@@ -605,7 +640,7 @@ function ProjectFieldBreakdown(props: Props) {
           <header className="field-breakdown-asof">
             <div>
               <h3 ref={reportHeading} tabIndex={-1}>
-                {report.field.name}{report.comparison && ` × ${DIMENSION_LABELS[report.comparison.by]}`}
+                {report.field.name}{comparisonLabel && ` × ${comparisonLabel}`}
                 {report.field.archived && <span>보관된 필드</span>}
               </h3>
               <p>
@@ -675,12 +710,11 @@ function ProjectFieldBreakdown(props: Props) {
               <h3>{report.comparison ? '기준별 교차 집계' : '값별 업무 수'}</h3>
               <span>{groups.length.toLocaleString()}개 그룹</span>
             </header>
-            {(!report.comparison || report.field.kind === 'multi_select') && <p>
+            {(!report.comparison || overlaps) && <p>
               {!report.comparison && '막대는 조회 대상 전체 업무 대비 비율입니다.'}
-              {report.field.kind === 'multi_select' &&
-                ' 여러 선택 필드는 한 업무가 여러 값에 포함되므로 그룹 수량 합계가 전체 업무 수보다 클 수 있습니다.'}
+              {overlaps && ' 여러 선택 필드는 값을 선택한 만큼 행이나 열에 포함됩니다. 조회 대상 전체 업무 수에는 각 업무를 한 번만 셉니다.'}
             </p>}
-            {report.comparison ? <FieldBreakdownMatrix key={`${report.revision}:${report.generatedAt}`}
+            {report.comparison ? <FieldBreakdownMatrix key={report.comparison.field ? report.revision : `${report.revision}:${report.generatedAt}`}
               rowLabel={report.field.name} rows={groups.slice(start, start + GROUP_PAGE_SIZE)} comparison={report.comparison} total={report.totalIssues}
               page={page} disabled={stale || drillBusy || bulk.locked}
               onOpen={(bucket, comparisonBucketId) => void loadBucket(bucket, 0, comparisonBucketId, true)} /> : <div className="field-breakdown-table-scroll">

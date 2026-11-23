@@ -16,11 +16,22 @@ test('a linked field report round-trips the project, both dimensions and the exa
     { fieldId: 'unavailable', savedViewId: 'foreign', comparisonBy: 'status' });
 });
 
+test('a custom comparison round-trips its exact field and never aliases a built-in dimension', () => {
+  const custom = { fieldId: 'planning', comparisonFieldId: 'risk flag+&=1', savedViewId: 'view' };
+  assert.deepEqual(readFieldBreakdownScope(fieldBreakdownParameters(custom)), custom);
+  const builtin = { groupBy: 'status', comparisonFieldId: 'status' } as const;
+  assert.deepEqual(readFieldBreakdownScope(fieldBreakdownParameters(builtin)), builtin);
+  assert.equal(sameFieldBreakdownScope(custom, { ...custom, comparisonFieldId: 'other' }), false);
+});
+
 test('conflicting or malformed report links cannot become broader valid filters', () => {
   for (const query of [
     'groupBy=status&fieldId=score', 'groupBy=typo&savedView=expected-view', 'groupBy=&savedView=expected-view',
     'groupBy=status&comparisonBy=status', 'comparisonBy=type&savedView=expected-view', 'fieldId=score&comparisonBy=wrong',
     'fieldId=score&savedView=view-one&savedView=view-two', 'fieldId=score&savedView=%20', 'fieldId=%00score',
+    'fieldId=score&comparisonFieldId=score', 'groupBy=status&comparisonBy=type&comparisonFieldId=score',
+    'savedView=view&comparisonFieldId=score', 'fieldId=score&comparisonFieldId=%00bad',
+    'groupBy=type&comparisonFieldId=score&comparisonFieldId=other',
     `fieldId=score&savedView=${'x'.repeat(201)}`,
   ]) {
     const parsed = readFieldBreakdownScope(new URLSearchParams(query));

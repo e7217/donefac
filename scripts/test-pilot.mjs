@@ -758,6 +758,26 @@ async function runStandardPilot() {
   })).json();
   assert.equal(routedIssue.assigneeId, rule.assigneeId);
   assert.equal(routedIssue.version, routingIssue.version + 1);
+  const fieldBreakdownPath = `/projects/${parallelProjectId}/field-breakdown`;
+  const fieldBreakdownQuery = { fieldId: 'pilot_proof', comparisonFieldId: 'pilot_gate' };
+  const fieldBreakdownPreset = await (await call(pilot.url, `${fieldBreakdownPath}-presets`, {
+    method: 'POST', status: 201, body: { name: '파일럿 사용자 정의 교차 집계', query: fieldBreakdownQuery },
+  })).json();
+  const verifyFieldBreakdown = async url => {
+    const presets = await (await call(url, `${fieldBreakdownPath}-presets`)).json();
+    assert.deepEqual(presets.find(preset => preset.id === fieldBreakdownPreset.id), fieldBreakdownPreset);
+    const report = await (await call(url, fieldBreakdownPath, { method: 'POST', body: fieldBreakdownPreset.query })).json();
+    assert.equal(report.comparison.field.id, 'pilot_gate');
+    const row = report.groups.find(group => group.label === '착수 조건 확인');
+    const column = report.comparison.columns.find(group => group.label === '예');
+    assert.ok(row && column);
+    assert.equal(report.comparison.counts[row.id][column.id], 1);
+    const members = await (await call(url, `${fieldBreakdownPath}/issues`, { method: 'POST', body: {
+      ...fieldBreakdownPreset.query, revision: report.revision, bucketId: row.id, comparisonBucketId: column.id,
+    } })).json();
+    assert.deepEqual(members.issues.map(item => item.id), [routedIssue.id]);
+  };
+  await verifyFieldBreakdown(pilot.url);
   const assignmentRuns = await (await call(pilot.url, runsPath)).json();
   assert.equal(assignmentRuns.total, 1);
   assert.equal(assignmentRuns.items[0].issueId, routedIssue.id);
@@ -970,6 +990,7 @@ async function runStandardPilot() {
   assert.deepEqual(await (await call(copy.url, schemaPath)).json(), savedSchema);
   const restoredRouting = (await (await call(copy.url, '/workspace')).json()).issues.find(item => item.id === routedIssue.id);
   assert.deepEqual(restoredRouting.customFields, routedIssue.customFields);
+  await verifyFieldBreakdown(copy.url);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

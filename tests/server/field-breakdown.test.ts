@@ -126,8 +126,8 @@ test('reporter dimensions keep explicit blanks and missing records separate in r
   assert.deepEqual(columns.report.comparison?.columns.slice(-2), [
     { id: 'missing', label: '미지정', count: 1 }, { id: 'unknown', label: '기록 없음', count: 1 },
   ]);
-  assert.equal(columns.columnByIssue.get('3'), 'missing');
-  assert.equal(columns.columnByIssue.get('4'), 'unknown');
+  assert.deepEqual(columns.columnIdsByIssue.get('3'), new Set(['missing']));
+  assert.deepEqual(columns.columnIdsByIssue.get('4'), new Set(['unknown']));
   const swapped = [...issues.slice(0, 2), issue('3'), issue('4', {}, { reporterId: null })];
   for (const [source, original] of [[grouped, rows], [compared, columns]] as const) {
     const next = buildIssueFieldBreakdown({ ...source, issues: swapped });
@@ -135,6 +135,105 @@ test('reporter dimensions keep explicit blanks and missing records separate in r
     assert.deepEqual(next.report.comparison, original.report.comparison);
     assert.notEqual(next.report.revision, original.report.revision);
   }
+});
+
+test('two selectable axes count each issue once per observed row, column and cell', () => {
+  const tags = field('multi_select', { issueTypes: ['incident', 'legacy'] });
+  const partners = field('multi_select', { id: 'partner', name: '협업 부서', issueTypes: ['incident', 'request'], options: [
+    { id: 'delivery', name: '납품', archived: false }, { id: 'testing', name: '검사', archived: true },
+  ] });
+  const cases = [
+    issue('10', { attribute: ['a', 'a', 'b'], partner: ['delivery', 'delivery', 'testing'] }),
+    issue('2', { attribute: ['b'], partner: ['testing'] }),
+    issue('3', { attribute: [], partner: [] }),
+    issue('4', { attribute: ['a'], partner: ['testing'] }, { type: 'request' }),
+    issue('5', { attribute: ['a'], partner: ['delivery'] }, { type: 'legacy' }),
+  ];
+  const source = input('multi_select', cases, { field: tags, comparison: { field: partners } });
+  const result = buildIssueFieldBreakdown(source);
+  const { comparison, totalIssues, populatedIssues, missingIssues, notApplicableIssues } = result.report;
+  assert.equal(comparison!.by, undefined);
+  assert.deepEqual(comparison!.field, { id: 'partner', name: '협업 부서', kind: 'multi_select', archived: false });
+  assert.deepEqual({ totalIssues, populatedIssues, missingIssues, notApplicableIssues },
+    { totalIssues: 5, populatedIssues: 3, missingIssues: 1, notApplicableIssues: 1 });
+
+  const first = values(result).find(bucket => bucket.label === '첫 선택')!;
+  const archived = values(result).find(bucket => bucket.label === '보관된 선택')!;
+  const delivery = comparison!.columns.find(column => column.label === '납품')!;
+  const testing = comparison!.columns.find(column => column.label === '검사')!;
+  assert.deepEqual([first.count, archived.count, delivery.count, testing.count], [2, 2, 1, 3]);
+  assert.deepEqual(comparison!.columns.slice(-2), [
+    { id: 'missing', label: '값 없음', count: 1 }, { id: 'not-applicable', label: '유형 미적용', count: 1 },
+  ]);
+  assert.deepEqual(comparison!.counts, {
+    [first.id]: { [delivery.id]: 1, [testing.id]: 1, 'not-applicable': 1 },
+    [archived.id]: { [delivery.id]: 1, [testing.id]: 2 },
+    missing: { missing: 1 }, 'not-applicable': { [testing.id]: 1 },
+  });
+  assert.deepEqual(result.issuesByBucket.get(archived.id)?.map(({ id }) => id), ['2', '10']);
+  assert.deepEqual(result.columnIdsByIssue.get('10'), new Set([delivery.id, testing.id]));
+  assert.deepEqual(result.columnIdsByIssue.get('5'), new Set(['not-applicable']));
+
+  const shuffled = structuredClone(source);
+  shuffled.issues.reverse();
+  (shuffled.issues.at(-1)!.customFields!.partner as string[]).reverse();
+  const same = buildIssueFieldBreakdown(shuffled);
+  assert.deepEqual(same.report, result.report);
+  shuffled.comparison!.field.name = '현재 이름';
+  const renamed = buildIssueFieldBreakdown(shuffled);
+  assert.notEqual(renamed.report.revision, result.report.revision);
+  assert.deepEqual(renamed.report.comparison?.counts, result.report.comparison?.counts);
+});
+
+test('custom comparison keeps scalar types exact and numeric statistics count a primary value once', () => {
+  const cases = [
+    ['text', '예', '예'], ['number', 0, '0'], ['date', '2026-11-23', '2026-11-23'],
+    ['checkbox', false, '아니요'], ['user', 'alice', '같은 이름'], ['url', 'https://example.test', 'https://example.test'],
+    ['select', 'a', '첫 선택'],
+  ] as const;
+  for (const [kind, value, label] of cases) {
+    const result = buildIssueFieldBreakdown(input('checkbox', [issue('1', { attribute: false, compared: value })], {
+      comparison: { field: field(kind, { id: 'compared' }) },
+    }));
+    const columns = result.report.comparison!.columns;
+    assert.deepEqual(columns.map(column => [column.label, column.count]), [[label, 1]]);
+    assert.equal(result.report.comparison!.counts[values(result)[0].id][columns[0].id], 1);
+  }
+
+  const result = buildIssueFieldBreakdown(input('number', [
+    issue('1', { attribute: 7, compared: ['a', 'b'] }), issue('2', { attribute: -2, compared: ['b'] }), issue('3'),
+  ], { comparison: { field: field('multi_select', { id: 'compared' }) } }));
+  assert.deepEqual(result.report.numeric, { min: -2, max: 7, average: 2.5, sum: 5 });
+  assert.equal(result.report.populatedIssues, 2);
+  assert.equal(result.report.totalIssues, 3);
+  assert.deepEqual(result.report.comparison!.columns.map(column => [column.label, column.count]), [
+    ['보관된 선택', 2], ['첫 선택', 1], ['값 없음', 1],
+  ]);
+});
+
+test('dense multi-select intersections count exact cohorts across bitset words', () => {
+  const issues = Array.from({ length: 133 }, (_, index) => issue(String(index + 1), {
+    attribute: index % 2 ? ['a', 'b'] : ['b'], compared: index % 3 ? ['a'] : ['a', 'b'],
+  }));
+  const source = input('multi_select', issues, { comparison: { field: field('multi_select', { id: 'compared' }) } });
+  const result = buildIssueFieldBreakdown(source);
+  const comparison = result.report.comparison!;
+  for (const row of values(result)) for (const column of comparison.columns) {
+    const cohort = result.issuesByBucket.get(row.id)!.filter(item => result.columnIdsByIssue.get(item.id)!.has(column.id));
+    assert.equal(comparison.counts[row.id][column.id], cohort.length);
+  }
+  assert.deepEqual(buildIssueFieldBreakdown({ ...source, issues: [...issues].reverse() }).report, result.report);
+});
+
+test('custom comparison accepts exactly 50,000 populated cells and rejects excess without truncation', () => {
+  const options = Array.from({ length: 200 }, (_, index) => ({ id: `tag-${index}`, name: `태그 ${index}`, archived: false }));
+  const compared = options.map(option => option.id);
+  const issues = Array.from({ length: 251 }, (_, index) => issue(String(index + 1), { attribute: `업무 ${index}`, compared }));
+  const columns = field('multi_select', { id: 'compared', options });
+  const source = input('text', issues.slice(0, 250), { comparison: { field: columns } });
+  const result = buildIssueFieldBreakdown(source);
+  assert.equal(Object.values(result.report.comparison!.counts).reduce((count, row) => count + Object.keys(row).length, 0), 50_000);
+  assert.throws(() => buildIssueFieldBreakdown({ ...source, issues }), status(413));
 });
 
 test('long Unicode labels remain bounded and distinguish truncated prefixes and special bucket labels', () => {

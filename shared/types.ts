@@ -1421,6 +1421,7 @@ export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIO
 export type IssueFieldBreakdownQuery = {
   savedViewId?: string;
   comparisonBy?: IssueFieldBreakdownDimension;
+  comparisonFieldId?: string;
 } & ({ fieldId: string; groupBy?: never } | { groupBy: IssueFieldBreakdownDimension; fieldId?: never });
 export interface SavedFieldBreakdown {
   id: string;
@@ -1434,6 +1435,7 @@ export interface SavedFieldBreakdown {
 export type IssueFieldBreakdownSelection = {
   savedViewId?: string | null;
   comparisonBy?: IssueFieldBreakdownDimension | null;
+  comparisonFieldId?: string | null;
   revision: string;
   bucketId: string;
   comparisonBucketId?: string | null;
@@ -1443,11 +1445,11 @@ export interface IssueFieldBreakdownColumn {
   label: string;
   count: number;
 }
-export interface IssueFieldBreakdownComparison {
-  by: IssueFieldBreakdownDimension;
+type IssueFieldBreakdownField = Pick<CustomFieldDefinition, 'id' | 'name' | 'kind' | 'archived'>;
+export type IssueFieldBreakdownComparison = {
   columns: IssueFieldBreakdownColumn[];
   counts: Record<string, Record<string, number>>;
-}
+} & ({ by: IssueFieldBreakdownDimension; field?: never } | { by?: never; field: IssueFieldBreakdownField });
 export interface IssueFieldBreakdownBucket {
   id: string;
   label: string;
@@ -1457,7 +1459,7 @@ export interface IssueFieldBreakdownBucket {
 export interface IssueFieldBreakdownIssue { id: string; key: string; title: string }
 export interface IssueFieldBreakdown {
   projectId: string;
-  field: Pick<CustomFieldDefinition, 'id' | 'name' | 'kind' | 'archived'>;
+  field: IssueFieldBreakdownField;
   groupBy?: IssueFieldBreakdownDimension;
   comparison?: IssueFieldBreakdownComparison;
   savedView: { id: string; name: string; version: number } | null;

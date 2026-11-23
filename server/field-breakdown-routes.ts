@@ -10,7 +10,7 @@ import type { Store } from './store.js';
 
 const issueLimit = 10_000;
 const pageSize = 50;
-const selectionFields = new Set(['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'revision', 'bucketId', 'comparisonBucketId']);
+const selectionFields = new Set(['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'comparisonFieldId', 'revision', 'bucketId', 'comparisonBucketId']);
 
 function identifier(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 200) {
@@ -33,20 +33,27 @@ export function parseFieldBreakdownQuery(body: Record<string, unknown>): IssueFi
     throw new FieldBreakdownError(400, '사용자 정의 필드 또는 기본 필드 중 하나를 선택해 주세요.');
   }
   const groupBy = Object.hasOwn(body, 'groupBy') ? dimension(body.groupBy) : undefined;
+  const fieldId = groupBy ? undefined : identifier(body.fieldId, '집계할 필드');
   const comparisonBy = body.comparisonBy == null ? undefined : dimension(body.comparisonBy);
-  if (comparisonBy && groupBy === comparisonBy) throw new FieldBreakdownError(400, '행과 열에 서로 다른 기준을 선택해 주세요.');
+  const comparisonFieldId = body.comparisonFieldId == null ? undefined : identifier(body.comparisonFieldId, '비교할 필드');
+  if (comparisonBy && comparisonFieldId) throw new FieldBreakdownError(400, '열의 비교 기준을 하나만 선택해 주세요.');
+  if ((comparisonBy && groupBy === comparisonBy) || (comparisonFieldId && fieldId === comparisonFieldId)) {
+    throw new FieldBreakdownError(400, '행과 열에 서로 다른 기준을 선택해 주세요.');
+  }
   const savedViewId = body.savedViewId == null ? undefined : identifier(body.savedViewId, '저장된 보기');
-  return { ...(groupBy ? { groupBy } : { fieldId: identifier(body.fieldId, '집계할 필드') }), comparisonBy, savedViewId };
+  return { ...(groupBy ? { groupBy } : { fieldId: fieldId! }), comparisonBy, comparisonFieldId, savedViewId };
 }
 
 export function resolveFieldBreakdownSources(store: Store, schema: ProjectIssueSchema, query: IssueFieldBreakdownQuery) {
   const field = query.groupBy ? undefined : schema.fields.find(item => item.id === query.fieldId);
   if (!query.groupBy && !field) throw new FieldBreakdownError(404, '이 프로젝트에서 집계할 필드를 찾을 수 없습니다.');
+  const comparisonField = query.comparisonFieldId ? schema.fields.find(item => item.id === query.comparisonFieldId) : undefined;
+  if (query.comparisonFieldId && !comparisonField) throw new FieldBreakdownError(404, '이 프로젝트에서 비교할 필드를 찾을 수 없습니다.');
   const view = query.savedViewId ? store.get<SavedView>('saved_views', query.savedViewId) : undefined;
   if (query.savedViewId && view?.projectId !== schema.projectId) {
     throw new FieldBreakdownError(404, '이 프로젝트에서 저장된 보기를 찾을 수 없습니다.');
   }
-  return { field, view: view ?? null };
+  return { field, comparisonField, view: view ?? null };
 }
 
 function breakdownGroup(body: Record<string, unknown>) {
@@ -66,7 +73,7 @@ export function parseFieldBreakdownSelection(raw: unknown): IssueFieldBreakdownS
   const body = raw as Record<string, unknown>;
   const group = breakdownGroup(body);
   const query = parseFieldBreakdownQuery(body);
-  if (group.comparisonBucketId && !query.comparisonBy) {
+  if (group.comparisonBucketId && !query.comparisonBy && !query.comparisonFieldId) {
     throw new FieldBreakdownError(400, '교차 집계 기준과 비교 그룹을 확인해 주세요.');
   }
   return { ...query, ...group };
@@ -87,8 +94,10 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const query = parseFieldBreakdownQuery(body);
     const { groupBy, comparisonBy } = query;
     const workflow = groupBy === 'status' || comparisonBy === 'status' ? lookupWorkflow(projectId) : undefined;
-    const { field: customField, view } = resolveFieldBreakdownSources(store, schema, query);
+    const { field: customField, comparisonField, view } = resolveFieldBreakdownSources(store, schema, query);
     const field = groupBy ? builtinField(groupBy, schema, workflow) : customField!;
+    const comparison = comparisonBy ? { by: comparisonBy, field: builtinField(comparisonBy, schema, workflow) }
+      : comparisonField ? { field: comparisonField } : undefined;
     const users = store.all<User>('users');
     const gitlabLinks = view?.filters.gitlab
       ? store.db.prepare(`SELECT link.json FROM gitlab_links AS link
@@ -108,16 +117,15 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const result = buildIssueFieldBreakdown({
       projectId,field,issues,users,schemaVersion:schema.version,generatedAt:new Date().toISOString(),
       savedView:view ? {id:view.id,name:view.name,version:view.version} : null,
-      groupBy,
-      ...(comparisonBy ? { comparison: { by: comparisonBy, field: builtinField(comparisonBy, schema, workflow) } } : {}),
-      ...(groupBy || comparisonBy ? { configuration: { workflowVersion: workflow?.version, importGeneration: store.setting('attachmentImportGeneration') } } : {}),
+      groupBy, comparison,
+      ...(groupBy || comparison ? { configuration: { workflowVersion: workflow?.version, importGeneration: store.setting('attachmentImportGeneration') } } : {}),
     });
     return { ...result, matchedIssues: issues };
   }
 
   function cohort(projectId: string, body: Record<string, unknown>,
     { revision, bucketId, comparisonBucketId }: Pick<IssueFieldBreakdownSelection, 'revision' | 'bucketId' | 'comparisonBucketId'>) {
-    const { report, issuesByBucket, columnByIssue, matchedIssues } = breakdown(projectId, body);
+    const { report, issuesByBucket, columnIdsByIssue, matchedIssues } = breakdown(projectId, body);
     if (report.revision !== revision) {
       throw new FieldBreakdownError(409, '집계 이후 업무·보기·속성이 변경되었습니다. 필드 집계를 다시 조회해 주세요.');
     }
@@ -126,7 +134,7 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const comparisonBucket = comparisonBucketId ? report.comparison?.columns.find(column => column.id === comparisonBucketId) : undefined;
     if (comparisonBucketId && !comparisonBucket) throw new FieldBreakdownError(404, '조회한 집계에서 비교 그룹을 찾을 수 없습니다.');
     const rowIssues = issuesByBucket.get(bucketId) ?? [];
-    const issues = comparisonBucketId ? rowIssues.filter(issue => columnByIssue.get(issue.id) === comparisonBucketId) : rowIssues;
+    const issues = comparisonBucketId ? rowIssues.filter(issue => columnIdsByIssue.get(issue.id)?.has(comparisonBucketId)) : rowIssues;
     return { bucket, comparisonBucket, issues, matchedIssues };
   }
 

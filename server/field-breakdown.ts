@@ -26,9 +26,19 @@ interface BreakdownInput {
   schemaVersion: number;
   generatedAt: string;
   groupBy?: IssueFieldBreakdownDimension;
-  comparison?: { by: IssueFieldBreakdownDimension; field: CustomFieldDefinition };
+  comparison?: BreakdownAxis;
   configuration?: { workflowVersion?: number; importGeneration: string | null };
 }
+
+interface BreakdownAxis {
+  by?: IssueFieldBreakdownDimension;
+  field: CustomFieldDefinition;
+}
+
+type Scalar = string | number | boolean;
+type SpecialBucketId = 'missing' | 'unknown' | 'not-applicable';
+type ColumnMemberships = ReadonlyMap<string, ReadonlySet<string>>;
+const MAX_CUSTOM_COMPARISON_CELLS = 50_000;
 
 const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'variant' });
 const compareText = (left: string, right: string) => collator.compare(left, right) || (left < right ? -1 : left > right ? 1 : 0);
@@ -61,7 +71,8 @@ function builtinValue(issue: Issue, by: IssueFieldBreakdownDimension): string | 
 
 const missingValueLabel = (by?: IssueFieldBreakdownDimension) => by === 'assignee' || by === 'reporter' ? '미지정' : '값 없음';
 const unknownReporterLabel = '기록 없음';
-const specialGroupOrder = new Map([['missing', 1], ['unknown', 2]]);
+const notApplicableLabel = '유형 미적용';
+const specialGroupOrder = new Map([['missing', 1], ['unknown', 2], ['not-applicable', 3]]);
 
 const valueId = (field: CustomFieldDefinition, value: string | number | boolean) => `value:${hash([field.id, field.kind, value])}`;
 
@@ -94,6 +105,94 @@ function validatePresentValue(field: CustomFieldDefinition, value: CustomFieldVa
     default:
       return fail('지원하지 않는 사용자 정의 필드 종류입니다.', 400);
   }
+}
+
+function axisValue(issue: Issue, { by, field }: BreakdownAxis) {
+  const applicable = fieldApplies(field, issue.type);
+  const raw = applicable ? (by ? builtinValue(issue, by) : ownValue(issue, field)) : undefined;
+  const emptyId: SpecialBucketId = by === 'reporter' && raw === undefined ? 'unknown' : 'missing';
+  if (!applicable) return { raw, emptyId, specialId: 'not-applicable' as const };
+  if (!hasCustomValue(raw)) return { raw, emptyId, specialId: emptyId };
+  validatePresentValue(field, raw!);
+  const values: Scalar[] = field.kind === 'multi_select' ? [...new Set(raw as string[])] : [raw as Scalar];
+  return { raw, emptyId, values };
+}
+
+function axisIds(field: CustomFieldDefinition) {
+  const cached = new Map<Scalar, string>();
+  return (value: Scalar) => {
+    let id = cached.get(value);
+    if (!id) { id = valueId(field, value); cached.set(value, id); }
+    return id;
+  };
+}
+
+const valueLabel = (field: CustomFieldDefinition, value: Scalar, users: User[]) =>
+  displayLabel(fieldValueLabel(field, field.kind === 'multi_select' ? [value as string] : value, users));
+
+function specialLabel(id: SpecialBucketId, by?: IssueFieldBreakdownDimension) {
+  if (id === 'unknown') return unknownReporterLabel;
+  if (id === 'not-applicable') return notApplicableLabel;
+  return missingValueLabel(by);
+}
+
+function intersectionCount(left: Uint32Array, right: Uint32Array) {
+  let count = 0;
+  for (let index = 0; index < left.length; index++) {
+    let bits = left[index] & right[index];
+    bits -= (bits >>> 1) & 0x55555555;
+    bits = (bits & 0x33333333) + ((bits >>> 2) & 0x33333333);
+    count += (((bits + (bits >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+  }
+  return count;
+}
+
+function comparisonCounts(issuesByBucket: ReadonlyMap<string, IssueFieldBreakdownIssue[]>, columnIdsByIssue: ColumnMemberships,
+  columns: ReadonlyMap<string, IssueFieldBreakdownColumn>, custom: boolean, bothMultiple: boolean) {
+  const counts = new Map<string, Map<string, number>>();
+  let populated = 0;
+  const add = (row: Map<string, number>, columnId: string, count = 1) => {
+    const previous = row.get(columnId) ?? 0;
+    if (custom && !previous && ++populated > MAX_CUSTOM_COMPARISON_CELLS) {
+      fail('업무가 있는 교차 셀이 50,000개를 넘습니다. 저장된 보기로 집계 범위를 좁혀 주세요.', 413);
+    }
+    row.set(columnId, previous + count);
+  };
+
+  // For dense multi-select pairs, intersect issue memberships a word at a time.
+  // The sparse path avoids walking huge empty grids for high-cardinality dimensions.
+  if (bothMultiple && columnIdsByIssue.size > 64 && issuesByBucket.size * columns.size <= MAX_CUSTOM_COMPARISON_CELLS * 2) {
+    const issueIndex = new Map([...columnIdsByIssue.keys()].map((id, index) => [id, index]));
+    const words = Math.ceil(issueIndex.size / 32);
+    const columnBits = new Map([...columns.keys()].map(id => [id, new Uint32Array(words)]));
+    for (const [issueId, memberships] of columnIdsByIssue) {
+      const index = issueIndex.get(issueId)!;
+      for (const columnId of memberships) columnBits.get(columnId)![index >>> 5] |= 1 << (index & 31);
+    }
+    for (const [bucketId, issues] of issuesByBucket) {
+      if (!issues.length) continue;
+      const rowBits = new Uint32Array(words);
+      for (const { id } of issues) {
+        const index = issueIndex.get(id)!;
+        rowBits[index >>> 5] |= 1 << (index & 31);
+      }
+      const row = new Map<string, number>();
+      for (const [columnId, bits] of columnBits) {
+        const count = intersectionCount(rowBits, bits);
+        if (count) add(row, columnId, count);
+      }
+      counts.set(bucketId, row);
+    }
+    return counts;
+  }
+
+  for (const [bucketId, issues] of issuesByBucket) {
+    if (!issues.length) continue;
+    const row = new Map<string, number>();
+    for (const { id } of issues) for (const columnId of columnIdsByIssue.get(id)!) add(row, columnId);
+    counts.set(bucketId, row);
+  }
+  return counts;
 }
 
 /** Exact binary accumulation prevents intermediate overflow/cancellation from
@@ -135,20 +234,23 @@ function numericStatistics(values: number[]): IssueFieldBreakdown['numeric'] {
 export function buildIssueFieldBreakdown(input: BreakdownInput): {
   report: IssueFieldBreakdown;
   issuesByBucket: Map<string, IssueFieldBreakdownIssue[]>;
-  columnByIssue: ReadonlyMap<string, string>;
+  columnIdsByIssue: ColumnMemberships;
 } {
   if (!Array.isArray(input.issues) || input.issues.length > 10000) fail('필드 분포는 최대 10,000개 업무까지 집계할 수 있습니다.', 413);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) fail('업무 스키마 버전을 확인해 주세요.', 400);
   const { projectId, field, users, groupBy, comparison } = input;
+  const rowAxis: BreakdownAxis = { by: groupBy, field };
+  const rowId = axisIds(field);
+  const comparisonId = comparison && axisIds(comparison.field);
   const buckets = new Map<string, IssueFieldBreakdownBucket>();
   const issuesByBucket = new Map<string, IssueFieldBreakdownIssue[]>();
-  const columnByIssue = new Map<string, string>();
+  const columnIdsByIssue = new Map<string, ReadonlySet<string>>();
   const columns = new Map<string, IssueFieldBreakdownColumn>();
-  const counts = new Map<string, Map<string, number>>();
+  const columnGroups = new Map<string, { ids: ReadonlySet<string>; count: number }>();
   const missing: IssueFieldBreakdownBucket = { id: 'missing', label: missingValueLabel(groupBy), kind: 'missing', count: 0 };
   const unknown: IssueFieldBreakdownBucket | null = groupBy === 'reporter'
     ? { id: 'unknown', label: unknownReporterLabel, kind: 'missing', count: 0 } : null;
-  const notApplicable: IssueFieldBreakdownBucket = { id: 'not-applicable', label: '유형 미적용', kind: 'not_applicable', count: 0 };
+  const notApplicable: IssueFieldBreakdownBucket = { id: 'not-applicable', label: notApplicableLabel, kind: 'not_applicable', count: 0 };
   const specialBuckets = unknown ? [missing, unknown, notApplicable] : [missing, notApplicable];
   for (const bucket of specialBuckets) {
     buckets.set(bucket.id, bucket);
@@ -164,54 +266,50 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     if (!summary) { summary = { id: issue.id, key: issue.key, title: issue.title }; summaries.set(issue.id, summary); }
     bucket.count++;
     issuesByBucket.get(bucket.id)!.push(summary);
-    const columnId = columnByIssue.get(issue.id);
-    if (columnId) {
-      let row = counts.get(bucket.id);
-      if (!row) { row = new Map(); counts.set(bucket.id, row); }
-      row.set(columnId, (row.get(columnId) ?? 0) + 1);
-    }
   };
   for (const issue of input.issues) {
     if (issue.projectId !== projectId) fail('다른 프로젝트 업무를 필드 분포에 포함할 수 없습니다.', 400);
     if (!issue.id || seen.has(issue.id)) fail('필드 분포에 중복되거나 비어 있는 업무 ID가 있습니다.', 400);
     if (!Number.isSafeInteger(issue.version) || issue.version < 1) fail('업무 버전을 확인해 주세요.', 400);
     seen.add(issue.id);
-    let columnId: string | undefined;
-    if (comparison) {
-      const comparedValue = builtinValue(issue, comparison.by);
-      const unknownReporter = comparison.by === 'reporter' && comparedValue === undefined;
-      columnId = hasCustomValue(comparedValue) ? valueId(comparison.field, comparedValue!) : (unknownReporter ? 'unknown' : 'missing');
-      let column = columns.get(columnId);
-      if (!column) {
-        const label = columnId === 'unknown' ? unknownReporterLabel : columnId === 'missing' ? missingValueLabel(comparison.by)
-          : fieldValueLabel(comparison.field, comparedValue, users);
-        column = { id: columnId, label: displayLabel(label), count: 0 };
-        columns.set(columnId, column);
+    let columnFingerprint: string | undefined;
+    if (comparison && comparisonId) {
+      const { values, specialId } = axisValue(issue, comparison);
+      // A group's sorted values identify identical memberships across issues.
+      // Built-in dimensions keep their original per-issue fingerprint.
+      columnFingerprint = specialId ?? (comparison.by ? comparisonId(values[0]) : hash(values.sort()));
+      let columnGroup = columnGroups.get(columnFingerprint);
+      if (!columnGroup) {
+        const ids = new Set<string>();
+        if (specialId) {
+          columns.set(specialId, { id: specialId, label: specialLabel(specialId, comparison.by), count: 0 });
+          ids.add(specialId);
+        } else for (const value of values) {
+          const id = comparisonId(value);
+          if (!columns.has(id)) columns.set(id, { id, label: valueLabel(comparison.field, value, users), count: 0 });
+          ids.add(id);
+        }
+        columnGroup = { ids, count: 0 };
+        columnGroups.set(columnFingerprint, columnGroup);
       }
-      column.count++;
-      columnByIssue.set(issue.id, columnId);
+      columnGroup.count++;
+      columnIdsByIssue.set(issue.id, columnGroup.ids);
     }
-    const applicable = fieldApplies(field, issue.type);
-    const value = applicable ? (groupBy ? builtinValue(issue, groupBy) : ownValue(issue, field)) : undefined;
-    const emptyBucket = value === undefined ? unknown ?? missing : missing;
-    const valueFingerprint = value == null ? (emptyBucket === unknown ? 'unknown' : null) : hash([field.kind, value]);
+    const { raw, emptyId, values, specialId } = axisValue(issue, rowAxis);
+    const applicable = specialId !== 'not-applicable';
+    const valueFingerprint = raw == null ? (emptyId === 'unknown' ? 'unknown' : null) : hash([field.kind, raw]);
     fingerprints.push([issue.id, issue.version, issue.key, issue.title, issue.type, applicable,
-      valueFingerprint, ...(columnId ? [columnId] : [])]);
+      valueFingerprint, ...(columnFingerprint ? [columnFingerprint] : [])]);
     if (!applicable) { add(notApplicable, issue); continue; }
     applicableIssues++;
-    if (!hasCustomValue(value)) { add(emptyBucket, issue); continue; }
-    validatePresentValue(field, value!);
+    if (specialId) { add(buckets.get(specialId)!, issue); continue; }
     populatedIssues++;
-    if (field.kind === 'number') numericValues.push(value as number);
-    const distinctValues: (string | number | boolean)[] = field.kind === 'multi_select'
-      ? [...new Set(value as string[])].sort(compareText)
-      : [value as string | number | boolean];
-    for (const distinct of distinctValues) {
-      const id = valueId(field, distinct);
+    if (field.kind === 'number') numericValues.push(raw as number);
+    for (const distinct of values) {
+      const id = rowId(distinct);
       let bucket = buckets.get(id);
       if (!bucket) {
-        const label = fieldValueLabel(field, field.kind === 'multi_select' ? [distinct as string] : distinct, users);
-        bucket = { id, label: displayLabel(label), kind: 'value', count: 0 };
+        bucket = { id, label: valueLabel(field, distinct, users), kind: 'value', count: 0 };
         buckets.set(id, bucket);
         issuesByBucket.set(id, []);
       }
@@ -229,6 +327,9 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
   const savedView = input.savedView ? { id: input.savedView.id, name: input.savedView.name, version: input.savedView.version } : null;
   let comparisonResult: IssueFieldBreakdown['comparison'];
   if (comparison) {
+    for (const { ids, count } of columnGroups.values()) for (const id of ids) columns.get(id)!.count += count;
+    const counts = comparisonCounts(issuesByBucket, columnIdsByIssue, columns, !comparison.by,
+      field.kind === 'multi_select' && comparison.field.kind === 'multi_select');
     distinguishLabels(columns);
     const workflowOrder = comparison.by === 'status'
       ? new Map(comparison.field.options.map((option, index) => [valueId(comparison.field, option.id), index]))
@@ -238,10 +339,14 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       (workflowOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (workflowOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER) ||
       compareText(left.label, right.label) || compareText(left.id, right.id));
     const columnPosition = new Map(orderedColumns.map((column, index) => [column.id, index]));
-    comparisonResult = { by: comparison.by, columns: orderedColumns, counts: Object.fromEntries(groups.flatMap(group => {
+    const orderedCounts = Object.fromEntries(groups.flatMap(group => {
       const row = counts.get(group.id);
       return row ? [[group.id, Object.fromEntries([...row].sort(([left], [right]) => columnPosition.get(left)! - columnPosition.get(right)!))]] : [];
-    })) };
+    }));
+    comparisonResult = comparison.by ? { by: comparison.by, columns: orderedColumns, counts: orderedCounts } : {
+      field: { id: comparison.field.id, name: comparison.field.name, kind: comparison.field.kind, archived: comparison.field.archived },
+      columns: orderedColumns, counts: orderedCounts,
+    };
   }
   const revision = hash({
     projectId, schemaVersion: input.schemaVersion,
@@ -261,6 +366,6 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       applicableIssues, populatedIssues, missingIssues: missing.count + (unknown?.count ?? 0), notApplicableIssues: notApplicable.count,
       groups, numeric,
     },
-    issuesByBucket, columnByIssue,
+    issuesByBucket, columnIdsByIssue,
   };
 }

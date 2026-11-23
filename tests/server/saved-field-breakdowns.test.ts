@@ -175,3 +175,61 @@ test('native v92 preserves named queries and retained missing sources, rejecting
   await replace({ ...missingList, schemaVersion: 91 });
   assert.deepEqual(await f.list(), []);
 });
+
+test('native v95 restores custom comparison presets and their retained missing fields with exact write versions', async t => {
+  const f = await fixture(t);
+  const schemaPath = `/projects/${f.project.id}/issue-schema`;
+  const schema = await f.call<ProjectIssueSchema>(schemaPath);
+  const choice = { id: 'classification', name: '합성 분류', kind: 'select' as const, description: '', required: false, issueTypes: [], archived: false,
+    options: [{ id: 'checked', name: '합성 점검', archived: false }] };
+  const flag = { ...choice, id: 'retired', name: '이전 검토 항목', kind: 'checkbox' as const, options: [] };
+  const defined = await f.call<ProjectIssueSchema>(schemaPath, 200, 'PATCH', { ...schema, expectedVersion: schema.version, fields: [choice, flag] });
+  const view = await f.view('공유 검증 보기', '배포 검증');
+  await f.issue('배포 검증 업무', actorId, { classification: 'checked' });
+  await f.issue('다른 제목', actorId, { classification: 'checked' });
+  const query = { groupBy: 'priority', comparisonFieldId: choice.id, savedViewId: view.id } as const;
+  const original = await f.call<SavedFieldBreakdown>(f.path, 201, 'POST', { name: '공유 사용자 정의 비교', query });
+  assert.deepEqual(original.query, query);
+  assert.deepEqual(await f.call<SavedFieldBreakdown>(f.path, 200, 'POST', { name: original.name, query }, peerId), original);
+  await f.call(f.path, 409, 'POST', { name: original.name, query: { ...query, comparisonFieldId: flag.id } });
+  await f.call(f.path, 400, 'POST', { name: '잘못된 두 비교 기준', query: { ...query, comparisonBy: 'assignee' } });
+  await f.call(f.path, 404, 'POST', { name: '없어진 새 비교 기준', query: { ...query, comparisonFieldId: 'unavailable' } });
+  const before = await f.run(original.query);
+  assert.equal(before.totalIssues, 1);
+  assert.equal(before.comparison?.field?.id, choice.id);
+  assert.equal(before.comparison?.columns.find(column => column.label === choice.options[0].name)?.count, 1);
+
+  const orphan = await f.call<SavedFieldBreakdown>(f.path, 201, 'POST', { name: '비교 필드를 삭제한 집계', query: { groupBy: 'status', comparisonFieldId: flag.id } });
+  await f.call(schemaPath, 200, 'PATCH', { ...defined, expectedVersion: defined.version, fields: [{ ...choice, archived: true }] });
+  await f.run(orphan.query, 404);
+  const historical = await f.run(original.query);
+  assert.equal(historical.comparison?.field?.archived, true);
+  assert.equal(historical.comparison?.columns.find(column => column.label === choice.options[0].name)?.count, 1);
+
+  const backup = await f.call<Backup>('/export');
+  assert.equal(backup.schemaVersion, 95);
+  assert.deepEqual(backup.savedFieldBreakdowns.find(preset => preset.id === original.id), original);
+  assert.deepEqual(backup.savedFieldBreakdowns.find(preset => preset.id === orphan.id), orphan);
+  const path = `${f.path}/${original.id}`;
+  const renamed = await f.call<SavedFieldBreakdown>(path, 200, 'PATCH', { expectedVersion: original.version, name: '복원 전 수정된 이름' });
+  await f.call(`${path}?expectedVersion=${renamed.version}`, 200, 'DELETE');
+  await f.call('/import', 400, 'POST', { data: { ...backup, schemaVersion: 94 } });
+  assert.deepEqual(await f.list(), [orphan]);
+
+  await f.call('/import', 200, 'POST', { data: backup });
+  const presets = await f.list();
+  const restored = presets.find(preset => preset.id === original.id)!;
+  const restoredOrphan = presets.find(preset => preset.id === orphan.id)!;
+  assert.ok(restored.version > renamed.version);
+  assert.deepEqual(restored.query, original.query);
+  assert.deepEqual(restoredOrphan.query, orphan.query);
+  await f.call(path, 409, 'PATCH', { expectedVersion: renamed.version, name: '복원 전 오래된 입력' });
+  const after = await f.run(restored.query);
+  assert.equal(after.totalIssues, 1);
+  assert.notEqual(after.revision, historical.revision);
+  await f.run(restoredOrphan.query, 404);
+  const fixed = await f.call<SavedFieldBreakdown>(`${f.path}/${orphan.id}`, 200, 'PATCH', {
+    expectedVersion: restoredOrphan.version, query: { groupBy: 'status', comparisonFieldId: choice.id },
+  });
+  assert.equal((await f.run(fixed.query)).comparison?.field?.id, choice.id);
+});
