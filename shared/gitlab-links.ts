@@ -103,7 +103,7 @@ export function isRestorableGitlabLink(value: unknown): boolean {
   }
   if (Object.hasOwn(link, 'originalJiraKey') && !isJiraIssueKey(link.originalJiraKey)) return false;
   if (Object.hasOwn(link, 'branchObservationSource') &&
-      (link.kind !== 'branch' || link.branchObservationSource !== 'sync' || link.state !== 'active')) return false;
+      (link.kind !== 'branch' || (link.branchObservationSource !== 'sync' && link.branchObservationSource !== 'read') || link.state !== 'active')) return false;
   if (Object.hasOwn(link, 'manualLinkId')) return isRestorableManualGitlabLink(link);
   if (link.kind !== 'branch') {
     return typeof link.kind === 'string' && ['merge_request', 'commit', 'pipeline'].includes(link.kind) && Number.isInteger(link.projectId) &&

@@ -354,24 +354,29 @@ async function readVerifiedProject(connection: Connection, repositoryId: number,
   return { ...request, ...verifiedProjectRepository(project, repositoryId, request.base) };
 }
 
-function verifiedBranchSha(value: unknown, repositoryId: number, branch: string): string {
+function verifiedBranch(value: unknown, repositoryId: number, branch: string) {
   if (!isReadObject(value) || value.name !== branch ||
       (value.project_id !== undefined && value.project_id !== repositoryId) || !isReadObject(value.commit)) {
     throw new GitlabReadError('branches', 'invalid-response');
   }
   const sha = gitlabObjectSha(value.commit.id);
   if (!sha || /^0+$/u.test(sha)) throw new GitlabReadError('branches', 'invalid-response');
-  return sha;
+  return { object: value, sourceSha: sha };
 }
 
-async function readExactBranch({ projectUrl, headers }: ReturnType<typeof projectReadRequest>, repositoryId: number,
-  branch: string, signal?: AbortSignal): Promise<string | null> {
-  if (!isGitlabBranchName(branch)) throw new GitlabReadError('branches', 'invalid-response');
+async function readBranchDetails({ projectUrl, headers }: ReturnType<typeof projectReadRequest>, repositoryId: number,
+  name: string, signal?: AbortSignal) {
   const url = new URL(projectUrl);
-  url.pathname += `/repository/branches/${encodeURIComponent(branch)}`;
+  url.pathname += `/repository/branches/${encodeURIComponent(name)}`;
+  const object = await readJson(url, headers, 'branches', signal);
+  return verifiedBranch(object, repositoryId, name);
+}
+
+async function readExactBranch(request: ReturnType<typeof projectReadRequest>, repositoryId: number, branch: string,
+  signal?: AbortSignal): Promise<string | null> {
+  if (!isGitlabBranchName(branch)) throw new GitlabReadError('branches', 'invalid-response');
   try {
-    const value = await readJson(url, headers, 'branches', signal);
-    return verifiedBranchSha(value, repositoryId, branch);
+    return (await readBranchDetails(request, repositoryId, branch, signal)).sourceSha;
   } catch (error) {
     if (error instanceof GitlabReadError && error.httpStatus === 404) return null;
     throw error;
@@ -441,7 +446,7 @@ export async function createGitlabIssueBranch(connection: Connection, repository
   const { headers, projectUrl } = projectReadRequest(connection, repositoryId, 'branches');
   projectUrl.pathname += '/repository/branches';
   const value = await readJson(projectUrl, headers, 'branches', undefined, undefined, { branch, ref: sha });
-  const createdSha = verifiedBranchSha(value, repositoryId, branch);
+  const { sourceSha: createdSha } = verifiedBranch(value, repositoryId, branch);
   if (createdSha !== sha) throw new GitlabReadError('branches', 'invalid-response');
   return createdSha;
 }
@@ -599,20 +604,36 @@ async function readExactWorkflowObject(
   return { kind, object: { ...object, web_url: webUrl }, webUrl };
 }
 
-export function gitlabLinkedWorkflowReader(connection: Connection, signal?: AbortSignal) {
+export function gitlabLinkedActivityReader(connection: Connection, signal?: AbortSignal) {
   const projects = new Map<number, ReturnType<typeof readVerifiedProject>>();
-  return async (projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number) => {
+  function projectFor(projectId: number) {
     let project = projects.get(projectId);
     if (!project) {
       project = readVerifiedProject(connection, projectId, signal);
       projects.set(projectId, project);
     }
-    const context = await project;
-    const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, signal);
-    if (verified.object.id !== expectedObjectId || includesGitlabCredential(connection.token, [verified.webUrl])) {
-      throw new GitlabReadError(kind === 'merge_request' ? 'merge-requests' : 'pipelines', 'invalid-response');
-    }
-    return verified;
+    return project;
+  }
+  return {
+    async workflow(projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number) {
+      const context = await projectFor(projectId);
+      const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, signal);
+      if (verified.object.id !== expectedObjectId || includesGitlabCredential(connection.token, [verified.webUrl])) {
+        throw new GitlabReadError(kind === 'merge_request' ? 'merge-requests' : 'pipelines', 'invalid-response');
+      }
+      return verified;
+    },
+    async branch(projectId: number, name: string) {
+      if (!isGitlabBranchName(name) || includesGitlabCredential(connection.token, [name])) {
+        throw new GitlabReadError('branches', 'invalid-response');
+      }
+      const context = await projectFor(projectId);
+      const webUrl = gitlabPushLinkUrl(context.repository, 'tree', name);
+      if (!webUrl || includesGitlabCredential(connection.token, [webUrl])) throw new GitlabReadError('branches', 'invalid-response');
+      const { sourceSha } = await readBranchDetails(context, projectId, name, signal);
+      if (includesGitlabCredential(connection.token, [sourceSha])) throw new GitlabReadError('branches', 'invalid-response');
+      return { sourceSha, webUrl };
+    },
   };
 }
 
@@ -658,8 +679,8 @@ function reviewRevision(object: GitlabReadObject): string {
 export async function readGitlabMergeRequestReview(connection: Connection, repositoryId: number, iid: number, objectId: number,
   signal?: AbortSignal): Promise<Omit<GitlabMergeRequestReview, 'linkId' | 'repositoryId' | 'mergeRequestIid' | 'checkedAt'>> {
   if (!positiveId(iid) || !positiveId(objectId)) invalidMergeRequestReview();
-  const read = gitlabLinkedWorkflowReader(connection, signal);
-  const { object } = await read(repositoryId, 'merge_request', iid, objectId);
+  const { workflow } = gitlabLinkedActivityReader(connection, signal);
+  const { object } = await workflow(repositoryId, 'merge_request', iid, objectId);
   const observed = reviewRevision(object);
   const { projectUrl, headers } = projectReadRequest(connection, repositoryId, reviewStage);
   const token = connection.token;
@@ -678,7 +699,7 @@ export async function readGitlabMergeRequestReview(connection: Connection, repos
   }
   let pagination = new Headers();
   const [roster, votes] = await Promise.all([readReviewPart('reviewers', value => { pagination = value; }), readReviewPart('approvals')]);
-  const { object: latest } = await read(repositoryId, 'merge_request', iid, objectId);
+  const { object: latest } = await workflow(repositoryId, 'merge_request', iid, objectId);
   if (reviewRevision(latest) !== observed) throw new GitlabReadError(reviewStage, 'changed');
 
   const reviewerSource = roster.available ? 'reviewers' : Array.isArray(latest.reviewers) ? 'merge_request' : 'unavailable';
@@ -817,20 +838,22 @@ export async function readGitlabManualObject(
   const { repositoryPath, repository } = verifiedProjectRepository(project, projectId, base);
   if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 활동 주소를 입력해 주세요.');
 
-  const itemUrl = new URL(projectUrl);
   if (!isWorkflowPage(page)) {
-    const stage = page.kind === 'branch' ? 'branches' : 'commits';
     const webUrl = gitlabPushLinkUrl(repository, page.kind === 'branch' ? 'tree' : 'commit', page.id);
     if (!webUrl) throw new GitlabManualUrlError('GitLab 활동 주소가 너무 깁니다.');
-    itemUrl.pathname += `/repository/${stage}/${encodeURIComponent(page.id)}`;
-    if (page.kind === 'branch') onResolvedBranch?.(page.id, webUrl);
+    if (page.kind === 'branch') {
+      onResolvedBranch?.(page.id, webUrl);
+      const { object } = await readBranchDetails({ base, headers, projectUrl }, projectId, page.id, signal);
+      return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+    }
+    const itemUrl = new URL(projectUrl);
+    const stage = 'commits';
+    itemUrl.pathname += `/repository/commits/${encodeURIComponent(page.id)}`;
     const object = await readJson(itemUrl, headers, stage, signal);
     if (!isReadObject(object) || object.project_id !== undefined && object.project_id !== projectId) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
-    const sourceId = page.kind === 'branch' ? (isReadObject(object.commit) ? object.commit.id : undefined) : object.id;
-    const sha = gitlabObjectSha(sourceId);
-    if (!sha || /^0+$/.test(sha) || (page.kind === 'branch' ? object.name !== page.id : sha !== page.id)) {
+    if (gitlabObjectSha(object.id) !== page.id) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
     return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };

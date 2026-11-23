@@ -216,3 +216,143 @@ test('360px 티켓에서 GitLab 상태 확인으로 누락된 병합을 읽고 �
     }
   }
 });
+
+test('360px 브랜치만 연결한 티켓에서 HEAD를 확인하고 조회 실패 시 저장한 상태와 초안을 유지한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const unique = randomUUID();
+  const token = `synthetic-branch-refresh-read-${unique}`;
+  const secret = `synthetic-branch-refresh-webhook-${unique}`;
+  const upstreamError = `upstream-branch-only-error-${unique}`;
+  const repositoryId = 42;
+  const repositoryPath = 'team/review/branch-status';
+  const projectPath = `/forge/api/v4/projects/${repositoryId}`;
+  const originalSha = 'a'.repeat(40), updatedSha = 'b'.repeat(40);
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
+  const { projects: [project] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const issue = await json<Issue>(await request.post('/api/issues', {
+    data: { projectId: project.id, title: `브랜치 상태 확인 ${unique.slice(0, 8)}` },
+  }), 201);
+  const branch = `feature/${issue.key}`;
+  const branchPath = `${projectPath}/repository/branches/${encodeURIComponent(branch)}`;
+  const refreshPath = `/api/issues/${issue.id}/gitlab-links/refresh`;
+  const calls: { path: string; method?: string; token?: string | string[] }[] = [];
+  let baseUrl = '';
+  let unavailable = false;
+  let releaseRead = () => {};
+  let heldRead: Promise<void> | undefined;
+  const repoUrl = () => `${baseUrl}/${repositoryPath}`;
+  const branchUrl = () => `${repoUrl()}/-/tree/${encodeURIComponent(branch)}`;
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    calls.push({ path, method: incoming.method, token: incoming.headers['private-token'] });
+    response.setHeader('Content-Type', 'application/json');
+    if (path === projectPath) {
+      response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repositoryPath, web_url: repoUrl() }));
+    } else if (path === branchPath && !unavailable) {
+      const body = JSON.stringify({ name: branch, web_url: branchUrl(), commit: { id: updatedSha, committed_date: '2020-02-01T00:00:00Z' } });
+      if (heldRead) void heldRead.then(() => response.end(body));
+      else response.end(body);
+    } else {
+      response.writeHead(404).end(JSON.stringify({ message: `${upstreamError} ${token}` }));
+    }
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/forge`;
+
+  try {
+    await json(await request.patch(settingsPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    const push = async (before: string, after: string) => json<{ linked: number }>(await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Token': secret, 'X-Gitlab-Event': 'Push Hook', 'webhook-id': randomUUID() },
+      data: { object_kind: 'push', project_id: repositoryId, ref: `refs/heads/${branch}`,
+        before, after, checkout_sha: after, commits: [], total_commits_count: 0,
+        project: { id: repositoryId, web_url: repoUrl(), path_with_namespace: repositoryPath } },
+    }));
+    expect((await push('0'.repeat(40), originalSha)).linked).toBe(1);
+    const initialLinks = (await workspace()).gitlabLinks.filter(link => link.issueId === issue.id);
+    expect(initialLinks).toMatchObject([{ kind: 'branch', state: 'active', sourceBranch: branch, sourceSha: originalSha }]);
+    const [initial] = initialLinks;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+    const gitlab = panel.getByRole('region', { name: 'GitLab', exact: true });
+    const branchRow = gitlab.getByRole('region', { name: '브랜치', exact: true }).getByRole('listitem');
+    const statusCheck = gitlab.getByRole('button', { name: 'GitLab에서 상태 확인', exact: true });
+    const title = panel.getByRole('textbox', { name: '제목', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    await expect(branchRow.locator('code')).toHaveAttribute('title', originalSha);
+    await expect(statusCheck).toBeEnabled();
+    await title.fill('저장하지 않은 브랜치 확인 제목');
+    await comment.fill('아직 저장하지 않은 브랜치 확인 댓글');
+    expect(calls).toEqual([]);
+
+    const nextCheck = () => page.waitForResponse(response => new URL(response.url()).pathname === refreshPath && response.request().method() === 'POST');
+    const checking = nextCheck();
+    await statusCheck.press('Enter');
+    const result = await json<GitlabIssueRefreshResult>(await checking);
+    expect(result).toMatchObject({ links: [{ id: initial.id, state: 'active', sourceSha: updatedSha, branchObservationSource: 'read' }], failures: [], skipped: 0 });
+    await expect(branchRow.locator('code')).toHaveAttribute('title', updatedSha);
+    await expect(branchRow).toContainText('GitLab에서 확인한 HEAD');
+    await expect(gitlab.getByRole('status').filter({ hasText: 'GitLab 활동' })).toContainText('1건의 상태를 확인했습니다.');
+    await expect(statusCheck).toBeFocused();
+
+    unavailable = true;
+    const retrying = nextCheck();
+    await statusCheck.click();
+    const failed = await json<GitlabIssueRefreshResult>(await retrying);
+    expect(failed).toMatchObject({ links: [], failures: [{ linkId: initial.id }], skipped: 0 });
+    expect(JSON.stringify(failed)).not.toContain(upstreamError);
+    expect(JSON.stringify(failed)).not.toContain(token);
+    const failures = gitlab.getByRole('list', { name: '확인하지 못한 활동', exact: true });
+    await expect(failures.getByText(`브랜치 ${branch}`, { exact: true })).toBeVisible();
+    await expect(failures).toContainText('기존 브랜치 상태를 유지합니다.');
+    await expect(branchRow).toHaveAttribute('data-gitlab-state', 'active');
+    await expect(branchRow.getByRole('link')).toHaveAttribute('href', `${branchUrl()}?ref_type=heads`);
+    await expect(branchRow.locator('code')).toHaveAttribute('title', updatedSha);
+    await expect(title).toHaveValue('저장하지 않은 브랜치 확인 제목');
+    await expect(comment).toHaveValue('아직 저장하지 않은 브랜치 확인 댓글');
+
+    const saved = await workspace();
+    expect(saved.gitlabLinks.find(link => link.id === initial.id)).toEqual(result.links[0]);
+
+    unavailable = false;
+    heldRead = new Promise(resolve => { releaseRead = resolve; });
+    const deferred = nextCheck();
+    await statusCheck.click();
+    await expect.poll(() => calls.filter(call => call.path === branchPath).length).toBe(3);
+    const pushedSha = 'c'.repeat(40);
+    expect((await push(updatedSha, pushedSha)).linked).toBe(1);
+    releaseRead();
+    const raced = await json<GitlabIssueRefreshResult>(await deferred);
+    expect(raced).toMatchObject({ links: [], failures: [{ linkId: initial.id }], skipped: 0 });
+    await expect(failures).toContainText('브랜치 상태가 변경되었습니다.');
+    await expect(branchRow.locator('code')).toHaveAttribute('title', pushedSha);
+    await expect(title).toHaveValue('저장하지 않은 브랜치 확인 제목');
+    await expect(comment).toHaveValue('아직 저장하지 않은 브랜치 확인 댓글');
+    expect((await workspace()).issues.find(item => item.id === issue.id)).toEqual(issue);
+    expect(calls.map(call => call.path)).toEqual(Array.from({ length: 3 }, () => [projectPath, branchPath]).flat());
+    expect(calls.every(call => call.method === 'GET' && call.token === token)).toBe(true);
+  } finally {
+    releaseRead();
+    try {
+      const deleted = await request.delete(`/api/issues/${issue.id}`);
+      if (deleted.ok()) {
+        const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
+    }
+  }
+});

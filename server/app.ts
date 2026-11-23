@@ -2806,6 +2806,19 @@ export function createApp(options: {
     if (data.schemaVersion < 101 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
       links => links.some((link: GitlabLink) => Object.hasOwn(link, 'pipelineSource') || Object.hasOwn(link, 'pipelineTag')),
     )) fail('GitLab 파이프라인 실행 유형을 포함한 백업은 schemaVersion 101이 필요합니다.');
+    const readBranchLinks = [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].flatMap(
+      (links: GitlabLink[]) => links.filter(link => link.branchObservationSource === 'read'),
+    );
+    if (readBranchLinks.length) {
+      if (data.schemaVersion < 102) fail('단건 조회로 확인한 GitLab 브랜치를 포함한 백업은 schemaVersion 102가 필요합니다.');
+      const latestObservation = Math.min(Date.parse(data.exportedAt), Date.parse(restoreAt));
+      if (!Number.isFinite(latestObservation) || readBranchLinks.some(link => {
+        const { id, issueId, projectId, sourceBranch, updatedAt } = link;
+        const instance = /^gitlab:([a-f\d]{12}):/u.exec(id)?.[1];
+        return !instance || !sourceBranch || id !== `gitlab:${instance}:${projectId}:branch:${branchObjectId(sourceBranch)}:${issueId}` ||
+          Date.parse(updatedAt) > latestObservation;
+      })) fail('단건 조회로 확인한 GitLab 브랜치의 식별자나 관측 시각을 확인해 주세요.');
+    }
     if (data.schemaVersion <28 && (data.gitlabLinks.some((link:GitlabLink) => link.branchObservationSource==='sync') ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.branchObservationSource==='sync')))) {
       fail('GitLab 수동 조회로 확인한 브랜치 연결에는 schemaVersion 28 백업이 필요합니다.');

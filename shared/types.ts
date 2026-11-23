@@ -1274,7 +1274,7 @@ export interface GitlabLink {
   id: string; issueId: string; projectId: number; iid: number;
   kind: 'merge_request' | 'commit' | 'pipeline' | 'branch';
   title: string; webUrl: string; state: string; updatedAt: string;
-  sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync';
+  sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' | 'read';
   originalJiraKey?: string; manualLinkId?: string;
   mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[];
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;

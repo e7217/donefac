@@ -14,7 +14,7 @@ import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type Collaborati
 import type {
   ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, DocumentCommentReplyResult,
   DocumentPublicationView, DocumentSelectionCommentResult, TeamNotification,
-  GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
+  GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueWorklogPage, Milestone, ProjectWorklogReport, ReportingLedgerData, ResourceLink, RichContent, TrashEntrySummary, TrashPage,
   TrashItemPage, TrashItemSummary, TrashResourceType, TrashRestoreResult, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -584,6 +584,91 @@ test('schema 28 preserves GitLab observations for the first authenticated deleti
   assert.equal(deleted?.branchObservationSource, undefined);
   await restore(f, entry);
   assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.issueId === issue.id), deleted);
+});
+
+test('schema 102 preserves exact branch refreshes as the push baseline for live and archived links', async t => {
+  const f = await fixture(t);
+  const live = await makeIssue(f, '조회 후 백업할 브랜치');
+  const archived = await makeIssue(f, '조회 후 휴지통에 둘 브랜치');
+  const firstHead = 'a'.repeat(40), checkedHead = 'b'.repeat(40), newHead = 'c'.repeat(40), zero = '0'.repeat(40);
+  const branch = (issue: Issue) => `release/${issue.key}`;
+  const projectPath = '/forge/api/v4/projects/42';
+  const token = 'synthetic-exact-branch-read';
+  const mock = createServer((req, res) => {
+    assert.equal(req.headers['private-token'], token);
+    const issue = [live, archived].find(issue => req.url === `${projectPath}/repository/branches/${encodeURIComponent(branch(issue))}`);
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === projectPath) res.end(JSON.stringify({ id: 42, web_url: `${baseUrl}/team/engine` }));
+    else if (issue) res.end(JSON.stringify({ name: branch(issue), commit: { id: checkedHead } }));
+    else res.writeHead(404).end();
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  t.after(() => new Promise<void>(resolve => {
+    mock.close(() => resolve());
+    mock.closeAllConnections();
+  }));
+  const address = mock.address();
+  assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}/forge`;
+  const webhookSecret = 'synthetic-exact-branch-backup';
+  const { version } = await f.call<GitlabSettings>('/integrations/gitlab');
+  await f.call('/integrations/gitlab', 'PATCH', { expectedVersion: version, baseUrl, projectIds: [42], token, webhookSecret });
+  async function push(issue: Issue, before: string, after: string) {
+    const response = await f.request('/integrations/gitlab/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Gitlab-Token': webhookSecret, 'X-Gitlab-Event': 'Push Hook', 'webhook-id': randomUUID() },
+      body: JSON.stringify({ object_kind: 'push', project_id: 42, ref: `refs/heads/${branch(issue)}`, before, after,
+        checkout_sha: after === zero ? null : after, commits: [], total_commits_count: 0,
+        project: { id: 42, path_with_namespace: 'team/engine' } }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+
+  for (const issue of [live, archived]) {
+    await push(issue, zero, firstHead);
+    const { links, failures } = await f.call<GitlabIssueRefreshResult>(`/issues/${issue.id}/gitlab-links/refresh`, 'POST', {});
+    assert.deepEqual(failures, []);
+    assert.deepEqual(links.map(link => [link.sourceSha, link.branchObservationSource]), [[checkedHead, 'read']]);
+  }
+  const entry = await archive(f, 'issue', archived);
+  const backup = await f.call<GitlabBackup>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const liveLink = backup.gitlabLinks.find(link => link.issueId === live.id);
+  const archivedLink = branchInTrash(backup, entry);
+  assert.ok(liveLink && archivedLink);
+  assert.equal(liveLink.branchObservationSource, 'read');
+  assert.equal(archivedLink.branchObservationSource, 'read');
+
+  const unsupported = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 101 } }, 400);
+  assert.match(unsupported.error, /schemaVersion 102/u);
+  const corrupt = structuredClone(backup);
+  corrupt.gitlabLinks.find(link => link.id === liveLink.id)!.id = liveLink.id.replace(/:branch:[a-f\d]{64}:/u, `:branch:${'0'.repeat(64)}:`);
+  await f.call('/import', 'POST', { data: corrupt }, 400);
+  const legacy = structuredClone(backup);
+  legacy.schemaVersion = 101;
+  legacy.gitlabLinks.find(link => link.id === liveLink.id)!.branchObservationSource = 'sync';
+  branchInTrash(legacy, entry)!.branchObservationSource = 'sync';
+  await f.call('/import', 'POST', { data: legacy });
+  await f.call('/import', 'POST', { data: backup });
+  await f.restart();
+  const restoredBackup = await f.call<GitlabBackup>('/export');
+  assert.deepEqual(restoredBackup.gitlabLinks.find(link => link.id === liveLink.id), liveLink);
+  assert.deepEqual(branchInTrash(restoredBackup, entry), archivedLink);
+
+  await push(live, firstHead, 'd'.repeat(40));
+  assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.id === liveLink.id), liveLink);
+  await push(live, checkedHead, newHead);
+  await push(archived, checkedHead, zero);
+  const current = (await workspace(f)).gitlabLinks.find(link => link.id === liveLink.id);
+  assert.equal(current?.sourceSha, newHead);
+  assert.equal(current?.branchObservationSource, undefined);
+  const deleted = branchInTrash(await f.call<GitlabBackup>('/export'), entry);
+  assert.equal(deleted?.state, 'deleted');
+  assert.equal(deleted?.sourceSha, checkedHead);
+  assert.equal(deleted?.branchObservationSource, undefined);
+  await restore(f, entry);
+  assert.deepEqual((await workspace(f)).gitlabLinks.find(link => link.issueId === archived.id), deleted);
 });
 
 async function bytes(f: Fixture, path: string, expected: Buffer) {

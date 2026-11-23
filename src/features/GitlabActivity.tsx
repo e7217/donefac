@@ -400,6 +400,7 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
   const sha = gitlabObjectSha(link.sourceSha) ?? gitlabObjectSha(legacyCommitId);
   const branch = typeof link.sourceBranch === 'string' ? link.sourceBranch : '';
+  const branchHeadLabel = deleted ? '삭제 전 HEAD' : link.branchObservationSource === 'read' ? 'GitLab에서 확인한 HEAD' : '확인한 HEAD';
   const title = (link.kind === 'branch' && branch) || (typeof link.title === 'string' && link.title) || '이름 없음';
   const hasNumber = Number.isSafeInteger(link.iid) && link.iid > 0;
   const number = hasNumber && link.kind === 'merge_request' ? `!${link.iid}` : hasNumber && link.kind === 'pipeline' ? `#${link.iid}` : null;
@@ -419,7 +420,7 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
             {titleContent}<ExternalLink aria-hidden="true" size={14} /><span className="sr-only">GitLab에서 새 탭으로 열기</span>
           </a>
         : <div className="gitlab-activity-target">{titleContent}</div>}
-      {link.kind === 'branch' && sha && <span className="gitlab-activity-detail">{deleted ? '삭제 전 HEAD' : '확인한 HEAD'} <code title={sha}>{sha.slice(0, 8)}</code></span>}
+      {link.kind === 'branch' && sha && <span className="gitlab-activity-detail">{branchHeadLabel} <code title={sha}>{sha.slice(0, 8)}</code></span>}
       {link.kind === 'commit' && branch && <span className="gitlab-activity-detail">{branch}</span>}
       {link.kind === 'merge_request' && state === 'opened' && <MergeReadiness value={link.mergeReadiness} />}
       {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
