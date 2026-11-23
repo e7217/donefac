@@ -66,6 +66,28 @@
 .gitlab-project-webhook-events > li { padding: 1px 5px; border-radius: 4px; color: #285e49; background: #e8f3eb; font-size: 12px; }
 .gitlab-project-webhook-events > li[data-enabled="false"] { color: #75472f; background: #fff0e2; }
 
+.gitlab-project-webhook-history-actions { margin-top: 8px; }
+.gitlab-project-webhook-history {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #dae8e1;
+  font-size: 13px;
+}
+.gitlab-project-webhook-history h4 { margin: 0; color: #274c3c; font-size: 13px; }
+.gitlab-project-webhook-attempts {
+  max-height: 18rem;
+  overflow-y: auto;
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}
+.gitlab-project-webhook-attempts > li { padding: 5px 4px; border-bottom: 1px solid #dae8e1; }
+.gitlab-project-webhook-attempts > li > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.gitlab-project-webhook-attempts small { color: #506f61; font-size: 12px; }
+.gitlab-project-webhook-http { padding: 0 4px; border-radius: 3px; background: #fff0e2; color: #75472f; font-size: 12px; }
+.gitlab-project-webhook-http[data-ok="true"] { background: #e8f3eb; color: #285e49; }
+.gitlab-project-webhook-local-receipt { margin-top: 8px; }
+
 @media (max-width: 600px) {
   .gitlab-project-webhook { padding: 14px; }
   .gitlab-project-webhook label { flex-basis: 100%; }

@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type RequestListener } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
+import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabProjectWebhookHistory, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
 
 async function upstream(t: TestContext, listener: RequestListener) {
   const server = createServer(listener);
@@ -17,6 +17,78 @@ async function upstream(t: TestContext, listener: RequestListener) {
   assert.ok(address && typeof address === 'object');
   return `http://127.0.0.1:${address.port}`;
 }
+
+test('GitLab webhook history reads one reviewed receiver page and projects delivery diagnostics without private fields', async t => {
+  const receiver = 'https://teamspace.example.test/api/integrations/gitlab/webhook';
+  const paths: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], 'synthetic-hook-token');
+    paths.push(request.url!);
+    response.setHeader('X-Next-Page', '2');
+    response.end(JSON.stringify([
+      { id: 32, url: receiver, trigger: 'deployment_hooks', response_status: '200', execution_duration: 1.09064,
+        created_at: '2026-01-22T11:20:30-07:00', request_headers: { authorization: 'private-header' },
+        request_data: { private: 'private-payload' }, response_body: 'response-private-data', response_headers: { Date: 'Thu, 22 Jan 2026 18:20:31 GMT' } },
+      { id: 45, url: receiver, trigger: 'merge_request_hooks', response_status: 401, execution_duration: 0.08 },
+      { id: 23, url: `${receiver}?token=historical-private-target`, trigger: 'pipeline_hooks', response_status: '200' },
+      { id: 24, url: 'https://older.example.test/api/integrations/gitlab/webhook', trigger: 'push_hooks', response_status: '200' },
+      { id: 26, url: receiver, trigger: 'pipeline_hooks', response_status: 'internal error', execution_duration: -0.001,
+        created_at: '2026-02-29T00:00:00Z', internal_error_message: 'private-connection-detail' },
+      { id: 20, url: receiver, trigger: 'tag_push_hooks', response_status: '0', response_headers: { Date: 'Thu, 22 Jan 2026 18:20:31 GMT' } },
+      { id: 18, url: receiver, trigger: 'push_hooks', response_status: 0, created_at: '2026-01-22T18:20:30', execution_duration: 0 },
+      { id: 17, url: receiver, trigger: 'private-trigger-detail', response_status: '502', execution_duration: '1.25' },
+      { id: 15, url: receiver, trigger: 'push_hooks', response_status: 'malformed status private-data' },
+      { id: 12, url: receiver, trigger: 'push_hooks', response_status: '200' },
+      { id: 12, url: receiver, trigger: 'merge_request_hooks', response_status: '400' },
+      null,
+    ]));
+  });
+  const result = await readGitlabProjectWebhookHistory({ baseUrl: `${origin}/gitlab/`, token: 'synthetic-hook-token' }, 42, 8, receiver);
+  assert.deepEqual(paths, ['/gitlab/api/v4/projects/42/hooks/8/events?per_page=20&page=1']);
+  assert.deepEqual(result, { partial: true, attempts: [
+    { id: 32, event: 'deployment', status: 200, sentAt: '2026-01-22T18:20:30.000Z', durationMs: 1091 },
+    { id: 45, event: 'merge_request', status: 401, sentAt: null, durationMs: 80 },
+    { id: 26, event: 'pipeline', status: null, sentAt: null, durationMs: null },
+    { id: 20, event: 'tag_push', status: null, sentAt: null, durationMs: null },
+    { id: 18, event: 'push', status: null, sentAt: null, durationMs: 0 },
+    { id: 17, event: 'other', status: 502, sentAt: null, durationMs: null },
+  ] });
+  assert.doesNotMatch(JSON.stringify(result), /private|https:/u);
+});
+
+test('GitLab webhook history distinguishes an empty page, filtered attempts, incomplete coverage and invalid envelopes', async t => {
+  const receiver = 'https://teamspace.example.test/api/integrations/gitlab/webhook';
+  const attempt = { id: 1, url: receiver, trigger: 'push_hooks', response_status: '200' };
+  const fullPage = Array.from({ length: 20 }, (_, index) => ({ ...attempt, id: index + 1 }));
+  const fixtures: { rows: unknown; next?: string; status?: number }[] = [
+    { rows: [] }, { rows: [attempt], next: '2' }, { rows: [null, { ...attempt, response_status: 600 }] },
+    { rows: fullPage }, { rows: fullPage, next: '' }, { rows: {} }, { rows: [...fullPage, attempt] }, { rows: [], next: '2' },
+    { rows: { private: 'do not include upstream failure object' }, status: 403 },
+  ];
+  let reads = 0;
+  const origin = await upstream(t, (_request, response) => {
+    const fixture = fixtures[reads++];
+    response.statusCode = fixture.status ?? 200;
+    if (fixture.next !== undefined) response.setHeader('X-Next-Page', fixture.next);
+    response.end(JSON.stringify(fixture.rows));
+  });
+  const read = () => readGitlabProjectWebhookHistory({ baseUrl: origin }, 2, 3, receiver);
+  assert.deepEqual(await read(), { attempts: [], partial: false });
+  assert.deepEqual(await read(), { attempts: [{ id: 1, event: 'push', status: 200, sentAt: null, durationMs: null }], partial: true });
+  assert.deepEqual(await read(), { attempts: [], partial: true });
+  const limited = await read();
+  assert.equal(limited.attempts.length, 20);
+  assert.equal(limited.partial, true);
+  assert.deepEqual(await read(), { ...limited, partial: false });
+  for (let index = 0; index < 3; index++) {
+    await assert.rejects(read, (error: unknown) => error instanceof GitlabReadError && error.code === 'invalid-response');
+  }
+  await assert.rejects(read, (error: unknown) => error instanceof GitlabReadError && error.httpStatus === 403 && !error.message.includes('private'));
+  await assert.rejects(() => readGitlabProjectWebhookHistory({ baseUrl: origin }, 2, -1, receiver), GitlabReadError);
+  await assert.rejects(() => readGitlabProjectWebhookHistory({ baseUrl: origin }, 2, 3, `${receiver}/`), GitlabReadError);
+  assert.equal(reads, fixtures.length);
+});
 
 test('GitLab read scans preserve a configured subpath and cap MR pages and pipeline rows', async t => {
   const paths: string[] = [];

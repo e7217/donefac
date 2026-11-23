@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode, GitlabProjectWebhookReview } from '../shared/gitlab-project-webhooks.js';
-import { createGitlabProjectWebhook, GitlabReadError, listGitlabProjectWebhooks, supportsGitlabProjectWebhookSigning } from './gitlab-read-sync.js';
+import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode, GitlabProjectWebhookHistory, GitlabProjectWebhookReview } from '../shared/gitlab-project-webhooks.js';
+import { createGitlabProjectWebhook, GitlabReadError, listGitlabProjectWebhooks, readGitlabProjectWebhookHistory, supportsGitlabProjectWebhookSigning } from './gitlab-read-sync.js';
 import type { Store } from './store.js';
 
 type Connection = {
@@ -53,6 +53,18 @@ function externalError(error: unknown, creating = false): GitlabProjectWebhookSe
     return new GitlabProjectWebhookSetupError(422, 'GitLab이 웹훅 등록을 거절했습니다. 수신 주소, 인증 방식과 GitLab 버전을 확인해 주세요.');
   }
   return new GitlabProjectWebhookSetupError(502, 'GitLab 프로젝트 웹훅 목록을 확인하지 못했습니다. 연결과 다음 페이지를 확인해 주세요.');
+}
+
+function historyReadError(error: unknown): GitlabProjectWebhookSetupError {
+  if (error instanceof GitlabReadError) {
+    if (error.httpStatus === 401 || error.httpStatus === 403 || error.httpStatus === 429) return externalError(error);
+    if (error.httpStatus === 404) return new GitlabProjectWebhookSetupError(404,
+      'GitLab 웹훅 전송 이력을 찾을 수 없습니다. 웹훅이 변경되었거나 권한 또는 GitLab 버전에서 조회를 지원하는지 확인해 주세요.');
+    if (error.code === 'timeout') return new GitlabProjectWebhookSetupError(504, 'GitLab 웹훅 전송 이력의 응답 시간이 초과되었습니다. 다시 확인해 주세요.');
+    if (error.code === 'response-too-large') return new GitlabProjectWebhookSetupError(502, 'GitLab 웹훅 전송 이력이 응답 크기 한도를 초과했습니다.');
+    if (error.code === 'invalid-response') return new GitlabProjectWebhookSetupError(502, 'GitLab 웹훅 전송 이력의 응답 형식을 확인할 수 없습니다.');
+  }
+  return new GitlabProjectWebhookSetupError(502, 'GitLab 웹훅 전송 이력을 조회하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.');
 }
 
 function isConfigured(hook: GitlabProjectWebhook): boolean {
@@ -131,6 +143,32 @@ export class GitlabProjectWebhookSetup {
       result.reviewId = reviewId;
     }
     return result;
+  }
+
+  async history(value: unknown, signal?: AbortSignal): Promise<Omit<GitlabProjectWebhookHistory, 'localReceipt'>> {
+    const input = requestFields(value, ['expectedVersion', 'repositoryId', 'hookId', 'managementToken', 'actorId']);
+    const target = this.target(input);
+    const { connection, repositoryId, receiverUrl } = target;
+    const { hookId } = input;
+    if (typeof hookId !== 'number' || !Number.isSafeInteger(hookId) || hookId < 1) {
+      throw new GitlabProjectWebhookSetupError(400, '전송 이력을 조회할 웹훅을 선택해 주세요.');
+    }
+    const token = input.managementToken === undefined ? connection.readToken() : submittedCredential(input.managementToken).trim();
+    if (!token) throw new GitlabProjectWebhookSetupError(400, '웹훅 전송 이력을 조회할 GitLab 토큰을 입력해 주세요.');
+
+    const checkCurrent = () => {
+      signal?.throwIfAborted();
+      this.connection(connection.version);
+    };
+    const hooks = await this.findHooks(target, token, signal).finally(checkCurrent);
+    if (!hooks.some(hook => hook.id === hookId && hook.receiverExact !== false)) {
+      throw new GitlabProjectWebhookSetupError(404, '현재 Teamspace 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.',
+        { reason: 'receiver_changed' });
+    }
+
+    const result = await readGitlabProjectWebhookHistory({ baseUrl: connection.baseUrl, token }, repositoryId, hookId, receiverUrl, signal)
+      .catch(error => { throw historyReadError(error); }).finally(checkCurrent);
+    return { settingsVersion: connection.version, repositoryId, hookId, attempts: result.attempts, partial: result.partial };
   }
 
   async register(value: unknown, actorId: string, signal?: AbortSignal): Promise<GitlabProjectWebhookReview> {

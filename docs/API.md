@@ -599,6 +599,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 | `GET /api/integrations/gitlab/webhook-status` | 저장한 연결 설정 버전과 허용 저장소별 최근 인증 수신 및 이벤트별 반영 요약 |
 | `POST /api/integrations/gitlab/project-webhook-review` | 저장한 저장소의 프로젝트 웹훅을 조회하고 수신 주소와 이벤트 설정 점검 |
 | `POST /api/integrations/gitlab/project-webhook-register` | 점검에서 누락된 저장소 한 곳에 프로젝트 웹훅 등록 |
+| `POST /api/integrations/gitlab/project-webhook-history` | 현재 수신 주소와 일치하는 훅의 GitLab 전송 결과와 저장소의 최근 인증 수신 조회 |
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
 | `POST /api/automation-rules` | 규칙 생성 |
 | `PATCH /api/automation-rules/:id` · `DELETE /api/automation-rules/:id` | `expectedVersion`으로 변경·삭제 |
@@ -640,6 +641,8 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 등록은 `{expectedVersion,repositoryId,reviewId,managementToken,webhookCredential}`을 받는다. `reviewId`는 인증 값이 설정된 누락 저장소의 점검 결과에 표시되며, 같은 작업자·저장소·연결 버전으로 10분간 유효하다. 관리 토큰은 저장소의 Maintainer·Owner 권한 또는 관리자 권한과 `api` 범위가 필요하다. 다시 입력한 웹훅 인증 값을 저장한 값과 대조하며, Signing Token이 설정된 경우 기능 플래그 없이 서명 등록을 지원하는 GitLab 19.1 이상인지 먼저 확인한다. 등록용 자격 증명은 저장하지 않는다. [GitLab 토큰 범위](https://docs.gitlab.com/security/tokens/access_token_scopes/) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/) · [GitLab 버전 조회](https://docs.gitlab.com/api/metadata/)
 
 등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline·Deployment와 SSL 검증을 켜고 `created`로 반환한다. 기존 훅의 `deploymentEvents`가 `false`이거나 확인할 수 없으면 `review`가 표시된다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
+
+최근 전송 조회는 `{expectedVersion,repositoryId,hookId,managementToken?}`을 받는다. 현재 HTTPS 수신 주소에 정확히 일치하는 저장소의 훅을 다시 확인한 뒤 GitLab 17.3 이상에서 제공하는 전송 이력의 첫 페이지를 최대 20건 읽는다. 응답의 `attempts`는 전송 ID, 이벤트 유형, HTTP 상태 `status`, 전송 시각 `sentAt`과 소요 밀리초 `durationMs`를 담는다. HTTP 응답이 없으면 상태는 `null`이며, GitLab이 시각·소요 시간을 제공하지 않으면 해당 값도 `null`이다. 원래 등록 주소가 다른 전송이나 해석할 수 없는 행이 있거나 다음 페이지가 있으면 `partial`을 표시한다. `localReceipt`는 해당 저장소의 최근 인증 수신 요약이다. 전송과 수신은 각 시스템이 보고한 기록을 함께 보여준다. 원문·헤더·응답 본문은 내보내거나 저장하지 않는다. [GitLab 프로젝트 웹훅 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events)
 
 ### GitLab 환경별 배포
 

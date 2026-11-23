@@ -5,7 +5,7 @@ import { RefreshCw } from 'lucide-react';
 import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabSettings, type GitlabWebhookDelivery, type GitlabWebhookStatus } from '../../shared/types';
 import { api } from '../lib/api';
 
-const eventLabels: Record<GitlabWebhookDelivery['event'], string> = {
+export const gitlabWebhookEventLabels: Record<GitlabWebhookDelivery['event'], string> = {
   push: 'Push',
   tag_push: 'Tag Push',
   merge_request: 'Merge Request',
@@ -13,7 +13,7 @@ const eventLabels: Record<GitlabWebhookDelivery['event'], string> = {
   deployment: '배포 이벤트',
   other: '기타',
 };
-const authenticationLabels: Record<GitlabWebhookDelivery['authentication'], string> = {
+export const gitlabWebhookAuthenticationLabels: Record<GitlabWebhookDelivery['authentication'], string> = {
   'secret-token': 'Secret Token',
   'signing-token': 'Signing Token',
 };
@@ -91,7 +91,7 @@ export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSetting
             <h3>저장소 {repositoryId} {delivery ? <span className="badge gitlab-preview-ok">인증 수신 확인</span>
               : <span className="badge gitlab-webhook-waiting">{authenticationConfigured ? '인증 수신 대기' : '웹훅 인증 미설정'}</span>}</h3>
             {delivery && <>
-              <p>{eventLabels[delivery.event]} · {authenticationLabels[delivery.authentication]}</p>
+              <p>{gitlabWebhookEventLabels[delivery.event]} · {gitlabWebhookAuthenticationLabels[delivery.authentication]}</p>
               <p><time dateTime={delivery.receivedAt}>{new Date(delivery.receivedAt).toLocaleString('ko-KR')}</time></p>
               <p>{deliveryResult(delivery)}</p>
             </>}
@@ -108,9 +108,9 @@ export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSetting
               <summary>이벤트별 수신 {observed}/{events.length}</summary>
               <ul className="gitlab-webhook-events" aria-label="이벤트별 인증 수신" role="list">
                 {events.map(({ event, receipt }) => <li key={event}>
-                  <strong>{eventLabels[event]}</strong>
+                  <strong>{gitlabWebhookEventLabels[event]}</strong>
                   {receipt ? <div>
-                    <p><time dateTime={receipt.receivedAt}>{new Date(receipt.receivedAt).toLocaleString('ko-KR')}</time> · {authenticationLabels[receipt.authentication]}</p>
+                    <p><time dateTime={receipt.receivedAt}>{new Date(receipt.receivedAt).toLocaleString('ko-KR')}</time> · {gitlabWebhookAuthenticationLabels[receipt.authentication]}</p>
                     <p>{deliveryResult(receipt)}</p>
                   </div> : <span>{authenticationConfigured ? '수신 대기' : '인증 미설정'}</span>}
                 </li>)}

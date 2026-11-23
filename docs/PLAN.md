@@ -347,6 +347,8 @@ GitLab 연결 미리보기는 현재 입력한 주소·저장소·읽기 토큰�
 
 프로젝트 웹훅 설정은 배포 시 검증한 Teamspace HTTPS 수신 주소와 저장한 GitLab 연결을 사용한다. 저장소의 웹훅 목록을 끝까지 읽고 같은 경로의 등록과 이벤트·TLS·브랜치 필터·전송 상태를 표시한다. 누락을 확인한 저장소는 같은 작업자와 설정 버전으로 등록한다. 등록 직전 목록을 다시 읽고 관리 토큰과 다시 입력한 인증 값을 해당 GitLab 액세스에만 사용한다. 외부 쓰기 결과를 확인할 수 없으면 재시작 후에도 미확인 시도를 기억하고 목록으로 확인한다. 등록과 인증된 이벤트 수신은 각각 확인한다. [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/)
 
+프로젝트 웹훅의 **최근 전송 확인**은 저장한 저장소에서 현재 수신 주소에 정확히 일치하는 훅을 대조한다. 요청한 경우에만 GitLab 전송 이력을 읽고 이벤트·HTTP 상태·시각·소요 시간을 표시한다. 같은 저장소의 마지막 인증 수신을 함께 보여준다. 조회 도중 연결 설정이 바뀌면 이전 결과를 폐기한다. 전송 원문·헤더·응답 본문은 화면과 보관 기록에 남기지 않는다. [GitLab 프로젝트 웹훅 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events)
+
 배포 기록은 GitLab 인스턴스·저장소·배포 ID와 발생 시각을 기준으로 저장한다. 인증된 배포가 먼저 들어오면 저장소 이력에 나타난다. 이후 연결된 커밋·파이프라인의 전체 SHA 또는 대상 저장소가 확인된 병합 MR의 병합·스쿼시 SHA가 일치하면 티켓에도 표시된다. 배포 화면은 환경·상태·시각과 GitLab 작업 또는 커밋 주소를 표시한다. GitLab 19 이전의 시간대가 포함된 웹훅 발생 시각은 ISO 8601로 정규화한다. [GitLab 19 웹훅 변경](https://docs.gitlab.com/update/versions/gitlab_19_changes/#webhook-payload-timestamps-changed-to-iso-8601-format)
 
 저장소별 배포 이력 동기화는 GitLab에서 최근 배포 50건과 성공한 배포의 포함 MR을 읽는다. MR의 숫자 ID·IID·대상 저장소가 기존 티켓 연결과 일치하면 같은 배포를 함께 표시한다. 조회 권한·한도·일시 오류로 전체 관계를 읽지 못하면 확인한 관계를 보존하고 누락 가능성을 안내한다. 동기화 중 갱신한 웹훅 상태와 연결 설정 버전을 저장 직전에 확인한다. 자체 백업 형식 74는 배포 상태의 동기화 출처와 포함 MR을 보존한다. [GitLab의 배포별 MR 추적](https://docs.gitlab.com/ci/environments/deployments/#track-newly-included-merge-requests-per-deployment)

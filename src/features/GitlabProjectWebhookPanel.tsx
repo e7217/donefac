@@ -1,14 +1,16 @@
 'use client';
 
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Copy, Link2, Search } from 'lucide-react';
-import type { GitlabProjectWebhookReview } from '../../shared/gitlab-project-webhooks';
+import type { GitlabProjectWebhookHistory, GitlabProjectWebhookReview } from '../../shared/gitlab-project-webhooks';
 import type { GitlabSettings } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
+import { gitlabWebhookAuthenticationLabels, gitlabWebhookEventLabels } from './GitlabWebhookStatusPanel';
 import './gitlab-project-webhook.css';
 
 type Action = 'review' | 'register';
 type Hook = GitlabProjectWebhookReview['hooks'][number];
+type HistoryRead = { hookId: number; value: GitlabProjectWebhookHistory | null; error?: string };
 
 const receiverPath = '/api/integrations/gitlab/webhook';
 const staleReviewMessage = '연결 설정이나 점검 결과가 변경되었습니다. 최신 설정을 확인하고 다시 점검해 주세요.';
@@ -39,7 +41,61 @@ function operationError(error: unknown, action: Action) {
     : '웹훅 설정을 점검하지 못했습니다. 다시 점검하거나 GitLab의 웹훅 목록을 확인해 주세요.';
 }
 
-function ExistingHook({ hook }: { hook: Hook }) {
+function historyError(error: unknown) {
+  if (error instanceof ApiError) {
+    if (error.status === 409) return staleReviewMessage;
+    if (error.status === 400 || error.status === 401 || error.status === 403) {
+      return 'GitLab 관리 토큰과 저장소의 Maintainer 또는 Owner 권한을 확인해 주세요.';
+    }
+    if (error.status === 404) {
+      if (error.details && typeof error.details === 'object' && 'reason' in error.details && error.details.reason === 'receiver_changed') {
+        return '현재 Teamspace 수신 주소와 일치하는 웹훅이 없습니다. 웹훅 설정을 다시 점검해 주세요.';
+      }
+      return 'GitLab 전송 이력을 읽을 수 없습니다. GitLab 17.3 이상과 저장소 조회 권한을 확인해 주세요.';
+    }
+    if (error.status === 429) return 'GitLab 요청 한도에 도달했습니다. 잠시 뒤 다시 확인해 주세요.';
+    if (error.status === 504) return 'GitLab 전송 이력 조회 시간이 초과되었습니다. 잠시 뒤 다시 확인해 주세요.';
+  }
+  return 'GitLab 전송 이력을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요.';
+}
+
+function deliveryHint(status: number | null) {
+  if (status === null) return 'GitLab의 전송 상세와 Teamspace 수신 주소·TLS 설정을 확인해 주세요.';
+  if (status === 401 || status === 403) return 'Teamspace 웹훅 인증 값과 프록시의 수신 경로 접근을 확인해 주세요.';
+  if (status === 404 || (status >= 300 && status < 400)) return 'GitLab에 등록된 HTTPS 수신 주소와 프록시 경로를 확인해 주세요.';
+  if (status >= 500) return 'Teamspace와 프록시의 오류 기록을 확인해 주세요.';
+  return null;
+}
+
+function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
+  const receipt = value.localReceipt;
+  const hint = value.attempts.length ? deliveryHint(value.attempts[0].status) : null;
+  return <section className="gitlab-project-webhook-history" aria-label="GitLab 최근 전송">
+    <h4>GitLab 최근 전송</h4>
+    {value.partial && <p className="gitlab-project-webhook-note">확인할 수 있는 전송만 표시합니다.</p>}
+    {hint && <p>{hint}</p>}
+    {value.attempts.length ? <ol className="gitlab-project-webhook-attempts" aria-label="GitLab 최근 전송 내역" role="list">
+      {value.attempts.map(attempt => <li key={attempt.id}>
+        <div><strong>{gitlabWebhookEventLabels[attempt.event]}</strong>
+          <span className="gitlab-project-webhook-http" data-ok={attempt.status !== null && attempt.status >= 200 && attempt.status < 300}>
+            {attempt.status === null ? 'HTTP 응답 없음' : `HTTP ${attempt.status}`}
+          </span>
+        </div>
+        <small>{attempt.sentAt ? <time dateTime={attempt.sentAt}>{new Date(attempt.sentAt).toLocaleString('ko-KR')}</time> : '전송 시각 미제공'}
+          {attempt.durationMs !== null && <> · {attempt.durationMs.toLocaleString('ko-KR')}ms</>}
+        </small>
+      </li>)}
+    </ol> : <p>확인된 GitLab 전송 기록이 없습니다.</p>}
+    <div className="gitlab-project-webhook-local-receipt">
+      <h4>Teamspace 인증 수신</h4>
+      {receipt ? <p>이 저장소의 마지막 인증 수신 · {gitlabWebhookEventLabels[receipt.event]} · {gitlabWebhookAuthenticationLabels[receipt.authentication]}
+        {' · '}<time dateTime={receipt.receivedAt}>{new Date(receipt.receivedAt).toLocaleString('ko-KR')}</time></p>
+        : <p>이 저장소의 인증 수신 기록이 없습니다.</p>}
+    </div>
+  </section>;
+}
+
+function ExistingHook({ hook, children }: { hook: Hook; children?: ReactNode }) {
   const flags = [
     ['Push', hook.pushEvents],
     ['Merge Request', hook.mergeRequestEvents],
@@ -60,6 +116,7 @@ function ExistingHook({ hook }: { hook: Hook }) {
     </ul>
     {hook.deploymentEvents !== true && <p>GitLab 저장소의 Settings → Webhooks에서 이 웹훅의 Deployment events를 켠 뒤 다시 점검하세요.</p>}
     <p>{hook.active === null ? '전송 상태 확인 불가' : hook.active ? '전송 가능' : '전송 중지'}</p>
+    {children}
   </li>;
 }
 
@@ -70,7 +127,8 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
   const [managementToken, setManagementToken] = useState('');
   const [webhookCredential, setWebhookCredential] = useState('');
   const [result, setResult] = useState<GitlabProjectWebhookReview | null>(null);
-  const [activeAction, setActiveAction] = useState<Action | null>(null);
+  const [activeAction, setActiveAction] = useState<Action | 'history' | null>(null);
+  const [history, setHistory] = useState<HistoryRead | null>(null);
   const [error, setError] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
   const receiver = useRef<HTMLInputElement>(null);
@@ -102,6 +160,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
   function chooseRepository(id: number) {
     setRepositoryId(id);
     setResult(null);
+    setHistory(null);
     setWebhookCredential('');
     setError('');
   }
@@ -114,6 +173,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
     request.current = controller;
     setActiveAction(action);
     if (action === 'review') setResult(null);
+    setHistory(null);
     setWebhookCredential('');
     setError('');
     try {
@@ -147,6 +207,35 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
     }
   }
 
+  async function readHistory(hook: Hook, opener: HTMLButtonElement) {
+    if (!reviewAvailable || request.current || hook.receiverExact === false || result?.configurationChanged ||
+        result?.settingsVersion !== version || result.repositoryId !== repositoryId) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setActiveAction('history');
+    setHistory({ hookId: hook.id, value: null });
+    try {
+      const value = await api<GitlabProjectWebhookHistory>('/integrations/gitlab/project-webhook-history', {
+        method: 'POST', signal: controller.signal, cache: 'no-store',
+        body: JSON.stringify({ expectedVersion: version, repositoryId, hookId: hook.id, ...(management ? { managementToken: management } : {}) }),
+      });
+      if (request.current !== controller) return;
+      if (value.settingsVersion !== version || value.repositoryId !== repositoryId || value.hookId !== hook.id) {
+        setHistory({ hookId: hook.id, value: null, error: staleReviewMessage });
+      } else setHistory({ hookId: hook.id, value });
+    } catch (cause) {
+      if (request.current === controller) setHistory({ hookId: hook.id, value: null, error: historyError(cause) });
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        setActiveAction(null);
+        requestAnimationFrame(() => {
+          if (opener.isConnected && document.activeElement === document.body) opener.focus({ preventScroll: true });
+        });
+      }
+    }
+  }
+
   return <section className="card gitlab-project-webhook" aria-labelledby={`${id}-heading`}>
     <h2 id={`${id}-heading`}>GitLab 프로젝트 웹훅 설정</h2>
     <p>GitLab 저장소의 Settings → Webhooks에서 Teamspace 수신 주소와 이벤트를 설정할 수 있습니다.</p>
@@ -173,7 +262,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
         </label>
         <label>GitLab 관리 API 토큰
           <input className="field" type="password" autoComplete="new-password" maxLength={2000} value={managementToken}
-            disabled={busy} onChange={event => setManagementToken(event.target.value)} aria-describedby={`${id}-management`} />
+            disabled={busy} onChange={event => { setManagementToken(event.target.value); setHistory(null); }} aria-describedby={`${id}-management`} />
         </label>
         <button type="submit" className="btn" disabled={busy}><Search size={15} aria-hidden="true" />
           {result || error ? '다시 점검' : '웹훅 설정 점검'}
@@ -182,20 +271,29 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
       <p id={`${id}-management`} className="gitlab-project-webhook-note">
         점검은 저장한 읽기 토큰으로 시도할 수 있습니다. 등록하려면 저장소의 웹훅을 관리할 수 있는 <code>api</code> 토큰을 입력하세요.
       </p>
-      {activeAction && <p role="status">{activeAction === 'review' ? '웹훅 설정을 점검하고 있습니다.' : 'GitLab에 웹훅을 등록하고 있습니다.'}</p>}
+      {activeAction && activeAction !== 'history' && <p role="status">{activeAction === 'review' ? '웹훅 설정을 점검하고 있습니다.' : 'GitLab에 웹훅을 등록하고 있습니다.'}</p>}
       {error && <p className="error-text" role="alert">{error}</p>}
       {result && <div className="gitlab-project-webhook-result">
         <p role="status">{resultMessages[result.state]}</p>
         {result.configurationChanged && <p className="error-text">Teamspace 연결 설정이 바뀌었습니다. 최신 설정을 불러온 뒤 다시 점검해 주세요.</p>}
         {result.hooks.length > 1 && <p>같은 수신 주소를 사용하는 웹훅이 {result.hooks.length}개 있습니다.</p>}
         {result.hooks.length > 0 && <ul className="gitlab-project-webhook-hooks" aria-label="등록된 웹훅" role="list">
-          {result.hooks.map(hook => <ExistingHook key={hook.id} hook={hook} />)}
+          {result.hooks.map(hook => <ExistingHook key={hook.id} hook={hook}>
+            {hook.receiverExact !== false && !result.configurationChanged && <div className="gitlab-project-webhook-history-actions">
+              <button type="button" className="btn" disabled={busy} onClick={event => void readHistory(hook, event.currentTarget)}>최근 전송 확인</button>
+            </div>}
+            {history?.hookId === hook.id && <>
+              {activeAction === 'history' && <p role="status">GitLab 전송 이력을 확인하고 있습니다.</p>}
+              {history.error && <p className="error-text" role="alert">{history.error}</p>}
+              {history.value && <WebhookHistory value={history.value} />}
+            </>}
+          </ExistingHook>)}
         </ul>}
         {result.state === 'unknown' && <p>다시 점검하거나 GitLab의 웹훅 목록에서 등록 상태를 직접 확인해 주세요.</p>}
         {result.state === 'missing' && !result.authMode && !result.configurationChanged &&
           <p>GitLab 연결에서 웹훅 인증 값을 먼저 저장해 주세요.</p>}
         {(result.state === 'created' || result.state === 'configured') &&
-          <p>GitLab에서 테스트 이벤트를 보낸 뒤 아래의 웹훅 수신 확인에서 인증 결과를 확인하세요.</p>}
+          <p>GitLab에서 이벤트를 보낸 뒤 최근 전송과 이 저장소의 인증 수신을 확인하세요.</p>}
         {registrationAvailable && <>
           <form className="gitlab-project-webhook-fields" onSubmit={event => void runAction(event, 'register')}>
             <label>웹훅 {credentialLabel} 다시 입력

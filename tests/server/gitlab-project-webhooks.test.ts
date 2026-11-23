@@ -9,12 +9,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { GitlabProjectWebhookReview as Review } from '../../shared/gitlab-project-webhooks.js';
-import type { GitlabSettings, GitlabWebhookStatus } from '../../shared/types.js';
+import type { GitlabProjectWebhookHistory as History, GitlabProjectWebhookReview as Review } from '../../shared/gitlab-project-webhooks.js';
+import type { GitlabSettings, GitlabWebhookStatus, WorkspaceSnapshot } from '../../shared/types.js';
 
 const settingsPath = '/integrations/gitlab';
 const reviewPath = `${settingsPath}/project-webhook-review`;
 const registerPath = `${settingsPath}/project-webhook-register`;
+const historyPath = `${settingsPath}/project-webhook-history`;
 const contextPath = '/tools/git';
 const publicOrigin = 'https://teamspace.example.test';
 const receiverUrl = `${publicOrigin}/api${settingsPath}/webhook`;
@@ -24,6 +25,7 @@ const readToken = 'synthetic-gitlab-read-only';
 const managementToken = 'synthetic-gitlab-project-manager';
 const repositoryId = 42;
 const hookPath = `${contextPath}/api/v4/projects/${repositoryId}/hooks`;
+const historyHookPath = `${hookPath}/12/events`;
 const hookOptions = {
   url: receiverUrl, push_events: true, merge_requests_events: true, pipeline_events: true, deployment_events: true,
   enable_ssl_verification: true,
@@ -88,9 +90,10 @@ async function fixture(t: TestContext) {
     server = createServer(runtime.app);
     baseUrl = await listen(server);
   }
-  async function call<T>(path: string, body?: unknown, status = 200, method = body === undefined ? 'GET' : 'POST') {
+  async function call<T>(path: string, body?: unknown, status = 200, method = body === undefined ? 'GET' : 'POST',
+    headers: Record<string, string> = {}, signal?: AbortSignal) {
     const response = await fetch(`${baseUrl}/api${path}`, {
-      method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': 'user-seo' },
+      method, signal, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': 'user-seo', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const raw = await response.text();
@@ -330,4 +333,131 @@ test('a settings change during the registration check prevents a webhook write',
   } finally { gate.resolve(); }
   await pending;
   assert.ok(source.calls.every(call => call.method === 'GET'));
+});
+
+test('delivery history only reads the exact saved hook and exposes a sanitized summary plus the independent local receipt', async t => {
+  const confidential = 'private synthetic branch and response';
+  const sentAt = '2026-11-23T12:15:00.000Z';
+  const source = await gitlab(t, (call, response) => {
+    if (call.url.pathname === hookPath) return reply(response, [
+      hook(12), hook(13, { url: `${receiverUrl}?routed=123` }), hook(14, { url: 'https://another.example.test/receiver' }),
+    ], 200, { 'X-Next-Page': '' });
+    assert.equal(call.url.pathname, historyHookPath);
+    return reply(response, [
+      { id: 17, url: receiverUrl, trigger: 'push_hooks', created_at: sentAt, response_status: '401', execution_duration: 0.125,
+        request_headers: { 'X-Gitlab-Token': legacySecret }, request_data: { ref: confidential },
+        response_headers: { 'Private-Token': managementToken }, response_body: confidential },
+      { id: 16, url: 'https://previous.example.test/receiver', trigger: 'push_hooks', created_at: sentAt, response_status: '200' },
+    ], 200, { 'X-Next-Page': '' });
+  });
+  const app = await fixture(t);
+  const settings = await app.configure(source.url);
+  const input = { ...reviewInput(settings), hookId: 12 };
+
+  await app.call(historyPath, { ...input, repositoryId: 13 }, 403);
+  await app.call(historyPath, { ...input, hookId: '12' }, 400);
+  await app.call(`${historyPath}?page=2`, input, 400);
+  await app.call(historyPath, { ...input, expectedVersion: settings.version + 1 }, 409);
+  assert.equal(source.calls.length, 0);
+  for (const hookId of [13, 14, 30]) {
+    const { data } = await app.call<{ details?: unknown }>(historyPath, { ...input, hookId }, 404);
+    assert.deepEqual(data.details, { reason: 'receiver_changed' });
+  }
+  assert.deepEqual(source.calls.map(call => call.url.pathname), [hookPath, hookPath, hookPath]);
+
+  const first = await app.call<History>(historyPath, input);
+  assert.equal(first.cacheControl, 'no-store');
+  assert.equal(first.data.localReceipt, null);
+  assert.deepEqual(first.data.attempts, [{ id: 17, event: 'push', status: 401, sentAt, durationMs: 125 }]);
+  assert.deepEqual([first.data.settingsVersion, first.data.repositoryId, first.data.hookId], [settings.version, repositoryId, 12]);
+  assert.ok(!JSON.stringify(first.data).includes(confidential));
+  assert.ok(!JSON.stringify(first.data).includes('previous.example.test'));
+
+  await app.call(`${settingsPath}/webhook`, { project_id: repositoryId, object_kind: 'push' }, 200, 'POST', { 'X-Gitlab-Token': legacySecret });
+  const before = (await app.call<WorkspaceSnapshot>('/workspace')).data;
+  const { data: receipt } = await app.call<GitlabWebhookStatus>(`${settingsPath}/webhook-status`);
+  const next = (await app.call<History>(historyPath, { ...input, managementToken })).data;
+  assert.deepEqual(next.localReceipt, receipt.repositories[0].lastDelivery);
+  assert.equal(next.localReceipt?.authentication, 'secret-token');
+  assert.deepEqual(next.attempts, first.data.attempts);
+  assert.deepEqual(source.calls.slice(-2).map(call => [call.url.pathname, call.credential]), [[hookPath, managementToken], [historyHookPath, managementToken]]);
+  assert.ok(source.calls.every(call => call.method === 'GET' && call.body === undefined));
+  assert.deepEqual((await app.call<GitlabSettings>(settingsPath)).data, settings);
+  assert.deepEqual((await app.call<WorkspaceSnapshot>('/workspace')).data, before);
+});
+
+test('delivery history reports access and invalid response errors safely and can retry', async t => {
+  const confidential = 'private synthetic GitLab error';
+  let responseStatus = 200;
+  let malformed = false;
+  const source = await gitlab(t, (call, response) => {
+    if (call.url.pathname === hookPath) return reply(response, [hook(12)]);
+    assert.equal(call.url.pathname, historyHookPath);
+    return reply(response, responseStatus !== 200 ? { error: confidential } : malformed ? { malformed: confidential } : [], responseStatus);
+  });
+  const app = await fixture(t);
+  const settings = await app.configure(source.url);
+  const input = { ...reviewInput(settings), hookId: 12 };
+  for (const [status, expected] of [[401, 401], [403, 403], [404, 404], [429, 429], [500, 502]]) {
+    responseStatus = status;
+    const { data } = await app.call<{ error: string }>(historyPath, input, expected);
+    assert.ok(!JSON.stringify(data).includes(confidential));
+    if (status === 404) assert.match(data.error, /권한.*GitLab 버전/);
+  }
+  responseStatus = 200;
+  malformed = true;
+  const invalid = await app.call<{ error: string }>(historyPath, input, 502);
+  assert.match(invalid.data.error, /응답 형식/);
+  assert.ok(!JSON.stringify(invalid.data).includes(confidential));
+  malformed = false;
+  assert.deepEqual((await app.call<History>(historyPath, input)).data, {
+    settingsVersion: settings.version, repositoryId, hookId: 12, attempts: [], partial: false, localReceipt: null,
+  });
+});
+
+test('delivery history discards reads when the GitLab settings change during hook verification or history loading', async t => {
+  let barrier: { path: string; arrived: PromiseWithResolvers<void>; gate: PromiseWithResolvers<void> } | null = null;
+  const source = await gitlab(t, async (call, response) => {
+    if (barrier?.path === call.url.pathname) {
+      barrier.arrived.resolve();
+      await barrier.gate.promise;
+    }
+    if (call.url.pathname === hookPath) return reply(response, [hook(12)]);
+    assert.equal(call.url.pathname, historyHookPath);
+    return reply(response, []);
+  });
+  const app = await fixture(t);
+  let settings = await app.configure(source.url);
+  for (const path of [hookPath, historyHookPath]) {
+    barrier = { path, arrived: Promise.withResolvers<void>(), gate: Promise.withResolvers<void>() };
+    const first = source.calls.length;
+    const pending = app.call(historyPath, { ...reviewInput(settings), hookId: 12 }, 409);
+    try {
+      await Promise.race([barrier.arrived.promise, pending.then(() => { throw new Error('History returned before the upstream read'); })]);
+      settings = await app.configure(source.url);
+    } finally { barrier.gate.resolve(); }
+    await pending;
+    assert.deepEqual(source.calls.slice(first).map(call => call.url.pathname), path === hookPath ? [hookPath] : [hookPath, historyHookPath]);
+  }
+});
+
+test('closing the browser request cancels an in-flight GitLab delivery history read', { timeout: 5_000 }, async t => {
+  const started = Promise.withResolvers<void>();
+  const disconnected = Promise.withResolvers<void>();
+  const source = await gitlab(t, (call, response) => {
+    if (call.url.pathname === hookPath) return reply(response, [hook(12)]);
+    assert.equal(call.url.pathname, historyHookPath);
+    response.once('close', disconnected.resolve);
+    started.resolve();
+  });
+  const app = await fixture(t);
+  const settings = await app.configure(source.url);
+  const abort = new AbortController();
+  const pending = app.call(historyPath, { ...reviewInput(settings), hookId: 12 }, 200, 'POST', {}, abort.signal);
+  try {
+    await Promise.race([started.promise, pending.then(() => { throw new Error('History returned before the upstream read'); })]);
+  } finally { abort.abort(); }
+  await assert.rejects(pending, { name: 'AbortError' });
+  await disconnected.promise;
+  assert.deepEqual((await app.call<GitlabSettings>(settingsPath)).data, settings);
 });

@@ -1,3 +1,5 @@
+import type { GitlabWebhookDelivery } from './types.js';
+
 export type GitlabProjectWebhookAuthMode = 'secret' | 'signature';
 
 export interface GitlabProjectWebhook {
@@ -22,4 +24,21 @@ export interface GitlabProjectWebhookReview {
   hooks: GitlabProjectWebhook[];
   reviewId?: string;
   configurationChanged?: true;
+}
+
+export interface GitlabProjectWebhookAttempt {
+  id: number;
+  event: GitlabWebhookDelivery['event'];
+  status: number | null;
+  sentAt: string | null;
+  durationMs: number | null;
+}
+
+export interface GitlabProjectWebhookHistory {
+  settingsVersion: number;
+  repositoryId: number;
+  hookId: number;
+  attempts: GitlabProjectWebhookAttempt[];
+  partial: boolean;
+  localReceipt: GitlabWebhookDelivery | null;
 }

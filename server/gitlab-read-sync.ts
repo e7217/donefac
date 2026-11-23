@@ -1,5 +1,6 @@
+import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
-import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
+import type { GitlabProjectWebhook, GitlabProjectWebhookAttempt, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
 import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch,
   GitlabReviewParticipant, GitlabReviewState } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
@@ -35,7 +36,13 @@ const COMMIT_PAGE_SIZE = 100;
 const REPOSITORY_SEARCH_PAGE_SIZE = 20;
 const WEBHOOK_PAGE_SIZE = 100;
 const MAX_WEBHOOK_PAGES = 10;
+const WEBHOOK_HISTORY_LIMIT = 20;
 const WEBHOOK_RECEIVER_PATH = '/api/integrations/gitlab/webhook';
+const WEBHOOK_ATTEMPT_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
+const WEBHOOK_HISTORY_EVENTS = new Map<string, GitlabProjectWebhookAttempt['event']>([
+  ['push_hooks', 'push'], ['tag_push_hooks', 'tag_push'], ['merge_request_hooks', 'merge_request'],
+  ['pipeline_hooks', 'pipeline'], ['deployment_hooks', 'deployment'],
+]);
 export const GITLAB_REPOSITORY_SEARCH_MAX_PAGE = 20;
 
 const stageNames: Record<GitlabReadStage, string> = {
@@ -224,7 +231,7 @@ function webhookFlags(row: GitlabReadObject, id: number): GitlabProjectWebhook {
     sslVerification, unfilteredPush, standardPayload: template == null || template === '', active };
 }
 
-function webhookNextPage(headers: Headers, url: URL, page: number, rowCount: number): boolean {
+function webhookNextPage(headers: Headers, url: URL, page: number, pageSize: number, rowCount: number): boolean {
   const next = headers.get('x-next-page');
   if (next !== null && next !== '' && next !== String(page + 1)) invalidWebhookResponse();
   let nextLink = false;
@@ -240,12 +247,12 @@ function webhookNextPage(headers: Headers, url: URL, page: number, rowCount: num
     const perPage = target.searchParams.getAll('per_page');
     const pages = target.searchParams.getAll('page');
     if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
-        pages.length !== 1 || pages[0] !== String(page + 1) || perPage.length > 1 || (perPage.length && perPage[0] !== String(WEBHOOK_PAGE_SIZE)) ||
+        pages.length !== 1 || pages[0] !== String(page + 1) || perPage.length > 1 || (perPage.length && perPage[0] !== String(pageSize)) ||
         [...target.searchParams.keys()].some(key => key !== 'page' && key !== 'per_page')) invalidWebhookResponse();
     nextLink = true;
   }
   if ((next === '' && nextLink) || (rowCount === 0 && (Boolean(next) || nextLink))) invalidWebhookResponse();
-  return next !== null ? next !== '' : nextLink || rowCount === WEBHOOK_PAGE_SIZE;
+  return next !== null ? next !== '' : nextLink || rowCount === pageSize;
 }
 
 export async function listGitlabProjectWebhooks(connection: Connection, projectId: number, receiverUrl: string, signal?: AbortSignal): Promise<GitlabProjectWebhook[]> {
@@ -269,9 +276,62 @@ export async function listGitlabProjectWebhooks(connection: Connection, projectI
         hooks.push({ ...webhookFlags(row, identity.id), receiverExact: false });
       }
     }
-    if (!webhookNextPage(pagination, projectUrl, page, rows.length)) return hooks;
+    if (!webhookNextPage(pagination, projectUrl, page, WEBHOOK_PAGE_SIZE, rows.length)) return hooks;
   }
   return invalidWebhookResponse();
+}
+
+function webhookAttemptStatus(value: unknown): number | null | undefined {
+  if (value === 0 || value === '0' || value === 'internal error') return null;
+  const status = typeof value === 'string' && /^[1-5]\d{2}$/u.test(value) ? Number(value) : value;
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) return status;
+}
+
+function webhookAttemptTime(value: unknown): string | null {
+  if (typeof value !== 'string' || !WEBHOOK_ATTEMPT_TIMESTAMP.test(value) || !isCalendarDate(value.slice(0, 10))) return null;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return null;
+  const canonical = new Date(time).toISOString();
+  return canonical.length === 24 ? canonical : null;
+}
+
+export async function readGitlabProjectWebhookHistory(connection: Connection, repositoryId: number, hookId: number,
+  receiverUrl: string, signal?: AbortSignal): Promise<{ attempts: GitlabProjectWebhookAttempt[]; partial: boolean }> {
+  const receiver = webhookReceiver(receiverUrl);
+  if (!Number.isSafeInteger(hookId) || hookId < 1) throw new GitlabReadError('webhooks', 'network');
+  const { headers, projectUrl } = projectReadRequest(connection, repositoryId, 'webhooks');
+  projectUrl.pathname += `/hooks/${hookId}/events`;
+  projectUrl.search = new URLSearchParams({ per_page: String(WEBHOOK_HISTORY_LIMIT), page: '1' }).toString();
+  let pagination = new Headers();
+  const rows = await readJson(projectUrl, headers, 'webhooks', signal, value => { pagination = value; });
+  if (!Array.isArray(rows) || rows.length > WEBHOOK_HISTORY_LIMIT) invalidWebhookResponse();
+  let partial = webhookNextPage(pagination, projectUrl, 1, WEBHOOK_HISTORY_LIMIT, rows.length);
+  const attempts = new Map<number, GitlabProjectWebhookAttempt>();
+  const seen = new Set<number>();
+  for (const row of rows) {
+    if (!isReadObject(row) || typeof row.id !== 'number' || !Number.isSafeInteger(row.id) || row.id < 1) {
+      partial = true;
+      continue;
+    }
+    const { id } = row;
+    if (seen.has(id)) {
+      attempts.delete(id);
+      partial = true;
+      continue;
+    }
+    seen.add(id);
+    const status = webhookAttemptStatus(row.response_status);
+    if (webhookAddress(row.url)?.href !== receiver || status === undefined) {
+      partial = true;
+      continue;
+    }
+    const event = typeof row.trigger === 'string' ? WEBHOOK_HISTORY_EVENTS.get(row.trigger) ?? 'other' : 'other';
+    const seconds = row.execution_duration;
+    const duration = typeof seconds === 'number' && seconds >= 0 ? Math.round(seconds * 1000) : NaN;
+    attempts.set(id, { id, event, status, sentAt: webhookAttemptTime(row.created_at),
+      durationMs: Number.isSafeInteger(duration) ? duration : null });
+  }
+  return { attempts: [...attempts.values()], partial };
 }
 
 export async function createGitlabProjectWebhook(connection: Connection, projectId: number, receiverUrl: string,

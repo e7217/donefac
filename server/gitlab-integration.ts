@@ -1690,13 +1690,24 @@ export class GitlabIntegrationService{
     });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));
-    const projectWebhookRequest = (operation: 'review' | 'register') => async (req: Request, res: Response) => {
+    const projectWebhookRequest = (operation: 'review' | 'register' | 'history') => async (req: Request, res: Response) => {
       res.set('Cache-Control', 'no-store');
       const actorId = hooks.actor(req);
       const controller = new AbortController();
       const disconnected = () => { if (!res.writableEnded) controller.abort(); };
       res.once('close', disconnected);
       try {
+        if (operation === 'history') {
+          if (Object.keys(req.query).length) fail('웹훅 전송 이력 조회 조건을 확인해 주세요.');
+          const history = await this.projectWebhooks.history(req.body, controller.signal);
+          if (controller.signal.aborted) return;
+          const status = this.webhookStatus();
+          const repository = status.repositories.find(item => item.repositoryId === history.repositoryId);
+          if (status.settingsVersion !== history.settingsVersion || !repository) {
+            fail('GitLab 연결 설정이 변경되었습니다. 최신 설정에서 다시 점검해 주세요.', 409);
+          }
+          return res.json({ ...history, localReceipt: repository.lastDelivery });
+        }
         const result = await this.projectWebhooks[operation](req.body, actorId, controller.signal);
         if (result.state === 'created') {
           try { hooks.activity(req, 'integration', 'gitlab', 'GitLab 웹훅 등록', `저장소 ${result.repositoryId}`); }
@@ -1708,6 +1719,7 @@ export class GitlabIntegrationService{
     };
     app.post('/api/integrations/gitlab/project-webhook-review', projectWebhookRequest('review'));
     app.post('/api/integrations/gitlab/project-webhook-register', projectWebhookRequest('register'));
+    app.post('/api/integrations/gitlab/project-webhook-history', projectWebhookRequest('history'));
     const issueBranchRequest = (operation: 'preview' | 'apply' | 'reconcile') => async (req: Request, res: Response) => {
       res.set('Cache-Control', 'no-store');
       if (Object.keys(req.query).length) fail('브랜치 생성 요청의 입력을 확인해 주세요.');
