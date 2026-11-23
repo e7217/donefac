@@ -480,8 +480,24 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(report.source.evidence.checks.pendingPackages, 0);
   assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
   assert.equal(report.source.evidence.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithInvalidPrimaryTargets, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
   assert.equal(report.source.evidence.receipts.length, 1);
   const [receipt] = report.source.evidence.receipts;
+  const coverage = new Map(receipt.primaryRecords.map(entry => [entry.kind, entry]));
+  for (const { packageId, kind, counts, invalidTargets, dispositionSha256, records } of coverage.values()) {
+    const pkg = staged.packages.find(item => item.packageId === packageId);
+    assert.equal(pkg.counts[kind], records.expected);
+    assert.equal(records.expected, records.observed);
+    assert.equal(records.observed, Object.values(counts).reduce((sum, count) => sum + count, 0));
+    assert.equal(invalidTargets, 0);
+    assert.match(dispositionSha256, /^[a-f0-9]{64}$/);
+  }
+  assert.equal(coverage.get('issue').counts.linked, 2);
+  assert.equal(coverage.get('page').counts.linked, 1);
+  assert.equal(coverage.get('page').counts.excluded, 2);
+  assert.deepEqual(report.restore.evidence.receipts[0].primaryRecords, receipt.primaryRecords);
   assert.equal(receipt.liveRestrictedConfluenceDocumentCount, 0);
   assert.equal(receipt.confluenceReviews.length, 2);
   for (const [index, reportSha] of reviewDigests.entries()) {
@@ -581,6 +597,24 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.equal(repaired.plainText, importedDocument.plainText);
   } finally {
     await legacyPilot.close();
+  }
+
+  // Keep the source bundle and receipt intact while changing the staged issue count.
+  try {
+    const wrongCoverage = structuredClone(staged);
+    wrongCoverage.packages[0].counts.issue++;
+    await writeFile(stagePath, JSON.stringify(wrongCoverage));
+    const rejectedCoverage = await launch(['verify', root], env).exited;
+    assert.equal(rejectedCoverage.code, 1, rejectedCoverage.stdout + rejectedCoverage.stderr);
+    const coverageFailure = (await readReport(root, rejectedCoverage)).report;
+    assert.equal(coverageFailure.status, 'failed');
+    assert.ok(coverageFailure.source.bundles.every(bundle => bundle.status === 'verified'));
+    assert.equal(coverageFailure.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 1);
+    assert.deepEqual(coverageFailure.source.evidence.receipts[0].primaryRecords.find(entry => entry.kind === 'issue').records,
+      { expected: 3, observed: 2 });
+    assert.equal(coverageFailure.restore, null);
+  } finally {
+    await writeFile(stagePath, initial);
   }
 
   const rawPath = join(root, 'workspace', 'legacy-imports', `${staged.packages[0].packageId}.bundle`);

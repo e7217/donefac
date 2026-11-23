@@ -6,7 +6,8 @@ import type {
   Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment,
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
-  SourceReconciliationPage, SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceReconciliationTargetContent,
+  SourceReconciliationPage, SourceReconciliationPrimaryRecords, SourceReconciliationRow, SourceReconciliationStatus,
+  SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
 import { auditJiraStatusHistory, jiraStatusHistoryFindings } from './jira-status-history.js';
@@ -33,6 +34,7 @@ type AuditMatchRow = MatchRow & {
 };
 type AuditTargetProjection = { auditRowOrder: number; targetPayload: string | null; targetColumns: string | null };
 type ContentFingerprint = { count: number; hash: Hash };
+type PrimaryRecordFingerprint = Pick<SourceReconciliationPrimaryRecords, 'kind' | 'counts' | 'invalidTargets'> & { hash: Hash };
 type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
 type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
 type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string };
@@ -150,6 +152,10 @@ function packageIdentity(product: string, instance: string, sha256: string) {
   return JSON.stringify([product, instance, sha256]);
 }
 
+function emptyRecordCounts(): SourceReconciliationPage['counts'] {
+  return { linked: 0, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
+}
+
 function archiveProjection(archive: TrashArchive, audit: boolean) {
   const labels: Record<string, Map<string, string>> = {
     comment: new Map(archive.comments.map(value => [value.id, '댓글'])),
@@ -171,11 +177,11 @@ function archiveProjection(archive: TrashArchive, audit: boolean) {
 function scanReceipt(
   { store, trash }: Dependencies, receipt: SourceImport, audit: boolean,
   visit: (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null,
-    archivedFile?: FileMetadata, archivedContentSha256?: string) => void,
+    stagingId?: string, archivedFile?: FileMetadata, archivedContentSha256?: string) => void,
 ): SourceReconciliationPage['counts'] {
   const packages = new Map(receipt.packages.map(value => [packageIdentity(value.source.product, value.source.instanceKey, value.sha256), value.stagingId]));
   const excluded = new Set(receipt.configuration.excludedRecords);
-  const counts: SourceReconciliationPage['counts'] = { linked: 0, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
+  const counts = emptyRecordCounts();
   const trashedChildren = new Map<string, ReturnType<typeof archiveProjection>>();
 
   function archivedChildren(trashId: string) {
@@ -220,7 +226,7 @@ function scanReceipt(
       };
     }
     counts[status]++;
-    visit(row, status, target, archivedFile, archivedContentSha256);
+    visit(row, status, target, stagingId, archivedFile, archivedContentSha256);
   }
   return counts;
 }
@@ -433,14 +439,28 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const integrity = compareArchive(receipt, dependencies.preservation.measureArchive(receipt));
   const fingerprint = createHash('sha256');
   fingerprint.update(JSON.stringify(integrity)).update('\n');
+  const primaryByPackage = new Map<string, PrimaryRecordFingerprint>(receipt.packages.map(({ stagingId, source, sha256 }) => {
+    const kind = source.product === 'jira' ? 'issue' : 'page';
+    const hash = createHash('sha256').update(JSON.stringify([stagingId, source.product, source.instanceKey, sha256, kind])).update('\n');
+    return [stagingId, { kind, counts: emptyRecordCounts(), invalidTargets: 0, hash }];
+  }));
   const orderedEntries: { order: number; entry: AuditEntry }[] = [];
   const contents = { comments: contentFingerprint(), revisions: contentFingerprint(), worklogs: contentFingerprint() };
   const linkedIssues = new Set<string>();
   const boundDocuments = new Map<string, string | null>();
   const observedRevisions = new Set<string>();
-  const recordCounts = scanReceipt(dependencies, receipt, true, (match, status, target, archivedFile, archivedContentSha256) => {
+  const recordCounts = scanReceipt(dependencies, receipt, true, (match, status, target, stagingId, archivedFile, archivedContentSha256) => {
     const { auditRowOrder, targetPayload, targetColumns, ...row } = match as AuditMatchRow & AuditTargetProjection;
     fingerprint.update(JSON.stringify([row, status, target, archivedFile ?? null])).update('\n');
+    const primary = stagingId ? primaryByPackage.get(stagingId) : undefined;
+    if (primary && row.kind === primary.kind) {
+      primary.counts[status]++;
+      const expectedTargetType = primary.kind === 'issue' ? 'issue' : 'document';
+      if ((row.targetType !== null || row.targetId !== null) &&
+          (status === 'excluded' || row.targetType !== expectedTargetType || !row.targetId)) primary.invalidTargets++;
+      primary.hash.update(JSON.stringify([row.sourceRecordId, row.originalRecordId, status,
+        row.targetType, row.targetId, target === null ? row.targetProjectId : target.projectId])).update('\n');
+    }
     if (collect && row.kind === 'attachment') orderedEntries.push({ order: auditRowOrder, entry: auditEntry(row, status, archivedFile) });
     if (!target) return;
     if (target.type === 'issue' && status === 'linked') linkedIssues.add(target.id);
@@ -469,9 +489,12 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const jiraStatusHistory = receipt.packages.some(packageInfo => packageInfo.source.product === 'jira')
     ? auditJiraStatusHistory(dependencies.store, receipt)
     : null;
-  fingerprint.update(JSON.stringify([targetContent, jiraStatusHistory]));
+  const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash }]) => ({
+    packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'),
+  }));
+  fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, integrity, targetContent, jiraStatusHistory };
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, primaryRecords, integrity, targetContent, jiraStatusHistory };
 }
 
 function errorCode(error: unknown): unknown {
@@ -570,7 +593,7 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   if (!current || current.version !== expectedVersion || auditSnapshot(dependencies, current, false).fingerprint !== before.fingerprint) conflict();
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
-    integrity: before.integrity, recordCounts: before.recordCounts, targetContent: before.targetContent,
+    integrity: before.integrity, recordCounts: before.recordCounts, primaryRecords: before.primaryRecords, targetContent: before.targetContent,
     jiraStatusHistory: before.jiraStatusHistory, attachmentCounts, attachments,
   };
 }

@@ -3407,9 +3407,10 @@ test('whole-receipt audit detects changed migrated target data with identical co
   const rows = (await f.call<SourceReconciliationPage>(`${reconciliation}?limit=100`)).data.rows;
   const comment = rows.find(row => row.kind === 'comment' && row.product === 'jira')?.target;
   const revision = rows.find(row => row.kind === 'revision')?.target;
-  const issue = rows.find(row => row.kind === 'issue' && row.sourceKey === 'OLD-1')?.target;
+  const issueRow = rows.find(row => row.kind === 'issue' && row.sourceKey === 'OLD-1');
+  const issue = issueRow?.target;
   const otherIssue = rows.find(row => row.kind === 'issue' && row.sourceKey === 'OLD-2')?.target;
-  assert.ok(comment && revision?.owner && issue && otherIssue);
+  assert.ok(comment && revision?.owner && issueRow && issue && otherIssue);
   const worklogPath = `/issues/${issue.id}/worklogs`;
   const worklog = (await f.call<IssueWorklogPage>(worklogPath)).data.entries[0];
   assert.equal(worklog?.durationSeconds, 91);
@@ -3417,6 +3418,41 @@ test('whole-receipt audit detects changed migrated target data with identical co
   assert.ok(relation && typeof relation.id === 'string');
 
   const clean = await audit();
+  const primary = (report: SourceReconciliationAudit, pkg: LegacyPackageSummary) => {
+    const result = report.primaryRecords.find(row => row.packageId === pkg.id);
+    assert.ok(result);
+    return result;
+  };
+  const originalIssueDisposition = primary(clean, jira);
+  assert.deepEqual(originalIssueDisposition.counts, { linked: 2, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 });
+  assert.equal(originalIssueDisposition.invalidTargets, 0);
+  const updatePrimaryBinding = f.db.prepare('UPDATE source_records SET target_type=?,target_id=? WHERE id=?');
+  const changeIssueBinding = (target: { type: string; id: string }) =>
+    assert.equal(updatePrimaryBinding.run(target.type, target.id, issueRow.sourceRecordId).changes, 1);
+  changeIssueBinding(otherIssue);
+  const rebound = await audit();
+  assert.deepEqual(primary(rebound, jira).counts, originalIssueDisposition.counts);
+  assert.equal(primary(rebound, jira).invalidTargets, 0);
+  assert.notEqual(primary(rebound, jira).dispositionSha256, originalIssueDisposition.dispositionSha256);
+  assert.deepEqual(primary(rebound, wiki), primary(clean, wiki));
+  changeIssueBinding(revision.owner);
+  const wrongType = primary(await audit(), jira);
+  assert.deepEqual(wrongType.counts, originalIssueDisposition.counts);
+  assert.equal(wrongType.invalidTargets, 1);
+  assert.notEqual(wrongType.dispositionSha256, originalIssueDisposition.dispositionSha256);
+  changeIssueBinding(issue);
+  const originalDocumentScope = revision.owner.projectId;
+  const otherScope = f.db.prepare('SELECT id FROM projects WHERE id<>? ORDER BY id LIMIT 1').get(originalDocumentScope);
+  assert.ok(originalDocumentScope && typeof otherScope?.id === 'string');
+  const changeDocumentScope = f.db.prepare('UPDATE documents SET project_id=? WHERE id=?');
+  assert.equal(changeDocumentScope.run(otherScope.id, revision.owner.id).changes, 1);
+  const movedDocument = await audit();
+  assert.deepEqual(primary(movedDocument, wiki).counts, primary(clean, wiki).counts);
+  assert.notEqual(primary(movedDocument, wiki).dispositionSha256, primary(clean, wiki).dispositionSha256);
+  assert.deepEqual(primary(movedDocument, jira), primary(clean, jira));
+  assert.equal(changeDocumentScope.run(originalDocumentScope, revision.owner.id).changes, 1);
+  assert.deepEqual((await audit()).primaryRecords, clean.primaryRecords);
+
   assert.equal(clean.targetContent.version, 1);
   const sections = ['comments', 'revisions', 'worklogs', 'issueRelations'] as const;
   const expectedCounts = [2, 2, 1, 1];
@@ -3485,7 +3521,10 @@ test('retained source verification distinguishes archival loss from deleted live
   const jira = await f.upload(csv, 'integrity-jira.csv', 'jira');
   const wiki = await f.upload(confluence(true).bytes, 'integrity-confluence.zip', 'confluence');
   const linkedWiki = await f.upload(confluence().bytes, 'integrity-linked-confluence.zip', 'confluence');
-  const config = await f.configuration([jira, wiki, linkedWiki]);
+  const additionalJira = await f.upload(jiraGitlabCsv([['311', 'AUXILIARY-1', 'Additional archived ticket', 'Open']]),
+    'integrity-additional-jira.csv', 'jira', jira.source.instanceKey);
+  const packages = [jira, wiki, linkedWiki, additionalJira];
+  const config = await f.configuration(packages);
   config.excludedRecords = [`${wiki.id}/page:100`];
   const preview = await f.preview(config);
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
@@ -3498,7 +3537,7 @@ test('retained source verification distinguishes archival loss from deleted live
   const manifest = receipt.integrity;
   assert.ok(manifest);
   assert.equal(manifest.version, 1);
-  assert.equal(manifest.packages.length, 3);
+  assert.equal(manifest.packages.length, packages.length);
 
   async function audit(service = f) {
     const receipts = await service.call<SourceImport[]>('/source-imports');
@@ -3530,6 +3569,24 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.equal(confluenceRows.length, preview.counts.excludedRecords);
   assert.ok(confluenceRows.every(value => value.status === 'excluded' && value.target === null));
   const clean = await audit();
+  const primary = (report: SourceReconciliationAudit, pkg: LegacyPackageSummary) => {
+    const result = report.primaryRecords.find(row => row.packageId === pkg.id);
+    assert.ok(result);
+    return result;
+  };
+  const noPrimaryRows = { linked: 0, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
+  assert.deepEqual(clean.primaryRecords.map(({ packageId }) => packageId), packages.map(({ id }) => id));
+  assert.deepEqual(primary(clean, jira).counts, { ...noPrimaryRows, linked: 2 });
+  assert.deepEqual(primary(clean, wiki).counts, { ...noPrimaryRows, excluded: 1 });
+  assert.deepEqual(primary(clean, linkedWiki).counts, { ...noPrimaryRows, linked: 1 });
+  assert.deepEqual(primary(clean, additionalJira).counts, { ...noPrimaryRows, linked: 1 });
+  assert.deepEqual(clean.primaryRecords.map(({ kind }) => kind), ['issue', 'page', 'page', 'issue']);
+  for (const row of clean.primaryRecords) {
+    assert.equal(row.invalidTargets, 0);
+    assert.match(row.dispositionSha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(Object.keys(row).sort(), ['counts', 'dispositionSha256', 'invalidTargets', 'kind', 'packageId']);
+  }
+  assert.doesNotMatch(JSON.stringify(clean.primaryRecords), /OLD-1|Synthetic versioned page|original\.author/);
   assert.deepEqual(clean.recordCounts, page.data.counts);
   assert.equal(clean.attachmentCounts.excluded, confluenceRows.filter(value => value.kind === 'attachment').length);
   assert.equal(clean.attachmentCounts.verified, 2);
@@ -3540,7 +3597,7 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.deepEqual(clean.integrity.boundAttachments, { expected: 2, observed: 2 });
   assert.equal(clean.integrity.unmatchedRecords, 0);
   assert.equal(clean.integrity.columnMismatches, 0);
-  for (const pkg of [jira, wiki, linkedWiki]) {
+  for (const pkg of packages) {
     const expected: SourceImportIntegrityPackage | undefined = manifest.packages.find(value => value.stagingId === pkg.id);
     assert.ok(expected);
     assert.match(expected.recordsSha256, /^[a-f\d]{64}$/);
@@ -3551,14 +3608,43 @@ test('retained source verification distinguishes archival loss from deleted live
     assert.deepEqual(current.boundAttachments, { expected: expected.boundAttachmentCount, observed: expected.boundAttachmentCount });
   }
 
+  const additionalIssue = page.data.rows.find(row => row.sourceKey === 'AUXILIARY-1');
+  assert.ok(additionalIssue);
+  const changePackageSha = f.db.prepare("UPDATE source_records SET json=json_set(json,'$.packageSha256',?) WHERE id=?");
+  assert.equal(changePackageSha.run('0'.repeat(64), additionalIssue.sourceRecordId).changes, 1);
+  const unknownPackage = await audit();
+  assert.equal(unknownPackage.integrity.status, 'mismatch');
+  assert.equal(unknownPackage.integrity.unmatchedRecords, 1);
+  assert.deepEqual(primary(unknownPackage, additionalJira).counts, noPrimaryRows);
+  assert.notEqual(primary(unknownPackage, additionalJira).dispositionSha256, primary(clean, additionalJira).dispositionSha256);
+  assert.deepEqual(primary(unknownPackage, jira), primary(clean, jira));
+  assert.equal(changePackageSha.run(additionalJira.sha256, additionalIssue.sourceRecordId).changes, 1);
+  assert.deepEqual((await audit()).primaryRecords, clean.primaryRecords);
+
+  const excludedPage = confluenceRows.find(row => row.kind === 'page');
+  assert.ok(excludedPage);
+  const changeExcludedBinding = f.db.prepare('UPDATE source_records SET target_type=?,target_id=? WHERE id=?');
+  assert.equal(changeExcludedBinding.run('issue', jiraIssue.target.id, excludedPage.sourceRecordId).changes, 1);
+  const invalidExcluded = primary(await audit(), wiki);
+  assert.deepEqual(invalidExcluded.counts, primary(clean, wiki).counts);
+  assert.equal(invalidExcluded.invalidTargets, 1);
+  assert.notEqual(invalidExcluded.dispositionSha256, primary(clean, wiki).dispositionSha256);
+  assert.equal(changeExcludedBinding.run(null, null, excludedPage.sourceRecordId).changes, 1);
+
   const trashed = await f.call<{ trashEntryId: string }>(`/issues/${jiraIssue.target.id}`, 'DELETE');
   assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
-  assert.equal((await audit()).recordCounts.trashed, clean.recordCounts.trashed + 2, 'The ticket and its migrated comment are both still available in trash.');
+  const whileTrashed = await audit();
+  assert.equal(whileTrashed.recordCounts.trashed, clean.recordCounts.trashed + 2, 'The ticket and its migrated comment are both still available in trash.');
+  assert.deepEqual(primary(whileTrashed, jira).counts, { ...noPrimaryRows, linked: 1, trashed: 1 });
+  assert.equal(primary(whileTrashed, jira).invalidTargets, 0);
   assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}`, 'DELETE')).status, 200);
   const afterPurge = await audit();
   assert.equal(afterPurge.recordCounts.missing, clean.recordCounts.missing + 2);
   assert.equal(afterPurge.recordCounts.excluded, clean.recordCounts.excluded);
   assert.deepEqual(afterPurge.integrity, clean.integrity);
+  assert.deepEqual(primary(afterPurge, jira).counts, { ...noPrimaryRows, linked: 1, missing: 1 });
+  assert.equal(primary(afterPurge, jira).invalidTargets, 0);
+  assert.notEqual(primary(afterPurge, jira).dispositionSha256, primary(whileTrashed, jira).dispositionSha256);
 
   const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] }>('/export');
   assert.equal(backup.status, 200);
@@ -3650,6 +3736,7 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.deepEqual(restored.recordCounts, afterPurge.recordCounts);
   assert.deepEqual(restored.attachmentCounts, afterPurge.attachmentCounts);
   assert.deepEqual(restored.integrity, clean.integrity);
+  assert.deepEqual(restored.primaryRecords, afterPurge.primaryRecords);
 
   const legacy = await fixture();
   t.after(() => legacy.close());

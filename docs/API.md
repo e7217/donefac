@@ -936,6 +936,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 `integrity`의 `records`와 `boundAttachments`는 보존 원본 수와 대상 첨부 버전 ID가 연결된 원본 수의 이관 당시 기준(`expected`)과 검사값(`observed`)이다. `packages`는 이름·수량·원본 집합 SHA-256을 패키지별로 대조한다. `verified`는 저장된 원본 기준과 일치, `mismatch`는 불일치, `counts-only`는 당시 수량만 비교 가능, `unavailable`은 당시 기준을 읽을 수 없는 상태다. `unmatchedRecords`와 `columnMismatches`는 출처를 확인할 수 없는 기록과 저장 식별 정보 불일치를 보여준다. 원본 무결성 `verified`와 현재 대상·파일 상태는 독립된 결과다.
 
+`primaryRecords`는 패키지마다 `packageId`, 원본 종류 `kind` (`issue` 또는 `page`), 연결 상태별 `counts`, `invalidTargets`, `dispositionSha256`을 반환한다. Jira 업무와 Confluence 현재 페이지의 원본 행을 각각 센다. 여러 원본 행이 같은 Teamspace 대상을 가리켜도 각 원본 행을 해당 패키지에서 센다. 대상 종류가 다르거나 종류·ID 중 하나만 저장됐거나, 제외한 원본에 연결이 남으면 `invalidTargets`에 집계한다. `dispositionSha256`으로 같은 원본이 같은 대상과 상태로 복원됐는지 비교할 수 있다. 이 항목에는 원래 키, 제목, 본문이 들어가지 않는다.
+
 `targetContent`의 `version`은 `1`이다. `comments`, `revisions`, `worklogs`, `issueRelations`는 각각 저장된 대상의 `count`와 `sha256`을 반환한다. 원본에 연결된 댓글과 작업 기록은 보관 데이터가 남은 휴지통과 삭제 기록도 포함한다. 문서 이력은 직접 연결한 버전과 영수증에 연결한 문서의 저장 이력을 한 번씩 센다. 업무 관계는 영수증에 연결된 활성 업무가 양쪽 중 하나에 있는 관계를 센다. 이 값은 현재 대상의 복원 전후 대조에 쓰며, `targetContent`에는 본문이나 작성자 정보가 들어가지 않는다.
 
 Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서 확인한 상태 변경 수 `sourceChanges`를 반환한다. 이 값은 활성 티켓에 표시되는 `projected.count`, 다른 원본 기록과 겹치는 `duplicate`, 명시적 제외 `excluded`, 접근 제한 `restricted`, 현재 업무 연결을 확인할 수 없는 `unavailable`의 합이다. `unresolvedTime`과 `unresolvedAuthor`는 표시된 항목에서 시각과 작성자를 확정하지 못한 건수다. `projected.sha256`으로 티켓 연결 및 표시 내용의 복원 전후 일치를 대조한다. Confluence만 있는 영수증에서는 `jiraStatusHistory`가 `null`이다. 집계 범위는 이관 영수증에 저장된 원본이다.

@@ -20,6 +20,7 @@ const count = value => Number.isSafeInteger(value) && value >= 0;
 const product = value => value === 'jira' || value === 'confluence';
 const hex = value => typeof value === 'string' && sha.test(value);
 const id = value => typeof value === 'string' && uuid.test(value);
+const primaryKind = product => product === 'jira' ? 'issue' : 'page';
 const sum = values => values.reduce((total, value) => total + value, 0);
 const canonicalKeys = (_key, value) => isObject(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value;
@@ -46,11 +47,15 @@ function inputPackages(packages) {
   requireEvidence(Array.isArray(packages) && packages.length > 0, '검증할 이관 원본 패키지가 필요합니다.');
   const byId = new Map();
   for (const entry of packages) {
-    const { packageId, product: sourceProduct, format, instanceKey, sha256, size, errors, warnings } = entry ?? {};
+    const { packageId, product: sourceProduct, format, instanceKey, sha256, size, errors, warnings, counts: analysisCounts } = entry ?? {};
     requireEvidence(id(packageId) && !byId.has(packageId) && product(sourceProduct) && sourceFormats.has(format) &&
       typeof instanceKey === 'string' && instanceKey.length > 0 && hex(sha256) && count(size) && size > 0 && count(errors) && count(warnings),
     '검증할 이관 원본 패키지 정보가 올바르지 않습니다.');
+    const kind = primaryKind(sourceProduct);
+    requireEvidence(isObject(analysisCounts) && (!Object.hasOwn(analysisCounts, kind) || count(analysisCounts[kind])),
+      '이관 준비 기록의 업무·문서 분석 건수가 올바르지 않습니다.');
     byId.set(packageId, { packageId, product: sourceProduct, format, sha256, size, errors, warnings,
+      expectedPrimaryRecords: analysisCounts[kind] ?? 0,
       sourceIdentitySha256: sourceIdentity(sha256, sourceProduct, instanceKey, format), receiptIds: [] });
   }
   return byId;
@@ -106,6 +111,29 @@ function targetContentEvidence(raw) {
     worklogs: section('worklogs'), issueRelations: section('issueRelations') };
 }
 
+function primaryRecordsEvidence(raw, receiptPackages, matches, integrity, recordCounts) {
+  const message = '영수증의 패키지별 업무·문서 연결 검증 결과가 올바르지 않습니다.';
+  requireEvidence(Array.isArray(raw) && raw.length === receiptPackages.length, message);
+  const receiptKinds = new Map(receiptPackages.map(pkg => [pkg.stagingId, primaryKind(pkg.source.product)]));
+  const archiveCounts = new Map(integrity.packages.map(pkg => [pkg.packageId, pkg.records.observed]));
+  const totals = Object.fromEntries(recordStatuses.map(status => [status, 0]));
+  const seen = new Set();
+  const proof = raw.map(entry => {
+    const { packageId, kind, invalidTargets, dispositionSha256 } = entry ?? {};
+    requireEvidence(receiptKinds.has(packageId) && !seen.has(packageId) && kind === receiptKinds.get(packageId) &&
+      count(invalidTargets) && hex(dispositionSha256), message);
+    seen.add(packageId);
+    const statusCounts = counts(entry.counts, recordStatuses);
+    const observed = sum(Object.values(statusCounts));
+    requireEvidence(count(observed) && observed <= archiveCounts.get(packageId) && invalidTargets <= observed, message);
+    for (const status of recordStatuses) totals[status] += statusCounts[status];
+    return { packageId, kind, counts: statusCounts, invalidTargets, dispositionSha256,
+      records: { expected: matches.get(packageId)?.expectedPrimaryRecords ?? null, observed } };
+  });
+  requireEvidence(recordStatuses.every(status => totals[status] <= recordCounts[status]), message);
+  return proof.sort((left, right) => left.packageId.localeCompare(right.packageId));
+}
+
 function jiraStatusHistoryEvidence(raw, hasJira) {
   const message = 'Jira 상태 이력의 검증 건수 또는 해시가 올바르지 않습니다.';
   if (!hasJira) {
@@ -133,7 +161,7 @@ function noticeCounts(notices) {
   return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value);
 }
 
-async function auditReceipt(call, receipt, packageIds, receiptKeys) {
+async function auditReceipt(call, receipt, matches, receiptKeys) {
   const noticesAvailable = Array.isArray(receipt.notices);
   requireEvidence(noticesAvailable || receipt.notices === undefined || receipt.notices === null, '이관 영수증의 검토 진단 형식이 올바르지 않습니다.');
   const raw = await call(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`, { timeoutMs: 120_000 });
@@ -142,11 +170,12 @@ async function auditReceipt(call, receipt, packageIds, receiptKeys) {
   const recordCounts = counts(raw.recordCounts, recordStatuses);
   const attachmentCounts = counts(raw.attachmentCounts, attachmentStatuses);
   requireEvidence(integrity.records.observed === sum(Object.values(recordCounts)), '이관 원본의 검증 건수와 대조 건수가 다릅니다.');
+  const primaryRecords = primaryRecordsEvidence(raw.primaryRecords, receipt.packages, matches, integrity, recordCounts);
   const attachmentsSha256 = attachmentEvidence(raw.attachments, receiptKeys, attachmentCounts);
   const targetContent = targetContentEvidence(raw.targetContent);
   const jiraStatusHistory = jiraStatusHistoryEvidence(raw.jiraStatusHistory, receipt.packages.some(pkg => pkg.source.product === 'jira'));
-  return { id: receipt.id, version: receipt.version, packageIds,
-    projectCount: receipt.projectIds.length, integrity, recordCounts, attachmentCounts, attachmentsSha256, targetContent, jiraStatusHistory,
+  return { id: receipt.id, version: receipt.version, packageIds: [...matches.keys()].sort(),
+    projectCount: receipt.projectIds.length, integrity, recordCounts, primaryRecords, attachmentCounts, attachmentsSha256, targetContent, jiraStatusHistory,
     configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]),
     noticesAvailable, notices: noticeCounts(receipt.notices) };
 }
@@ -272,7 +301,7 @@ function failedAudit({ integrity, recordCounts, attachmentCounts, notices }) {
 
 /** Read whole source audits and return only counts, generated IDs, and fingerprints.
  * @param {(path: string, options?: {timeoutMs: number}) => Promise<unknown>} call
- * @param {{packageId: string, product: string, format: string, instanceKey: string, sha256: string, size: number, errors: number, warnings: number}[]} packages
+ * @param {{packageId: string, product: string, format: string, instanceKey: string, sha256: string, size: number, errors: number, warnings: number, counts: Record<string, number>}[]} packages
  * @param {ConfluenceReview[]} [confluenceReviews]
  */
 export async function collectMigrationEvidence(call, packages, confluenceReviews = []) {
@@ -283,14 +312,15 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
     receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
-    receiptsWithLiveRestrictedConfluenceDocuments: 0 };
+    receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
+    receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0 };
   const seenReceipts = new Set();
   const receipts = [];
   for (const receipt of imports) {
     requireEvidence(id(receipt?.id) && !seenReceipts.has(receipt.id) && count(receipt.version) && receipt.version > 0 &&
       Array.isArray(receipt.packages) && Array.isArray(receipt.projectIds), '이관 영수증 형식이 올바르지 않습니다.');
     seenReceipts.add(receipt.id);
-    const matches = new Set();
+    const matches = new Map();
     const packageIds = new Set();
     const receiptKeys = new Set();
     for (const pkg of receipt.packages) {
@@ -305,12 +335,12 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
         continue;
       }
       entry.receiptIds.push(receipt.id);
-      matches.add(pkg.stagingId);
+      matches.set(pkg.stagingId, entry);
     }
     let evidence;
     if (matches.size) {
       checks.unmatchedPackages += packageIds.size - matches.size;
-      evidence = await auditReceipt(call, receipt, [...matches].sort(), receiptKeys);
+      evidence = await auditReceipt(call, receipt, matches, receiptKeys);
       requireEvidence(evidence.integrity.packages.length === packageIds.size &&
         new Set(evidence.integrity.packages.map(pkg => pkg.packageId)).size === packageIds.size &&
         evidence.integrity.packages.every(pkg => packageIds.has(pkg.packageId)), '원본 검증 결과의 패키지와 이관 영수증이 일치하지 않습니다.');
@@ -330,8 +360,14 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   checks.receiptsWithoutNotices = receipts.filter(receipt => !receipt.noticesAvailable).length;
   checks.receiptsWithJiraHistoryReview = receipts.filter(({ jiraStatusHistory }) => jiraStatusHistory &&
     (jiraStatusHistory.unavailable > 0 || jiraStatusHistory.restricted > 0 || jiraStatusHistory.unresolvedTime > 0 || jiraStatusHistory.unresolvedAuthor > 0)).length;
+  for (const { primaryRecords } of receipts) {
+    if (primaryRecords.some(({ records }) => records.expected !== null && records.expected !== records.observed)) checks.receiptsWithPrimaryRecordCountMismatches++;
+    if (primaryRecords.some(record => record.invalidTargets > 0)) checks.receiptsWithInvalidPrimaryTargets++;
+    if (primaryRecords.some(record => record.counts['archive-only'] > 0)) checks.receiptsWithArchiveOnlyPrimaryRecords++;
+  }
   receipts.sort((a, b) => a.id.localeCompare(b.id));
-  const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 || receipts.some(failedAudit);
+  const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 ||
+    checks.receiptsWithPrimaryRecordCountMismatches > 0 || checks.receiptsWithInvalidPrimaryTargets > 0 || receipts.some(failedAudit);
   const review = confluenceReviews.some(({ proof }) => proof.status === 'needs-review') ||
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>
     receipt.recordCounts.trashed > 0 || receipt.recordCounts.excluded > 0 || receipt.attachmentCounts.unbound > 0);

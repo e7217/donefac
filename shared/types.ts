@@ -534,6 +534,13 @@ export interface SourceReconciliationContentDigest {
   count: number;
   sha256: string;
 }
+export interface SourceReconciliationPrimaryRecords {
+  packageId: string;
+  kind: 'issue' | 'page';
+  counts: Record<SourceReconciliationStatus, number>;
+  invalidTargets: number;
+  dispositionSha256: string;
+}
 export interface SourceReconciliationTargetContent {
   version: 1;
   comments: SourceReconciliationContentDigest;
@@ -578,6 +585,7 @@ export interface SourceReconciliationAudit {
   completedAt: string;
   integrity: SourceReconciliationIntegrity;
   recordCounts: SourceReconciliationPage['counts'];
+  primaryRecords: SourceReconciliationPrimaryRecords[];
   targetContent: SourceReconciliationTargetContent;
   jiraStatusHistory: SourceReconciliationJiraStatusHistory | null;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;

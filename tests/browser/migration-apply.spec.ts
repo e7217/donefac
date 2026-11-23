@@ -2069,6 +2069,8 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
     const audit = reconciliation.getByRole('region', { name: '전체 이관 검증', exact: true });
     const comparison = audit.getByRole('region', { name: '이관 당시 기록과 현재 비교', exact: true });
+    const coverage = audit.getByRole('region', { name: '이관 티켓·문서 대조', exact: true });
+    const primaryPackage = coverage.getByRole('list', { name: '원본 패키지별 티켓·문서', exact: true }).getByRole('listitem');
     const output = audit.getByRole('button', { name: '검증 결과 JSON 내보내기', exact: true });
     const filter = audit.getByLabel('첨부 검증 상태', { exact: true });
     const rows = audit.getByRole('list', { name: '첨부 검증 목록', exact: true }).getByRole('listitem');
@@ -2084,6 +2086,15 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
 
     const good = await checkAll();
     expect(good.jiraStatusHistory).toBeNull();
+    expect(good.primaryRecords).toEqual([{
+      packageId: pkg.id, kind: 'page', counts: { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 },
+      invalidTargets: 0, dispositionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }]);
+    await expect(primaryPackage).toHaveCount(1);
+    await expect(primaryPackage.getByText(filename, { exact: true })).toBeVisible();
+    await expect(primaryPackage.getByText('Confluence 페이지 1개', { exact: true })).toBeVisible();
+    await expect(primaryPackage.getByText('연결됨', { exact: true }).locator('..').locator('dd')).toHaveText('1');
+    await expect(primaryPackage.getByText('확인 필요', { exact: true })).toHaveCount(0);
     await expect(audit.getByRole('region', { name: 'Jira 상태 변경 검증', exact: true })).toHaveCount(0);
     expect(good.attachmentCounts).toEqual({ verified: 3, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 });
     expect(new Set(good.attachments.map(row => row.sha256))).toEqual(new Set([first, latest, removed].map(bytes => createHash('sha256').update(bytes).digest('hex'))));
@@ -2126,6 +2137,16 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     expect(JSON.parse(json)).toEqual(mixed);
 
     const auditPath = `/api/source-imports/${receipt.id}/reconciliation/audit`;
+    const primary = good.primaryRecords[0];
+    const archivedOnly: SourceReconciliationAudit = {
+      ...good,
+      primaryRecords: [{ ...primary, counts: { ...primary.counts, linked: 0, 'archive-only': 1 } }],
+    };
+    await page.route(url => url.pathname === auditPath, route => route.fulfill({ json: archivedOnly }), { times: 1 });
+    await checkAll();
+    await expect(primaryPackage.getByText('확인 필요', { exact: true })).toBeVisible();
+    await expect(primaryPackage.getByText('원본 보관만', { exact: true }).locator('..').locator('dd')).toHaveText('1');
+
     const packageResult = good.integrity.packages.find(item => item.filename === filename)!;
     const records = { ...packageResult.records, observed: packageResult.records.observed - 1 };
     const boundAttachments = { ...packageResult.boundAttachments, observed: packageResult.boundAttachments.observed - 1 };

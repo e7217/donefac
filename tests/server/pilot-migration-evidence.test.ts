@@ -4,16 +4,17 @@ import { collectMigrationEvidence, compareMigrationEvidence } from '../../script
 
 const jira = {
   packageId: '00000000-0000-0000-0000-000000000011', product: 'jira', format: 'jira-json', sha256: 'a'.repeat(64),
-  instanceKey: 'never-emit-private-jira-instance', size: 25, errors: 0, warnings: 2,
+  instanceKey: 'never-emit-private-jira-instance', size: 25, errors: 0, warnings: 2, counts: { issue: 1 },
 };
 const wiki = {
   packageId: '00000000-0000-0000-0000-000000000012', product: 'confluence', format: 'confluence-xml', sha256: 'b'.repeat(64),
-  instanceKey: 'never-emit-private-wiki-instance', size: 35, errors: 0, warnings: 0,
+  instanceKey: 'never-emit-private-wiki-instance', size: 35, errors: 0, warnings: 0, counts: { page: 1 },
 };
 const receiptId = '00000000-0000-0000-0000-000000000020';
 const archivedId = '00000000-0000-0000-0000-000000000030';
 const fileId = '00000000-0000-0000-0000-000000000040';
 const recordCounts = { linked: 4, trashed: 0, missing: 0, 'archive-only': 1, excluded: 0 };
+const primaryCounts = { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
 const attachmentCounts = { verified: 1, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 };
 const targetDigests = {
   comments: { count: 1, sha256: '1'.repeat(64) },
@@ -38,7 +39,7 @@ const info: ReceiptNotice = { ...warning, severity: 'info', code: 'SOURCE_DETAIL
 
 function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false,
   notices = [] as ReceiptNotice[] | null, wikiOnly = false } = {}) {
-  const packages = wikiOnly ? [wiki] : [jira, wiki];
+  const packages: Parameters<typeof collectMigrationEvidence>[1] = wikiOnly ? [wiki] : [jira, wiki];
   const receipt = {
     id: receiptId, version, projectIds: ['project-synthetic'], configuration: { users: { original: changedOwner ? 'team-2' : 'team-1' } },
     packages: packages.map(({ packageId, sha256, product, instanceKey, format }) => ({ stagingId: packageId,
@@ -55,6 +56,8 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
         recordsSha256: { expected: 'd'.repeat(64), observed: 'd'.repeat(64) },
       })) },
     recordCounts,
+    primaryRecords: packages.map(({ packageId, product }) => ({ packageId, kind: product === 'jira' ? 'issue' : 'page',
+      counts: { ...primaryCounts }, invalidTargets: 0, dispositionSha256: 'e'.repeat(64), title: 'never-emit-private-primary-title' })),
     attachmentCounts: corrupt ? { ...attachmentCounts, verified: 0, corrupt: 1 } : attachmentCounts,
     attachments: [{ sourceRecordId: archivedId, fileId, recordStatus: 'linked', status: corrupt ? 'corrupt' : 'verified',
       packageSha256: wiki.sha256, product: wiki.product, sourceInstance: wiki.instanceKey, size: 11,
@@ -93,6 +96,14 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.checks.receiptsWithWarnings, 0);
   assert.equal(before.receipts[0].noticesAvailable, true);
   assert.equal(before.receipts[0].attachmentCounts.verified, 1);
+  assert.equal(before.receipts[0].recordCounts['archive-only'], 1, 'archive-only reference data does not delay verification');
+  assert.equal(before.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
+  assert.deepEqual(before.receipts[0].primaryRecords, [
+    { packageId: jira.packageId, kind: 'issue', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
+      records: { expected: 1, observed: 1 } },
+    { packageId: wiki.packageId, kind: 'page', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
+      records: { expected: 1, observed: 1 } },
+  ]);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.deepEqual(before.receipts[0].jiraStatusHistory, statusHistory);
   assert.equal(before.checks.receiptsWithJiraHistoryReview, 0);
@@ -111,6 +122,74 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   const releaseComparison = compareMigrationEvidence(before, await evidence(differentRelease));
   assert.equal(releaseComparison.workspaceMatches, false);
   assert.equal(releaseComparison.status, 'failed');
+});
+
+test('migration rehearsal distinguishes archive-only primary records from hard coverage failures', async () => {
+  const input = sample();
+  const [jiraProof, wikiProof] = input.observations.primaryRecords;
+  const archiveOnly = { ...jiraProof, counts: { ...primaryCounts, linked: 0, 'archive-only': 1 } };
+  const observations = { ...input.observations, primaryRecords: [wikiProof, archiveOnly] };
+  const review = await evidence(input, observations);
+  assert.equal(review.status, 'review');
+  assert.equal(review.checks.receiptsWithArchiveOnlyPrimaryRecords, 1);
+  assert.equal(review.checks.receiptsWithPrimaryRecordCountMismatches, 0);
+  assert.equal(review.receipts[0].primaryRecords[0].packageId, jira.packageId, 'proof uses stable package order');
+  assert.equal(review.receipts[0].primaryRecords[0].counts['archive-only'], 1);
+  assert.deepEqual(review.receipts[0].recordCounts, recordCounts, 'same aggregate counts can hide a change of disposition');
+
+  input.packages = [{ ...jira, counts: { issue: 2 } }, wiki];
+  const countMismatch = await evidence(input, observations);
+  assert.equal(countMismatch.status, 'failed');
+  assert.equal(countMismatch.checks.receiptsWithPrimaryRecordCountMismatches, 1);
+  assert.deepEqual(countMismatch.receipts[0].primaryRecords[0].records, { expected: 2, observed: 1 });
+  const restore = compareMigrationEvidence(countMismatch, await evidence(input, observations));
+  assert.equal(restore.matches, true);
+  assert.equal(restore.status, 'failed');
+
+  input.packages = [jira, wiki];
+  const invalid = await evidence(input, { ...observations, primaryRecords: [jiraProof, { ...wikiProof, invalidTargets: 1 }] });
+  assert.equal(invalid.status, 'failed');
+  assert.equal(invalid.checks.receiptsWithInvalidPrimaryTargets, 1);
+  assert.equal(invalid.checks.receiptsWithPrimaryRecordCountMismatches, 0);
+  assert.equal(invalid.receipts[0].primaryRecords[1].invalidTargets, 1);
+});
+
+test('migration rehearsal requires complete and consistent coverage rows, including packages with zero primary records', async () => {
+  const input = sample();
+  const [jiraProof, wikiProof] = input.observations.primaryRecords;
+  const readPrimary = (primaryRecords: unknown) => evidence(input, { ...input.observations, primaryRecords });
+  const invalidProofs = [
+    undefined,
+    [jiraProof],
+    [jiraProof, jiraProof],
+    [jiraProof, { ...wikiProof, packageId: '00000000-0000-0000-0000-000000000099' }],
+    [{ ...jiraProof, kind: 'page' }, wikiProof],
+    [{ ...jiraProof, dispositionSha256: 'not-a-digest' }, wikiProof],
+    [{ ...jiraProof, invalidTargets: 2 }, wikiProof],
+    [{ ...jiraProof, counts: { ...primaryCounts, linked: 3 } }, wikiProof],
+    [{ ...jiraProof, counts: { ...primaryCounts, 'archive-only': 2, linked: 0 } }, wikiProof],
+    [{ ...jiraProof, counts: { ...primaryCounts, linked: 0.5 } }, wikiProof],
+  ];
+  for (const invalid of invalidProofs) await assert.rejects(readPrimary(invalid), /검증 (결과|건수)/u);
+
+  input.packages = [jira, { ...wiki, counts: {} }];
+  const zero = await readPrimary([jiraProof, { ...wikiProof, counts: { ...primaryCounts, linked: 0 } }]);
+  assert.equal(zero.status, 'verified');
+  assert.deepEqual(zero.receipts[0].primaryRecords[1].records, { expected: 0, observed: 0 });
+  input.packages = [jira, { ...wiki, counts: { page: -1 } }];
+  await assert.rejects(evidence(input), /이관 준비 기록의 업무·문서 분석 건수/u);
+});
+
+test('migration rehearsal detects changed primary dispositions even when counts and workspace match', async () => {
+  const input = sample();
+  const [jiraProof, wikiProof] = input.observations.primaryRecords;
+  const before = await evidence(input);
+  const after = await evidence(input, { ...input.observations, primaryRecords: [wikiProof, { ...jiraProof, dispositionSha256: 'f'.repeat(64) }] });
+  assert.equal(before.status, 'verified');
+  assert.equal(after.status, 'verified');
+  assert.deepEqual(compareMigrationEvidence(before, after), {
+    status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: true, packagesMatch: true,
+  });
 });
 
 test('migration rehearsal reports applied warnings by receipt even when the cold restore matches', async () => {

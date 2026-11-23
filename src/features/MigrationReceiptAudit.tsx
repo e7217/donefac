@@ -27,6 +27,7 @@ const integrityLabels: Record<SourceReconciliationIntegrity['status'], string> =
   'counts-only': '건수만 비교',
   unavailable: '비교 기준 없음',
 };
+const primaryRecordLabels = { issue: 'Jira 업무', page: 'Confluence 페이지' } as const;
 const jiraHistoryLabels = {
   sourceChanges: '보존 원본의 변경',
   projected: '현재 업무에 표시',
@@ -146,6 +147,7 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       {report && <>
         <p className="migration-audit-completed" role="status">원본 연결과 첨부 검증을 마쳤습니다.</p>
         <ReceiptIntegrity integrity={report.integrity} />
+        <PrimaryRecordCoverage records={report.primaryRecords} packages={report.integrity.packages} recordLabels={recordLabels} />
         {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
           base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
         <h5>원본 객체 상태</h5>
@@ -199,6 +201,34 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       </>}
     </section>}
   </div>;
+}
+
+function PrimaryRecordCoverage({ records, packages, recordLabels }: {
+  records: SourceReconciliationAudit['primaryRecords'];
+  packages: SourceReconciliationIntegrityPackage[];
+  recordLabels: Record<SourceReconciliationStatus, string>;
+}) {
+  if (!records?.length) return null;
+  const names = new Map(packages.map(item => [item.stagingId, item.filename]));
+  const labels = { ...recordLabels, 'archive-only': '원본 보관만' };
+  return <section className="migration-audit-integrity migration-audit-primary-records" aria-label="이관 티켓·문서 대조">
+    <div className="migration-audit-integrity-heading"><h5>이관 티켓·문서 대조</h5></div>
+    <ul className="migration-audit-integrity-packages" aria-label="원본 패키지별 티켓·문서">
+      {records.map(({ packageId, kind, counts, invalidTargets }) => {
+        const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+        const needsReview = counts['archive-only'] > 0 || counts.missing > 0 || counts.trashed > 0;
+        return <li key={packageId}>
+          <div className="migration-audit-integrity-heading">
+            <strong>{names.get(packageId) ?? packageId}</strong>
+            <span>{primaryRecordLabels[kind]} {count(total)}</span>
+            {invalidTargets > 0 ? <span className="migration-audit-status is-mismatch">대상 연결 오류 {count(invalidTargets)}</span>
+              : needsReview && <span className="migration-audit-status is-unbound">확인 필요</span>}
+          </div>
+          <AuditCounts label={`${primaryRecordLabels[kind]} 상태별 건수`} labels={labels} counts={counts} />
+        </li>;
+      })}
+    </ul>
+  </section>;
 }
 
 function JiraStatusHistoryAudit({ history, integrity, base, receiptVersion, detail }: {
