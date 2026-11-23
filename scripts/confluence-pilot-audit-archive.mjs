@@ -63,7 +63,7 @@ const permissionWarningCode = 'CONFLUENCE_SPACE_PERMISSION_REVIEW';
 const restrictedCode = 'CONFLUENCE_RESTRICTED_CONTENT';
 const unlinkedBinaryCode = 'CONFLUENCE_UNLINKED_ATTACHMENT_FILES';
 
-export async function compareConfluenceArchive(archivePath, inventory) {
+export async function compareConfluenceArchive(archivePath, inventory, addFinding) {
   const bytes = await readArchive(archivePath);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const { dataset } = await analyzeLegacyPackageBytes({
@@ -107,13 +107,23 @@ export async function compareConfluenceArchive(archivePath, inventory) {
     const row = archived.get(id);
     if (!row) {
       missingPages++;
+      addFinding?.(id, 'MISSING_FROM_ARCHIVE');
       continue;
     }
     matchedPages++;
     const version = row.metadata.version;
-    if (typeof version !== 'string' || !/^\d+$/u.test(version) || Number(version) !== page.version) versionMismatches++;
-    if (!sameHierarchy(row, page, currentPages)) hierarchyMismatches++;
-    if (page.restriction !== 'unknown' && (row.metadata.restricted === true) !== (page.restriction === 'restricted')) restrictionMismatches++;
+    if (typeof version !== 'string' || !/^\d+$/u.test(version) || Number(version) !== page.version) {
+      versionMismatches++;
+      addFinding?.(id, 'VERSION_MISMATCH');
+    }
+    if (!sameHierarchy(row, page, currentPages)) {
+      hierarchyMismatches++;
+      addFinding?.(id, 'HIERARCHY_MISMATCH');
+    }
+    if (page.restriction !== 'unknown' && (row.metadata.restricted === true) !== (page.restriction === 'restricted')) {
+      restrictionMismatches++;
+      addFinding?.(id, 'RESTRICTION_MISMATCH');
+    }
   }
 
   let archiveOnlyPages = 0;
@@ -121,15 +131,31 @@ export async function compareConfluenceArchive(archivePath, inventory) {
   let missingPageBodies = 0;
   for (const id of scoped) {
     const row = archived.get(id);
-    if (!inventory.pages.has(id)) archiveOnlyPages++;
-    if (row.metadata.restricted === true) archivedRestrictedPages++;
-    if (row.metadata.bodyPresent !== true) missingPageBodies++;
+    if (!inventory.pages.has(id)) {
+      archiveOnlyPages++;
+      addFinding?.(id, 'ARCHIVE_ONLY_PAGE');
+    }
+    if (row.metadata.restricted === true) {
+      archivedRestrictedPages++;
+      addFinding?.(id, 'ARCHIVE_RESTRICTED');
+    }
+    if (row.metadata.bodyPresent !== true) {
+      missingPageBodies++;
+      addFinding?.(id, 'MISSING_ARCHIVE_BODY');
+    }
   }
 
   const scopedAttachments = dataset.records.filter(row => row.kind === 'attachment' &&
     row.metadata.containerClass === 'Page' && scoped.has(row.containerId));
-  const attachmentBinaries = scopedAttachments.filter(row => typeof row.metadata.packagePath === 'string').length;
-  const attachmentEvidenceProblems = scopedAttachments.filter(row => !validAttachmentBinary(row)).length;
+  let attachmentBinaries = 0;
+  let attachmentEvidenceProblems = 0;
+  for (const row of scopedAttachments) {
+    if (typeof row.metadata.packagePath === 'string') attachmentBinaries++;
+    if (!validAttachmentBinary(row)) {
+      attachmentEvidenceProblems++;
+      addFinding?.(row.containerId, 'ATTACHMENT_EVIDENCE_PROBLEM');
+    }
+  }
   const recordById = new Map(dataset.records.map(row => [row.id, row]));
   function hasOutOfScopePageOwner(item) {
     const row = recordById.get(item.recordId);

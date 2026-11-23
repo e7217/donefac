@@ -225,5 +225,5 @@ export async function readConfluenceInventory({ spaceKey, pageIds }, getJson) {
     page.restriction = combineRestrictions(statuses);
   }
 
-  return { spaceKey, spaceId, explicitSelection, requestedPageIds, pages, unavailablePages: unreadableIds.size };
+  return { spaceKey, spaceId, explicitSelection, requestedPageIds, pages, unreadableIds, unavailablePages: unreadableIds.size };
 }

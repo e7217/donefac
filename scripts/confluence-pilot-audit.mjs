@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, resolve } from 'node:path';
+import { link, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { compareConfluenceArchive } from './confluence-pilot-audit-archive.mjs';
 import { readConfluenceInventory } from './confluence-pilot-audit-rest.mjs';
 
@@ -98,32 +98,77 @@ function createReader({ base, authorization }, signal) {
   };
 }
 
+async function writeFindings(path, value, signal) {
+  let stagingDirectory;
+  try {
+    stagingDirectory = await mkdtemp(join(dirname(path), '.teamspace-confluence-findings-'));
+    const stagedFile = join(stagingDirectory, 'findings.json');
+    await writeFile(stagedFile, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx', flush: true, signal });
+    signal.throwIfAborted();
+    await link(stagedFile, path);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error.code === 'EEXIST') throw new Error('페이지별 검토 파일이 이미 있습니다. 새 경로를 지정해 주세요.');
+    throw new Error('페이지별 검토 파일을 저장할 수 없습니다. 상위 디렉터리와 쓰기 권한을 확인해 주세요.');
+  } finally {
+    if (stagingDirectory) await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 const [configurationPath, archivePath, ...extra] = process.argv.slice(2);
+const findingsPath = extra[1];
 const interrupted = new AbortController();
 const cancel = () => interrupted.abort(new Error('Confluence 원본 대조를 중단했습니다.'));
 process.once('SIGINT', cancel);
 process.once('SIGTERM', cancel);
 try {
-  if (!configurationPath || !isAbsolute(configurationPath) || extra.length ||
-      archivePath !== undefined && (!isAbsolute(archivePath) || extname(archivePath).toLowerCase() !== '.zip')) {
-    throw new Error('사용법: npm run pilot:confluence:audit -- /absolute/config.json [/absolute/export.zip]');
+  if (!configurationPath || !isAbsolute(configurationPath) ||
+      archivePath !== undefined && (!isAbsolute(archivePath) || extname(archivePath).toLowerCase() !== '.zip') ||
+      extra.length && (extra.length !== 2 || extra[0] !== '--findings' || !archivePath || !isAbsolute(findingsPath))) {
+    throw new Error('npm run pilot:confluence:audit -- /absolute/config.json [/absolute/export.zip [--findings /absolute/findings.json]] 형식으로 실행해 주세요.');
   }
   const configuration = await readConfiguration(configurationPath);
   const signal = interrupted.signal;
   const inventory = await readConfluenceInventory(configuration, createReader(configuration, signal));
-  const archive = archivePath === undefined ? undefined : await compareConfluenceArchive(archivePath, inventory);
+  const pageFindings = new Map();
+  function addFinding(pageId, code) {
+    if (!findingsPath) return;
+    if (!pageFindings.has(pageId)) pageFindings.set(pageId, new Set());
+    pageFindings.get(pageId).add(code);
+  }
+  const archive = archivePath === undefined ? undefined
+    : await compareConfluenceArchive(archivePath, inventory, findingsPath ? addFinding : undefined);
   signal.throwIfAborted();
   let restrictedPages = 0;
   let unknownRestrictions = 0;
   for (const page of inventory.pages.values()) {
-    if (page.restriction === 'restricted') restrictedPages++;
-    if (page.restriction === 'unknown') unknownRestrictions++;
+    if (page.restriction === 'restricted') {
+      restrictedPages++;
+      addFinding(page.id, 'LIVE_RESTRICTED');
+    }
+    if (page.restriction === 'unknown') {
+      unknownRestrictions++;
+      addFinding(page.id, 'LIVE_RESTRICTION_UNKNOWN');
+    }
   }
   const { unavailablePages } = inventory;
   const needsReview = !inventory.pages.size || unavailablePages > 0 || restrictedPages > 0 || unknownRestrictions > 0 || archive?.needsReview;
   const status = needsReview ? 'needs-review' : archive ? 'matched' : 'observed';
-  process.stdout.write(`${JSON.stringify({ status, selection: inventory.explicitSelection ? 'explicit-pages' : 'visible-space',
-    visiblePages: inventory.pages.size, unavailablePages, restrictedPages, unknownRestrictions, spacePermissions: 'manual-review', archive })}\n`);
+  const selection = inventory.explicitSelection ? 'explicit-pages' : 'visible-space';
+  const spacePermissions = 'manual-review';
+  if (findingsPath) {
+    for (const pageId of inventory.unreadableIds) addFinding(pageId, 'LIVE_PAGE_UNAVAILABLE');
+    const findings = [...pageFindings].filter(([pageId]) => typeof pageId === 'string' && pageIdPattern.test(pageId))
+      .sort(([left], [right]) => left.length - right.length || left.localeCompare(right))
+      .map(([pageId, codes]) => ({ pageId, codes: [...codes].sort() }));
+    await writeFindings(findingsPath, {
+      format: 'teamspace-confluence-audit-findings', version: 1, checkedAt: new Date().toISOString(),
+      selection, status, archive: { sha256: archive.sha256, bytes: archive.bytes }, spacePermissions,
+      unidentifiedPages: pageFindings.size - findings.length, findings,
+    }, signal);
+  }
+  process.stdout.write(`${JSON.stringify({ status, selection, visiblePages: inventory.pages.size, unavailablePages,
+    restrictedPages, unknownRestrictions, spacePermissions, archive })}\n`);
   if (needsReview) process.exitCode = 2;
 } catch (error) {
   process.exitCode = interrupted.signal.aborted ? 130 : 1;

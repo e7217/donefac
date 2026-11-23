@@ -160,6 +160,24 @@ ZIP을 생략하면 현재 페이지와 제한 확인 결과만 나온다. ZIP�
 
 `matched`는 조회한 페이지의 확인 항목이 일치했다는 뜻이다. 원본 ZIP에만 있는 페이지는 현재 계정에 보이지 않을 수 있다. 공간 권한은 보고서의 `spacePermissions`에 수동 검토로 표시된다. 이관 대상과 원본의 열람 범위, 과거 버전 및 첨부를 확인한 후 아래 리허설에서 적용을 검토한다. `npm run test:pilot:confluence`는 모의 Confluence와 Teamspace 분석기로 이 절차를 검사한다. [Atlassian의 공간 XML 내보내기 안내](https://confluence.atlassian.com/conf711/export-content-to-word-pdf-html-and-xml-1044781118.html)
 
+페이지를 찾아 검토하려면 ZIP을 지정한 실행에 `--findings`를 추가한다.
+
+```bash
+npm run pilot:confluence:audit -- /absolute/path/confluence-audit.json /absolute/path/confluence-space.zip --findings /absolute/path/page-findings.json
+```
+
+새 검토 파일은 실행 계정만 읽고 쓸 수 있는 권한으로 저장한다. ZIP의 SHA-256·크기, 조회 범위·시각, 확인할 페이지 ID와 사유 코드가 들어간다. 단말 출력은 기존 집계를 사용한다. Confluence 형식의 숫자 ID로 확인할 수 없는 항목은 `unidentifiedPages` 건수로 남긴다.
+
+| 사유 코드 | 확인할 항목 |
+| --- | --- |
+| `LIVE_RESTRICTED`, `LIVE_RESTRICTION_UNKNOWN` | 현재 페이지의 직접 제한이나 상위 페이지에서 상속된 읽기 제한, 또는 제한을 확인할 수 없는 응답 |
+| `LIVE_PAGE_UNAVAILABLE`, `ARCHIVE_ONLY_PAGE` | 선택했으나 계정에서 읽을 수 없는 페이지, 또는 이번 조회에 잡히지 않고 ZIP에 있는 페이지 |
+| `ARCHIVE_RESTRICTED`, `RESTRICTION_MISMATCH` | ZIP에서 확인한 제한 표시, 또는 확인된 현재 제한과 ZIP 표시의 차이 |
+| `MISSING_FROM_ARCHIVE`, `VERSION_MISMATCH`, `HIERARCHY_MISMATCH` | ZIP의 페이지 누락, 현재 버전 또는 상위 관계 차이 |
+| `MISSING_ARCHIVE_BODY`, `ATTACHMENT_EVIDENCE_PROBLEM` | ZIP에서 페이지 본문 또는 첨부 바이트를 확인할 수 있는지 여부 |
+
+리허설에서 분석할 ZIP의 SHA-256과 검토 파일의 해시를 대조한다. 적용 전 **원본 주소와 제외 항목**에서 같은 패키지와 `page` 종류를 고른 뒤 정확한 원본 페이지 ID를 찾아 확인한다. 팀 열람 범위에서 제외해야 하는 페이지는 체크하고 새 미리보기에서 하위 기록까지 적용 범위를 검토한다. 검토 파일에는 원본 페이지 ID가 들어가므로 원본 자료와 함께 비공개로 보관한다.
+
 ## 오프라인 원본 이관 리허설
 
 리허설 명령은 지정한 내보내기 파일을 전용 워크스페이스에 분석한다. Jira REST 수집 ZIP, Jira 관리자 XML과 첨부파일을 담은 ZIP, Confluence 공간 XML ZIP 등 [지원 형식](API.md#기존-도구-원본-분석)에 해당하는 파일을 매니페스트에 적는다. `file`은 절대 경로나 매니페스트 기준 상대 경로다. 같은 원본 시스템에서 받은 후속 파일에는 같은 `instanceKey`를 사용한다.
@@ -224,6 +242,8 @@ npm run pilot:rehearsal -- verify /absolute/path/rehearsal
 `verify`는 분석 때 보관한 패키지 파일의 SHA-256을 다시 계산하고, 이관 영수증의 패키지 범위와 전체 원본·첨부 검증 결과를 확인한다. 검사에 사용한 파일럿을 종료한 뒤 물리 백업을 만들고, 별도 경로에 복원해 영수증과 업무·문서·계획 데이터의 해시를 다시 비교한다. 영수증에 연결된 댓글, 문서 이력, 작업 기록, 활성 업무 관계와 티켓에 표시된 Jira 상태 이력도 건수와 SHA-256을 대조한다. 건수가 같아도 대상 내용이 달라지면 보고서의 `changedReceiptIds`에 해당 영수증이 기록된다.
 
 매 실행마다 `verification-*/report.json`에 결과를 남긴다. 원본 검사를 통과하고 적용 영수증이 있으면 해당 디렉터리에 물리 `backup/`과 `restored/`도 보관한다. 보고서는 건수, 해시, 내부 ID를 기록하며, 워크스페이스와 백업에는 원본과 첨부 바이트가 들어 있다.
+
+이관 제외는 팀 업무와 문서를 생성할 범위에 적용한다. 리허설의 보존 원본과 전체 백업에는 제외한 객체의 내용도 들어갈 수 있다. 팀에 제공할 워크스페이스에는 팀에서 열람해도 되는 내보내기 파일을 사용한다.
 
 종료 코드 `0`은 자동 대조 통과, `2`는 적용 대기·원본 제외·미연결 첨부·적용 영수증 경고 또는 이전 영수증의 진단 부재 등 검토 필요, `1`은 파일·영수증 불일치 또는 실행 실패다. 권한 범위나 변환 방식에 대한 적용 당시의 경고는 복원본이 일치해도 `2`로 기록된다. 상태 이력의 접근 제한, 업무 연결·시각·작성자 미확인은 `receiptsWithJiraHistoryReview`에 집계한다. 보고서의 `source.evidence.checks`에는 `receiptsWithWarnings`와 `receiptsWithoutNotices`도 들어 있다. `source.evidence.receipts`에서 대상 영수증 ID, 진단 코드별 건수, `jiraStatusHistory` 건수와 해시를 확인한다. `npm run test:pilot:rehearsal`은 합성 Jira·Confluence 패키지로 이 절차를 재현한다.
 

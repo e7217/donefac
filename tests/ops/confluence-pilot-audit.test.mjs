@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,14 +31,15 @@ function property(name, value) { return `<property name="${name}">${value}</prop
 function reference(name, type, id) { return `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`; }
 function object(type, id, properties) { return `<object class="${type}"><id name="id">${id}</id>${properties}</object>`; }
 
-function nativeExport(pages = [root, child], { extras = false, restricted = [], spaceId = '42', includeBinary = true, spacePermission = false } = {}) {
+function nativeExport(pages = [root, child], { extras = false, restricted = [], spaceId = '42', includeBinary = true, spacePermission = false, omitBody = [] } = {}) {
   const space = object('Space', spaceId, property('key', 'WIKI') + property('name', 'Fixture Wiki'));
   function pageRows(page, originalId) {
     const parent = page.ancestors.at(-1);
     return [object('Page', page.id, property('contentStatus', originalId ? 'historical' : 'current') +
       property('title', `${privateTitle} ${page.id}`) + property('version', page.version) + reference('space', 'Space', spaceId) +
       (parent ? reference('parent', 'Page', parent) : '') + (originalId ? reference('originalVersion', 'Page', originalId) : '')),
-    object('BodyContent', `9${page.id}`, property('body', `<![CDATA[<p>${privateBody}</p>]]>`) + reference('content', 'Page', page.id))];
+    ...(omitBody.includes(page.id) ? [] :
+      [object('BodyContent', `9${page.id}`, property('body', `<![CDATA[<p>${privateBody}</p>]]>`) + reference('content', 'Page', page.id))])];
   }
   const rows = pages.flatMap(page => pageRows(page));
   const files = [];
@@ -130,8 +131,8 @@ async function invocation(t, baseUrl, { pageIds, archive } = {}) {
   await writeFile(config, JSON.stringify({ baseUrl, authFile: 'confluence-auth', spaceKey: 'WIKI', ...(pageIds ? { pageIds } : {}) }), { mode: 0o600 });
   if (archive) await writeFile(exportPath, archive, { mode: 0o600 });
   const args = ['--import', 'tsx', cli, config, ...(archive ? [exportPath] : [])];
-  async function audit() {
-    try { return { code: 0, ...await run(process.execPath, args, { cwd: repo, timeout: 30_000 }) }; }
+  async function audit(...options) {
+    try { return { code: 0, ...await run(process.execPath, [...args, ...options], { cwd: repo, timeout: 30_000 }) }; }
     catch (error) {
       if (typeof error.code !== 'number') throw error;
       return { code: error.code, stdout: error.stdout, stderr: error.stderr };
@@ -149,6 +150,20 @@ function assertPrivate(result, directory) {
 
 function assertCounts(report, expected) {
   for (const [key, count] of Object.entries(expected)) assert.equal(report[key], count, key);
+}
+
+async function assertFindings(path, { directory, archive, status, selection, findings, unidentifiedPages = 0 }) {
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  const raw = await readFile(path, 'utf8');
+  assertPrivate({ stdout: raw, stderr: '' }, directory);
+  const { checkedAt, ...report } = JSON.parse(raw);
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(report, {
+    format: 'teamspace-confluence-audit-findings', version: 1, selection, status,
+    archive: { sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length },
+    spacePermissions: 'manual-review', unidentifiedPages, findings,
+  });
+  return raw;
 }
 
 test('native Confluence ZIP matches paged live metadata without reading document bodies or writing an export', async t => {
@@ -176,6 +191,14 @@ test('native Confluence ZIP matches paged live metadata without reading document
   }
   assert.deepEqual(await readdir(directory), ['confluence-auth', 'native-private-source.zip', 'source.json']);
   assert.deepEqual(await readFile(exportPath), archive);
+
+  const findingsPath = join(directory, 'private-review.json');
+  const detailed = await audit('--findings', findingsPath);
+  assert.equal(detailed.code, 0, detailed.stdout + detailed.stderr);
+  assert.equal(detailed.stdout, result.stdout);
+  assertPrivate(detailed, directory);
+  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'visible-space', findings: [] });
+  assert.deepEqual(await readFile(exportPath), archive);
 });
 
 test('audit distinguishes live-only and export-only pages, changed versions and changed parents', async t => {
@@ -193,6 +216,34 @@ test('audit distinguishes live-only and export-only pages, changed versions and 
     hierarchyMismatches: 1, needsReview: true });
 });
 
+test('optional findings preserve aggregate stdout and list the selected page IDs and differences', async t => {
+  const liveOnly = { id: '90', version: 1, ancestors: [] };
+  const archiveOnly = { id: '103', version: 1, ancestors: [] };
+  const unidentified = { id: 'synthetic-private-unidentified-id', version: 1, ancestors: [] };
+  const rest = [child, { ...root, version: 3 }, liveOnly];
+  const archive = nativeExport([archiveOnly, unidentified, root, { ...child, ancestors: [archiveOnly.id] }],
+    { extras: true, restricted: [child.id], includeBinary: false, omitBody: [child.id] });
+  const source = await fixture(t, { pages: rest });
+  const { directory, audit } = await invocation(t, source.origin + context, { archive });
+  const findingsPath = join(directory, 'private-review.json');
+  const aggregate = await audit();
+  const detailed = await audit('--findings', findingsPath);
+  assert.equal(detailed.code, 2, detailed.stdout + detailed.stderr);
+  assert.equal(detailed.stdout, aggregate.stdout);
+  assert.deepEqual(source.errors, []);
+  assertPrivate(detailed, directory);
+  assert.ok(!detailed.stdout.includes('"pageId"'));
+  const raw = await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space', unidentifiedPages: 1, findings: [
+    { pageId: liveOnly.id, codes: ['MISSING_FROM_ARCHIVE'] },
+    { pageId: root.id, codes: ['VERSION_MISMATCH'] },
+    { pageId: child.id, codes: ['ARCHIVE_RESTRICTED', 'ATTACHMENT_EVIDENCE_PROBLEM', 'HIERARCHY_MISMATCH', 'MISSING_ARCHIVE_BODY', 'RESTRICTION_MISMATCH'] },
+    { pageId: archiveOnly.id, codes: ['ARCHIVE_ONLY_PAGE'] },
+  ] });
+  assert.ok(!raw.includes(source.origin));
+  assert.ok(!raw.includes(unidentified.id));
+  assert.ok(!detailed.stdout.includes(unidentified.id));
+});
+
 test('explicit selection checks inherited restrictions outside the selection and preserves other selected evidence', async t => {
   const source = await fixture(t, { restrictionOverride({ id, operation, envelope, url, json }) {
     if (id !== root.id || operation !== 'read') return false;
@@ -200,15 +251,23 @@ test('explicit selection checks inherited restrictions outside the selection and
     json(envelope);
     return true;
   } });
-  const archive = nativeExport([root, child], { restricted: [root.id] });
-  const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [child.id], archive });
-  const result = await audit();
-  assert.equal(result.code, 2, result.stdout + result.stderr);
+  for (const [archiveRestriction, restrictionMismatches, codes] of [
+    [[root.id], 0, ['ARCHIVE_RESTRICTED', 'LIVE_RESTRICTED']],
+    [[], 1, ['LIVE_RESTRICTED', 'RESTRICTION_MISMATCH']],
+  ]) {
+    const archive = nativeExport([root, child], { restricted: archiveRestriction });
+    const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [child.id], archive });
+    const findingsPath = join(directory, 'private-review.json');
+    const result = await audit('--findings', findingsPath);
+    assert.equal(result.code, 2, result.stdout + result.stderr);
+    assertPrivate(result, directory);
+    const report = JSON.parse(result.stdout);
+    assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, restrictedPages: 1, unknownRestrictions: 0 });
+    assertCounts(report.archive, { outsideSelectionPages: 1, missingPages: 0, archiveOnlyPages: 0, restrictionMismatches });
+    await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages',
+      findings: [{ pageId: child.id, codes }] });
+  }
   assert.deepEqual(source.errors, []);
-  assertPrivate(result, directory);
-  const report = JSON.parse(result.stdout);
-  assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, restrictedPages: 1, unknownRestrictions: 0 });
-  assertCounts(report.archive, { outsideSelectionPages: 1, missingPages: 0, archiveOnlyPages: 0, restrictionMismatches: 0 });
   assert.ok(!source.requests.some(({ url }) => url.pathname === listing));
   assert.ok(source.requests.some(({ url }) => url.pathname === `${apiPath}/content/${root.id}`));
   assert.ok(source.requests.some(({ url }) => url.pathname === `${apiPath}/content/${root.id}/restriction/byOperation/read`));
@@ -252,17 +311,64 @@ test('a direct edit restriction requires review only for its own selected page',
 });
 
 test('the audit counts an explicitly selected unreadable page without exposing its details', async t => {
-  const source = await fixture(t, { pages: [root] });
+  const source = await fixture(t, { pages: [root], restrictionOverride({ id, operation, json }) {
+    if (id !== root.id || operation !== 'read') return false;
+    json({ message: privateBody }, 404);
+    return true;
+  } });
   const archive = nativeExport([root, child]);
-  const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [root.id, child.id], archive });
-  const result = await audit();
+  const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [child.id, root.id], archive });
+  const findingsPath = join(directory, 'private-review.json');
+  const result = await audit('--findings', findingsPath);
   assert.equal(result.code, 2, result.stdout + result.stderr);
   assert.deepEqual(source.errors, []);
   assertPrivate(result, directory);
   const report = JSON.parse(result.stdout);
-  assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, unavailablePages: 1 });
+  assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, unavailablePages: 1, unknownRestrictions: 1 });
   assertCounts(report.archive, { archiveOnlyPages: 1, outsideSelectionPages: 0 });
   assert.ok(!source.requests.some(({ url }) => url.pathname.startsWith(`${apiPath}/content/${child.id}/`)));
+  await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages', findings: [
+    { pageId: root.id, codes: ['LIVE_RESTRICTION_UNKNOWN'] },
+    { pageId: child.id, codes: ['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE'] },
+  ] });
+});
+
+test('findings require a ZIP and a new absolute path without replacing existing files', async t => {
+  const source = await fixture(t);
+  const withoutArchive = await invocation(t, source.origin + context);
+  const noZip = await withoutArchive.audit('--findings', join(withoutArchive.directory, 'private-review.json'));
+  assert.equal(noZip.code, 1);
+  assert.equal(noZip.stdout, '');
+  assertPrivate(noZip, withoutArchive.directory);
+  assert.deepEqual(await readdir(withoutArchive.directory), ['confluence-auth', 'source.json']);
+  assert.deepEqual(source.requests, []);
+
+  const archive = nativeExport();
+  const { directory, exportPath, audit } = await invocation(t, source.origin + context, { archive });
+  const relative = await audit('--findings', 'private-review.json');
+  assert.equal(relative.code, 1);
+  assert.equal(relative.stdout, '');
+  assertPrivate(relative, directory);
+  assert.deepEqual(source.requests, []);
+
+  const existing = join(directory, 'existing-review.json');
+  const linked = join(directory, 'linked-review.json');
+  const sentinel = 'private preexisting review';
+  await writeFile(existing, sentinel, { mode: 0o600 });
+  await symlink(existing, linked);
+  for (const path of [existing, linked, join(directory, 'missing-directory', 'private-review.json')]) {
+    const invalid = await audit('--findings', path);
+    assert.equal(invalid.code, 1, invalid.stdout + invalid.stderr);
+    assert.equal(invalid.stdout, '');
+    assert.ok(!invalid.stderr.includes(sentinel));
+    assertPrivate(invalid, directory);
+  }
+  assert.deepEqual(source.errors, []);
+  assert.equal(await readFile(existing, 'utf8'), sentinel);
+  assert.equal(await readFile(linked, 'utf8'), sentinel);
+  assert.ok((await lstat(linked)).isSymbolicLink());
+  assert.deepEqual(await readFile(exportPath), archive);
+  assert.deepEqual((await readdir(directory)).sort(), ['confluence-auth', 'existing-review.json', 'linked-review.json', 'native-private-source.zip', 'source.json']);
 });
 
 test('without a native archive the command reports observation and keeps an empty visible scope under review', async t => {
@@ -308,12 +414,13 @@ test('a native ZIP for the same space key with a different original ID cannot ma
   const source = await fixture(t);
   const archive = nativeExport([root, child], { spaceId: '99' });
   const { directory, audit } = await invocation(t, source.origin + context, { archive });
-  const result = await audit();
+  const result = await audit('--findings', join(directory, 'private-review.json'));
   assert.equal(result.code, 1, result.stdout + result.stderr);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /원본 ID가 일치하지 않습니다/);
   assert.deepEqual(source.errors, []);
   assertPrivate(result, directory);
+  assert.deepEqual((await readdir(directory)).sort(), ['confluence-auth', 'native-private-source.zip', 'source.json']);
 });
 
 test('verified live pages still require review for missing native attachment bytes or space permissions', async t => {
