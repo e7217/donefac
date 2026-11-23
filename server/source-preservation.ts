@@ -1,5 +1,5 @@
 import type { Express, Request } from 'express';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, STATUS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationJiraWorkflow, type MigrationJiraWorkflowStatus, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
 import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
@@ -90,6 +90,56 @@ export function parseMigrationPageAppendConfiguration(raw: unknown): NonNullable
   return { projectId: string(append.projectId, '문서를 추가할 프로젝트', 200), ...(refresh ? { refreshExisting: true } : {}),
     ...(attachments ? { refreshAttachments: true } : {}), ...(history ? { refreshHistory: true } : {}) };
 }
+const jiraWorkflowStatusId = /^s_[a-f0-9]{24}$/u;
+const jiraWorkflowAdditionalStatusId = /^s_new_(?:[1-9]|[1-3][0-9]|40)$/u;
+
+function parseMigrationJiraWorkflow(raw: unknown): MigrationJiraWorkflow {
+  const workflow = object(raw, 'Jira 이관 워크플로');
+  const hasAdditionalStatuses = Object.hasOwn(workflow, 'additionalStatuses');
+  if (Object.keys(workflow).length !== 2 + Number(hasAdditionalStatuses)) fail(400, 'Jira 이관 워크플로 형식을 확인해 주세요.');
+  const additionalIds = new Set<string>();
+  const additionalStatuses = hasAdditionalStatuses
+    ? list(workflow.additionalStatuses, 'Jira 이관 추가 상태', 40).map(rawStatus => {
+      const status = object(rawStatus, 'Jira 이관 추가 상태');
+      const { id, category } = status;
+      const label = string(status.label, '추가 상태 이름', 40).trim();
+      if (Object.keys(status).length !== 3 || typeof id !== 'string' || !jiraWorkflowAdditionalStatusId.test(id) ||
+          additionalIds.has(id) || !label.isWellFormed() || typeof category !== 'string' || !Object.hasOwn(STATUS, category)) {
+        fail(400, 'Jira 이관 추가 상태의 ID·이름·분류를 확인해 주세요.');
+      }
+      additionalIds.add(id);
+      return { id, label, category: category as MigrationJiraWorkflowStatus['category'] };
+    }) : undefined;
+  const stateId = (rawId: unknown) => {
+    if (typeof rawId !== 'string' || (!jiraWorkflowStatusId.test(rawId) && !additionalIds.has(rawId))) {
+      fail(400, 'Jira 이관 시작·전이 상태에 유효한 상태 ID를 선택해 주세요.');
+    }
+    return rawId;
+  };
+  const initialStatusId = stateId(workflow.initialStatusId);
+  const transitionPairs = new Set<string>();
+  const transitions = list(workflow.transitions, 'Jira 이관 허용 전이', 1600).map(rawEdge => {
+    const edge = object(rawEdge, 'Jira 이관 허용 전이');
+    const from = stateId(edge.from), to = stateId(edge.to);
+    const pair = `${from}:${to}`;
+    if (Object.keys(edge).length !== 2 || from === to || transitionPairs.has(pair)) {
+      fail(400, 'Jira 이관 허용 전이에는 서로 다른 상태를 선택하고 같은 방향은 한 번만 지정해 주세요.');
+    }
+    transitionPairs.add(pair);
+    return { from, to };
+  });
+  return { initialStatusId, transitions, ...(additionalStatuses ? { additionalStatuses } : {}) };
+}
+
+export function parseMigrationJiraWorkflows(raw: unknown): NonNullable<MigrationConfiguration['jiraWorkflows']> {
+  const entries = Object.entries(object(raw, 'Jira 이관 워크플로'));
+  if (entries.length > 100) fail(400, 'Jira 이관 워크플로는 100개 프로젝트까지 지정할 수 있습니다.');
+  return Object.fromEntries(entries.map(([key, workflow]) => {
+    if (!/^[A-Z][A-Z0-9]{1,11}$/u.test(key)) fail(400, 'Jira 이관 워크플로의 새 프로젝트 키를 확인해 주세요.');
+    return [key, parseMigrationJiraWorkflow(workflow)];
+  }));
+}
+
 export function parseJiraPlanSelections(raw: unknown, packageIds: readonly string[], label: '릴리스' | '스프린트'): Record<string, string | null> {
   const entries = Object.entries(object(raw, `Jira ${label} 매핑`));
   if (entries.length > 10_000) fail(400, `Jira ${label} 선택은 10,000개까지 보관할 수 있습니다.`);
@@ -121,12 +171,17 @@ function configuration(raw: unknown, users: Set<string>): MigrationConfiguration
   const excludedRecords = list(value.excludedRecords, '제외 원본', 100000).map(value => string(value, '제외 원본', 1200)); if (new Set(excludedRecords).size !== excludedRecords.length) fail(400, '제외 원본이 중복되었습니다.');
   const appendTo = Object.hasOwn(value, 'appendTo') ? parseMigrationAppendConfiguration(value.appendTo) : undefined;
   const appendPagesTo = Object.hasOwn(value, 'appendPagesTo') ? parseMigrationPageAppendConfiguration(value.appendPagesTo) : undefined;
+  const jiraWorkflows = Object.hasOwn(value, 'jiraWorkflows') ? parseMigrationJiraWorkflows(value.jiraWorkflows) : undefined;
   const jiraReleaseSelections = Object.hasOwn(value, 'jiraReleaseSelections') ? parseJiraPlanSelections(value.jiraReleaseSelections, packageIds, '릴리스') : undefined;
   const jiraSprintSelections = Object.hasOwn(value, 'jiraSprintSelections') ? parseJiraPlanSelections(value.jiraSprintSelections, packageIds, '스프린트') : undefined;
   if (appendTo && appendPagesTo) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
+  if (jiraWorkflows && (appendTo || appendPagesTo || Object.keys(jiraWorkflows).some(key => !projectNames.has(key)))) {
+    fail(400, 'Jira 이관 워크플로는 새 프로젝트에만 지정할 수 있습니다.');
+  }
   return { packageIds, projects, users: mappedUsers, statuses, issueTypes, fields, sourceBaseUrls, timezone, datePolicy: value.datePolicy,
     excludedRecords, ...(appendTo ? { appendTo } : {}), ...(appendPagesTo ? { appendPagesTo } : {}),
-    ...(jiraReleaseSelections ? { jiraReleaseSelections } : {}), ...(jiraSprintSelections ? { jiraSprintSelections } : {}) };
+    ...(jiraReleaseSelections ? { jiraReleaseSelections } : {}), ...(jiraSprintSelections ? { jiraSprintSelections } : {}),
+    ...(jiraWorkflows ? { jiraWorkflows } : {}) };
 }
 
 const jiraIssueFields = new Set(JIRA_MIGRATION_ISSUE_FIELDS);
@@ -207,6 +262,9 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const packages = list(value.packages, '원본 패키지', 20).map(raw => { const item = object(raw, '원본 패키지'); let filename: string; try { filename = safeFilename(item.filename); } catch { return fail(400, '원본 패키지 파일명을 확인해 주세요.'); } return { stagingId: string(item.stagingId, '분석 패키지 ID', 200), filename, sha256: sha(item.sha256), source: legacySource(item.source) }; });
   if (!packages.length || new Set(packages.map(value => value.stagingId)).size !== packages.length || new Set(packages.map(value => stable([value.source.product, value.source.instanceKey, value.sha256]))).size !== packages.length) fail(400, '원본 패키지 출처가 중복되거나 비었습니다.');
   const config = configuration(value.configuration, users); if (config.packageIds.length !== packages.length || packages.some(value => !config.packageIds.includes(value.stagingId))) fail(400, '이관 설정과 원본 패키지 목록이 다릅니다.');
+  if (config.jiraWorkflows && Object.keys(config.jiraWorkflows).length && !packages.some(pkg => pkg.source.product === 'jira')) {
+    fail(400, 'Jira 이관 워크플로에 해당하는 원본 패키지를 확인해 주세요.');
+  }
   if (config.appendTo && (projectIds[0] !== config.appendTo.projectId || (projectIds.length !== 1 && !config.appendTo.refreshRelations) ||
       packages.some(pkg => pkg.source.product !== 'jira' || pkg.source.instanceKey !== packages[0].source.instanceKey))) {
     fail(400, '추가 이관 영수증의 대상 프로젝트와 Jira 원본 인스턴스를 확인해 주세요.');

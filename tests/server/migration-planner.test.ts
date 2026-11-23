@@ -10,6 +10,7 @@ import { contentReferences } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
+import { allowedNextStatuses } from '../../shared/workflow-helpers.js';
 
 const now='2026-11-19T12:00:00.000Z',created='2020-01-01T00:00:00.000Z',actor:User={id:'actor',name:'이관 작업자',email:'actor@example.test',color:'#668899'};
 function pkg(id:string,product:'jira'|'confluence',records:LegacyRecord[],diagnostics:LegacyDataset['diagnostics']=[]):MigrationPackage{const source={product,format:product==='jira'?'jira-backup-xml' as const:'confluence-xml' as const,instanceKey:id,declaredVersion:'synthetic',timezone:null};return{summary:{id,filename:`${id}.zip`,sha256:createHash('sha256').update(id).digest('hex'),size:100,version:1,createdAt:now,actorId:actor.id,source,counts:{},errors:diagnostics.filter(item=>item.severity==='error').length,warnings:0,fileCount:1,expandedBytes:100,applySupported:false},dataset:{source,records,diagnostics,unsupported:[]}};}
@@ -24,6 +25,121 @@ const storageStatus = (label: string) => `<ac:structured-macro ac:name="status">
 
 test('options are stable opaque IDs scoped by package and include an explicit editable default configuration',()=>{
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
+});
+
+function workflowIssue(id: string, container: string, status: string, label: string): LegacyRecord {
+  return issue(id, { containerId: container, metadata: {
+    key: `OLD-${id}`, fields: { status: { id: status, name: label }, issuetype: { id: 'bug', name: '버그' } },
+  } });
+}
+
+test('reviewed migration workflow uses stable statuses for merged Jira containers and leaves unrelated defaults intact', () => {
+  const first = pkg('workflow-a', 'jira', [
+    record('project', 'a', { title: '업무 A' }),
+    workflowIssue('11', 'a', 'ready', '착수 가능'),
+    workflowIssue('12', 'a', 'review', '팀 검토'),
+  ]);
+  const second = pkg('workflow-b', 'jira', [
+    record('project', 'b', { title: '업무 B' }),
+    workflowIssue('21', 'b', 'ready', '착수 가능'),
+    workflowIssue('22', 'b', 'closed', '완료'),
+  ]);
+  second.dataset.source.instanceKey = first.dataset.source.instanceKey;
+  const third = pkg('workflow-c', 'jira', [
+    record('project', 'c', { title: '별도 업무' }),
+    workflowIssue('31', 'c', 'ready', '착수 가능'),
+    workflowIssue('32', 'c', 'closed', '완료'),
+  ]);
+  const packages = [first, second, third, confluence()];
+  const options = buildMigrationOptions(packages);
+  const imported = options.jiraWorkflowStatuses!;
+  const groupedReady = imported.find(status => status.label === '착수 가능' && status.containerIds.length === 2)!;
+  assert.deepEqual(groupedReady.containerIds, options.containers.filter(option => ['a', 'b'].includes(option.sourceProjectId)).map(option => option.id));
+  assert.equal(imported.filter(status => status.label === '착수 가능').length, 2);
+  const reviewed = imported.find(status => status.label === '팀 검토')!;
+  const completed = imported.find(status => status.label === '완료' && status.containerIds.includes(groupedReady.containerIds[1]))!;
+  const request = input(packages);
+  const otherContainer = options.containers.find(option => option.sourceProjectId === 'c')!;
+  request.configuration.projects = request.configuration.projects.map(project => project.containerId === otherContainer.id
+    ? { ...project, key: 'OTHER', name: '별도 업무' } : project);
+  const additional = { id: 's_new_1', label: ' 신규 접수 ', category: 'backlog' as const };
+  const transitions = [{ from: additional.id, to: groupedReady.id }, { from: groupedReady.id, to: reviewed.id },
+    { from: reviewed.id, to: completed.id }];
+  request.configuration.jiraWorkflows = { NEW: { initialStatusId: additional.id, additionalStatuses: [additional], transitions } };
+
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.ok(plan.preview.requiredAcknowledgements.includes('JIRA_WORKFLOW_REVIEW_REQUIRED'));
+  assert.ok(plan.preview.requiredAcknowledgements.includes('WORKFLOW_RULES_NOT_REPRODUCED'));
+  const mergedId = plan.projects.find(project => project.key === 'NEW')!.id;
+  const merged = plan.workflows.find(workflow => workflow.projectId === mergedId)!;
+  assert.equal(merged.initialStatusId, additional.id);
+  assert.equal(merged.statuses.find(status => status.id === additional.id)?.label, '신규 접수');
+  assert.deepEqual(merged.transitions, transitions.map(edge => ({ ...edge, issueTypes: [], requiredFields: [] })));
+  assert.deepEqual(plan.preview.jiraWorkflows, [{
+    projectKey: 'NEW', initialStatusId: additional.id, statuses: merged.statuses.map(({ id, label, category }) => ({ id, label, category })), transitions,
+  }]);
+  assert.deepEqual(plan.sourceImport.configuration.jiraWorkflows, request.configuration.jiraWorkflows);
+  assert.equal(plan.documents[0].projectId, mergedId);
+  const ready = plan.issues.find(row => row.title === '업무 11')!;
+  assert.equal(ready.status, groupedReady.id);
+  assert.equal(plan.issues.find(row => row.title === '업무 21')?.status, groupedReady.id);
+  assert.equal(plan.issues.find(row => row.title === '업무 22')?.status, completed.id);
+  assert.deepEqual(allowedNextStatuses({ workflows: plan.workflows }, ready).map(status => status.id), [groupedReady.id, reviewed.id]);
+  const otherWorkflow = plan.workflows.find(workflow => workflow.projectId !== mergedId)!;
+  assert.equal(otherWorkflow.transitions.length, 2);
+});
+
+test('reviewed migration workflows reject foreign, excluded and invalid graph elements and accept an empty graph', () => {
+  const source = pkg('workflow-invalid', 'jira', [
+    record('project', 'a', { title: '업무 A' }),
+    record('project', 'b', { title: '업무 B' }),
+    workflowIssue('11', 'a', 'ready', '착수 가능'),
+    workflowIssue('12', 'a', 'review', '팀 검토'),
+    workflowIssue('21', 'b', 'closed', '완료'),
+  ]);
+  const packages = [source, confluence()];
+  const options = buildMigrationOptions(packages);
+  const [ready, review, closed] = options.jiraWorkflowStatuses!;
+  const makeInput = () => {
+    const request = input(packages);
+    const keys = new Map([['a', 'NEW'], ['b', 'OTHER'], ['s', 'DOCS']]);
+    request.configuration.projects = options.containers.map(option => ({
+      containerId: option.id, name: option.name, key: keys.get(option.sourceProjectId)!,
+    }));
+    return request;
+  };
+  const request = makeInput();
+  request.configuration.jiraWorkflows = { NEW: { initialStatusId: ready.id, transitions: [] } };
+  const emptyPlan = buildMigrationPlan(request);
+  assert.equal(emptyPlan.preview.canApply, true, JSON.stringify(emptyPlan.preview.notices));
+  assert.deepEqual(emptyPlan.preview.jiraWorkflows?.[0].transitions, []);
+  request.configuration.jiraWorkflows.NEW.additionalStatuses = [{ id: 's_new_1', label: ' 팀 검토 ', category: 'review' }];
+  const sharedNamePlan = buildMigrationPlan(request);
+  assert.equal(sharedNamePlan.preview.canApply, true, JSON.stringify(sharedNamePlan.preview.notices));
+  assert.deepEqual(sharedNamePlan.preview.jiraWorkflows?.[0].statuses.filter(status => status.label === '팀 검토')
+    .map(status => status.id), [review.id, 's_new_1']);
+
+  function reject(value: NonNullable<MigrationPlanningInput['configuration']['jiraWorkflows']>, code: string, excludedRecords: string[] = []) {
+    const request = makeInput();
+    request.configuration.jiraWorkflows = value;
+    request.configuration.excludedRecords = excludedRecords;
+    const plan = buildMigrationPlan(request);
+    assert.equal(plan.preview.canApply, false);
+    assert.ok(notices(plan).has(code), JSON.stringify(plan.preview.notices));
+    assert.equal(plan.preview.jiraWorkflows, undefined);
+  }
+  reject({ NEW: { initialStatusId: closed.id, transitions: [] } }, 'JIRA_WORKFLOW_INITIAL_STATUS_INVALID');
+  reject({ NEW: { initialStatusId: review.id, transitions: [] } }, 'JIRA_WORKFLOW_INITIAL_STATUS_INVALID', [`${source.summary.id}/issue:12`]);
+  reject({ NEW: { initialStatusId: ready.id, transitions: [{ from: ready.id, to: closed.id }] } }, 'JIRA_WORKFLOW_TRANSITION_INVALID');
+  reject({ NEW: { initialStatusId: ready.id, transitions: [{ from: ready.id, to: ready.id }] } }, 'JIRA_WORKFLOW_TRANSITION_INVALID');
+  const edge = { from: ready.id, to: review.id };
+  reject({ NEW: { initialStatusId: ready.id, transitions: [edge, edge] } }, 'JIRA_WORKFLOW_TRANSITION_INVALID');
+  reject({ NEW: { initialStatusId: ready.id, transitions: [],
+    additionalStatuses: [{ id: 's_new_1', label: '   ', category: 'review' }] } }, 'JIRA_WORKFLOW_ADDITIONAL_STATUS_INVALID');
+  reject({ DOCS: { initialStatusId: 's_new_1', transitions: [],
+    additionalStatuses: [{ id: 's_new_1', label: '접수', category: 'todo' }] } }, 'JIRA_WORKFLOW_PROJECT_INVALID');
+  reject({ ABSENT: { initialStatusId: ready.id, transitions: [] } }, 'JIRA_WORKFLOW_PROJECT_INVALID');
 });
 
 test('Jira descriptions retain Markdown annotations while comments stay plain and documents retain native nodes', () => {

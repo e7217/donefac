@@ -8,7 +8,7 @@ import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
   LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationMappingFile, MigrationMappingRestore,
-  MigrationOptions, MigrationPreview, User, WorkspaceSnapshot,
+  MigrationOptions, MigrationPreview, ProjectWorkflow, SourceImport, User, WorkspaceSnapshot,
 } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
@@ -250,4 +250,84 @@ test('mapping transfer restores active Jira append choices only for the existing
   assert.equal(added.projectId, projectId);
   assert.equal(added.status, workflowStatus.id);
   assert.equal(added.type, issueType.id);
+});
+
+test('a reviewed Jira workflow survives re-staged mapping transfer and the native receipt backup', async t => {
+  const source = await fixture(t);
+  const destination = await fixture(t);
+  const issues = [
+    { id: '100', key: 'FLOW-1', project: { id: '42', key: 'FLOW', name: 'Review workflow' }, status: { id: '1', name: 'Ready' } },
+    { id: '101', key: 'FLOW-2', project: { id: '42', key: 'FLOW', name: 'Review workflow' }, status: { id: '2', name: 'Done' } },
+    { id: '102', key: 'OTHER-1', project: { id: '43', key: 'OTHER', name: 'Other workflow' }, status: { id: '3', name: 'Deferred' } },
+  ];
+  const bytes = Buffer.from(JSON.stringify({ issues: issues.map(({ id, key, project, status }) => ({
+    id, key,
+    fields: { project, status, summary: `Jira ticket ${id}`, issuetype: { id: '4', name: 'Task' },
+      created: '2025-03-01T00:00:00Z', updated: '2025-03-02T00:00:00Z' },
+  })) }));
+  const staged = await source.stage('jira', jiraInstance, 'jira-workflow.json', bytes);
+  const first = await source.options([staged]);
+  const ready = first.jiraWorkflowStatuses?.find(s => s.label === 'Ready');
+  const done = first.jiraWorkflowStatuses?.find(s => s.label === 'Done');
+  const deferred = first.jiraWorkflowStatuses?.find(s => s.label === 'Deferred');
+  assert.ok(ready && done && deferred);
+  const configuration: MigrationConfiguration = {
+    ...first.defaultConfiguration,
+    jiraWorkflows: { FLOW: { initialStatusId: ready.id,
+      transitions: [{ from: ready.id, to: 's_new_1' }, { from: 's_new_1', to: done.id }],
+      additionalStatuses: [{ id: 's_new_1', label: '검토 대기', category: 'review' }],
+    } },
+  };
+  const graph = configuration.jiraWorkflows;
+  assert.ok(graph);
+  const exported = await source.call<MigrationMappingFile>(exportPath, 'POST', { configuration });
+  assert.deepEqual(exported.configuration.jiraWorkflows, graph);
+  const reanalyzed = await destination.stage('jira', jiraInstance, 'jira-workflow-restaged.json', bytes);
+  assert.notEqual(reanalyzed.id, staged.id);
+  const restored = await destination.call<MigrationMappingRestore>(importPath, 'POST', { mapping: exported });
+  const remappedReady = restored.options.jiraWorkflowStatuses?.find(s => s.label === 'Ready');
+  assert.ok(remappedReady);
+  assert.notDeepEqual(remappedReady.containerIds, ready.containerIds);
+  assert.equal(remappedReady.id, ready.id);
+  assert.deepEqual(restored.configuration.jiraWorkflows, graph);
+
+  const invalidGraphs = [
+    { ...graph.FLOW, initialStatusId: deferred.id },
+    { ...graph.FLOW, transitions: [{ from: ready.id, to: deferred.id }] },
+    { ...graph.FLOW, transitions: [{ from: ready.id, to: ready.id }] },
+    { ...graph.FLOW, transitions: [...graph.FLOW.transitions, graph.FLOW.transitions[0]] },
+    { ...graph.FLOW, additionalStatuses: [] },
+    { ...graph.FLOW, additionalStatuses: [{ id: ready.id, label: '기존 상태 덮어쓰기', category: 'review' }] },
+  ];
+  for (const invalid of invalidGraphs) {
+    const mapping = { ...exported, configuration: { ...exported.configuration, jiraWorkflows: { FLOW: invalid } } };
+    const response = await destination.call<{ details: { reason: string } }>(importPath, 'POST', { mapping }, 400);
+    assert.equal(response.details.reason, 'mapping_invalid');
+  }
+  const append = { projectId: 'project-team', statuses: {}, issueTypes: {}, fields: {} };
+  await destination.call('/migrations/preview', 'POST', { configuration: { ...restored.configuration, appendTo: append } }, 400);
+  await destination.call('/migrations/preview', 'POST', { configuration: {
+    ...restored.configuration, appendPagesTo: { projectId: 'project-team' },
+  } }, 400);
+
+  const reviewed = await destination.preview(restored.configuration);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  const receipt = (await destination.apply(reviewed)).import;
+  assert.deepEqual(receipt.configuration.jiraWorkflows, graph);
+  const projectId = reviewed.projects.find(project => project.key === 'FLOW')?.id;
+  assert.ok(projectId);
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const workflow = await destination.call<ProjectWorkflow>(workflowPath);
+  assert.equal(workflow.initialStatusId, ready.id);
+  const transitionsOf = (value: ProjectWorkflow) => value.transitions.map(({ from, to }) => ({ from, to }));
+  assert.deepEqual(transitionsOf(workflow), graph.FLOW.transitions);
+  assert.equal(workflow.statuses.find(state => state.id === 's_new_1')?.label, '검토 대기');
+  const backup = await destination.call<WorkspaceSnapshot & { sourceImports: SourceImport[] }>('/export');
+  assert.deepEqual(backup.sourceImports.find(value => value.id === receipt.id)?.configuration.jiraWorkflows, graph);
+  await source.call('/import', 'POST', { data: backup });
+  const reapplied = await source.call<ProjectWorkflow>(workflowPath);
+  assert.equal(reapplied.initialStatusId, workflow.initialStatusId);
+  assert.deepEqual(transitionsOf(reapplied), transitionsOf(workflow));
+  const restoredReceipts = await source.call<SourceImport[]>('/source-imports');
+  assert.deepEqual(restoredReceipts.find(value => value.id === receipt.id)?.configuration.jiraWorkflows, graph);
 });

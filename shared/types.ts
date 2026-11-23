@@ -340,10 +340,29 @@ export interface ConfluenceMigrationDocumentReview {
   documentId: string; title: string; sourceId: string; recordId: string;
   fields: { field: ConfluenceMigrationDocumentField; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true }[];
 }
+export interface MigrationJiraWorkflowStatusOption {
+  id: string;
+  label: string;
+  containerIds: string[];
+}
+export type MigrationJiraWorkflowStatus = Pick<WorkflowStatus, 'id' | 'label' | 'category'>;
+type MigrationJiraWorkflowTransition = Pick<WorkflowTransition, 'from' | 'to'>;
+export interface MigrationJiraWorkflow {
+  initialStatusId: string;
+  transitions: MigrationJiraWorkflowTransition[];
+  additionalStatuses?: MigrationJiraWorkflowStatus[];
+}
+export interface MigrationJiraWorkflowReview {
+  projectKey: string;
+  initialStatusId: string;
+  statuses: MigrationJiraWorkflowStatus[];
+  transitions: MigrationJiraWorkflowTransition[];
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
   defaultConfiguration:MigrationConfiguration;
+  jiraWorkflowStatuses?: MigrationJiraWorkflowStatusOption[];
   appendTarget?: MigrationAppendTarget;
   appendPagesTarget?: MigrationPageAppendTarget;
 }
@@ -354,6 +373,7 @@ export interface MigrationConfiguration {
   timezone:string;datePolicy:'block'|'import-time';excludedRecords:string[];
   jiraReleaseSelections?: Record<string, string | null>;
   jiraSprintSelections?: Record<string, string | null>;
+  jiraWorkflows?: Record<string, MigrationJiraWorkflow>;
   appendTo?: MigrationAppendConfiguration;
   appendPagesTo?: MigrationPageAppendConfiguration;
 }
@@ -386,6 +406,7 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
+  jiraWorkflows?: MigrationJiraWorkflowReview[];
   jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string;
     sourceProjectName?: string; targetProjectName?: string }[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];

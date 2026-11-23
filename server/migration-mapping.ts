@@ -12,7 +12,7 @@ const control = /[\u0000-\u001f\u007f]/u;
 const formats = { jira: ['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json'], confluence: ['confluence-xml'] };
 const fieldKinds = new Set(['text', 'number', 'date', 'select', 'multi_select', 'checkbox', 'user', 'url', 'archive']);
 const configurationKeys = new Set(['packageIds', 'projects', 'users', 'statuses', 'issueTypes', 'fields', 'sourceBaseUrls',
-  'timezone', 'datePolicy', 'excludedRecords', 'jiraReleaseSelections', 'jiraSprintSelections', 'appendTo', 'appendPagesTo']);
+  'timezone', 'datePolicy', 'excludedRecords', 'jiraReleaseSelections', 'jiraSprintSelections', 'jiraWorkflows', 'appendTo', 'appendPagesTo']);
 type MappingPackage = MigrationMappingFile['packages'][number];
 type MappingFileInput = Omit<MigrationMappingFile, 'configuration'> & { configuration: unknown };
 
@@ -100,6 +100,24 @@ function checkedValue<T>(value: T, allowed: (value: T) => boolean): T {
   return value;
 }
 
+function validateJiraWorkflowDestinations(workflows: NonNullable<MigrationConfiguration['jiraWorkflows']>,
+  projects: MigrationConfiguration['projects'], options: MigrationOptions): void {
+  const keyByContainer = new Map(projects.map(project => [project.containerId, project.key.trim().toUpperCase()]));
+  const statesByKey = new Map(Object.keys(workflows).map(key => [key, new Set<string>()]));
+  for (const status of options.jiraWorkflowStatuses ?? []) for (const container of status.containerIds) {
+    const key = keyByContainer.get(container);
+    if (key) statesByKey.get(key)?.add(status.id);
+  }
+  for (const [key, workflow] of Object.entries(workflows)) {
+    const states = statesByKey.get(key);
+    if (!states?.size) return invalidMigrationMapping('Jira 업무가 매핑된 새 프로젝트에 워크플로를 지정해 주세요.');
+    for (const state of workflow.additionalStatuses ?? []) states.add(state.id);
+    if (!states.has(workflow.initialStatusId) || workflow.transitions.some(edge => !states.has(edge.from) || !states.has(edge.to))) {
+      return invalidMigrationMapping('해당 프로젝트에 매핑한 Jira 상태 또는 추가 상태를 선택해 주세요.');
+    }
+  }
+}
+
 export function remapMappingConfiguration(configuration: MigrationConfiguration, packages: MigrationPackage[], options: MigrationOptions): MigrationConfiguration {
   const byOld = new Map(configuration.packageIds.map((id, index) => [id, packages[index]]));
   const oldByCurrent = new Map([...byOld].map(([id, pkg]) => [pkg.summary.id, id]));
@@ -138,7 +156,9 @@ export function remapMappingConfiguration(configuration: MigrationConfiguration,
     if (!base) return invalidMigrationMapping('원본 기준 주소에는 사용자 정보, 검색 조건, 조각 또는 개별 항목 주소를 넣을 수 없습니다.');
     return [pkg.summary.id, `${base.origin}${base.contextPath}`];
   }));
-  const { appendTo, appendPagesTo, jiraReleaseSelections, jiraSprintSelections } = configuration;
+  const { appendTo, appendPagesTo, jiraReleaseSelections, jiraSprintSelections, jiraWorkflows } = configuration;
+  // Workflow states use source instance and source status IDs, independent of staging package IDs.
+  if (jiraWorkflows) validateJiraWorkflowDestinations(jiraWorkflows, projects, options);
   return {
     packageIds: packages.map(pkg => pkg.summary.id), projects,
     users: remapObject(configuration.users, identityId, value => checkedValue(value, value => value === null || identifier(value))),
@@ -148,6 +168,7 @@ export function remapMappingConfiguration(configuration: MigrationConfiguration,
     sourceBaseUrls, timezone: configuration.timezone, datePolicy: configuration.datePolicy, excludedRecords,
     ...(jiraReleaseSelections ? { jiraReleaseSelections: remapObject(jiraReleaseSelections, recordKey) } : {}),
     ...(jiraSprintSelections ? { jiraSprintSelections: remapObject(jiraSprintSelections, recordKey) } : {}),
+    ...(jiraWorkflows ? { jiraWorkflows } : {}),
     ...(appendTo ? { appendTo: { ...appendTo, statuses: remapObject(appendTo.statuses, statusId),
       issueTypes: remapObject(appendTo.issueTypes, typeId), fields: remapObject(appendTo.fields, fieldId) } } : {}),
     ...(appendPagesTo ? { appendPagesTo } : {}),

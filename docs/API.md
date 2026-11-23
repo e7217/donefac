@@ -804,6 +804,12 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.
 
+### 새 Jira 프로젝트의 워크플로 지정
+
+`options.jiraWorkflowStatuses`에는 Jira 이관 업무에 관측된 상태의 `id`, `label`, `containerIds`가 들어 있다. `id`는 같은 원본 인스턴스·상태를 같은 값으로 분석하면 유지된다. `configuration.jiraWorkflows`는 정규화한 새 프로젝트 키마다 `{initialStatusId, transitions, additionalStatuses?}`를 받는다. 각 전이는 `{from, to}`의 한 방향이며, 빈 배열은 상태 변경을 제한한다. 추가 상태는 `{id, label, category}` 형식이고 `s_new_1`부터 `s_new_40`까지 중 하나를 사용한다. 한 프로젝트의 전체 상태는 40개까지다.
+
+미리보기의 `jiraWorkflows`에는 검토할 프로젝트 키, 실제 초기 상태, 상태 이름·분류와 허용 전이가 포함된다. 해당 프로젝트에 이관되는 업무의 상태와 직접 추가한 상태 중에서 출발·도착 상태를 고른다. 제외한 업무에서만 관측된 상태는 미리보기에서 다시 확인한다. 직접 설정한 프로젝트는 `JIRA_WORKFLOW_REVIEW_REQUIRED` 확인 후 적용한다. 설정이 생략된 새 프로젝트에는 매핑한 상태 사이의 전이를 허용하는 기본 방식이 적용된다. 매핑 파일과 이관 영수증에 직접 설정한 내용을 보관한다. Jira의 유형별 조건·검증기·후처리는 별도 검토 항목이다.
+
 ### 기존 프로젝트에 새 Jira 업무 추가
 
 선택한 패키지의 업무가 같은 Jira 인스턴스와 하나의 원본 프로젝트에 속하고, 원본이 기존 Teamspace 프로젝트에 연결되어 있으면 옵션에 `appendTarget`과 현재 상태·유형·필드가 포함된다. `configuration.appendTo`에 `{projectId,statuses,issueTypes,fields}`를 설정한다. 각 매핑의 키는 옵션 ID이며 값은 대상 프로젝트의 상태·업무 유형·필드 ID다. 필드 값을 `null`로 지정하면 해당 값은 원본에 보관한다. 기존 프로젝트의 설정과 기존 티켓 데이터를 보존한다.

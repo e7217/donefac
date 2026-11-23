@@ -19,7 +19,7 @@ import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAli
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
-import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationPageAppendConfiguration, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
+import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationJiraWorkflows, parseMigrationPageAppendConfiguration, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
 const fail = (status: number, message: string): never => { throw new LegacyImportError(status, message); };
@@ -764,6 +764,10 @@ export class MigrationService {
       }
     }
     if (Object.hasOwn(config, 'appendTo') && Object.hasOwn(config, 'appendPagesTo')) fail(400, '기존 프로젝트에 추가할 원본 도구를 하나 선택해 주세요.');
+    if (Object.hasOwn(config, 'jiraWorkflows')) {
+      if (Object.hasOwn(config, 'appendTo') || Object.hasOwn(config, 'appendPagesTo')) fail(400, 'Jira 이관 워크플로는 새 프로젝트에만 지정할 수 있습니다.');
+      config = { ...config, jiraWorkflows: parseMigrationJiraWorkflows(config.jiraWorkflows) };
+    }
     if (Object.hasOwn(config, 'appendTo')) {
       const appendTo = parseMigrationAppendConfiguration(config.appendTo);
       return { ...config, projects: [], statuses: {}, issueTypes: {}, fields: {}, appendTo };

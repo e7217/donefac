@@ -7,6 +7,7 @@ import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigration
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
+import { MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceImportRecords } from './SourceOrigins';
 import { downloadDocument } from './document-utils';
@@ -120,9 +121,9 @@ function ActorMigration(props: MigrationApplyProps) {
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
   const migrationHeading = useRef<HTMLHeadingElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
-  const savedAppendDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping }>({});
+  const savedDestinationDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping; workflows?: MigrationConfiguration['jiraWorkflows'] }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
-  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); savedAppendDraft.current = {}; dirtyRef.current = false; }, []);
+  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     try { const [nextPackages, nextImports] = await Promise.all([api<LegacyPackageSummary[]>('/legacy-import/packages'), api<SourceImport[]>('/source-imports')]); if (active.current && sequence === loadSequence.current) { setPackages(nextPackages); setImports(nextImports); setListError(''); } }
@@ -163,27 +164,38 @@ function ActorMigration(props: MigrationApplyProps) {
   function chooseDestination(mode: string) {
     if (!configuration || !options) return;
     const next = { ...configuration };
-    if (next.appendTo) savedAppendDraft.current.issues = next.appendTo;
-    if (next.appendPagesTo) savedAppendDraft.current.pages = next.appendPagesTo;
+    if (next.appendTo) savedDestinationDraft.current.issues = next.appendTo;
+    else if (next.appendPagesTo) savedDestinationDraft.current.pages = next.appendPagesTo;
+    else savedDestinationDraft.current.workflows = next.jiraWorkflows;
     delete next.appendTo;
     delete next.appendPagesTo;
+    delete next.jiraWorkflows;
     for (const { selections } of jiraPlanningReviews) delete next[selections];
     if (mode === 'append' && options.appendTarget) {
       const target = options.appendTarget;
-      const draft = savedAppendDraft.current.issues;
+      const draft = savedDestinationDraft.current.issues;
       next.appendTo = draft?.projectId === target.projectId ? draft : defaultAppendMapping(options, target);
     } else if (mode === 'append-pages' && options.appendPagesTarget) {
       const { projectId } = options.appendPagesTarget;
-      const draft = savedAppendDraft.current.pages;
+      const draft = savedDestinationDraft.current.pages;
       next.appendPagesTo = draft?.projectId === projectId ? draft : { projectId };
-    } else if (mode !== 'new') {
+    } else if (mode === 'new') {
+      if (savedDestinationDraft.current.workflows) next.jiraWorkflows = savedDestinationDraft.current.workflows;
+    } else {
       return;
     }
     change(next);
   }
+  function changeJiraWorkflows(jiraWorkflows: NonNullable<MigrationConfiguration['jiraWorkflows']>) {
+    if (!configuration) return;
+    const next = { ...configuration };
+    if (Object.keys(jiraWorkflows).length) next.jiraWorkflows = jiraWorkflows;
+    else delete next.jiraWorkflows;
+    change(next);
+  }
   async function loadOptions() {
     if (configuration && !window.confirm('기존 이관 매핑과 미리보기를 선택한 패키지의 기본값으로 바꿀까요? 요청에 실패하면 현재 입력은 유지됩니다.')) return;
-    await execute('매핑 불러오는 중…', async () => { const params = new URLSearchParams(); selected.forEach(id => params.append('packageId', id)); const result = await api<MigrationOptions>(`/migrations/options?${params}`, { headers: { 'X-Actor-Id': actorId } }); if (active.current) { savedAppendDraft.current = {}; setOptions(result); setConfiguration(structuredClone(result.defaultConfiguration)); setPreview(null); setAcknowledgements([]); } });
+    await execute('매핑 불러오는 중…', async () => { const params = new URLSearchParams(); selected.forEach(id => params.append('packageId', id)); const result = await api<MigrationOptions>(`/migrations/options?${params}`, { headers: { 'X-Actor-Id': actorId } }); if (active.current) { savedDestinationDraft.current = {}; setOptions(result); setConfiguration(structuredClone(result.defaultConfiguration)); setPreview(null); setAcknowledgements([]); } });
   }
   const mode = destinationMode(configuration), reviewMode = destinationMode(preview?.configuration);
   const reviewProduct = refreshProduct(preview?.configuration);
@@ -311,7 +323,7 @@ function ActorMigration(props: MigrationApplyProps) {
       setPackages(previous => [...verified.values(), ...previous.filter(item => !verified.has(item.id))]);
       setSelected(packageIds);
       setOptions(result.options);
-      savedAppendDraft.current = {};
+      savedDestinationDraft.current = {};
       change(next);
       dirtyRef.current = true;
       setMappingNotice('이관 매핑을 불러왔습니다. 적용 전 미리보기를 새로 만들어 주세요.');
@@ -415,6 +427,9 @@ function ActorMigration(props: MigrationApplyProps) {
         {appendTo && issueDestination && <AppendMappings options={options} target={issueDestination} value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} />}
         {mode === 'new' && <>
         <MappingSection title="상태 매핑"><Paged title="상태 매핑" items={options.statuses} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`상태 매핑 ${item.label}`} value={configuration.statuses[item.id] || 'todo'} onChange={event => mapValue('statuses', item.id, event.target.value as StatusCategory)}>{Object.entries(categoryLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
+        {Boolean(options.jiraWorkflowStatuses?.length || configuration.jiraWorkflows) && <MappingSection title="Jira 워크플로 매핑">
+          <MigrationJiraWorkflowEditor options={options} configuration={configuration} onChange={changeJiraWorkflows} />
+        </MappingSection>}
         <MappingSection title="업무 유형 매핑"><Paged title="업무 유형 매핑" items={options.issueTypes} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`유형 매핑 ${item.label}`} value={configuration.issueTypes[item.id] ?? ''} onChange={event => mapValue('issueTypes', item.id, event.target.value || null)}><option value="">원본 유형을 새 유형으로 생성</option>{ISSUE_TYPES.map(type => <option value={type} key={type}>{type}</option>)}</select></MappingRow>} /></MappingSection>
         <MappingSection title="사용자 정의 속성 매핑"><p>선택한 원본 속성을 업무 양식에 추가할 수 있습니다. 변환할 값이 선택한 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={sourceMappingDetail(item)}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).map(([id, label]) => <option key={id} value={id}>{id === 'archive' && item.projectedDate ? '일정과 원본 기록에 반영' : label}</option>)}</select></MappingRow>} /></MappingSection>
         </>}
@@ -443,6 +458,7 @@ function ActorMigration(props: MigrationApplyProps) {
       </header>
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
       <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
+      {Boolean(preview.jiraWorkflows?.length) && <MigrationJiraWorkflowPreview workflows={preview.jiraWorkflows ?? []} />}
       {jiraPlanningReviews.map(({ choices, selections, label, original }) => {
         const rows = preview[choices];
         if (!rows?.length) return null;

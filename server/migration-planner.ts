@@ -24,13 +24,14 @@ import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
-import type { MigrationPreview } from '../shared/types.js';
+import type { LegacySource, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const optionId=(packageId:string,kind:string,value:string)=>`option_${hash(packageId,kind,value).slice(0,40)}`;
+const importedStatusId = (source: LegacySource, value: string) => `s_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
 export { optionId as migrationOptionId };
 const qualified=(packageId:string,row:LegacyRecord)=>`${packageId}/${row.id}`;
 const string=(value:unknown)=>typeof value==='string'?value:typeof value==='number'||typeof value==='boolean'?String(value):'';
@@ -64,6 +65,7 @@ function proposedKey(value:string,id:string):string{const key=value.toUpperCase(
 
 export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOptions{
   const containers:MigrationOptions['containers']=[],identities:MigrationOptions['identities']=[],statuses:MigrationValueOption[]=[],issueTypes:MigrationValueOption[]=[],fields:MigrationOptions['fields']=[];
+  const jiraWorkflowStates = new Map<string, { label: string; containerIds: Set<string> }>();
   for(const pkg of packages){const index=packageIndex(pkg),containerRows=new Map<string,{issueCount:number;documentCount:number}>(),identityIds=new Set<string>(),statusValues=new Map<string,string>(),typeValues=new Map<string,string>();
     const projectedSources = new Map<string, JiraScheduleEndpoint>();
     if (pkg.dataset.source.product === 'jira') for (const row of pkg.dataset.records) {
@@ -73,18 +75,44 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
       }
     }
     for(const row of pkg.dataset.records){if(row.kind==='project')containerRows.set(row.sourceId,{issueCount:0,documentCount:0});if(row.kind==='identity')identityIds.add(row.sourceId);if(row.authorId)identityIds.add(row.authorId);for(const ref of row.references)if(ref.kind==='identity')identityIds.add(ref.sourceId);}
-    for(const row of pkg.dataset.records){if(row.kind==='issue'||row.kind==='page'){const id=containerFor(pkg,row,index),count=containerRows.get(id)||{issueCount:0,documentCount:0};if(row.kind==='issue'){count.issueCount++;const state=builtin(pkg,row,'status',index),type=builtin(pkg,row,'issuetype',index);statusValues.set(state.value,state.label);typeValues.set(type.value,type.label);}else count.documentCount++;containerRows.set(id,count);}if(customField(row)){
-      const projectedDate = projectedSources.get(row.sourceId);
-      fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
-        sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : suggestedKind(row),
-        ...(projectedDate ? { projectedDate } : {}) });
-    }}
+    for (const row of pkg.dataset.records) {
+      if (row.kind === 'issue' || row.kind === 'page') {
+        const id = containerFor(pkg, row, index);
+        const count = containerRows.get(id) ?? { issueCount: 0, documentCount: 0 };
+        if (row.kind === 'issue') {
+          count.issueCount++;
+          const state = builtin(pkg, row, 'status', index), type = builtin(pkg, row, 'issuetype', index);
+          statusValues.set(state.value, state.label);
+          typeValues.set(type.value, type.label);
+          if (pkg.dataset.source.product === 'jira') {
+            const statusId = importedStatusId(pkg.dataset.source, state.value);
+            let workflowState = jiraWorkflowStates.get(statusId);
+            if (!workflowState) {
+              workflowState = { label: state.label, containerIds: new Set() };
+              jiraWorkflowStates.set(statusId, workflowState);
+            }
+            workflowState.containerIds.add(optionId(pkg.summary.id, 'container', id));
+          }
+        } else {
+          count.documentCount++;
+        }
+        containerRows.set(id, count);
+      }
+      if (customField(row)) {
+        const projectedDate = projectedSources.get(row.sourceId);
+        fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
+          sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : suggestedKind(row),
+          ...(projectedDate ? { projectedDate } : {}) });
+      }
+    }
     for(const[sourceProjectId,count]of containerRows){const row=index.get(`project:${sourceProjectId}`),name=row?.title||(sourceProjectId==='__unassigned__'?'원본 프로젝트 미지정':sourceProjectId);containers.push({id:optionId(pkg.summary.id,'container',sourceProjectId),packageId:pkg.summary.id,sourceProjectId,name,proposedKey:proposedKey(string(row?.metadata.key||row?.metadata.pkey||row?.metadata.spaceKey)||sourceProjectId,pkg.summary.id+sourceProjectId),...count});}
     for(const id of identityIds){const row=index.get(`identity:${id}`);identities.push({id:optionId(pkg.summary.id,'identity',id),packageId:pkg.summary.id,sourceValue:id,label:row?.title||id,email:string(row?.metadata.emailAddress||row?.metadata.email)||null});}
     for(const[value,label]of statusValues)statuses.push({id:optionId(pkg.summary.id,'status',value),packageId:pkg.summary.id,sourceValue:value,label});for(const[value,label]of typeValues)issueTypes.push({id:optionId(pkg.summary.id,'issuetype',value),packageId:pkg.summary.id,sourceValue:value,label});
   }
   const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:Object.fromEntries(statuses.map(state=>[state.id,suggestCategory(state.label)])),issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};
-  return{packages:packages.map(pkg=>structuredClone(pkg.summary)),containers,identities,statuses,issueTypes,fields,defaultConfiguration};
+  const jiraWorkflowStatuses = [...jiraWorkflowStates].map(([id, { label, containerIds }]) => ({ id, label, containerIds: [...containerIds] }));
+  return { packages: packages.map(pkg=>structuredClone(pkg.summary)), containers, identities, statuses, issueTypes, fields,
+    defaultConfiguration, ...(jiraWorkflowStatuses.length ? { jiraWorkflowStatuses } : {}) };
 }
 
 function confluenceSourceVersion(row: LegacyRecord): number | null {
@@ -518,7 +546,7 @@ class Planner{
       if (previousAppend.statuses[stateOption]) values.status = previousAppend.statuses[stateOption];
       if (previousAppend.issueTypes[typeOption]) values.type = previousAppend.issueTypes[typeOption];
     } else {
-      if (Object.hasOwn(configuration.statuses, stateOption)) values.status = `s_${hash(source.product, source.instanceKey, sourceState).slice(0, 24)}`;
+      if (Object.hasOwn(configuration.statuses, stateOption)) values.status = importedStatusId(source, sourceState);
       if (Object.hasOwn(configuration.issueTypes, typeOption)) {
         values.type = configuration.issueTypes[typeOption] || `t_${hash(source.product, source.instanceKey, sourceType).slice(0, 24)}`;
       }
@@ -1565,7 +1593,7 @@ class Planner{
       } else {
         const state = builtin(entry.pkg, row, 'status', this.indexes.get(entry.pkg.summary.id));
         const statusOption = optionId(entry.pkg.summary.id, 'status', state.value);
-        const stateId = mapping ? mapping.statuses[statusOption] : `s_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,state.value).slice(0,24)}`;
+        const stateId = mapping ? mapping.statuses[statusOption] : importedStatusId(entry.pkg.dataset.source, state.value);
         const workflow = this.workflows.get(project.id)!;
         const existingState = workflow.statuses.find(status => status.id === stateId);
         const category = mapping ? existingState?.category : this.configuration.statuses[statusOption];
@@ -1616,7 +1644,88 @@ class Planner{
         if(row.textFormat!=='plain'&&row.textFormat!=='none')this.notice('ISSUE_DESCRIPTION_PLAIN_TEXT','업무 설명은 현재 일반 텍스트로 변환합니다. 원래 서식·본문은 원본 보관함에 유지합니다.','warning',entry,true);
       }
     }
-    for(const project of this.result.projects){const schema=this.schemas.get(project.id)!,workflow=this.workflows.get(project.id)!;if(!schema.issueTypes.length)schema.issueTypes=defaultIssueSchema(project.id).issueTypes;if(!workflow.statuses.length)Object.assign(workflow,defaultWorkflow(project.id,this.input.now));else{workflow.initialStatusId=workflow.statuses.find(status=>status.category==='todo')?.id||workflow.statuses[0].id;workflow.transitions=workflow.statuses.flatMap(from=>workflow.statuses.filter(to=>to.id!==from.id).map(to=>({from:from.id,to:to.id,issueTypes:[],requiredFields:[]})));this.notice('WORKFLOW_RULES_NOT_REPRODUCED','원본 워크플로의 조건·검증기·후처리를 재현하지 않습니다. 매핑한 상태 사이의 전이를 허용하는 새 흐름을 만듭니다.','warning',undefined,true);}if(workflow.statuses.length>40||schema.issueTypes.length>50||schema.fields.length>100)this.notice('SCHEMA_LIMIT','프로젝트별 상태40개·유형50개·필드100개 제한을 넘습니다.','error');if(new Set(schema.issueTypes.map(type=>type.name)).size!==schema.issueTypes.length)this.notice('TYPE_NAME_CONFLICT','새 프로젝트 안에 같은 이름의 서로 다른 유형이 있습니다. 유형 매핑을 조정해 주세요.','error');if(schema.fields.some(field=>!field.name.trim()||field.name.length>120)||new Set(schema.fields.map(field=>field.name)).size!==schema.fields.length)this.notice('FIELD_NAME_CONFLICT','필드 이름이 중복되거나120자 제한을 넘습니다. 매핑 또는 보관 방식을 조정해 주세요.','error');this.result.issueSchemas.push(schema);this.result.workflows.push(workflow);}
+    const overrides = this.configuration.jiraWorkflows ?? {};
+    const reviewedProjects = new Set<string>();
+    for (const project of this.result.projects) {
+      const schema = this.schemas.get(project.id)!, workflow = this.workflows.get(project.id)!;
+      if (!schema.issueTypes.length) schema.issueTypes = defaultIssueSchema(project.id).issueTypes;
+      if (Object.hasOwn(overrides, project.key)) {
+        reviewedProjects.add(project.key);
+        this.reviewJiraWorkflow(project.key, workflow, overrides[project.key]);
+      } else if (!workflow.statuses.length) {
+        Object.assign(workflow, defaultWorkflow(project.id, this.input.now));
+      } else {
+        workflow.initialStatusId = workflow.statuses.find(status => status.category === 'todo')?.id || workflow.statuses[0].id;
+        if (workflow.statuses.length <= 40) {
+          workflow.transitions = workflow.statuses.flatMap(from => workflow.statuses.filter(to => to.id !== from.id)
+            .map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [] })));
+        }
+        this.notice('WORKFLOW_RULES_NOT_REPRODUCED','원본 워크플로의 조건·검증기·후처리를 재현하지 않습니다. 매핑한 상태 사이의 전이를 허용하는 새 흐름을 만듭니다.','warning',undefined,true);
+      }
+      if (workflow.statuses.length > 40 || schema.issueTypes.length > 50 || schema.fields.length > 100) {
+        this.notice('SCHEMA_LIMIT', '프로젝트별 상태40개·유형50개·필드100개 제한을 넘습니다.', 'error');
+      }
+      if (new Set(schema.issueTypes.map(type => type.name)).size !== schema.issueTypes.length) {
+        this.notice('TYPE_NAME_CONFLICT', '새 프로젝트 안에 같은 이름의 서로 다른 유형이 있습니다. 유형 매핑을 조정해 주세요.', 'error');
+      }
+      if (schema.fields.some(field => !field.name.trim() || field.name.length > 120) ||
+        new Set(schema.fields.map(field => field.name)).size !== schema.fields.length) {
+        this.notice('FIELD_NAME_CONFLICT', '필드 이름이 중복되거나120자 제한을 넘습니다. 매핑 또는 보관 방식을 조정해 주세요.', 'error');
+      }
+      this.result.issueSchemas.push(schema);
+      this.result.workflows.push(workflow);
+    }
+    for (const key of Object.keys(overrides)) {
+      if (!reviewedProjects.has(key)) {
+        this.notice('JIRA_WORKFLOW_PROJECT_INVALID', `${key}의 워크플로는 Jira 업무를 옮길 새 프로젝트에 지정해 주세요.`, 'error');
+      }
+    }
+  }
+  private reviewJiraWorkflow(projectKey: string, workflow: ProjectWorkflow, review: MigrationJiraWorkflow): void {
+    if (!workflow.statuses.length) {
+      this.notice('JIRA_WORKFLOW_PROJECT_INVALID', `${projectKey}의 워크플로를 구성할 이관 대상 Jira 업무가 없습니다.`, 'error');
+      return;
+    }
+    const additional = review.additionalStatuses ?? [];
+    if (workflow.statuses.length + additional.length > 40) {
+      this.notice('JIRA_WORKFLOW_STATUS_LIMIT', `${projectKey} 워크플로의 이관·추가 상태는 모두 40개까지 설정할 수 있습니다.`, 'error');
+      return;
+    }
+    const statusIds = new Set(workflow.statuses.map(status => status.id));
+    const statuses = [...workflow.statuses];
+    for (const { id, label, category } of additional) {
+      const name = label.trim();
+      if (!/^s_new_(?:[1-9]|[1-3][0-9]|40)$/.test(id) || !name || name.length > 40 ||
+        !categories.includes(category) || statusIds.has(id)) {
+        this.notice('JIRA_WORKFLOW_ADDITIONAL_STATUS_INVALID', `${projectKey} 워크플로에 추가할 상태의 이름·분류와 ID 중복 여부를 확인해 주세요.`, 'error');
+        return;
+      }
+      statusIds.add(id);
+      statuses.push({ id, label: name, category, color: '#668899' });
+    }
+    if (!statusIds.has(review.initialStatusId)) {
+      this.notice('JIRA_WORKFLOW_INITIAL_STATUS_INVALID', `${projectKey}의 시작 상태는 이관되는 업무의 상태 또는 직접 추가한 상태 중에서 선택해 주세요.`, 'error');
+      return;
+    }
+    const pairs = new Set<string>();
+    const transitions: ProjectWorkflow['transitions'] = [];
+    for (const { from, to } of review.transitions) {
+      const key = `${from}:${to}`;
+      if (from === to || !statusIds.has(from) || !statusIds.has(to) || pairs.has(key)) {
+        this.notice('JIRA_WORKFLOW_TRANSITION_INVALID', `${projectKey}의 허용 전이에서 출발·도착 상태와 중복 여부를 확인해 주세요.`, 'error');
+        return;
+      }
+      pairs.add(key);
+      transitions.push({ from, to, issueTypes: [], requiredFields: [] });
+    }
+    workflow.statuses = statuses;
+    workflow.initialStatusId = review.initialStatusId;
+    workflow.transitions = transitions;
+    const reviews = this.result.preview.jiraWorkflows ??= [];
+    reviews.push({ projectKey, initialStatusId: workflow.initialStatusId,
+      statuses: statuses.map(({ id, label, category }) => ({ id, label, category })),
+      transitions: transitions.map(({ from, to }) => ({ from, to })) });
+    this.notice('JIRA_WORKFLOW_REVIEW_REQUIRED', '검토한 시작 상태와 허용 전이를 적용합니다. Jira의 유형별 전이 조건·검증기·후처리는 별도 검토가 필요합니다.', 'warning', undefined, true);
   }
   private mapAppendFields(entry: Entry, issue: Issue, schema: ProjectIssueSchema, fieldMappings: Record<string, string | null>): void {
     const fields = fieldMap(entry.row);
