@@ -11,6 +11,7 @@ type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
   | { repositoryPath: string; kind: 'merge_request' | 'pipeline'; id: number }
   | { repositoryPath: string; kind: 'branch' | 'commit'; id: string };
+type WorkflowPage = Extract<ManualPage, { id: number }>;
 type RepositoryHistory = {
   project: GitlabReadObject;
   branches: GitlabReadObject[];
@@ -340,7 +341,7 @@ function verifiedProjectRepository(project: unknown, projectId: number, base: UR
   return { project, repositoryPath, repository };
 }
 
-async function readBranchProject(connection: Connection, repositoryId: number, signal?: AbortSignal) {
+async function readVerifiedProject(connection: Connection, repositoryId: number, signal?: AbortSignal) {
   const request = projectReadRequest(connection, repositoryId, 'project');
   const project = await readJson(request.projectUrl, request.headers, 'project', signal);
   return { ...request, ...verifiedProjectRepository(project, repositoryId, request.base) };
@@ -392,7 +393,7 @@ function includesGitlabCredential(token: string | null | undefined, values: read
 export async function readGitlabBranchTarget(connection: Connection, repositoryId: number, branch: string,
   ref: string | undefined, signal?: AbortSignal): Promise<{ target: GitlabIssueBranchTarget; existingSha?: string }> {
   if (!isGitlabBranchName(branch)) throw new GitlabReadError('branches', 'invalid-response');
-  const project = await readBranchProject(connection, repositoryId, signal);
+  const project = await readVerifiedProject(connection, repositoryId, signal);
   const sourceRef = ref ?? project.project.default_branch;
   if (!isGitlabBranchName(sourceRef)) throw new GitlabReadError('branches', 'invalid-response');
   const commit = ref === undefined ? null : gitlabObjectSha(sourceRef);
@@ -419,7 +420,7 @@ export async function readGitlabBranchHead(connection: Connection, repositoryId:
   if (!isGitlabBranchName(branch) || includesGitlabCredential(connection.token, [branch])) {
     throw new GitlabReadError('branches', 'invalid-response');
   }
-  const project = await readBranchProject(connection, repositoryId, signal);
+  const project = await readVerifiedProject(connection, repositoryId, signal);
   const sha = await readExactBranch(project, repositoryId, branch, signal);
   if (sha && includesGitlabCredential(connection.token, [sha])) throw new GitlabReadError('branches', 'invalid-response');
   return sha;
@@ -559,6 +560,49 @@ function manualPage(raw: unknown, base: URL, allowSuffix: boolean): ManualPage |
   return { repositoryPath, kind, id: Number(match[3]) };
 }
 
+function isWorkflowPage(page: ManualPage): page is WorkflowPage {
+  return typeof page.id === 'number';
+}
+
+async function readExactWorkflowObject(
+  { base, headers, projectUrl }: ReturnType<typeof projectReadRequest>, projectId: number,
+  { repositoryPath, kind, id }: WorkflowPage, signal?: AbortSignal,
+): Promise<{ kind: WorkflowPage['kind']; object: GitlabReadObject; webUrl: string }> {
+  const stage = kind === 'merge_request' ? 'merge-requests' : 'pipelines';
+  const collection = kind === 'merge_request' ? 'merge_requests' : 'pipelines';
+  const itemUrl = new URL(projectUrl);
+  itemUrl.pathname += `/${collection}/${id}`;
+  const object = await readJson(itemUrl, headers, stage, signal);
+  if (!isReadObject(object) || object.project_id !== projectId || typeof object.id !== 'number' ||
+      !Number.isSafeInteger(object.id) || object.id < 1 ||
+      (kind === 'merge_request' ? object.iid !== id || (object.target_project_id !== undefined && object.target_project_id !== projectId)
+        : object.id !== id)) throw new GitlabReadError(stage, 'invalid-response');
+
+  const verified = manualPage(object.web_url, base, false);
+  if (!verified || verified.repositoryPath !== repositoryPath || verified.kind !== kind || verified.id !== id) {
+    throw new GitlabReadError(stage, 'invalid-response');
+  }
+  const webUrl = new URL(`${repositoryPath}/-/${collection}/${id}`, base.origin).href;
+  return { kind, object: { ...object, web_url: webUrl }, webUrl };
+}
+
+export function gitlabLinkedWorkflowReader(connection: Connection, signal?: AbortSignal) {
+  const projects = new Map<number, ReturnType<typeof readVerifiedProject>>();
+  return async (projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number) => {
+    let project = projects.get(projectId);
+    if (!project) {
+      project = readVerifiedProject(connection, projectId, signal);
+      projects.set(projectId, project);
+    }
+    const context = await project;
+    const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, signal);
+    if (verified.object.id !== expectedObjectId || includesGitlabCredential(connection.token, [verified.webUrl])) {
+      throw new GitlabReadError(kind === 'merge_request' ? 'merge-requests' : 'pipelines', 'invalid-response');
+    }
+    return verified;
+  };
+}
+
 export async function readGitlabManualObject(
   connection: Connection, projectId: number, rawUrl: unknown, signal?: AbortSignal,
   onResolvedBranch?: (name: string, webUrl: string) => void,
@@ -576,7 +620,7 @@ export async function readGitlabManualObject(
   if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 활동 주소를 입력해 주세요.');
 
   const itemUrl = new URL(projectUrl);
-  if (page.kind === 'branch' || page.kind === 'commit') {
+  if (!isWorkflowPage(page)) {
     const stage = page.kind === 'branch' ? 'branches' : 'commits';
     const webUrl = gitlabPushLinkUrl(repository, page.kind === 'branch' ? 'tree' : 'commit', page.id);
     if (!webUrl) throw new GitlabManualUrlError('GitLab 활동 주소가 너무 깁니다.');
@@ -593,21 +637,7 @@ export async function readGitlabManualObject(
     }
     return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
   }
-  const stage = page.kind === 'merge_request' ? 'merge-requests' : 'pipelines';
-  const collection = page.kind === 'merge_request' ? 'merge_requests' : 'pipelines';
-  itemUrl.pathname += `/${collection}/${page.id}`;
-  const object = await readJson(itemUrl, headers, stage, signal);
-  if (!isReadObject(object) || object.project_id !== projectId || typeof object.id !== 'number' ||
-      !Number.isSafeInteger(object.id) || object.id < 1 ||
-      (page.kind === 'merge_request' ? object.iid !== page.id || (object.target_project_id !== undefined && object.target_project_id !== projectId)
-        : object.id !== page.id)) throw new GitlabReadError(stage, 'invalid-response');
-
-  const verified = manualPage(object.web_url, base, false);
-  if (!verified || verified.repositoryPath !== page.repositoryPath || verified.kind !== page.kind || verified.id !== page.id) {
-    throw new GitlabReadError(stage, 'invalid-response');
-  }
-  const webUrl = new URL(`${repositoryPath}/-/${collection}/${page.id}`, base.origin).href;
-  return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+  return readExactWorkflowObject({ base, headers, projectUrl }, projectId, page, signal);
 }
 
 export async function readGitlabSyncProject(

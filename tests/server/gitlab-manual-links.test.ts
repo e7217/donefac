@@ -10,7 +10,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { isGitlabManualLinkId } from '../../shared/gitlab-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationRule, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actor = 'user-seo';
@@ -36,6 +36,7 @@ async function fixture(t: TestContext) {
   let baseUrl = '';
   let objectGate: (() => Promise<void>) | undefined;
   let branchGate: (() => Promise<void>) | undefined;
+  let pipelineReadStatus = 200;
   let branchHead = sha;
   const projectPath = `/gitlab/api/v4/projects/${repositoryId}`;
   const projectUrl = () => `${baseUrl}/team/subgroup/product`;
@@ -46,13 +47,13 @@ async function fixture(t: TestContext) {
   let mr = { id: mrId, iid: mrIid, project_id: repositoryId, target_project_id: repositoryId,
     title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant(),
     detailed_merge_status: undefined as string | undefined };
+  let pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha, status: 'running', updated_at: instant() };
   const mock = createServer(async (req, res) => {
     const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
     calls.push({ method: req.method, path, credential: req.headers['private-token'] });
     res.setHeader('Content-Type', 'application/json');
     const mergeRequest = { ...mr, web_url: mrUrl() };
-    const pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha,
-      status: 'running', updated_at: instant(), web_url: pipelineUrl() };
+    const pipelineObject = { ...pipeline, web_url: pipelineUrl() };
     const branch = { name: sourceBranch, commit: { id: branchHead }, web_url: branchUrl() };
     const commitTitle = 'Existing repository changes';
     const commit = { id: commitSha, title: commitTitle, message: commitTitle, committed_date: instant(), web_url: commitUrl() };
@@ -60,9 +61,12 @@ async function fixture(t: TestContext) {
     else if (path === `${projectPath}/merge_requests/${mrIid}`) {
       await objectGate?.();
       res.end(JSON.stringify(mergeRequest));
-    } else if (path === `${projectPath}/pipelines/${pipelineId}`) res.end(JSON.stringify(pipeline));
+    } else if (path === `${projectPath}/pipelines/${pipelineId}`) {
+      res.statusCode = pipelineReadStatus;
+      res.end(JSON.stringify(pipelineReadStatus === 200 ? pipelineObject : { message: `fixture ${token}` }));
+    }
     else if (path === `${projectPath}/merge_requests`) res.end(JSON.stringify([mergeRequest]));
-    else if (path === `${projectPath}/pipelines`) res.end(JSON.stringify([pipeline]));
+    else if (path === `${projectPath}/pipelines`) res.end(JSON.stringify([pipelineObject]));
     else if (path === `${projectPath}/repository/branches/${encodeURIComponent(sourceBranch)}`) {
       await branchGate?.();
       res.end(JSON.stringify(branch));
@@ -119,8 +123,122 @@ async function fixture(t: TestContext) {
   return { call, request, issue, attach, configure, links, webhook, push, instant, calls, projectPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
     branchUrl: branchUrl(), commitUrl: commitUrl(), setBranchHead(value: string) { branchHead = value; },
     holdBranchRead(gate: () => Promise<void>) { branchGate = gate; },
+    setPipelineReadStatus(status: number) { pipelineReadStatus = status; },
+    setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     setMr(patch: Partial<typeof mr>) { mr = { ...mr, ...patch }; }, holdRead(gate: () => Promise<void>) { objectGate = gate; } };
 }
+
+test('ticket GitLab refresh updates its existing links only, reports partial failure, and skips status automation', async t => {
+  const f = await fixture(t);
+  const mrTitle = `${f.issue.key} Existing implementation review`;
+  const refreshPath = `${pathFor(f.issue.id)}/refresh`;
+  await f.webhook('merge_request', { id: mrId, iid: mrIid, title: mrTitle, state: 'opened', action: 'open',
+    source_branch: sourceBranch, sha, url: f.mrUrl, updated_at: f.instant() });
+  const [originalMr] = await f.links();
+  assert.equal(originalMr.manualLinkId, undefined);
+  const pipeline = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.pipelineUrl), 201);
+  const branch = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.branchUrl), 201);
+  const other = await f.call<Issue>('/issues', { method: 'POST', body: { projectId, title: 'Linked separately' } }, 201);
+  const otherLink = await f.call<GitlabLink>(pathFor(other.id), f.attach(f.mrUrl), 201);
+  const rule = await f.call<AutomationRule>('/automation-rules', { method: 'POST', body: {
+    projectId, name: 'Merge moves ticket to done', trigger: 'merge_request.merged', branchPattern: 'feature/*', gitlabProjectIds: [repositoryId],
+    issueTypes: [], fromStatuses: ['todo'], toStatusId: 'done', actorId: actor, priority: 10,
+  } }, 201);
+  await f.call(`/automation-rules/${rule.id}`, { method: 'PATCH', body: { expectedVersion: rule.version, enabled: true } });
+  const before = await f.call<WorkspaceSnapshot>('/workspace');
+
+  f.setMr({ title: mrTitle, state: 'merged', updated_at: f.instant(12) });
+  f.setPipelineReadStatus(503);
+  f.calls.length = 0;
+  await f.call(refreshPath, { method: 'POST', body: { url: 'http://wrong.example.test' } }, 400);
+  assert.equal(f.calls.length, 0);
+  const refreshed = await f.call<GitlabIssueRefreshResult>(refreshPath, { method: 'POST', body: {} });
+  assert.equal(refreshed.skipped, 0);
+  assert.equal(refreshed.links.length, 1);
+  assert.equal(refreshed.links[0].id, originalMr.id);
+  assert.equal(refreshed.links[0].state, 'merged');
+  assert.equal(refreshed.links[0].manualLinkId, undefined);
+  assert.deepEqual(refreshed.failures.map(failure => failure.linkId), [pipeline.id]);
+  assert.doesNotMatch(JSON.stringify(refreshed), new RegExp(token));
+  assert.deepEqual(new Set(f.calls.map(call => call.path)), new Set([
+    f.projectPath, `${f.projectPath}/merge_requests/${mrIid}`, `${f.projectPath}/pipelines/${pipelineId}`,
+  ]));
+  assert.ok(f.calls.every(call => call.method === 'GET' && call.credential === token));
+  assert.deepEqual(await f.links(other.id), [otherLink]);
+  assert.deepEqual((await f.links()).find(link => link.id === branch.id), branch);
+  assert.deepEqual((await f.links()).find(link => link.id === pipeline.id), pipeline);
+
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.issues.find(issue => issue.id === f.issue.id), before.issues.find(issue => issue.id === f.issue.id));
+  assert.deepEqual(after.activities, before.activities);
+  f.setPipelineReadStatus(200);
+  f.setPipeline({ status: 'success', updated_at: f.instant(15) });
+  const retried = await f.call<GitlabIssueRefreshResult>(refreshPath, { method: 'POST', body: {} });
+  assert.deepEqual(retried.failures, []);
+  const verifiedPipeline = retried.links.find(link => link.id === pipeline.id)!;
+  assert.equal(verifiedPipeline.state, 'success');
+  assert.equal(verifiedPipeline.manualLinkId, pipeline.manualLinkId);
+  assert.deepEqual((await f.links()).find(link => link.id === pipeline.id), verifiedPipeline);
+});
+
+test('ticket GitLab refresh retains a newer webhook and rejects an in-flight connection change before saving', async t => {
+  const f = await fixture(t);
+  const refreshPath = `${pathFor(f.issue.id)}/refresh`;
+  const mrTitle = `${f.issue.key} Existing implementation review`;
+  const hookFields = { id: mrId, iid: mrIid, title: mrTitle, source_branch: sourceBranch, sha, url: f.mrUrl };
+  await f.webhook('merge_request', { ...hookFields, state: 'opened', action: 'open', updated_at: f.instant() });
+  const pipeline = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.pipelineUrl), 201);
+  f.setMr({ title: mrTitle, state: 'opened', updated_at: f.instant(10) });
+
+  async function holdRefresh(change: () => Promise<void>) {
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const resumed = new Promise<void>(resolve => { release = resolve; });
+    f.holdRead(() => { entered(); return resumed; });
+    const pending = f.request<GitlabIssueRefreshResult>(refreshPath, { method: 'POST', body: {} });
+    await Promise.race([waiting, pending.then(result => assert.fail(`MR read did not reach the mock endpoint (${result.status})`))]);
+    try { await change(); }
+    finally { release(); }
+    return pending;
+  }
+  const newer = await holdRefresh(async () => {
+    await f.webhook('merge_request', { ...hookFields, state: 'merged', action: 'merge', updated_at: f.instant(20) });
+  });
+  assert.equal(newer.status, 200);
+  const merged = (await f.links()).find(link => link.kind === 'merge_request');
+  assert.equal(merged?.state, 'merged');
+  assert.deepEqual(newer.data.links.find(link => link.id === merged?.id), merged);
+
+  f.setMr({ state: 'closed', updated_at: f.instant(30) });
+  f.setPipeline({ status: 'success', updated_at: f.instant(31) });
+  const changedSettings = await holdRefresh(async () => {
+    const current = await f.call<GitlabSettings>('/integrations/gitlab');
+    await f.call('/integrations/gitlab', { method: 'PATCH', body: { expectedVersion: current.version, token: 'rotated-synthetic-token' } });
+  });
+  assert.equal(changedSettings.status, 409);
+  const saved = await f.links();
+  assert.deepEqual(saved.find(link => link.id === merged?.id), merged);
+  assert.deepEqual(saved.find(link => link.id === pipeline.id), pipeline);
+});
+
+test('ticket GitLab refresh limits exact reads to its 20 most recent workflow links', async t => {
+  const f = await fixture(t);
+  const ids = Array.from({ length: 23 }, (_, index) => pipelineId + index);
+  for (const [index, id] of ids.entries()) {
+    await f.webhook('pipeline', { id, ref: `feature/${f.issue.key}`, sha, status: 'running',
+      url: f.pipelineUrl.replace(String(pipelineId), String(id)), updated_at: f.instant(index) });
+  }
+  const before = await f.links();
+  assert.equal(before.length, 23);
+  f.calls.length = 0;
+  const result = await f.call<GitlabIssueRefreshResult>(`${pathFor(f.issue.id)}/refresh`, { method: 'POST', body: {} });
+  assert.equal(result.skipped, 3);
+  assert.equal(result.links.length + result.failures.length, 20);
+  assert.deepEqual(f.calls.filter(call => call.path.startsWith(`${f.projectPath}/pipelines/`)).map(call => call.path).sort(),
+    ids.slice(3).map(id => `${f.projectPath}/pipelines/${id}`).sort());
+  assert.deepEqual(await f.links(), before);
+});
 
 test('manual GitLab links verify saved repositories and store one canonical record per ticket and object', async t => {
   const f = await fixture(t);

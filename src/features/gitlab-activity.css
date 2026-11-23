@@ -25,6 +25,16 @@
   gap: 6px;
 }
 
+.gitlab-activity-feedback {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-activity-feedback > :is(p, ul) { margin: 0; }
+.gitlab-activity-feedback > ul { padding-inline-start: 26px; }
+
 .gitlab-activity-editor {
   display: grid;
   gap: 10px;

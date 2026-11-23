@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
-import type { FeatureProps, GitlabLink, GitlabSettings } from '../../shared/types';
+import type { FeatureProps, GitlabIssueRefreshResult, GitlabLink, GitlabSettings } from '../../shared/types';
 import { api, ApiError, post, remove } from '../lib/api';
-import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { gitlabActivityKindLabel, GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { IssueGitlabDeployments } from './GitlabDeployments';
 
@@ -17,6 +17,10 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
 };
 type Draft = { repositoryId: string; url: string; existing?: GitlabLink };
 type LinkView = { source: readonly GitlabLink[]; rows: readonly GitlabLink[] };
+type RefreshFailure = GitlabIssueRefreshResult['failures'][number] & { label: string };
+type RefreshFeedback = { kind: 'checking' } | { kind: 'failed'; message: string } | {
+  kind: 'finished'; checked: number; skipped: number; failures: RefreshFailure[]; workspaceRefreshFailed: boolean;
+};
 
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : 'GitLab 연결 요청을 처리하지 못했습니다.';
@@ -36,9 +40,11 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
   const [loading, setLoading] = useState(false);
   const [settingsError, setSettingsError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback | null>(null);
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const settingsRequest = useRef<AbortController | null>(null);
+  const refreshRequest = useRef<AbortController | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   const focusAfterClose = useRef<{ target: HTMLButtonElement | null } | null>(null);
@@ -46,7 +52,10 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
   const cancelUnlink = useRef<HTMLButtonElement>(null);
   const path = `/issues/${encodeURIComponent(issueId)}/gitlab-links`;
 
-  useEffect(() => () => settingsRequest.current?.abort(), []);
+  useEffect(() => () => {
+    settingsRequest.current?.abort();
+    refreshRequest.current?.abort();
+  }, []);
 
   const discard = useCallback(() => {
     settingsRequest.current?.abort();
@@ -193,17 +202,83 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
 
   const actionOpen = Boolean(draft || unlinkTarget || branchOpen);
   const controlsDisabled = disabled || busy || branchDraft.pending;
+  const canCheckStatus = visibleLinks.some(link => link.kind === 'merge_request' || link.kind === 'pipeline');
+
+  async function reloadSavedActivity() {
+    await refresh();
+    if (refreshFeedback?.kind === 'finished' && refreshFeedback.workspaceRefreshFailed) {
+      setRefreshFeedback(current => current === refreshFeedback ? { ...refreshFeedback, workspaceRefreshFailed: false } : current);
+    }
+  }
+
+  async function checkGitlabStatus(trigger: HTMLButtonElement) {
+    if (controlsDisabled || actionOpen || pending.current) return;
+    const hadFocus = document.activeElement === trigger;
+    const controller = new AbortController();
+    refreshRequest.current = controller;
+    pending.current = true;
+    setBusy(true);
+    setRefreshFeedback({ kind: 'checking' });
+    try {
+      const result = await api<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: '{}', signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const previous = new Map(visibleLinks.map(link => [link.id, link]));
+      const failures = result.failures.map(failure => {
+        const link = previous.get(failure.linkId);
+        const label = link ? `${gitlabActivityKindLabel(link.kind)} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid} ${link.title}`
+          : '연결한 GitLab 활동';
+        return { ...failure, label };
+      });
+      let workspaceRefreshFailed = false;
+      if (result.links.length) {
+        try { await refresh(); }
+        catch {
+          if (controller.signal.aborted) return;
+          workspaceRefreshFailed = true;
+          setView(current => {
+            const confirmed = new Map(result.links.map(link => [link.id, link]));
+            const rows = current.rows.map(link => {
+              const checked = confirmed.get(link.id);
+              confirmed.delete(link.id);
+              return checked && (link === previous.get(link.id) || Date.parse(checked.updatedAt) > Date.parse(link.updatedAt)) ? checked : link;
+            });
+            if (current.source === links) rows.push(...confirmed.values());
+            return { source: current.source, rows };
+          });
+        }
+      }
+      if (!controller.signal.aborted) setRefreshFeedback({ kind: 'finished', checked: result.links.length,
+        skipped: result.skipped, failures, workspaceRefreshFailed });
+    } catch (cause) {
+      if (!controller.signal.aborted) setRefreshFeedback({ kind: 'failed', message: errorMessage(cause) });
+    } finally {
+      refreshRequest.current = null;
+      pending.current = false;
+      if (!controller.signal.aborted) {
+        if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
+          focusAfterClose.current = { target: trigger };
+        }
+        setBusy(false);
+      }
+    }
+  }
 
   return <section className="issue-related-section" aria-label="GitLab">
     <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{visibleLinks.length}</span></h3>
       <div className="gitlab-activity-actions">
-        <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={controlsDisabled} />
+        <GitlabActivityRefresh refresh={reloadSavedActivity} notify={notify} disabled={controlsDisabled} />
+        {canCheckStatus && <button className="btn" type="button" aria-label="GitLab에서 상태 확인"
+          title="이 업무에 연결된 MR과 파이프라인 상태를 확인합니다."
+          disabled={controlsDisabled || actionOpen} onClick={event => void checkGitlabStatus(event.currentTarget)}>
+          <RefreshCw aria-hidden="true" size={15} />{refreshFeedback?.kind === 'checking' ? '확인 중…' : 'GitLab에서 상태 확인'}
+        </button>}
         <button ref={addButton} className="btn" type="button" disabled={controlsDisabled || actionOpen}
           onClick={event => showEditor(event.currentTarget)}><Link2 aria-hidden="true" size={15} />GitLab 링크 추가</button>
         <button className="btn" type="button" disabled={controlsDisabled || actionOpen}
           onClick={event => showBranchEditor(event.currentTarget)}><GitBranch aria-hidden="true" size={15} />GitLab 브랜치 만들기</button>
       </div>
     </div>
+    <GitlabStatusFeedback feedback={refreshFeedback} />
     {branchOpen && <IssueGitlabBranchCreate issueId={issueId} issueKey={issueKey} settings={settings} loadingSettings={loading}
       settingsError={settingsError} disabled={disabled || busy} reloadSettings={() => void readSettings(false)} refresh={refresh}
       onClose={closeAction} onDraftChange={trackBranchDraft} onLinked={showLinkedActivity} />}
@@ -250,4 +325,25 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
     <IssueGitlabDeployments issueId={issueId} links={links} />
   </section>;
+}
+
+function GitlabStatusFeedback({ feedback }: { feedback: RefreshFeedback | null }) {
+  if (!feedback) return null;
+  return <div className="gitlab-activity-feedback">
+    {feedback.kind === 'checking' && <p className="gitlab-activity-hint" role="status">GitLab에서 상태를 확인하고 있습니다.</p>}
+    {feedback.kind === 'failed' && <p className="issue-form-error" role="alert">{feedback.message}</p>}
+    {feedback.kind === 'finished' && <>
+      <p className="gitlab-activity-hint" role="status">{feedback.failures.length
+        ? feedback.checked ? `GitLab 활동 ${feedback.checked}건의 상태를 확인했고 ${feedback.failures.length}건은 확인하지 못했습니다.`
+          : `GitLab 활동 ${feedback.failures.length}건의 상태를 확인하지 못했습니다.`
+        : feedback.checked ? `GitLab 활동 ${feedback.checked}건의 상태를 확인했습니다.` : '확인할 MR 또는 파이프라인이 없습니다.'}
+        {feedback.skipped > 0 && ` 이전 활동 ${feedback.skipped}건은 이번 확인 범위를 벗어났습니다.`}</p>
+      {feedback.failures.length > 0 && <ul className="issue-form-error" aria-label="확인하지 못한 활동">
+        {feedback.failures.map(failure => <li key={failure.linkId}><strong>{failure.label}</strong> · {failure.message}</li>)}
+      </ul>}
+      {feedback.workspaceRefreshFailed && <p className="issue-form-error" role="alert">
+        확인한 GitLab 상태를 저장했습니다. 작업 공간을 다시 불러오지 못했습니다. GitLab 활동 새로고침을 눌러 주세요.
+      </p>}
+    </>}
+  </div>;
 }
