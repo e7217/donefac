@@ -360,6 +360,8 @@ function ProjectGantt(props: GanttProps) {
   const previewDialog = useRef<HTMLElement>(null);
   const manualReviewAction = useRef<HTMLButtonElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
+  const batchFollowUpOption = useRef<HTMLInputElement>(null);
+  const restoreBatchFollowUpFocus = useRef(false);
   const teamFollowUpPreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
@@ -428,7 +430,13 @@ function ProjectGantt(props: GanttProps) {
     return () => clearTimeout(timer);
   });
   useLayoutEffect(() => {
-    if (preview) previewDialog.current?.focus();
+    if (busy || !restoreBatchFollowUpFocus.current) return;
+    restoreBatchFollowUpFocus.current = false;
+    batchFollowUpOption.current?.focus({ preventScroll: true });
+  }, [busy, preview]);
+  useLayoutEffect(() => {
+    if (!preview || (batchFollowUpOption.current && document.activeElement === batchFollowUpOption.current)) return;
+    previewDialog.current?.focus();
   }, [preview]);
   useLayoutEffect(() => {
     if (shiftMode) shiftDaysField.current?.focus();
@@ -829,6 +837,10 @@ function ProjectGantt(props: GanttProps) {
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
   const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
   const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
+  const batchDateInput = manualReview?.inlineDates && 'changes' in manualReview.input ? manualReview.input : null;
+  const batchFollowUp = batchDateInput?.rescheduleSuccessors === true;
+  const canReviewBatchFollowUp = batchDateInput && (batchFollowUp || batchDateInput.changes.some(change => outgoingIssueIds.has(change.id)));
+  const batchAnchorIds = batchFollowUp ? new Set(batchDateInput.changes.map(change => change.id)) : null;
   const previewTeamFollowUp = manualReview && 'changes' in manualReview.input && manualReview.input.changes.length === 1 &&
     singleChange && teamBlockerChoices.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
@@ -1392,7 +1404,7 @@ function ProjectGantt(props: GanttProps) {
     try {
       await refresh();
       if (review.inline?.returnToMissingRow ?? true) completedFocus = focusAfterCompletingMissingRows(result.updated, focusOrigin);
-      notify(`${result.updated.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 의존성 경고를 확인하세요.' : ''}`);
+      notify(`${result.updated.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 일정 경고를 확인하세요.' : ''}`);
     } catch {
       notify('일정을 저장했습니다. 간트 목록을 다시 불러와 주세요.', 'error');
     } finally { restoreDatePreviewFocus(!completedFocus); }
@@ -1404,10 +1416,24 @@ function ProjectGantt(props: GanttProps) {
     try { await commitManualReview(manualReview, manualProblem?.kind === 'uncertain'); }
     finally { markBusy(false); }
   }
+  async function reviewBatchFollowUp(rescheduleSuccessors: boolean) {
+    if (busyRef.current || !manualReview || !batchDateInput || manualProblem) return;
+    const input = { changes: batchDateInput.changes, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}) };
+    restoreBatchFollowUpFocus.current = true;
+    markBusy(true);
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      setManualReview({ ...manualReview, input, preview });
+    } catch (cause) {
+      setManualReview({ ...manualReview, input, preview: { changes: [], warnings: [] } });
+      setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+      await refresh().catch(() => undefined);
+    } finally { markBusy(false); }
+  }
   async function reviewManualAgain() {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
-    if (manualReview.inlineDates) {
+    if (manualReview.inlineDates && 'changes' in input) {
       const latest = new Map(data.issues.map(issue => [issue.id, issue]));
       const changes: ScheduleAnchorChange[] = [];
       for (const draft of manualReview.inlineDates) {
@@ -1418,7 +1444,7 @@ function ProjectGantt(props: GanttProps) {
         }
         changes.push(inlineDateChange(draft, issue));
       }
-      input = { changes };
+      input = { ...input, changes };
     } else if ('changes' in input) {
       const issues = new Map(data.issues.map(issue => [issue.id, issue]));
       input = { changes: input.changes.map(change => ({ ...change, expectedVersion: issues.get(change.id)?.version ?? change.expectedVersion })) };
@@ -2272,7 +2298,7 @@ function ProjectGantt(props: GanttProps) {
     {preview && !cascade && !teamFollowUp && !teamFollowUpHandoff && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
       if (event.defaultPrevented || event.nativeEvent.isComposing) return;
       if (manualReview?.inlineDates && event.key === 'Tab') {
-        const controls = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+        const controls = event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)');
         const first = controls[0], last = controls[controls.length - 1];
         if (!first || event.target === event.currentTarget || event.target === (event.shiftKey ? first : last)) {
           event.preventDefault();
@@ -2284,13 +2310,30 @@ function ProjectGantt(props: GanttProps) {
       event.stopPropagation();
       closePreview();
     }}><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
+      {canReviewBatchFollowUp && <div className="gantt-batch-follow-up">
+        <label><input ref={batchFollowUpOption} type="checkbox" checked={batchFollowUp} disabled={busy || Boolean(manualProblem)}
+          aria-describedby="gantt-batch-follow-up-help" onChange={event => void reviewBatchFollowUp(event.currentTarget.checked)} />후행 일정 함께 검토</label>
+        <p id="gantt-batch-follow-up-help">입력한 날짜를 기준으로 같은 프로젝트의 후행 일정을 필요한 만큼 늦춥니다.</p>
+      </div>}
       <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
       {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       {(manualProblem || missingHierarchyAnchor || Boolean(preview.blocking?.length)) && <div className="issue-form-error gantt-preview-error" role="alert">
         {missingHierarchyAnchor && (!manualProblem || manualProblem.kind === 'stale') ? '현재 프로젝트에서 상위 업무를 찾을 수 없습니다.'
           : manualProblem ? manualProblem.message : preview.blocking?.map((message, index) => <p key={index}>{message}</p>)}
       </div>}
-      <div className="gantt-preview-table"><table><thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead><tbody>{preview.changes.map(change => <tr key={change.id}><td><span className="issue-key">{change.key}</span><strong>{change.title}</strong></td><td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td><td><ArrowRight size={16} /></td><td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td></tr>)}</tbody></table>
+      <div className="gantt-preview-table">
+        <table>
+          <thead><tr><th>업무</th><th>현재 일정</th><th /><th>변경할 일정</th></tr></thead>
+          <tbody>{preview.changes.map(change => <tr key={change.id}>
+            <td>
+              <span className="issue-key">{change.key}</span><strong>{change.title}</strong>
+              {batchAnchorIds && !batchAnchorIds.has(change.id) && <small className="gantt-follow-up-row-label">후행 조정</small>}
+            </td>
+            <td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td>
+            <td><ArrowRight size={16} /></td>
+            <td className="gantt-new-dates">{change.toStart || '미정'}<br />{change.toEnd || '미정'}</td>
+          </tr>)}</tbody>
+        </table>
         {preview.changes.length === 0 && !manualProblem && !missingHierarchyAnchor && !preview.blocking?.length && <div className="issue-empty">
           {hierarchyPreview ? '이동할 수 있는 일정이 없습니다.' : '이동할 일정이 없습니다. 날짜를 먼저 입력하세요.'}
         </div>}

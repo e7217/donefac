@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
+import { calculateFixedFollowUpSchedule } from '../../server/automatic-schedule.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
 import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWorkCalendar, isWorkingDate, shiftWorkingDate,
   countWorkingDays, createCalendarMath, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
+import { defaultWorkflow } from '../../shared/workflow-helpers.js';
 import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, IssueRelation, ScheduleChange, TeamFollowUpScheduleInput, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
@@ -453,6 +455,43 @@ test('pinned anchor conflicts and edits to a hidden successor cannot partially a
   assert.deepEqual(await f.request(`/schedule/auto-result/${ready.data.previewId}`), { status: 200, data: { applied: false } });
   assert.deepEqual(await getIssue(f, anchor.id), anchor);
   assert.deepEqual(await getIssue(f, successor.id), edited.data);
+});
+
+test('fixed date batches calculate shared successors once and preserve entered and already sufficient dates', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const first = await makeIssue(f, '첫 번째 기준 업무', '2026-11-19', '2026-11-19');
+  const second = await makeIssue(f, '두 번째 기준 업무', '2026-11-20', '2026-11-20');
+  const shared = await makeIssue(f, '두 업무의 공통 후행', '2026-11-20', '2026-11-23');
+  const indirect = await makeIssue(f, '간접 후행', '2026-11-23', '2026-11-23');
+  const sufficient = await makeIssue(f, '조건을 만족하는 후행', '2026-11-28', '2026-11-30');
+  const unrelated = await makeIssue(f, '일정 미정인 별도 업무', null, null);
+  const dependencies = [await dep(f, first, second), await dep(f, first, shared), await dep(f, second, shared, 1),
+    await dep(f, shared, indirect, 2, 'SS'), await dep(f, second, sufficient, 0, 'FF')];
+  const context = { issues: [first, second, shared, indirect, sufficient, unrelated], dependencies,
+    calendar: defaultCalendar(f.projectId), workflow: defaultWorkflow(f.projectId) };
+  const anchors = [
+    { id: first.id, expectedVersion: first.version, startDate: first.startDate, endDate: '2026-11-20' },
+    { id: second.id, expectedVersion: second.version, startDate: '2026-11-23', endDate: '2026-11-23' },
+  ];
+
+  const proposal = calculateFixedFollowUpSchedule({ ...context, anchors });
+  assert.deepEqual(proposal.blocking, []);
+  assert.deepEqual(proposal.warnings, []);
+  assert.deepEqual(proposal.issueIds, [first.id, second.id, shared.id, indirect.id, sufficient.id].sort());
+  assert.deepEqual(proposal.changes.map(change => [change.id, change.toStart, change.toEnd]), [
+    [first.id, '2026-11-19', '2026-11-20'],
+    [second.id, '2026-11-23', '2026-11-23'],
+    [shared.id, '2026-11-25', '2026-11-26'],
+    [indirect.id, '2026-11-27', '2026-11-27'],
+  ]);
+
+  const conflicting = calculateFixedFollowUpSchedule({ ...context,
+    anchors: [anchors[0], { ...anchors[1], startDate: '2026-11-20', endDate: '2026-11-20' }] });
+  assert.ok(conflicting.blocking.some(message => message.startsWith(`${second.key}: 입력한 시작일 2026-11-20`)));
+  assert.ok(conflicting.blocking.some(message => message.startsWith(`${shared.key}: ${second.key}`)));
+  assert.deepEqual(conflicting.changes.map(change => change.id), [first.id]);
+  assert.throws(() => calculateFixedFollowUpSchedule({ ...context, anchors: [anchors[0], anchors[0]] }), /중복/);
 });
 
 test('all dependency types use their calendar anchors and keep working duration through mixed constraints and undo', async () => {

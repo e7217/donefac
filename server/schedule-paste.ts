@@ -166,7 +166,9 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const invalid = () => new SchedulePasteError(400, '일정을 변경할 업무와 날짜 또는 이동 일수를 확인해 주세요.');
   if (!isRecord(raw)) throw invalid();
   if (Object.hasOwn(raw, 'changes')) {
-    if (Object.keys(raw).length !== 1 || !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
+    if (Object.keys(raw).some(key => key !== 'changes' && key !== 'rescheduleSuccessors') ||
+        (Object.hasOwn(raw, 'rescheduleSuccessors') && typeof raw.rescheduleSuccessors !== 'boolean') ||
+        !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
       const { id, expectedVersion, startDate, endDate } = value;
@@ -175,7 +177,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
       return { id, expectedVersion, startDate, endDate };
     });
     if (new Set(changes.map(change => change.id)).size !== changes.length) throw invalid();
-    return { changes };
+    return { changes, ...(raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {}) };
   }
   const { issueIds, days, workingDays } = raw;
   if (Object.keys(raw).length !== 3 || typeof days !== 'number' || !Number.isSafeInteger(days) ||
@@ -402,6 +404,7 @@ export class SchedulePasteService {
   private previewManual(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePreview {
     const input = parseManualPreviewInput(raw);
     const shift = 'changes' in input ? null : input;
+    const followUp = 'changes' in input && input.rescheduleSuccessors ? input.changes : null;
     const hierarchy = 'hierarchy' in input ? input.hierarchy : null;
     const shiftTarget = (id: string) => ({ id, expectedVersion: undefined, startDate: null, endDate: null });
     return this.store.transaction(() => {
@@ -429,6 +432,16 @@ export class SchedulePasteService {
       const skipped: SchedulePreview['skipped'] = hierarchy ? [] : undefined;
       const preview: SchedulePreview = { changes: [], warnings: [], ...(skipped ? { skipped } : {}) };
       const blocking: string[] = [];
+      const addDateChange = (issue: Issue, dates: Pick<Issue, 'startDate' | 'endDate'>) => {
+        const edit = proposeDateEdit(issue, dates);
+        if (!edit) return;
+        const error = hooks.validateChange(issue, edit.change);
+        if (error) blocking.push(`${issue.key}: ${error}`);
+        else {
+          changes.set(issue.id, edit.change);
+          preview.changes.push(omitUnchangedDueDate(edit.summary));
+        }
+      };
       for (const { id, expectedVersion, startDate, endDate } of selected) {
         const issue = byId.get(id);
         if (!issue) throw new SchedulePasteError(404, '선택한 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
@@ -460,15 +473,35 @@ export class SchedulePasteService {
             continue;
           }
         }
-        const edit = proposeDateEdit(issue, dates);
-        if (!edit) continue;
-        const error = hooks.validateChange(issue, edit.change);
-        if (error) {
-          blocking.push(`${issue.key}: ${error}`);
-          continue;
+        addDateChange(issue, dates);
+      }
+      const issueIds = new Set(selected.map(({ id }) => id));
+      const followUpWarnings: string[] = [];
+      if (followUp && !blocking.length) {
+        const anchorsByProject = Map.groupBy(followUp, ({ id }) => byId.get(id)!.projectId);
+        const issuesByProject = Map.groupBy(state.issues, ({ projectId }) => projectId);
+        const dependenciesByProject = Map.groupBy(state.dependencies, ({ predecessorId }) => byId.get(predecessorId)!.projectId);
+        for (const [projectId, anchors] of anchorsByProject) {
+          const plan = calculateFixedFollowUpSchedule({
+            issues: issuesByProject.get(projectId)!, dependencies: dependenciesByProject.get(projectId) ?? [],
+            calendar: hooks.calendar(projectId), workflow: hooks.workflow(projectId), anchors,
+          });
+          // An unchanged successor can gain a dependency before this proposal is applied.
+          for (const id of plan.issueIds) issueIds.add(id);
+          blocking.push(...plan.blocking);
+          followUpWarnings.push(...plan.warnings);
+          const anchorIds = new Set(anchors.map(({ id }) => id));
+          for (const { id, toStart, toEnd } of plan.changes) {
+            if (!anchorIds.has(id)) addDateChange(byId.get(id)!, { startDate: toStart, endDate: toEnd });
+          }
         }
-        changes.set(id, edit.change);
-        preview.changes.push(omitUnchangedDueDate(edit.summary));
+        if (changes.size > MAX_SCHEDULE_MANUAL_ISSUES) {
+          blocking.push(`한 번에 변경할 수 있는 업무는 ${MAX_SCHEDULE_MANUAL_ISSUES}개입니다. 범위를 나누어 미리 확인해 주세요.`);
+        }
+        for (const { id, key, toEnd } of preview.changes) {
+          const dueDate = byId.get(id)?.dueDate;
+          if (toEnd && dueDate && toEnd > dueDate) followUpWarnings.push(`${key}: 제안한 종료일 ${toEnd}이 목표 마감일 ${dueDate}보다 늦습니다.`);
+        }
       }
       if (changes.size) {
         const projected = state.issues.map(issue => {
@@ -477,11 +510,13 @@ export class SchedulePasteService {
         });
         preview.warnings.push(...hooks.warnings(projected, incidentLinks(state.dependencies, changes.keys())));
       }
-      if (blocking.length) return { ...preview, blocking };
+      if (followUpWarnings.length) preview.warnings = [...new Set([...followUpWarnings, ...preview.warnings])];
+      if (blocking.length) return { ...preview, blocking: [...new Set(blocking)] };
       if (!changes.size) return preview;
       return { ...preview, ...this.saveProposal(scope, state, {
-        actorId, issueIds: selected.map(({ id }) => id), changes: [...changes.values()], kind: 'manual-edit',
+        actorId, issueIds: [...issueIds], changes: [...changes.values()], kind: 'manual-edit',
         ...(hierarchy ? { hierarchyId: hierarchy.id } : {}),
+        ...(followUpWarnings.length ? { followUpWarnings } : {}),
       }, hooks) };
     });
   }

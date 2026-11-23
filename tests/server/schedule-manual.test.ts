@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { Dependency, Issue, Project, SchedulePasteApplyResult, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Dependency, Issue, Project, ProjectWorkflow, SchedulePasteApplyResult, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const actor = 'user-min';
 const otherActor = 'user-seo';
@@ -14,6 +14,7 @@ const previewPath = '/schedule/manual-preview';
 const applyPath = '/schedule/manual-apply';
 const dates = ({ startDate, endDate, dueDate }: Issue) => ({ startDate, endDate, dueDate });
 const shift = (issues: Issue[], workingDays = false) => ({ issueIds: issues.map(issue => issue.id), days: 1, workingDays });
+const chooseDate = (issue: Issue, date: string | null) => ({ id: issue.id, expectedVersion: issue.version, startDate: date, endDate: date });
 
 async function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-manual-schedule-'));
@@ -158,4 +159,105 @@ test('absolute manual dates exclude no-ops and replay one actor-owned mutation a
   assert.deepEqual(undone.updated.map(issue => [issue.id, issue.version, dates(issue)]), [[selected.id, selected.version + 2, dates(selected)]]);
   assert.deepEqual(await f.apply(proposal.previewId), applied);
   assert.deepEqual(dates((await f.state()).issues.find(issue => issue.id === selected.id)!), dates(selected));
+});
+
+test('manual follow-up reviews shared successors once across project calendars and applies and undoes as a single proposal', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('첫 선행');
+  const second = await f.issue('둘째 선행');
+  const shared = await f.issue('공통 후행', { startDate: '2026-11-23', endDate: '2026-11-23', dueDate: '2026-11-24' });
+  const unchanged = await f.issue('이미 선후행 조건을 만족한 업무', { startDate: '2026-11-30', endDate: '2026-11-30' });
+  const later = await f.issue('범위에 새로 연결할 업무', { startDate: '2026-12-01', endDate: '2026-12-01' });
+  await f.link(first, shared);
+  await f.link(second, shared);
+  await f.link(shared, unchanged);
+  const otherProject = await f.call<Project>('/projects', 201, 'POST', { key: 'FOLLOW', name: '토요일 근무 프로젝트' });
+  const otherAnchor = await f.issue('다른 프로젝트 선행', { startDate: '2026-11-19', endDate: '2026-11-19' }, otherProject.id);
+  const otherSuccessor = await f.issue('다른 프로젝트 후행', {}, otherProject.id);
+  await f.link(otherAnchor, otherSuccessor);
+  const calendarPath = `/projects/${otherProject.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath, 200);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-21', isWorking: true, label: '토요일 근무' }],
+  });
+
+  const input = { changes: [chooseDate(first, '2026-11-23'), chooseDate(second, '2026-11-24'), chooseDate(otherAnchor, '2026-11-20')],
+    rescheduleSuccessors: true };
+  const expected = new Map([[first.id, '2026-11-23'], [second.id, '2026-11-24'], [shared.id, '2026-11-25'],
+    [otherAnchor.id, '2026-11-20'], [otherSuccessor.id, '2026-11-21']]);
+  const before = await f.state();
+  const stale = await f.review(input);
+  assert.equal(stale.changes.length, expected.size);
+  assert.deepEqual(new Map(stale.changes.map(change => [change.id, change.toStart])), expected);
+  assert.ok(stale.warnings.some(warning => warning.includes(shared.key) && warning.includes('목표 마감일')));
+  assert.deepEqual(await f.state(), before);
+
+  await f.link(unchanged, later);
+  const withNewLink = await f.state();
+  await f.apply(stale.previewId, 409);
+  assert.deepEqual(await f.state(), withNewLink);
+
+  const proposal = await f.review(input);
+  await f.apply(proposal.previewId, 409, otherActor);
+  await f.restart();
+  const [applied, repeated] = await Promise.all([f.apply(proposal.previewId), f.apply(proposal.previewId)]);
+  assert.deepEqual(repeated, applied);
+  assert.ok(applied.undoId);
+  assert.deepEqual(applied.warnings, proposal.warnings);
+  assert.deepEqual(new Map(applied.updated.map(issue => [issue.id, issue.startDate])), expected);
+  assert.equal(applied.updated.find(issue => issue.id === shared.id)?.dueDate, shared.dueDate);
+  const originals = new Map(before.issues.filter(issue => expected.has(issue.id)).map(issue => [issue.id, dates(issue)]));
+  const undone = await f.call<Pick<SchedulePasteApplyResult, 'updated'>>('/schedule/undo', 200, 'POST', { undoId: applied.undoId });
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])), originals);
+  assert.deepEqual(await f.apply(proposal.previewId), applied);
+  assert.deepEqual(new Map((await f.state()).issues.filter(issue => expected.has(issue.id)).map(issue => [issue.id, dates(issue)])), originals);
+});
+
+test('manual follow-up keeps explicit unchanged anchors fixed and blocks the entire proposal when they conflict', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('미룰 선행 업무');
+  const fixed = await f.issue('그대로 둘 후행 업무', { startDate: '2026-11-23', endDate: '2026-11-23' });
+  const separateProject = await f.call<Project>('/projects', 201, 'POST', { key: 'SEPARATE', name: '함께 검토하는 프로젝트' });
+  const separate = await f.issue('함께 이동할 업무', {}, separateProject.id);
+  await f.link(predecessor, fixed);
+  const changes = [chooseDate(predecessor, '2026-11-24'), chooseDate(fixed, fixed.startDate), chooseDate(separate, '2026-11-23')];
+  await f.readPreview({ changes, rescheduleSuccessors: 'true' }, 400);
+  await f.readPreview({ ...shift([predecessor]), rescheduleSuccessors: true }, 400);
+  const before = await f.state();
+  const preview = await f.readPreview({ changes, rescheduleSuccessors: true });
+  assert.equal(preview.previewId, undefined);
+  assert.equal(preview.expiresAt, undefined);
+  assert.ok(preview.blocking?.some(warning => warning.includes(fixed.key) && warning.includes('2026-11-25')));
+  assert.ok(!preview.changes.some(change => change.id === fixed.id));
+  assert.deepEqual(await f.state(), before);
+
+  const legacy = await f.review({ changes, rescheduleSuccessors: false });
+  assert.deepEqual(legacy.changes.map(change => change.id), [predecessor.id, separate.id]);
+  assert.ok(legacy.warnings.some(warning => warning.includes(fixed.key) && warning.includes('2026-11-25')));
+  assert.deepEqual(await f.state(), before);
+});
+
+test('automatic follow-up changes are checked against the same workflow rules as the chosen dates', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('일정을 선택한 선행 업무');
+  const successor = await f.issue('목표 마감일이 없는 후행 업무', { startDate: '2026-11-23', endDate: '2026-11-23', dueDate: null });
+  await f.link(predecessor, successor);
+  const workflowPath = `/projects/${f.project.id}/workflow`;
+  const workflow = await f.call<ProjectWorkflow>(workflowPath, 200);
+  await f.call(workflowPath, 200, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [{ issueType: '*', statusId: successor.status, requiredFields: ['dueDate'] }],
+  });
+  const input = { changes: [chooseDate(predecessor, '2026-11-25')], rescheduleSuccessors: true };
+  const before = await f.state();
+  const blocked = await f.readPreview(input);
+  assert.equal(blocked.previewId, undefined);
+  assert.ok(blocked.blocking?.some(warning => warning.includes(successor.key) && warning.includes('마감일')));
+  assert.deepEqual(blocked.changes.map(change => change.id), [predecessor.id]);
+  assert.deepEqual(await f.state(), before);
+
+  await f.edit(successor, { dueDate: '2026-11-30' });
+  const proposal = await f.review(input);
+  assert.deepEqual(proposal.changes.map(change => [change.id, change.toStart]), [
+    [predecessor.id, '2026-11-25'], [successor.id, '2026-11-26'],
+  ]);
 });

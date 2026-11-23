@@ -959,6 +959,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/schedule/manual-preview`에 `{issueIds,days,workingDays}`를 보내 여러 업무를 이동하거나 `{changes:[{id,expectedVersion,startDate,endDate}]}`로 날짜를 직접 지정한다. 대상은 1~1,000개이며, 이동 일수의 범위는 −3,650~3,650이다. 날짜를 직접 지정할 때는 두 날짜에 각각 `YYYY-MM-DD` 또는 `null`을 보낸다. 여러 프로젝트가 포함된 근무일 이동은 각 업무가 속한 프로젝트의 달력을 사용한다.
 
+날짜를 직접 지정할 때 `rescheduleSuccessors: true`를 함께 보내면 모든 입력 날짜를 고정한 채 각 프로젝트의 직접·간접 후행을 검토한다. 현재 값과 같은 날짜 쌍도 기준으로 계산하며 `changes`에는 실제로 달라지는 행만 반환한다. 공통 후행은 모든 연결 조건을 적용해 한 번 계산한다. 1,000개 변경 한도는 모든 프로젝트의 입력과 조정을 합산한다. 다른 모드에는 이 옵션을 사용할 수 없다. 적용 시 검토한 후행 업무와 연결, 프로젝트 규칙을 함께 확인한다.
+
 상위 업무와 하위 업무를 함께 이동할 때는 `{hierarchy:{id,expectedVersion},days,workingDays}`를 보낸다. 서버가 기준 업무와 같은 프로젝트의 전체 하위 단계에서 최대 1,000개까지 계산한다. 완료·취소 상태와 시작일·종료일이 모두 없는 업무는 `skipped`의 `{id,key,title,reason}`에 기록된다. `reason`은 각각 `closed`, `unscheduled`다. 한쪽 날짜만 저장한 업무는 그 날짜를 이동한다. 적용 시 하위 업무 구성과 각 업무의 상위 연결도 확인한다.
 
 응답은 `changes`, 관련 업무의 `warnings`와 적용 가능한 경우 `previewId`·`expiresAt`을 반환한다. 변경할 날짜가 없거나 `blocking`에 확인할 이유가 있으면 적용 ID를 발급하지 않는다. `POST /api/schedule/manual-apply`에는 `{previewId}`를 보내며, 같은 작업자의 미리보기와 선택 업무·관련 업무·선후행 연결·프로젝트 규칙을 확인한다. 검토한 조건이 달라지면 `409`로 응답하고 날짜는 유지한다.

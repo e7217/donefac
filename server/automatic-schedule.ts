@@ -128,7 +128,7 @@ type ProjectScheduleInput = {
   math: ReturnType<typeof createCalendarMath>;
   selected: ReadonlySet<string>;
   terminal: (issue: Issue) => boolean;
-  anchor: ReturnType<typeof readSeedChange> | null;
+  fixedDates?: ReadonlyMap<string, ScheduleDates>;
   seeds?: ReadonlyMap<string, ScheduleDates>;
   anchorDate?: string | null;
   defaultDuration?: number | null;
@@ -136,7 +136,7 @@ type ProjectScheduleInput = {
 };
 
 function calculateProjectSchedule({
-  issues, dependencies, math, selected: initialIds, terminal, anchor, seeds, anchorDate, defaultDuration = null, preserveSatisfied,
+  issues, dependencies, math, selected: initialIds, terminal, fixedDates, seeds, anchorDate, defaultDuration = null, preserveSatisfied,
 }: ProjectScheduleInput) {
   const selected = new Set(initialIds);
   const successors = new Map<string, Dependency[]>();
@@ -189,7 +189,7 @@ function calculateProjectSchedule({
   for (const id of order) {
     const issue = issues.get(id)!;
     const isTerminal = terminal(issue);
-    const fixed = anchor?.issue.id === id ? anchor.dates : null;
+    const fixed = fixedDates?.get(id);
     const seed = fixed ?? seeds?.get(id);
     const basis = isTerminal ? issue : seed ?? issue;
     effective.set(id, basis);
@@ -243,7 +243,7 @@ function calculateProjectSchedule({
     let start = basis.startDate;
     let end = basis.endDate;
     let duration: number;
-    // A row review moves successors only when a projected dependency requires it.
+    // Fixed-date reviews move successors only when a projected dependency requires it.
     if (preserveSatisfied && (!required.startDate || (start && start >= required.startDate)) &&
         (!required.endDate || (end && end >= required.endDate))) continue;
     if ((start === null) !== (end === null)) {
@@ -300,24 +300,39 @@ function calculateProjectSchedule({
   return { changes, warnings, blocking, issueIds: [...selected] };
 }
 
+const MAX_AUTOMATIC_SCHEDULE_CHANGES = 1000;
 const CHANGE_LIMIT_MESSAGE = '한 번에 변경할 수 있는 업무는 1000개입니다. 범위를 나누어 미리 확인해 주세요.';
 
-export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar, workflow, anchor }: {
+type FixedFollowUpInput = {
   issues: readonly Issue[];
   dependencies: readonly Dependency[];
   calendar: WorkCalendar;
   workflow: ProjectWorkflow;
-  anchor: AutomaticScheduleMutation;
-}): { changes: ScheduleChange[]; warnings: string[]; blocking: string[]; issueIds: string[] } {
+} & (
+  { anchor: AutomaticScheduleMutation; anchors?: never } |
+  { anchors: readonly AutomaticScheduleMutation[]; anchor?: never }
+);
+
+export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar, workflow, anchor, anchors }: FixedFollowUpInput) {
   if (issues.length > 10000) fail('자동 일정은 프로젝트 업무 10,000개 이하에서 계산해 주세요.');
+  const anchorChanges = anchor ? [anchor] : anchors;
+  if (!anchorChanges?.length || anchorChanges.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) {
+    fail('후행 일정의 기준 업무는 1~1000개를 지정해 주세요.');
+  }
   const byId = new Map(issues.map(issue => [issue.id, issue]));
-  const fixed = readSeedChange(anchor, byId);
+  const fixedDates = new Map<string, ScheduleDates>();
+  for (const change of anchorChanges) {
+    const { issue, dates } = readSeedChange(change, byId);
+    if (issue.projectId !== calendar.projectId) fail('후행 일정의 기준 업무가 작업 달력의 프로젝트에 없습니다.');
+    if (fixedDates.has(issue.id)) fail('후행 일정의 기준 업무를 중복해서 지정할 수 없습니다.');
+    fixedDates.set(issue.id, dates);
+  }
   const workflowData = { workflows: [workflow] };
   const { changes, warnings, blocking, issueIds } = calculateProjectSchedule({
-    issues: byId, dependencies, math: createCalendarMath(calendar), selected: new Set([fixed.issue.id]), anchor: fixed,
+    issues: byId, dependencies, math: createCalendarMath(calendar), selected: new Set(fixedDates.keys()), fixedDates,
     terminal: issue => isTerminalStatus(workflowData, issue.projectId, issue.status), preserveSatisfied: true,
   });
-  if (changes.length > 1000) blocking.push(CHANGE_LIMIT_MESSAGE);
+  if (changes.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) blocking.push(CHANGE_LIMIT_MESSAGE);
   return { changes, warnings: [...new Set(warnings)], blocking: [...new Set(blocking)], issueIds: issueIds.sort() };
 }
 
@@ -376,14 +391,15 @@ export class AutomaticScheduleService{
     }
     const workflowTable=this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'").get();const workflows=workflowTable?this.store.all<ProjectWorkflow>('workflows'):[];
     const { changes, warnings, blocking } = calculateProjectSchedule({
-      issues: byId, dependencies, math, selected, anchor, seeds, anchorDate, defaultDuration,
+      issues: byId, dependencies, math, selected, seeds, anchorDate, defaultDuration,
+      fixedDates: anchor ? new Map([[anchor.issue.id, anchor.dates]]) : undefined,
       terminal: issue => isTerminalStatus({ workflows }, issue.projectId, issue.status),
     });
     if (anchor && validateChange) for (const change of changes) {
       const reason = validateChange(byId.get(change.id)!, toMutation(change));
       if (reason) blocking.push(`${change.key}: ${reason}`);
     }
-    if (changes.length > 1000) blocking.push(CHANGE_LIMIT_MESSAGE);
+    if (changes.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) blocking.push(CHANGE_LIMIT_MESSAGE);
     const createdAt=new Date().toISOString(),expiresAt=new Date(Date.now()+AUTO_PREVIEW_TTL_MS).toISOString(),previewId=randomUUID();
     const preview:AutomaticSchedulePreview={previewId,changes,warnings:[...new Set(warnings)],blocking:[...new Set(blocking)],calendarVersions:{[projectId]:calendar.version},expiresAt};
     const proposal:Proposal={id:previewId,projectId,actorId,createdAt,expiresAt,issueVersions:readset(issues),calendarVersion:calendar.version,workflowVersion:workflows.find(workflow=>workflow.projectId===projectId)?.version||1,issueSchemaVersion:this.issueSchemaVersion(projectId),dependencyHash:dependencyHash(dependencies),preview,used:false};this.store.put('automatic_schedule_previews',proposal);return preview;

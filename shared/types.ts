@@ -1715,7 +1715,7 @@ export interface ScheduleAnchorChange { id: string; expectedVersion: number; sta
 export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
 export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
   { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
-  { changes: ScheduleAnchorChange[] };
+  { changes: ScheduleAnchorChange[]; rescheduleSuccessors?: boolean };
 export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number; anchorChange?: ScheduleAnchorChange }
 export interface AutomaticSchedulePreview extends SchedulePreview {
   previewId: string;
