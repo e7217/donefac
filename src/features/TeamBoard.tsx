@@ -8,6 +8,7 @@ import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
 import { matchesGitlabFilter, orderProjectIssues } from '../../shared/issue-view';
 import { allowedNextStatuses, projectWorkflow, statusMeta, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { api, ApiError, dateLabel, patch } from '../lib/api';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { IssueTypeIcon, StatusDot } from './Issues';
@@ -19,6 +20,7 @@ type Props = FeatureProps & {
   filters: TeamBoardFilters;
   onFiltersChange: (filters: TeamBoardFilters) => void;
   onOpenBoardIssue: (id: string, trigger: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
+  onOpenIssueForReview?: OpenIssueForReview;
   refreshBoard: WorkspaceRefresh;
   issueOverlayOpen: boolean;
 };
@@ -42,7 +44,7 @@ function destinations(data: WorkspaceSnapshot, issue: Issue, category?: StatusCa
   return allowedNextStatuses(data, issue).filter(status => status.id !== issue.status && (category === undefined || status.category === category));
 }
 
-export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardIssue, refresh, notify, refreshBoard, issueOverlayOpen }: Props) {
+export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardIssue, onOpenIssueForReview, refresh, notify, refreshBoard, issueOverlayOpen }: Props) {
   const heading = useId();
   const board = useRef<HTMLDivElement>(null);
   const focusedCard = useRef<{ control: HTMLElement; issueId: string; selector: string } | null>(null);
@@ -127,6 +129,13 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
     if (!editing) return;
     const opener = board.current?.querySelector<HTMLButtonElement>(`[data-issue-id="${CSS.escape(editing.issue.id)}"] [data-team-board-open-action]`);
     onOpenBoardIssue(editing.issue.id, { opener: opener ?? editing.opener, fallback: board.current });
+  }
+
+  function openCardIssue(id: string, opener: HTMLElement) {
+    const fallback = board.current;
+    if (!onOpenIssueForReview) { onOpenBoardIssue(id, { opener, fallback }); return; }
+    const issueIds = CATEGORIES.flatMap(category => (columns.get(category) ?? []).map(({ issue }) => issue.id));
+    onOpenIssueForReview(id, { issueIds, opener, fallback });
   }
 
   function startDrag(event: DragEvent<HTMLElement>, entry: BoardEntry) {
@@ -252,7 +261,7 @@ export default function TeamBoard({ data, filters, onFiltersChange, onOpenBoardI
               return <li key={issue.id} className="team-board-card" data-issue-id={issue.id}
                 draggable={choices.some(choice => choice.category !== status.category)} onDragStart={event => startDrag(event, entry)} onDragEnd={endDrag}>
                 <button type="button" className="team-board-card-open" aria-label={`${issue.key} 업무 열기`} data-team-board-open-action=""
-                  onClick={event => onOpenBoardIssue(issue.id, { opener: event.currentTarget, fallback: board.current })}>
+                  onClick={event => openCardIssue(issue.id, event.currentTarget)}>
                   <span className="team-board-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}</span>
                   <strong>{issue.title}</strong>
                   <span className="team-board-card-labels">

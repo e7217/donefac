@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, CalendarRange, Check, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
+import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -35,12 +35,14 @@ import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { FavoriteAction } from './FavoritesState';
 import { AtlassianLinks } from './AtlassianLinks';
+import type { IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import './issues.css';
 import './issue-decision-source.css';
+import './issue-review.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
 type RelationScheduleReview = { relation: IssueRelation; mode: IssueRelationScheduleMode; reload: () => Promise<void> };
@@ -56,6 +58,8 @@ type IssuePanelProps = FeatureProps & {
   modalFocus?: boolean;
   previewDocumentId: string | null;
   commentFocus?: { commentId: string; activation: number };
+  reviewPosition?: IssueReviewPosition;
+  onAdvanceReview?: (direction: IssueReviewDirection) => void;
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
   onPreviewDocument: (id: string) => boolean;
@@ -78,7 +82,7 @@ export function IssuePanel(props: IssuePanelProps) {
 
 function IssuePanelContent(props: IssuePanelProps) {
   const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
-    refresh, notify, openIssue, openDocument } = props;
+    reviewPosition, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
   const manageFocus = Boolean(documentOverlay || modalFocus);
   const issue = data.issues.find(i => i.id === issueId);
   const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
@@ -122,6 +126,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [commenting, setCommenting] = useState(false);
+  const commentingRef = useRef(false);
   const [error, setError] = useState<IssueEditError | null>(null);
   const [conflict, setConflict] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -174,6 +179,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [scheduleUndoId, setScheduleUndoId] = useState<string | null>(null);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const rowScheduleOpener = useRef<HTMLButtonElement>(null);
+  const focusAfterScheduleUndo = useRef(false);
   const rowScheduleGuard = useRef({ dirty: false, pending: false });
   const trackRowScheduleDraft = useCallback((_id: string, dirty: boolean, pending = false) => {
     rowScheduleGuard.current = { dirty, pending };
@@ -205,6 +211,12 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [trackLinkedDocumentDraft]);
   const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
+  useLayoutEffect(() => {
+    if (dependencyBusy || !focusAfterScheduleUndo.current) return;
+    focusAfterScheduleUndo.current = false;
+    const opener = rowScheduleOpener.current;
+    if (opener && !opener.disabled && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+  }, [dependencyBusy]);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
   const dependencyDraftRef = useRef(false);
@@ -298,7 +310,9 @@ function IssuePanelContent(props: IssuePanelProps) {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
       const documentGuard = linkedDocumentGuard.current;
-      if (savingRef.current || isCommentEditPending() || childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending || projectMoveGuard.current.pending || documentGuard.pending) {
+      if (savingRef.current || commentingRef.current || linkingRef.current || isCommentEditPending() ||
+          childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending ||
+          projectMoveGuard.current.pending || documentGuard.pending) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
@@ -337,7 +351,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
+      if (!dirtyRef.current && !savingRef.current && !commentingRef.current && !linkingRef.current &&
+          !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
           !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
           !linkedDocumentGuard.current.dirty && !linkedDocumentGuard.current.pending && !linkedDocumentGuard.current.uncertain) return;
       event.preventDefault(); event.returnValue = '';
@@ -374,6 +389,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
   }, [issueId, props.actorId, commentActivation]);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const previousReviewButton = useRef<HTMLButtonElement>(null);
+  const nextReviewButton = useRef<HTMLButtonElement>(null);
+  const reviewFocusDirection = reviewPosition?.focusDirection;
   const issuePanel = useRef<HTMLElement>(null);
   const previewOpener = useRef<HTMLButtonElement | null>(null);
   const previousPreview = useRef<string | null>(null);
@@ -392,8 +410,11 @@ function IssuePanelContent(props: IssuePanelProps) {
     return () => cancelAnimationFrame(frame);
   }, [previewDocumentId]);
   useEffect(() => {
-    if (manageFocus) closeButton.current?.focus({ preventScroll: true });
-  }, [manageFocus]);
+    const reviewButton = reviewFocusDirection === 'previous' ? previousReviewButton.current
+      : reviewFocusDirection === 'next' ? nextReviewButton.current : null;
+    if (reviewButton && !reviewButton.disabled) reviewButton.focus({ preventScroll: true });
+    else if (manageFocus || reviewFocusDirection) closeButton.current?.focus({ preventScroll: true });
+  }, [manageFocus, reviewFocusDirection]);
   useEffect(() => {
     if (!commentFocus || loadedCommentActivation !== commentFocus.activation || handledCommentActivation.current === commentFocus.activation
       || previewDocumentId || nestedModalOpen) return;
@@ -494,7 +515,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       } catch (cause) {
         notify(`일정과 연결 변경을 되돌렸습니다. 최신 업무를 불러오지 못했습니다. ${errorMessage(cause)}`, 'error');
       }
-      requestAnimationFrame(() => rowScheduleOpener.current?.focus({ preventScroll: true }));
+      focusAfterScheduleUndo.current = true;
     } catch (cause) {
       notify(errorMessage(cause), 'error');
     } finally {
@@ -615,7 +636,8 @@ function IssuePanelContent(props: IssuePanelProps) {
   async function addComment(event: FormEvent) {
     event.preventDefault();
     const payload = commentDraftPayload(commentDraft);
-    if (!payload.body || commenting) return;
+    if (!payload.body || commentingRef.current) return;
+    commentingRef.current = true;
     setCommenting(true); setCommentError('');
     try {
       const value = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': props.actorId },
@@ -625,7 +647,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
       await refresh();
     }
-    catch (err) { setCommentError(errorMessage(err)); } finally { setCommenting(false); }
+    catch (err) { setCommentError(errorMessage(err)); }
+    finally { commentingRef.current = false; setCommenting(false); }
   }
   async function linkDocument(documentId: string) {
     if (linkingRef.current) return false;
@@ -655,7 +678,17 @@ function IssuePanelContent(props: IssuePanelProps) {
       else linkedDocumentOpener.current?.focus({ preventScroll: true });
     });
   }
-  async function unlinkDocument(id: string) { try { await remove(`/resource-links/${id}`); await refresh(); notify('문서 연결을 해제했습니다.'); } catch (err) { notify(errorMessage(err), 'error'); } }
+  async function unlinkDocument(id: string) {
+    if (linkingRef.current) return;
+    linkingRef.current = true;
+    setLinking(true);
+    try {
+      await remove(`/resource-links/${id}`);
+      await refresh();
+      notify('문서 연결을 해제했습니다.');
+    } catch (err) { notify(errorMessage(err), 'error'); }
+    finally { linkingRef.current = false; setLinking(false); }
+  }
   function openDependencyEditor(opener: HTMLButtonElement, otherRole: RelatedIssueDirection, dependency?: Dependency) {
     if (savingRef.current || dependencyBusyRef.current) return;
     dependencyOpener.current = opener;
@@ -735,12 +768,13 @@ function IssuePanelContent(props: IssuePanelProps) {
         onClick={event => {
           if (onPreviewDocument(doc.id)) previewOpener.current = event.currentTarget;
         }}><Eye size={14} aria-hidden="true" />미리보기</button>
-      {link && <button type="button" className="issue-icon-button" onClick={() => unlinkDocument(link.id)}
+      {link && <button type="button" className="issue-icon-button" disabled={linking} onClick={() => unlinkDocument(link.id)}
         aria-label={`${title} 연결 해제`} title="연결 해제"><X size={14} /></button>}
     </div>;
   }
   const parent = data.issues.find(i => i.id === issue.parentId);
   const previousKeys = issueSearchAliases(data, issue.id);
+  const reviewBusy = saving || commenting || linking || dependencyBusy || Boolean(commentEditing.operation);
   return <>
     <div className="issue-panel-backdrop" inert={nestedModalOpen || Boolean(previewDocument)} onMouseDown={event => {
       if (event.target === event.currentTarget && !saving && !nestedModalOpen && !dependencyBusyRef.current) closePanel();
@@ -760,9 +794,20 @@ function IssuePanelContent(props: IssuePanelProps) {
         </button>
         <FavoriteAction type="issue" id={issue.id} />
         <NotificationSubscriptionButton actorId={props.actorId} targetType="issue" targetId={issue.id} notify={notify} />
-        <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy} aria-label="업무 상세 닫기"><X size={20} /></button>
+        <button ref={closeButton} className="issue-icon-button" onClick={closePanel} disabled={saving || dependencyBusy || commenting || linking} aria-label="업무 상세 닫기"><X size={20} /></button>
       </div>
     </header>
+    {reviewPosition && onAdvanceReview && <nav className="issue-review-navigation" aria-label="업무 검토 순서">
+      <button ref={previousReviewButton} className="btn" type="button" aria-label="이전 업무" title={reviewPosition.previous?.key}
+        disabled={reviewBusy || !reviewPosition.previous} onClick={() => onAdvanceReview('previous')}>
+        <ChevronLeft size={15} aria-hidden="true" />이전 업무
+      </button>
+      <span role="status">{reviewPosition.total.toLocaleString('ko-KR')}개 중 {reviewPosition.position.toLocaleString('ko-KR')}번째</span>
+      <button ref={nextReviewButton} className="btn" type="button" aria-label="다음 업무" title={reviewPosition.next?.key}
+        disabled={reviewBusy || !reviewPosition.next} onClick={() => onAdvanceReview('next')}>
+        다음 업무<ChevronRight size={15} aria-hidden="true" />
+      </button>
+    </nav>}
     <div className="issue-panel-title">
       <span className="issue-type-label">
         <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issueTypeMeta(data, issue.projectId, issue.type).name}

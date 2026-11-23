@@ -19,6 +19,7 @@ import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecis
 import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
 import { appendWorkspaceSearchFilters, readWorkspaceSearchFilters, sameWorkspaceSearchFilters } from './lib/workspace-search-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
+import { issueReviewPosition, type IssueReviewDirection, type OpenIssueForReview } from './lib/issue-review';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
@@ -190,6 +191,16 @@ function hasSameBoardContext(previous: WorkspaceRoute, next: WorkspaceRoute): bo
   return hasSameTeamBoardContext(previous, next) || (previous.view === 'issues' && next.view === 'issues' && previous.projectId === next.projectId &&
     (previous.savedViewId ?? null) === (next.savedViewId ?? null));
 }
+function issueReviewContext(route: WorkspaceRoute) {
+  return routeHash({ ...route, issueId: null, documentPreviewId: null });
+}
+type IssueReview = {
+  context: string;
+  actorId: string;
+  projectScope: string | null;
+  issueIds: readonly string[];
+  focusDirection?: IssueReviewDirection;
+};
 function sameTeamGanttScheduleFilters(a?: TeamGanttScheduleFilters, b?: TeamGanttScheduleFilters): boolean {
   return a?.assigneeId === b?.assigneeId && Boolean(a?.unscheduledOnly) === Boolean(b?.unscheduledOnly);
 }
@@ -339,6 +350,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [actorId, setActorId] = useState('');
   const [view, setView] = useState<View>('overview');
   const [issueId, setIssueId] = useState<string | null>(null);
+  const [issueReview, setIssueReview] = useState<IssueReview | null>(null);
   const [documentPreviewId, setDocumentPreviewId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [documentLabel, setDocumentLabel] = useState<string | null>(null);
@@ -377,7 +389,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const rollbackHashRef = useRef<string | null>(null);
   const overlayIssueOpener = useRef<HTMLElement | null>(null);
   const workspaceMain = useRef<HTMLElement>(null);
-  const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null } | null>(null);
+  const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null; reviewContext?: string } | null>(null);
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind }), []);
@@ -449,6 +461,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, []);
   const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace', preserveIssueOpener = false) => {
     const previous = acceptedRouteRef.current;
+    setIssueReview(review => {
+      const id = route.issueId;
+      return review && id && review.context === issueReviewContext(route) && review.issueIds.includes(id) ? review : null;
+    });
     if (previous && (previous.view === 'teamboard' || previous.view === 'gantt')) {
       const changedPane = route.view !== previous.view || route.projectId !== previous.projectId || route.issueId !== previous.issueId;
       const changedChart = previous.view === 'gantt' && (route.ganttScope !== previous.ganttScope || route.ganttProject !== previous.ganttProject ||
@@ -463,17 +479,22 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       : null;
     const boardTrigger = boardIssueOpener.current;
     if (boardTrigger) {
-      const sameBoard = previous && hasSameBoardContext(previous, route);
-      if (sameBoard && route.issueId) setBoardDialogIssueId(route.issueId);
+      const sameContext = (target: WorkspaceRoute) => boardTrigger.reviewContext !== undefined
+        ? issueReviewContext(target) === boardTrigger.reviewContext : previous && hasSameBoardContext(previous, target);
+      const sameSource = sameContext(route);
+      if (sameSource && route.issueId) {
+        if (!boardTrigger.reviewContext || route.view === 'teamboard') setBoardDialogIssueId(route.issueId);
+      }
       else {
         boardIssueOpener.current = null;
         setBoardDialogIssueId(null);
-        if (sameBoard) requestAnimationFrame(() => {
+        if (sameSource) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
-          if (!current || current.issueId || !hasSameBoardContext(route, current)) return;
-          const target = boardTrigger.opener.isConnected ? boardTrigger.opener : boardTrigger.fallback;
-          if (target?.isConnected && !target.closest('[inert]')) target.focus({ preventScroll: true });
-          else if (route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
+          if (!current || current.issueId || !sameContext(current)) return;
+          const target = [boardTrigger.opener, boardTrigger.fallback].find(element =>
+            element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
+          if (target) target.focus({ preventScroll: true });
+          else if (boardTrigger.reviewContext || route.view === 'teamboard') workspaceMain.current?.focus({ preventScroll: true });
         });
       }
     }
@@ -566,12 +587,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, [processLocation]);
   useEffect(() => { if (data) processLocation(); }, [data, processLocation]);
 
-  const requestRoute = (route: WorkspaceRoute, mode: 'push' | 'replace' = 'push') => {
+  const requestRoute = (route: WorkspaceRoute, mode: 'push' | 'replace' = 'push', keepIssueReview = false) => {
     if (!dataRef.current) return false;
     const next = normalizeRoute(dataRef.current, routeHash(route));
     const previous = acceptedRouteRef.current;
     if (previous && routeHash(next) === routeHash(previous)) { setSidebarOpen(false); return true; }
     if (!confirmRouteNavigation(previous, next)) return false;
+    if (!keepIssueReview && previous?.issueId !== next.issueId) setIssueReview(null);
     writeRoute(next, routeIndexRef.current + (mode === 'push' ? 1 : 0), mode); setSidebarOpen(false);
     return true;
   };
@@ -660,6 +682,38 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const closeIssuePanel = (id: string) => {
     const current = acceptedRouteRef.current;
     if (current?.issueId === id) requestRoute({ ...current, issueId: null, documentPreviewId: null });
+  };
+  const openIssueForReview: OpenIssueForReview = (id, source) => {
+    const current = acceptedRouteRef.current;
+    if (!current || current.issueId || !source.issueIds.includes(id) ||
+        (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt')) {
+      openIssue(id);
+      return;
+    }
+    if (!dataRef.current?.issues.some(issue => issue.id === id)) return;
+    const context = issueReviewContext(current);
+    const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
+      : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null : current.projectId;
+    if (!requestRoute({ ...current, issueId: id, documentPreviewId: null })) return;
+    const opened = acceptedRouteRef.current;
+    if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
+    boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
+    setIssueReview({ context, actorId, projectScope, issueIds: [...new Set(source.issueIds)] });
+    setSearchOpen(false);
+  };
+  const advanceIssueReview = (direction: IssueReviewDirection) => {
+    const current = acceptedRouteRef.current;
+    const latest = dataRef.current;
+    const review = issueReview;
+    if (!review || !latest || !current?.issueId || review.actorId !== actorId || issueReviewContext(current) !== review.context) return;
+    const target = issueReviewPosition(review.issueIds, current.issueId, latest.issues, review.projectScope)?.[direction];
+    // Replace the drawer's history slot so Back returns to the originating view.
+    if (target && requestRoute({ ...current, issueId: target.id, documentPreviewId: null }, 'replace', true)) {
+      const opened = acceptedRouteRef.current;
+      if (opened?.issueId === target.id && issueReviewContext(opened) === review.context) {
+        setIssueReview({ ...review, focusDirection: direction });
+      }
+    }
   };
   const showSearchResults = (query: string) => {
     if (requestRoute({ projectId, view: 'search', documentId: null, issueId: null,
@@ -823,6 +877,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const props: FeatureProps = { data, projectId, actorId, refresh, notify, openIssue, openDocument };
   const projectIssues = data.issues.filter(i => i.projectId === projectId);
   const openedIssue = data.issues.find(issue => issue.id === issueId);
+  const reviewPosition = issueReview?.actorId === actorId && openedIssue
+    ? issueReviewPosition(issueReview.issueIds, openedIssue.id, data.issues, issueReview.projectScope) : undefined;
   const teamGantt = view === 'gantt' && ganttScope === 'team';
   const teamBoard = view === 'teamboard';
   const teamDecisions = view === 'reports' && decisionFollowUpScope?.projectId !== undefined;
@@ -835,7 +891,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     ? documentPreviewId : null;
   const activeCommentFocus = commentFocus && (commentFocus.actorId === null || commentFocus.actorId === actorId) ? commentFocus : undefined;
   const boardIssueFocus = Boolean(openedIssue && (teamBoard || openedIssue.id === boardDialogIssueId));
-  const workspaceObscured = documentIssueOpen || contextualIssueOpen || boardIssueFocus || Boolean(activeDocumentPreviewId);
+  const workspaceObscured = documentIssueOpen || contextualIssueOpen || boardIssueFocus || Boolean(reviewPosition || activeDocumentPreviewId);
 
   return <FavoritesProvider actorId={actorId} notify={notify}><div className="workspace">
     {sidebarOpen && !workspaceObscured && <button className="sidebar-scrim" aria-label="메뉴 닫기" onClick={() => setSidebarOpen(false)}/>}
@@ -883,11 +939,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         <div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {
           if(!dispatchWorkspaceNavigation())return;
           publicationOpenRequest.current++;notificationOpenRequest.current++;
+          setIssueReview(null);
           setCommentFocus(focus => focus?.actorId === null ? focus : null);
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
-      <main className={`main-content view-${view}`} ref={workspaceMain} tabIndex={teamBoard || view === 'search' || view === 'favorites' ? -1 : undefined}>
+      <main className={`main-content view-${view}`} ref={workspaceMain} tabIndex={teamBoard || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' ? -1 : undefined}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
@@ -896,6 +953,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         </Suspense>}
         {teamBoard && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>전체 프로젝트 보드를 불러오는 중입니다.</p></div>}>
           <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenBoardIssue={openIssue}
+            onOpenIssueForReview={openIssueForReview}
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
@@ -904,6 +962,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} openIssue={openIssue} openDocument={openDocument}/>
         </Suspense>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId}
+          onOpenIssueForReview={openIssueForReview}
           onOpenBoardCapacityIssue={openIssue}
           onOpenCycleBoard={() => openPlanIn('backlog')}
           onChangeSavedView={id => requestRoute({projectId,view:'issues',documentId:null,issueId,savedViewId:id})}
@@ -914,6 +973,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}
         {view === 'gantt' && <Gantt {...props} refreshGantt={refreshGantt} allProjects={teamGantt} teamProjectFilter={ganttProject} onChangeTeamProjectFilter={changeTeamGanttProject}
+          onOpenIssueForReview={openIssueForReview}
           teamScheduleFilters={ganttScheduleFilters} onChangeTeamScheduleFilters={changeTeamGanttScheduleFilters}
           onOpenProjectGantt={id => requestRoute({ projectId: id, view: 'gantt', documentId: null, issueId: null })}
           initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
@@ -949,8 +1009,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {!project && view !== 'trash' && view !== 'teamoverview' && view !== 'search' && view !== 'favorites' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}
       </main>
     </div>
-    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || contextualIssueOpen}
+    {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || contextualIssueOpen || Boolean(reviewPosition)}
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onClose={() => closeIssuePanel(openedIssue.id)}
+      reviewPosition={reviewPosition && { ...reviewPosition, focusDirection: issueReview?.focusDirection }} onAdvanceReview={advanceIssueReview}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}

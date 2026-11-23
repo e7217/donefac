@@ -1,0 +1,27 @@
+.issue-review-navigation {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 25px;
+  border-bottom: 1px solid #e5eee7;
+  background: #f8fbf9;
+  color: #51685b;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.issue-review-navigation > span {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-review-navigation > .btn {
+  gap: 3px;
+  padding-inline: 7px;
+  min-height: 36px;
+}
+
+@media (max-width: 700px) {
+  .issue-review-navigation { padding-inline: 20px; }
+}

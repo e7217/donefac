@@ -6,6 +6,7 @@ import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type Is
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { downloadText } from '../lib/download';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
 import { CustomFieldSummary, IssueTypeName } from './CustomFields';
@@ -111,6 +112,7 @@ export function Issues(props: FeatureProps & {
   onOpenFieldBreakdown?: (viewId: string) => void;
   onOpenCycleBoard?: () => void;
   onOpenBoardCapacityIssue?: (id: string, source: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
+  onOpenIssueForReview?: OpenIssueForReview;
 }) {
   const { data, projectId, refresh, notify, openIssue, savedViewId = null, onChangeSavedView, onOpenGantt, onOpenFieldBreakdown, onOpenBoardCapacityIssue } = props;
   const [loadedViews, setLoadedViews] = useState<{ projectId: string; snapshot: typeof data.savedViews; values: SavedView[] }>();
@@ -153,6 +155,7 @@ export function Issues(props: FeatureProps & {
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
   const boardCanvas = useRef<HTMLDivElement>(null);
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
   const capacityHeading = useRef<HTMLHeadingElement>(null);
   const capacityOpener = useRef<HTMLButtonElement | null>(null);
   const order = isAll(projectId) ? undefined : data.issueOrders?.find(value => value.projectId === projectId);
@@ -416,7 +419,7 @@ export function Issues(props: FeatureProps & {
         const user = data.users.find(user => user.id === issue.assigneeId);
         return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
           <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
-            draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={() => openIssue(issue.id)}>
+            draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
             <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
             <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(label => <span className="issue-label" key={label}>{label}</span>)}</span>
             <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
@@ -433,6 +436,15 @@ export function Issues(props: FeatureProps & {
   const lanes = groupedBoard ? groupBoardIssues(issues, data.users, showEmptyAssignees) : [];
   const csvDisabled = Boolean(busy || bulk.locked || unavailableView || !issues.length);
 
+  function openVisibleIssue(id: string, opener: HTMLElement) {
+    if (!props.onOpenIssueForReview) { openIssue(id); return; }
+    const boardLanes = groupedBoard ? lanes.map(lane => lane.issues) : [issues];
+    const reviewIssues = view === 'list' ? issues : boardLanes.flatMap(lane =>
+      statuses.flatMap(state => lane.filter(issue => issue.status === state.id)));
+    const fallback = view === 'list' ? reviewHeading.current : boardCanvas.current ?? reviewHeading.current;
+    props.onOpenIssueForReview(id, { issueIds: reviewIssues.map(issue => issue.id), opener, fallback });
+  }
+
   function downloadIssuesCsv(selectionOnly: boolean) {
     if (csvDisabled) return;
     const rows = selectionOnly ? issues.filter(issue => bulk.selectedIds.has(issue.id)) : issues;
@@ -442,7 +454,7 @@ export function Issues(props: FeatureProps & {
   }
 
   return <div className="issues-feature">
-    <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
+    <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1 ref={reviewHeading} tabIndex={-1}>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
       <div className="issue-heading-actions">
         {projectSelected && props.onOpenCycleBoard && <button className="btn" type="button" onClick={props.onOpenCycleBoard}>
           <CalendarRange size={15} aria-hidden="true" />백로그 · 사이클
@@ -513,7 +525,7 @@ export function Issues(props: FeatureProps & {
       return <tr key={issue.id} data-issue-id={issue.id} className={selected ? 'issue-bulk-selected' : undefined}>
         {bulk.active && <td className="issue-bulk-selection"><label className="issue-bulk-select-control"><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected}
           disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} /></label></td>}
-        <td><button className="issue-title-button" onClick={() => openIssue(issue.id)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} /></button>
+        <td><button className="issue-title-button" onClick={event => openVisibleIssue(issue.id, event.currentTarget)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><span className="issue-title-text">{issue.title}</span><IssueTypeName data={data} issue={issue} /></button>
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
           <CustomFieldSummary data={data} issue={issue} limit={2} />
           <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />{controls(issue, issues, index)}</td>
@@ -555,7 +567,7 @@ export function Issues(props: FeatureProps & {
             </div>
           </section>)}
         </div>
-      </> : <div className="issue-board" ref={boardCanvas}>{statuses.map(state => boardColumn(state, issues))}</div>}
+      </> : <div className="issue-board" ref={boardCanvas} role="region" aria-label="업무 보드" tabIndex={-1}>{statuses.map(state => boardColumn(state, issues))}</div>}
     </>)}
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
