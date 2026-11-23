@@ -26,16 +26,17 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
-  initialDateDraftVersion?: number;
+  initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
-  onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
+  onApplied: (result: SchedulePasteApplyResult, reviewedAnchorVersion: number) => Promise<void>;
 };
 type DateField = keyof ScheduleBulkDateChanges;
 type LinkAction = 'none' | 'add' | 'update' | 'remove';
 type Direction = 'predecessor' | 'successor';
 type Pending = 'preview' | 'apply' | 'recover' | 'reload' | 'reflect';
-type Review = { input: string; result: SchedulePastePreview; editGroups: number[] };
+type Review = { input: string; result: SchedulePastePreview; editGroups: number[]; anchorVersion: number };
+type AppliedReview = { result: SchedulePasteApplyResult; anchorVersion: number };
 type LinkDraft = {
   id: number;
   action: LinkAction;
@@ -138,7 +139,7 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraftVersion, actorId, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
@@ -148,7 +149,7 @@ export function GanttRowScheduleEdit({
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [retryId, setRetryId] = useState<string | null>(null);
-  const [applied, setApplied] = useState<SchedulePasteApplyResult | null>(null);
+  const [applied, setApplied] = useState<AppliedReview | null>(null);
   const [reloadNeeded, setReloadNeeded] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -166,7 +167,7 @@ export function GanttRowScheduleEdit({
   const projectIssues = useMemo(() => new Map(issues.filter(value => value.projectId === issue.projectId)
     .map(value => [value.id, value])), [issue.projectId, issues]);
   const currentIssue = projectIssues.get(issue.id);
-  const anchor = currentIssue ?? issue;
+  const anchor = currentIssue && currentIssue.version >= issue.version ? currentIssue : issue;
   const links = useMemo<ExistingLink[]>(() => dependencies.flatMap(dependency => {
     const role = dependency.predecessorId === issue.id ? 'successor' : dependency.successorId === issue.id ? 'predecessor' : null;
     if (!role) return [];
@@ -174,12 +175,13 @@ export function GanttRowScheduleEdit({
     return other ? [{ dependency, other, role }] : [];
   }), [dependencies, issue.id, projectIssues]);
   const editLocked = Boolean(pending || retryId || applied);
-  const datesChanged = initialDateDraftVersion === undefined ? Object.keys(editedDates).length > 0
+  const datesChanged = initialDateDraft === undefined ? Object.keys(editedDates).length > 0
     : dates.some(({ field }) => editedDates[field] !== initialDates?.[field]);
   const dirty = !applied && Boolean(datesChanged || drafts.some(draft => draft.action !== 'none') || review || retryId);
 
   const changes: ScheduleBulkDateChanges = {};
   const nextDates = { startDate: anchor.startDate, endDate: anchor.endDate, dueDate: anchor.dueDate, ...editedDates };
+  const transferredDatesStale = initialDateDraft !== undefined && anchor.version !== initialDateDraft.version;
   for (const { field } of dates) {
     const value = nextDates[field];
     if (value !== anchor[field]) changes[field] = value;
@@ -261,7 +263,7 @@ export function GanttRowScheduleEdit({
     if (request.current) { notify('일정 요청 결과를 확인한 뒤 닫아 주세요.', 'error'); return; }
     if (dirtyRef.current && !window.confirm(retryId
       ? '일정과 연결이 이미 변경됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
-      : initialDateDraftVersion !== undefined ? '이 편집 창에서 바꾼 내용과 검토 결과를 버리고 닫을까요?'
+      : initialDateDraft !== undefined ? '이 편집 창에서 바꾼 내용과 검토 결과를 버리고 닫을까요?'
         : '입력한 날짜와 연결, 검토 결과를 버리고 닫을까요?')) return;
     onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, false);
     onClose();
@@ -296,6 +298,16 @@ export function GanttRowScheduleEdit({
 
   function changeDate(field: DateField, value: string) {
     setEditedDates(previous => ({ ...previous, [field]: value || null }));
+    invalidate();
+  }
+
+  function adoptSavedDate(field: DateField) {
+    document.getElementById(`${uid}-${field}`)?.focus({ preventScroll: true });
+    setEditedDates(previous => {
+      const next = { ...previous };
+      delete next[field];
+      return next;
+    });
     invalidate();
   }
 
@@ -355,7 +367,7 @@ export function GanttRowScheduleEdit({
         method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify(payload), signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      setReview({ input, result, editGroups });
+      setReview({ input, result, editGroups, anchorVersion: payload.issue.expectedVersion });
       setClock(currentTime());
       focusAfter.current = 'review';
     } catch (cause) {
@@ -382,8 +394,8 @@ export function GanttRowScheduleEdit({
     } finally { finish(controller); }
   }
 
-  async function reflect(result: SchedulePasteApplyResult, controller: AbortController) {
-    try { await onApplied(result); }
+  async function reflect(appliedReview: AppliedReview, controller: AbortController) {
+    try { await onApplied(appliedReview.result, appliedReview.anchorVersion); }
     catch (cause) {
       if (controller.signal.aborted) return;
       setError(`일정과 연결은 적용되었습니다. ${errorMessage(cause)} 화면에 다시 반영할 수 있습니다.`);
@@ -393,7 +405,7 @@ export function GanttRowScheduleEdit({
 
   async function apply(previewId: string, recovering: boolean) {
     const current = currentTime();
-    if (recovering ? retryId !== previewId : applyId !== previewId || current >= expiry) {
+    if (review?.result.previewId !== previewId || (recovering ? retryId !== previewId : applyId !== previewId || current >= expiry)) {
       setClock(current);
       return;
     }
@@ -408,10 +420,11 @@ export function GanttRowScheduleEdit({
         !Array.isArray(recorded.updated) || !Array.isArray(recorded.warnings) ||
         !(recorded.updated.length || recorded.dependencyChanges)) throw new Error('일정 적용 응답을 확인할 수 없습니다.');
       setRetryId(null);
-      setApplied(recorded);
+      const appliedReview = { result: recorded, anchorVersion: review.anchorVersion };
+      setApplied(appliedReview);
       dirtyRef.current = false;
       onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, true);
-      await reflect(recorded, controller);
+      await reflect(appliedReview, controller);
     } catch (cause) {
       if (controller.signal.aborted) return;
       const rejected = definiteRejection(cause, recovering);
@@ -445,21 +458,31 @@ export function GanttRowScheduleEdit({
           onClick={close}><X size={20} aria-hidden="true" /></button>
       </header>
       {!currentIssue && <p className="schedule-paste-error gantt-row-edit-missing" role="alert">현재 프로젝트에서 업무를 찾을 수 없습니다.</p>}
-      {currentIssue && initialDateDraftVersion !== undefined && currentIssue.version !== initialDateDraftVersion &&
+      {currentIssue && transferredDatesStale &&
         <p className="schedule-paste-warnings gantt-row-edit-warning" role="status">업무가 변경됐습니다. 미리보기에서 저장된 날짜와 입력한 날짜를 비교해 주세요.</p>}
       <form className="schedule-paste-input" onSubmit={preview}>
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>날짜</legend>
           <div className="gantt-row-edit-columns">
-            {dates.map(({ field, label }) => <div className="gantt-row-edit-control" key={field}>
-              <label htmlFor={`${uid}-${field}`}>{label}</label>
-              <div className="gantt-row-edit-date">
-                <input id={`${uid}-${field}`} className="field" type="date" ref={field === (focusDate ?? 'startDate') ? initialDateInput : undefined}
-                  value={nextDates[field] ?? ''} max={MAX_CALENDAR_DATE} onChange={event => changeDate(field, event.currentTarget.value)} />
-                {nextDates[field] && <button className="btn btn-ghost" aria-label={`${label} 비우기`} title={`${label} 비우기`}
-                  type="button" onClick={() => changeDate(field, '')}><X size={15} aria-hidden="true" /></button>}
-              </div>
-            </div>)}
+            {dates.map(({ field, label }) => {
+              const conflicting = transferredDatesStale && Object.hasOwn(initialDates ?? {}, field) &&
+                anchor[field] !== initialDateDraft[field] && nextDates[field] !== anchor[field];
+              return <div className="gantt-row-edit-control" key={field}>
+                <label htmlFor={`${uid}-${field}`}>{label}</label>
+                <div className="gantt-row-edit-date">
+                  <input id={`${uid}-${field}`} className="field" type="date" ref={field === (focusDate ?? 'startDate') ? initialDateInput : undefined}
+                    value={nextDates[field] ?? ''} max={MAX_CALENDAR_DATE} aria-describedby={conflicting ? `${uid}-saved-${field}` : undefined}
+                    onChange={event => changeDate(field, event.currentTarget.value)} />
+                  {nextDates[field] && <button className="btn btn-ghost" aria-label={`${label} 비우기`} title={`${label} 비우기`}
+                    type="button" onClick={() => changeDate(field, '')}><X size={15} aria-hidden="true" /></button>}
+                </div>
+                {conflicting && <div className="gantt-row-edit-date-conflict">
+                  <span id={`${uid}-saved-${field}`}>현재 저장값 <strong>{anchor[field] ?? '미정'}</strong></span>
+                  <button className="btn btn-ghost" type="button" aria-label={`${label} 저장값 사용`}
+                    onClick={() => adoptSavedDate(field)}>저장값 사용</button>
+                </div>}
+              </div>;
+            })}
           </div>
           {showMissingDateSuggestion && <MissingDateSuggestion
             startDate={nextDates.startDate} endDate={nextDates.endDate} calendarMath={calendarMath}

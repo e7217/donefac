@@ -2262,14 +2262,14 @@ function ProjectGantt(props: GanttProps) {
   </div>
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
-      initialDates={rowScheduleEdit.initialDates} initialDateDraftVersion={rowScheduleEdit.inlineDraft?.source.version}
+      initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
       actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
-      onApplied={async result => {
+      onApplied={async (result, reviewedAnchorVersion) => {
         setUndoId(result.undoId);
         setScheduleWarnings(result.warnings);
         if (rowScheduleEdit.inlineDraft) {
           const saved = result.updated.find(issue => issue.id === rowScheduleEdit.issue.id)
-            ?? rowEditIssues.find(issue => issue.id === rowScheduleEdit.issue.id);
+            ?? rowEditIssues.find(issue => issue.id === rowScheduleEdit.issue.id && issue.version === reviewedAnchorVersion);
           if (saved) rowScheduleEdit.inlineDraft.accept(saved);
         }
         await refresh();

@@ -59,6 +59,21 @@
   padding-inline: 0.45rem;
 }
 
+.gantt-row-edit-date-conflict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.4rem;
+  margin-top: 0.3rem;
+  color: #74442c;
+  font-size: 0.8rem;
+}
+
+.gantt-row-edit-date-conflict .btn {
+  padding-inline: 0.4rem;
+  font-size: inherit;
+}
+
 .gantt-row-edit-existing,
 .gantt-row-edit-selection,
 .gantt-row-edit-suggestion,

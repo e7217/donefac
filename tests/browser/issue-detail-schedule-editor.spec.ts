@@ -222,6 +222,200 @@ test('티켓 상세 일정 미리보기 뒤 다른 작성자가 저장하면 날
   }
 });
 
+test('댓글 저장으로 갱신된 티켓에서 동료 날짜와 날짜 초안을 비교한 뒤 남은 제목을 저장한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const fixture = await createFixture(request);
+  try {
+    const anchor = await fixture.issue('갱신된 작업일과 날짜 초안을 비교할 업무', original);
+    const related = await fixture.issue('보드에서 숨긴 다른 업무', {});
+    const { details, scheduleButton, editor, location } = await openBoardTicket(page, anchor, related, fixture.actor.id);
+    const draftTitle = `${anchor.title} 제목 초안`;
+    const savedComment = '동료가 변경한 일정을 다시 불러오는 댓글';
+    const draftComment = '일정 검토 중에 이어서 작성할 댓글';
+    await field(details, '제목').fill(draftTitle);
+    await field(details, '시작일').fill(edited.startDate);
+
+    const remote = await json<Issue>(await request.patch(issuePath(anchor), {
+      headers: { 'X-Actor-Id': fixture.peer.id },
+      data: { expectedVersion: anchor.version, startDate: '2027-03-11', endDate: '2027-03-15', description: '동료가 먼저 저장한 설명' },
+    }));
+    await field(details, '댓글 내용').fill(savedComment);
+    await button(details, '댓글 등록').click();
+    await expect(details.getByText(savedComment, { exact: true })).toBeVisible();
+    await expect(details.getByText('다른 변경사항이 있습니다', { exact: true })).toBeVisible();
+    await expect(field(details, '시작일')).toHaveValue(edited.startDate);
+    await expect(field(details, '종료일')).toHaveValue(original.endDate);
+    await field(details, '댓글 내용').fill(draftComment);
+
+    await scheduleButton.click();
+    await expect(editor.getByRole('status').filter({ hasText: '업무가 변경됐습니다. 미리보기에서 저장된 날짜와 입력한 날짜를 비교해 주세요.' })).toBeVisible();
+    const start = field(editor, '시작일');
+    await expect(start).toHaveValue(edited.startDate);
+    await expect(start).toHaveAccessibleDescription(`현재 저장값 ${remote.startDate}`);
+    await expect(field(editor, '종료일')).toHaveValue(remote.endDate!);
+    const apply = button(editor, '일정과 연결 적용');
+    const preview = button(editor, '변경 미리보기');
+    await expect(apply).toBeDisabled();
+    expect((await readSchedule(request, anchor)).issue).toEqual(remote);
+
+    await button(editor, '시작일 저장값 사용').click();
+    await expect(start).toHaveValue(remote.startDate!);
+    await expect(preview).toBeDisabled();
+    await start.fill(edited.startDate);
+    await expect(apply).toBeDisabled();
+    const [previewResponse] = await Promise.all([waitPost(page, previewPath), preview.click()]);
+    expect(previewResponse.request().postDataJSON()).toEqual({
+      projectId: anchor.projectId, issue: { id: anchor.id, expectedVersion: remote.version }, changes: { startDate: edited.startDate },
+    });
+    expect(await json<SchedulePastePreview>(previewResponse)).toMatchObject({ errors: [], changes: [{
+      id: anchor.id, fromStart: remote.startDate, toStart: edited.startDate, fromEnd: remote.endDate, toEnd: remote.endDate,
+    }] });
+    await expect(editor.getByRole('region', { name: '일정과 연결 미리보기', exact: true })).toContainText(`${remote.startDate} → ${edited.startDate}`);
+    await expect(apply).toBeEnabled();
+    expect((await readSchedule(request, anchor)).issue).toEqual(remote);
+
+    const [applyResponse] = await Promise.all([waitPost(page, applyPath), apply.click()]);
+    const result = await json<SchedulePasteApplyResult>(applyResponse);
+    expect(result.updated).toMatchObject([{
+      id: anchor.id, version: remote.version + 1, title: anchor.title, description: remote.description,
+      startDate: edited.startDate, endDate: remote.endDate, dueDate: original.dueDate,
+    }]);
+    await expect(editor).toHaveCount(0);
+    await expect(scheduleButton).toBeFocused();
+    await expect(details.getByText('다른 변경사항이 있습니다', { exact: true })).toHaveCount(0);
+    await expect(field(details, '제목')).toHaveValue(draftTitle);
+    await expect(field(details, '설명')).toHaveValue(remote.description);
+    await expect(field(details, '시작일')).toHaveValue(edited.startDate);
+    await expect(field(details, '종료일')).toHaveValue(remote.endDate!);
+    await expect(field(details, '댓글 내용')).toHaveValue(draftComment);
+
+    const [saveResponse] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === issuePath(anchor) && response.request().method() === 'PATCH'),
+      button(details, '변경사항 저장').click(),
+    ]);
+    expect(saveResponse.request().postDataJSON()).toMatchObject({ expectedVersion: result.updated[0].version });
+    const saved = await json<Issue>(saveResponse);
+    expect(saved).toMatchObject({ id: anchor.id, version: remote.version + 2, title: draftTitle, description: remote.description,
+      startDate: edited.startDate, endDate: remote.endDate, dueDate: original.dueDate });
+    expect(await readSchedule(request, anchor)).toEqual({ issue: saved, links: [] });
+    const updatedDetails = page.getByRole('dialog', { name: draftTitle, exact: true });
+    await expect(field(updatedDetails, '댓글 내용')).toHaveValue(draftComment);
+    expect(page.url()).toBe(location);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('동료 날짜를 유지하고 선후행 연결만 저장한 뒤 남은 티켓 초안을 저장한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const fixture = await createFixture(request);
+  try {
+    const anchor = await fixture.issue('동료 일정 위에 선행만 연결할 업무', original);
+    const related = await fixture.issue('새로 연결할 선행 업무', { startDate: '2027-03-05', endDate: '2027-03-08' });
+    const { details, scheduleButton, editor } = await openBoardTicket(page, anchor, related, fixture.actor.id);
+    const draftTitle = `${anchor.title} 제목 초안`;
+    const peerDates = { startDate: '2027-03-11', endDate: '2027-03-15', dueDate: '2027-03-19' };
+    await field(details, '제목').fill(draftTitle);
+    await field(details, '시작일').fill(edited.startDate);
+    const remote = await json<Issue>(await request.patch(issuePath(anchor), {
+      headers: { 'X-Actor-Id': fixture.peer.id }, data: { expectedVersion: anchor.version, ...peerDates },
+    }));
+    await field(details, '댓글 내용').fill('선행을 연결하기 전에 동료 일정을 다시 불러오는 댓글');
+    await button(details, '댓글 등록').click();
+    const conflict = details.getByText('다른 변경사항이 있습니다', { exact: true });
+    await expect(conflict).toBeVisible();
+    await expect(field(details, '목표 마감일')).toHaveValue(original.dueDate);
+
+    await scheduleButton.click();
+    await button(editor, '시작일 저장값 사용').click();
+    await expect(field(editor, '시작일')).toHaveValue(peerDates.startDate);
+    await choosePredecessor(editor, related);
+    const [previewResponse] = await Promise.all([waitPost(page, previewPath), button(editor, '변경 미리보기').click()]);
+    expect(previewResponse.request().postDataJSON()).toEqual({ projectId: anchor.projectId,
+      issue: { id: anchor.id, expectedVersion: remote.version }, changes: {}, dependency: {
+        action: 'add', direction: 'predecessor', relatedIssue: { id: related.id, expectedVersion: related.version }, type: 'SS', lagDays: 1,
+      },
+    });
+    const preview = await json<SchedulePastePreview>(previewResponse);
+    expect(preview).toMatchObject({ errors: [], changes: [], dependencyChanges: [{
+      predecessorKey: related.key, successorKey: anchor.key, before: null, after: { type: 'SS', lagDays: 1 },
+    }] });
+    expect(await readSchedule(request, anchor)).toEqual({ issue: remote, links: [] });
+
+    const [applyResponse] = await Promise.all([waitPost(page, applyPath), button(editor, '일정과 연결 적용').click()]);
+    expect(applyResponse.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    expect(await json<SchedulePasteApplyResult>(applyResponse)).toMatchObject({ updated: [], dependencyChanges: 1 });
+    await expect(editor).toHaveCount(0);
+    await expect(scheduleButton).toBeFocused();
+    await expect(conflict).toHaveCount(0);
+    await expect(field(details, '제목')).toHaveValue(draftTitle);
+    await expect(field(details, '시작일')).toHaveValue(peerDates.startDate);
+    await expect(field(details, '종료일')).toHaveValue(peerDates.endDate);
+    await expect(field(details, '목표 마감일')).toHaveValue(peerDates.dueDate);
+    const { issue: afterLinks, links } = await readSchedule(request, anchor);
+    expect(afterLinks).toEqual(remote);
+    expect(links).toMatchObject([{ predecessorId: related.id, successorId: anchor.id, type: 'SS', lagDays: 1 }]);
+
+    const [saveResponse] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === issuePath(anchor) && response.request().method() === 'PATCH'),
+      button(details, '변경사항 저장').click(),
+    ]);
+    expect(saveResponse.request().postDataJSON()).toMatchObject({ expectedVersion: remote.version });
+    const saved = await json<Issue>(saveResponse);
+    expect(saved).toMatchObject({ id: anchor.id, version: remote.version + 1, title: draftTitle, ...peerDates });
+    expect(await readSchedule(request, anchor)).toEqual({ issue: saved, links });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('일정을 따로 저장해도 동료와 함께 바꾼 설명은 상세의 충돌 상태로 남는다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const fixture = await createFixture(request);
+  try {
+    const anchor = await fixture.issue('설명 충돌과 별도로 일정을 저장할 업무', original);
+    const related = await fixture.issue('보드에서 숨긴 다른 업무', {});
+    const { details, scheduleButton, editor } = await openBoardTicket(page, anchor, related, fixture.actor.id);
+    const draftDescription = '다른 작업을 끝낸 뒤 다시 검토할 설명 초안';
+    await field(details, '설명').fill(draftDescription);
+    await field(details, '시작일').fill(edited.startDate);
+    const remote = await json<Issue>(await request.patch(issuePath(anchor), {
+      headers: { 'X-Actor-Id': fixture.peer.id },
+      data: { expectedVersion: anchor.version, description: '동료와 겹치는 서버 설명' },
+    }));
+    await field(details, '댓글 내용').fill('겹치는 설명 변경을 다시 불러오는 댓글');
+    await button(details, '댓글 등록').click();
+    const conflict = details.getByText('다른 변경사항이 있습니다', { exact: true });
+    await expect(conflict).toBeVisible();
+
+    await scheduleButton.click();
+    await button(editor, '변경 미리보기').click();
+    const apply = button(editor, '일정과 연결 적용');
+    await expect(apply).toBeEnabled();
+    const [response] = await Promise.all([waitPost(page, applyPath), apply.click()]);
+    const result = await json<SchedulePasteApplyResult>(response);
+    expect(result.updated).toMatchObject([{ id: anchor.id, version: remote.version + 1,
+      description: remote.description, startDate: edited.startDate, endDate: original.endDate }]);
+    await expect(editor).toHaveCount(0);
+    await expect(conflict).toBeVisible();
+    await expect(field(details, '설명')).toHaveValue(draftDescription);
+    await expect(field(details, '시작일')).toHaveValue(edited.startDate);
+    await expect(button(details, '일정과 연결 되돌리기')).toBeVisible();
+    expect(await readSchedule(request, anchor)).toEqual({ issue: result.updated[0], links: [] });
+
+    const [rejected] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === issuePath(anchor) && response.request().method() === 'PATCH'),
+      button(details, '변경사항 저장').click(),
+    ]);
+    expect(rejected.request().postDataJSON()).toMatchObject({ expectedVersion: anchor.version });
+    expect(rejected.status()).toBe(409);
+    await expect(field(details, '설명')).toHaveValue(draftDescription);
+    expect(await readSchedule(request, anchor)).toEqual({ issue: result.updated[0], links: [] });
+  } finally {
+    await fixture.close();
+  }
+});
+
 test('티켓 상세에서 일정과 연결을 되돌리며 이후 날짜·제목·댓글 초안을 보존한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const fixture = await createFixture(request);

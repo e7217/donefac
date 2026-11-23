@@ -70,6 +70,44 @@ function editableIssue(issue: Issue, labels: string) {
   return { title: issue.title.trim(), description: issue.description, descriptionFormat: issue.descriptionFormat ?? 'plain', type: issue.type, status: issue.status, priority: issue.priority, assigneeId: issue.assigneeId, reporterId: issue.reporterId, collaboratorIds: issue.collaboratorIds, parentId: issue.parentId, labels: [...new Set(labels.split(',').map(value => value.trim()).filter(Boolean))], startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate, estimate: issue.estimate, plannedEffortMinutes: issue.plannedEffortMinutes ?? null, cycleId: issue.cycleId ?? null, moduleId: issue.moduleId ?? null, releaseId: issue.releaseId ?? null, customFields: issue.customFields || {} };
 }
 
+type IssueInputField = keyof ReturnType<typeof editableIssue>;
+const pairedIssueInputFields = [
+  ['description', 'descriptionFormat'],
+  ['type', 'status', 'customFields'],
+] as const satisfies readonly (readonly IssueInputField[])[];
+const groupedIssueInputFields = new Set<IssueInputField>([...scheduleDateFields, ...pairedIssueInputFields.flat()]);
+
+function equalIssueInput(left: unknown, right: unknown) {
+  // Custom fields contain a map of scalar or list values. The map's key order carries no edit intent.
+  const comparable = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : value;
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));
+}
+
+function mergeIssueFieldsAfterSchedule(base: Issue, draft: Issue, labels: string, saved: Issue) {
+  const before = editableIssue(base, base.labels.join(', '));
+  const local = editableIssue(draft, labels);
+  const latest = editableIssue(saved, saved.labels.join(', '));
+  const fields = Object.keys(before) as IssueInputField[];
+  const groups = [...pairedIssueInputFields, ...fields.filter(field => !groupedIssueInputFields.has(field)).map(field => [field])];
+  const next: Issue = { ...saved };
+  let nextLabels = saved.labels.join(', ');
+  function keepLocal<K extends IssueInputField>(field: K) {
+    next[field] = draft[field];
+    if (field === 'labels') nextLabels = labels;
+    if (field === 'cycleId') next.cycle = draft.cycle;
+    if (field === 'moduleId') next.module = draft.module;
+    if (field === 'releaseId') next.release = draft.release;
+  }
+  for (const group of groups) {
+    if (group.every(field => equalIssueInput(before[field], local[field]))) continue;
+    if (group.every(field => equalIssueInput(local[field], latest[field]))) continue;
+    if (group.some(field => !equalIssueInput(before[field], latest[field]))) return null;
+    for (const field of group) keepLocal(field);
+  }
+  return { draft: next, labels: nextLabels };
+}
+
 function isOpenBlockerError(cause: unknown) {
   return cause instanceof ApiError && cause.status === 422 && cause.details !== null &&
     typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'open_issue_blockers';
@@ -174,7 +212,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     });
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
-  const [rowScheduleEdit, setRowScheduleEdit] = useState<{ issue: Issue; initialDates: ScheduleBulkDateChanges } | null>(null);
+  const [rowScheduleEdit, setRowScheduleEdit] = useState<{
+    issue: Issue; initialDates: ScheduleBulkDateChanges; initialDateDraft?: Issue;
+  } | null>(null);
   const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; keepDateDraft: boolean } | null>(null);
   const [scheduleUndoId, setScheduleUndoId] = useState<string | null>(null);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
@@ -282,17 +322,20 @@ function IssuePanelContent(props: IssuePanelProps) {
     setScheduleReflection(null);
     if (issue && draft && baseDraft && issue.projectId === baseDraft.projectId && draft.version === baseDraft.version) {
       const { anchorVersion, keepDateDraft } = scheduleReflection;
-      const expectedVersion = baseDraft.version + (anchorVersion === null ? 0 : 1);
-      // The reviewed schedule is the only change to this form's saved version.
-      if (issue.version === expectedVersion && (anchorVersion === null || issue.version === anchorVersion)) {
-        const nextDraft = { ...draft, version: issue.version, updatedAt: issue.updatedAt };
+      // The receipt proves the saved anchor version. Leave newer workspace changes for an explicit review.
+      if (issue.version >= baseDraft.version && issue.version === (anchorVersion ?? baseDraft.version)) {
+        const merged = mergeIssueFieldsAfterSchedule(baseDraft, draft, labels, issue);
+        const nextDraft = merged?.draft ?? { ...draft };
         for (const field of scheduleDateFields) {
-          if (keepDateDraft && draft[field] !== baseDraft[field]) continue;
-          if (field === 'dueDate') nextDraft.dueDate = issue.dueDate;
-          else nextDraft[field] = issue[field];
+          nextDraft[field] = keepDateDraft && draft[field] !== baseDraft[field] ? draft[field] : issue[field];
         }
         setDraft(nextDraft);
-        setBaseDraft(issue);
+        setBaseDraft(merged ? issue : { ...baseDraft, startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate });
+        if (merged) {
+          setLabels(merged.labels);
+          setConflict(false);
+          if (conflict) setError(null);
+        } else setConflict(true);
       }
     }
   }
@@ -483,20 +526,25 @@ function IssuePanelContent(props: IssuePanelProps) {
       notify('현재 요청이 끝난 뒤 일정과 연결을 편집해 주세요.', 'error');
       return;
     }
+    if (baseDraft.projectId !== issue.projectId) {
+      notify('업무가 다른 프로젝트로 이동했습니다. 최신 업무를 확인한 뒤 일정을 편집해 주세요.', 'error');
+      return;
+    }
     const initialDates: ScheduleBulkDateChanges = {};
     for (const field of scheduleDateFields) {
       if (draft[field] !== baseDraft[field]) initialDates[field] = draft[field] ?? null;
     }
-    setRowScheduleEdit({ issue, initialDates });
+    setRowScheduleEdit({ issue: savedRelationIssue, initialDates,
+      initialDateDraft: Object.keys(initialDates).length ? baseDraft : undefined });
   }
-  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean) {
+  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean, reviewedAnchorVersion?: number) {
     await refresh();
-    setScheduleReflection({ anchorVersion: result.updated.find(value => value.id === issueId)?.version ?? null, keepDateDraft });
+    setScheduleReflection({ anchorVersion: result.updated.find(value => value.id === issueId)?.version ?? reviewedAnchorVersion ?? null, keepDateDraft });
     setScheduleWarnings(result.warnings);
   }
-  async function reflectRowScheduleEdit(result: SchedulePasteApplyResult) {
+  async function reflectRowScheduleEdit(result: SchedulePasteApplyResult, reviewedAnchorVersion: number) {
     setScheduleUndoId(result.undoId);
-    await reflectScheduleChange(result, false);
+    await reflectScheduleChange(result, false, reviewedAnchorVersion);
     closeRowScheduleEdit();
     const datesChanged = result.updated.length > 0;
     const linksChanged = Boolean(result.dependencyChanges);
@@ -1096,6 +1144,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link}
       onClose={closeScheduleIssueCreation} onScheduleIssueCreated={focusCreatedScheduleIssue} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
+      initialDateDraft={rowScheduleEdit.initialDateDraft}
       issues={data.issues} dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
