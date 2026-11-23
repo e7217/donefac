@@ -792,6 +792,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | 요청 | 동작 |
 | --- | --- |
 | `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑과 확인한 Jira·Confluence 추가 대상 |
+| `GET /api/migrations/identity-roster` | 이메일 후보 검토에 사용할 현재 Teamspace 팀원 목록 |
 | `POST /api/migrations/mapping/export` | `{configuration}`으로 다시 사용할 수 있는 이관 매핑 JSON 반환 |
 | `POST /api/migrations/mapping/import` | `{mapping}`의 원본과 현재 워크스페이스를 대조해 `{options, configuration}` 반환 |
 | `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 업무·문서 추가 계획과 보존·누락 진단 검토 |
@@ -805,6 +806,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
+
+`options.identities[]`의 `email`은 수동 매핑에서 참고할 원본 표시 값이다. 선택적으로 제공하는 `emailEvidence`에는 비교 가능한 `email`을 담고, 원본 계정과 프로필 사이의 연결을 확인한 경우 `accountId`도 담는다. 주소 근거가 불명확하면 `null`을 반환한다. 브라우저는 후보를 열거나 반영할 때 현재 팀원 목록을 조회한다. 사용자가 확인한 항목은 기존 `configuration.users`에 팀원 ID로 저장하며 이후 기존 미리보기·적용 절차를 사용한다.
 
 Confluence 본문의 `/display/SPACE/제목`, `/pages/viewpage.action?pageId=…`, `/spaces/SPACE/pages/…` 주소는 `sourceBaseUrls`의 서버와 설치 경로로 대조한다. 상대 주소는 원래 패키지의 설정을 사용한다. 다른 원본을 가리키는 절대 주소는 입력한 서버·설치 경로에서 하나의 원본 페이지로 확인될 때 연결한다. 원본 관계에 페이지 ID가 명시됐으면 URL의 대상과도 일치해야 한다. 추가 이관이나 변경분 반영은 현재 연결을 확인한 기존 페이지도 대상으로 사용할 수 있다. 대상을 확인할 수 없으면 원본 주소와 진단을 남긴다. 페이지의 진단은 `UNRESOLVED_REFERENCE`, 절의 진단은 `SECTION_LINK_UNRESOLVED`다.
 

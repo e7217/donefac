@@ -10,6 +10,7 @@ import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDa
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey } from './migration-jira-hierarchy.js';
+import { observeJiraIdentityEmail } from './migration-identity-email.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType } from './migration-jira-relations.js';
 
@@ -272,7 +273,29 @@ class Context{
   }
   warn(code:string,message:string,recordId:string|null=null,path:string|null=null,severity:'info'|'warning'|'error'='warning'){diagnostic(this.dataset,{severity,code,message,recordId,path});}
   unsupported(type:string,count=1){const existing=this.dataset.unsupported.find(value=>value.type===type);if(existing)existing.count+=count;else this.dataset.unsupported.push({type,count});}
-  identity(value:unknown):string|null{if(typeof value==='string'){if(value)this.ensure('identity',value,{title:value,metadata:{identityIncomplete:true}});return value||null;}const input=obj(value),id=str(input.accountId||input.key||input.name||input.username||input.id);if(!id)return null;const profileName=str(input.displayName||input.fullname||input.name||input.username),profile=selected(input,['accountId','key','name','username','emailAddress','email','active']),existing=this.byId.get(`identity:${id}`);if(existing){if(profileName&&existing.metadata.identityIncomplete){existing.title=profileName;existing.metadata.identityIncomplete=false;}Object.assign(existing.metadata,profile);return id;}const identity=this.ensure('identity',id,{title:profileName||id,metadata:{...profile,identityIncomplete:!profileName}})!;return identity.sourceId;}
+  identity(value: unknown): string | null {
+    if (typeof value === 'string') {
+      if (value) this.ensure('identity', value, { title: value, metadata: { identityIncomplete: true } });
+      return value || null;
+    }
+    const input = obj(value);
+    const id = str(input.accountId || input.key || input.name || input.username || input.id);
+    if (!id) return null;
+
+    const profileName = str(input.displayName || input.fullname || input.name || input.username);
+    const profile = selected(input, ['accountId', 'key', 'name', 'username', 'emailAddress', 'email', 'active']);
+    const existing = this.byId.get(`identity:${id}`);
+    const identity = existing ?? this.put('identity', id, { title: profileName || id, metadata: { ...profile, identityIncomplete: !profileName } });
+    if (existing) {
+      if (profileName && existing.metadata.identityIncomplete) {
+        existing.title = profileName;
+        existing.metadata.identityIncomplete = false;
+      }
+      Object.assign(existing.metadata, profile);
+    }
+    observeJiraIdentityEmail(identity, [input.emailAddress, input.email]);
+    return identity.sourceId;
+  }
   field(id:string,name:string,type='unknown'){return this.ensure('field',id,{title:name,metadata:{fieldType:type,...(/^(?:csv|named):/.test(id)?{syntheticId:true}:{})}})!;}
   option(fieldId:string,value:unknown):string|null{const input=obj(value),id=str(input.id)||str(input.value)||str(input.name)||str(value);if(!id)return null;const sourceId=`${fieldId}:${id}`;this.ensure('option',sourceId,{title:str(input.name||input.value)||id,containerId:fieldId,metadata:{originalId:str(input.id)||null,syntheticId:!str(input.id)},references:ref('field',fieldId,'field')});return sourceId;}
   date(value:unknown,recordId?:string):string|null{const result=str(value);if(!result)return null;if(!/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(result))this.warn('DATE_TIMEZONE_UNRESOLVED','원본 시각의 시간대 또는 상대 날짜 기준을 확정하지 않았습니다.',recordId||null);return result;}
@@ -771,10 +794,33 @@ function adminXmlDateValue(node: LegacyXmlNode, value: ObjectValue): unknown {
 
 function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   context.dataset.source.declaredVersion=root.attributes.version||null;
-  const rows=root.children,values=rows.map(node=>({name:node.name,value:entityValues(node),node})),appUsers=new Map(values.filter(row=>row.name==='ApplicationUser').map(row=>[str(row.value.lowerUserName),str(row.value.userKey)]));
+  const rows=root.children,values=rows.map(node=>({name:node.name,value:entityValues(node),node}));
+  const appUsers = new Map<string, string>();
+  const ambiguousUsernames = new Set<string>();
+  for (const { name, value } of values) {
+    if (name !== 'ApplicationUser') continue;
+    const username = str(value.lowerUserName), key = str(value.userKey);
+    if (appUsers.has(username) && appUsers.get(username) !== key) ambiguousUsernames.add(username);
+    appUsers.set(username, key);
+  }
   const projectedFields = new Map<string,JiraDateRole>();
   const rawIssueParents = new Map<LegacyRecord, string | null>();
-  for(const{ name,value:v }of values)if(['User','OSUser','CwdUser'].includes(name)){const username=str(v.userName||v.name||v.lowerUserName),id=appUsers.get(username.toLowerCase())||str(v.userKey)||username||str(v.id);context.ensure('identity',id,{title:str(v.displayName||v.fullName)||username||id,createdAt:context.date(v.createdDate),updatedAt:context.date(v.updatedDate),metadata:{...selected(v,['id','userName','name','lowerUserName','displayName','fullName','emailAddress','email','active']),identityIncomplete:false}});}
+  for (const { name, value, node } of values) {
+    if (!['User', 'OSUser', 'CwdUser'].includes(name)) continue;
+    const username = str(value.userName || value.name || value.lowerUserName);
+    const lowerName = username.toLowerCase();
+    const id = appUsers.get(lowerName) || str(value.userKey) || username || str(value.id);
+    const identity = context.ensure('identity', id, {
+      title: str(value.displayName || value.fullName) || username || id,
+      createdAt: context.date(value.createdDate), updatedAt: context.date(value.updatedDate),
+      metadata: { ...selected(value, ['id', 'userName', 'name', 'lowerUserName', 'displayName', 'fullName', 'emailAddress', 'email', 'active']), identityIncomplete: false },
+    });
+    if (!identity) continue;
+    const emailValues = ['emailAddress', 'email'].flatMap(field => [node.attributes[field],
+      ...children(node, field).map(element => element.children.length || Object.keys(element.attributes).length ? false : element.text)]);
+    if (ambiguousUsernames.has(lowerName) && emailValues.some(email => email === false || email?.trim())) emailValues.push(false);
+    observeJiraIdentityEmail(identity, emailValues);
+  }
   for(const[username,id]of appUsers)context.ensure('identity',id,{title:username||id,metadata:{key:id,name:username,identityIncomplete:true}});
   const resolveActor=(value:unknown):string|null=>{const original=str(value);return context.identity(appUsers.get(original.toLowerCase())||original);};
   for(const{name,value:v,node}of values){if(name==='Project'){

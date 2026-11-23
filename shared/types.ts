@@ -290,7 +290,10 @@ export interface LegacyRecordPage { records:LegacyRecordSummary[]; total:number;
 export interface LegacyDiagnosticPage { diagnostics:LegacyDiagnostic[]; total:number; offset:number; limit:number }
 export interface MigrationContainerOption { id:string;packageId:string;sourceProjectId:string;name:string;proposedKey:string;issueCount:number;documentCount:number }
 export interface MigrationValueOption { id:string;packageId:string;sourceValue:string;label:string }
-export interface MigrationIdentityOption extends MigrationValueOption { email:string|null }
+export interface MigrationIdentityOption extends MigrationValueOption {
+  email: string | null;
+  emailEvidence?: { email: string; accountId?: string } | null;
+}
 export interface MigrationFieldOption extends MigrationValueOption {
   suggestedKind: CustomFieldKind | 'archive';
   projectedDate?: 'startDate' | 'endDate';

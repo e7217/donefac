@@ -27,6 +27,45 @@ test('options are stable opaque IDs scoped by package and include an explicit ed
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
 });
 
+test('migration options distinguish source email consensus from legacy claims and preserve profile account identity', () => {
+  const earlier = pkg('old-jira', 'jira', [
+    record('identity', 'unchecked', { metadata: { emailAddress: 'Unchecked@Example.Test' } }),
+    record('identity', 'no-email@example.test'),
+  ]);
+  const fresh = pkg('fresh-jira', 'jira', []);
+  fresh.dataset = parseJira(new Map([['entities.xml', Buffer.from(`<entity-engine-xml>
+    <User id="1" userName="checked" emailAddress=" Checked@Example.Test "/>
+    <User id="2" userName="conflicted" emailAddress="first@example.test" email="second@example.test"/>
+  </entity-engine-xml>`)]]), 'fresh-jira');
+
+  const wiki = pkg('wiki-identities', 'confluence', []);
+  wiki.dataset = parseConfluence(new Map([['entities.xml', Buffer.from(`<hibernate-generic>
+    <object class="ConfluenceUserImpl"><id name="key">linked</id><property name="name">profile</property></object>
+    <object class="UserInfo"><id name="id">1</id><property name="username">profile</property><property name="email"> Profile@Example.Test </property></object>
+    <object class="ConfluenceUserImpl"><id name="key">conflicting</id><property name="name">older</property><property name="emailAddress">old@example.test</property></object>
+    <object class="UserInfo"><id name="id">2</id><property name="username">older</property><property name="email">new@example.test</property></object>
+    <object class="ConfluenceUserImpl"><id name="key">ambiguous-1</id><property name="name">same</property></object>
+    <object class="ConfluenceUserImpl"><id name="key">ambiguous-2</id><property name="name">same</property></object>
+    <object class="UserInfo"><id name="id">3</id><property name="username">same</property><property name="email">same@example.test</property></object>
+    <object class="ConfluenceUserImpl"><id name="key">direct</id><property name="name">different</property><property name="email"> DIRECT@example.test </property><property name="emailAddress">direct@example.test</property></object>
+  </hibernate-generic>`)]]), 'wiki-identities');
+
+  const options = buildMigrationOptions([earlier, fresh, wiki]);
+  const identities = new Map(options.identities.map(identity => [identity.sourceValue, identity]));
+  assert.equal(identities.get('unchecked')!.email, 'Unchecked@Example.Test');
+  assert.equal(identities.get('unchecked')!.emailEvidence, null);
+  assert.equal(identities.get('no-email@example.test')!.emailEvidence, undefined);
+  assert.deepEqual(identities.get('checked')!.emailEvidence, { email: 'checked@example.test' });
+  assert.equal(identities.get('conflicted')!.emailEvidence, null);
+  assert.equal(identities.get('linked')!.email, null);
+  assert.deepEqual(identities.get('linked')!.emailEvidence, { email: 'profile@example.test', accountId: 'linked' });
+  assert.deepEqual(identities.get('UserInfo:1')!.emailEvidence, identities.get('linked')!.emailEvidence);
+  assert.deepEqual(identities.get('direct')!.emailEvidence, { email: 'direct@example.test', accountId: 'direct' });
+  for (const id of ['conflicting', 'UserInfo:2', 'UserInfo:3']) assert.equal(identities.get(id)!.emailEvidence, null);
+  for (const id of ['ambiguous-1', 'ambiguous-2']) assert.equal(identities.get(id)!.emailEvidence, undefined);
+  assert.ok(Object.values(options.defaultConfiguration.users).every(value => value === null));
+});
+
 function workflowIssue(id: string, container: string, status: string, label: string): LegacyRecord {
   return issue(id, { containerId: container, metadata: {
     key: `OLD-${id}`, fields: { status: { id: status, name: label }, issuetype: { id: 'bug', name: '버그' } },

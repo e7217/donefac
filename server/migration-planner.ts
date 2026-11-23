@@ -25,6 +25,7 @@ import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.j
 import { JIRA_COMPONENTS_FIELD_ID, JIRA_RAW_COMPONENTS_FIELD_ID } from './legacy-import-jira-components.js';
 import { buildJiraComponentOptions } from './migration-jira-component-options.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
+import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './migration-identity-email.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
@@ -111,7 +112,16 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
       }
     }
     for(const[sourceProjectId,count]of containerRows){const row=index.get(`project:${sourceProjectId}`),name=row?.title||(sourceProjectId==='__unassigned__'?'원본 프로젝트 미지정':sourceProjectId);containers.push({id:optionId(pkg.summary.id,'container',sourceProjectId),packageId:pkg.summary.id,sourceProjectId,name,proposedKey:proposedKey(string(row?.metadata.key||row?.metadata.pkey||row?.metadata.spaceKey)||sourceProjectId,pkg.summary.id+sourceProjectId),...count});}
-    for(const id of identityIds){const row=index.get(`identity:${id}`);identities.push({id:optionId(pkg.summary.id,'identity',id),packageId:pkg.summary.id,sourceValue:id,label:row?.title||id,email:string(row?.metadata.emailAddress||row?.metadata.email)||null});}
+    const isJira = pkg.dataset.source.product === 'jira';
+    const confluenceEmailEvidence = isJira ? undefined : confluenceIdentityEmailEvidence(index);
+    for (const id of identityIds) {
+      const row = index.get(`identity:${id}`);
+      const emailEvidence = isJira ? jiraIdentityEmailEvidence(row) : confluenceEmailEvidence?.get(id);
+      identities.push({ id: optionId(pkg.summary.id, 'identity', id), packageId: pkg.summary.id, sourceValue: id,
+        label: row?.title || id, email: string(row?.metadata.emailAddress || row?.metadata.email) || null,
+        ...(emailEvidence !== undefined ? { emailEvidence } : {}),
+      });
+    }
     for(const[value,label]of statusValues)statuses.push({id:optionId(pkg.summary.id,'status',value),packageId:pkg.summary.id,sourceValue:value,label});for(const[value,label]of typeValues)issueTypes.push({id:optionId(pkg.summary.id,'issuetype',value),packageId:pkg.summary.id,sourceValue:value,label});
   }
   const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:Object.fromEntries(statuses.map(state=>[state.id,suggestCategory(state.label)])),issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};

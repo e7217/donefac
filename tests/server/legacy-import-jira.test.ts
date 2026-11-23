@@ -158,6 +158,50 @@ test('Jira JSON registers custom user identities without inferring users from or
   assert.equal(values['named:비움'], null);
 });
 
+test('Jira REST email evidence stays uncertain after conflicting or malformed claims for the same account', () => {
+  const row = (id: number, accountId: string, emails: Record<string, unknown>) => ({ id, key: `OLD-${id}`, fields: {
+    project: { id: '20', key: 'OLD' }, summary: `업무 ${id}`, assignee: { accountId, displayName: accountId, ...emails },
+  } });
+  const data = parse('rest.json', JSON.stringify({ issues: [
+    row(1, 'agree', { emailAddress: ' BEARER@example.test ' }),
+    row(2, 'agree', { emailAddress: null }),
+    row(3, 'agree', { email: 'bearer@EXAMPLE.TEST' }),
+    row(4, 'conflict', { emailAddress: 'first@example.test' }),
+    row(5, 'conflict', { emailAddress: 'later@example.test' }),
+    row(6, 'conflict', { emailAddress: '' }),
+    row(7, 'conflict', { emailAddress: 'first@example.test' }),
+    row(8, 'malformed', { email: { address: 'real@example.test' } }),
+    row(9, 'malformed', { emailAddress: 'real@example.test' }),
+    row(10, 'simultaneous', { emailAddress: 'a@example.test', email: 'b@example.test' }),
+    row(11, 'only-an-id@example.test', {}),
+  ] }));
+  assert.equal(find(data, 'identity:agree').metadata.jiraIdentityEmailEvidence, 'bearer@example.test');
+  for (const id of ['conflict', 'malformed', 'simultaneous']) {
+    assert.equal(find(data, `identity:${id}`).metadata.jiraIdentityEmailEvidence, null);
+  }
+  assert.equal(find(data, 'identity:conflict').metadata.emailAddress, 'first@example.test');
+  assert.ok(!Object.hasOwn(find(data, 'identity:only-an-id@example.test').metadata, 'jiraIdentityEmailEvidence'));
+});
+
+test('Jira administrator export checks every email observation and withholds an ambiguous account alias', () => {
+  const data = parse('entities.xml', `<entity-engine-xml>
+    <ApplicationUser lowerUserName="known" userKey="known-key"/>
+    <CwdUser id="1" userName="known" emailAddress="Known@Example.Test"/>
+    <OSUser id="2" userName="known"><email> known@example.test </email></OSUser>
+    <CwdUser id="3" userName="competing" emailAddress="first@example.test"/>
+    <User id="4" userName="competing" email="later@example.test"/>
+    <User id="5" userName="mixed" emailAddress="one@example.test"><emailAddress>two@example.test</emailAddress></User>
+    <ApplicationUser lowerUserName="alias" userKey="reused-1"/>
+    <ApplicationUser lowerUserName="alias" userKey="reused-2"/>
+    <User id="6" userName="alias" email="member@example.test"/>
+  </entity-engine-xml>`);
+  assert.equal(find(data, 'identity:known-key').metadata.jiraIdentityEmailEvidence, 'known@example.test');
+  assert.equal(find(data, 'identity:known-key').metadata.emailAddress, 'Known@Example.Test');
+  for (const id of ['competing', 'mixed', 'reused-2']) {
+    assert.equal(find(data, `identity:${id}`).metadata.jiraIdentityEmailEvidence, null);
+  }
+});
+
 test('Jira reporter evidence distinguishes the creator, explicit blanks and incomplete source identities', () => {
   const creator = { accountId: 'creator-a', displayName: '원본 작성자' };
   const rest = parse('issues.json', JSON.stringify({ issues: [

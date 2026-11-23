@@ -1251,6 +1251,10 @@ export class MigrationService {
       const packages = this.loadPackages(this.packageIds(req.query.packageId), true);
       res.json(this.optionsForPackages(packages));
     });
+    app.get('/api/migrations/identity-roster', (req, res) => {
+      hooks.actor(req);
+      res.set('Cache-Control', 'no-store').json(this.store.all<User>('users'));
+    });
     app.post('/api/migrations/mapping/export', (req, res) => {
       if (Object.keys(req.query).length) return invalidMigrationMapping();
       hooks.actor(req);

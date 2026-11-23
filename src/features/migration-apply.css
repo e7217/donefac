@@ -106,6 +106,42 @@
 .migration-original-heading p { margin: .3rem 0 0; font-size: .8125rem; color: #516965; }
 .migration-original-dialog .legacy-record-detail { margin-top: .9rem; }
 
+.migration-email-review .migration-paged { margin-top: .7rem; }
+.migration-email-choice {
+  display: grid;
+  grid-template-columns: auto repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: .35rem .7rem;
+  padding: .65rem 0;
+  border-bottom: 1px solid #dbe7e4;
+  font-size: .875rem;
+  cursor: pointer;
+}
+.migration-email-choice input {
+  width: 1rem;
+  height: 1rem;
+  margin: .15rem 0 0;
+  accent-color: #177c72;
+}
+.migration-email-choice span { min-width: 0; overflow-wrap: anywhere; }
+.migration-email-choice small { display: block; margin: .1rem 0 0; color: #516965; }
+.migration-email-target { padding-inline-start: .7rem; border-inline-start: 1px solid #dbe7e4; }
+.migration-email-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: .5rem;
+  margin-top: .85rem;
+}
+.migration-email-actions span { margin-inline-end: auto; font-size: .8125rem; color: #516965; }
+
+@media (max-width: 500px) {
+  .migration-email-choice { grid-template-columns: auto minmax(0, 1fr); }
+  .migration-email-target { grid-column: 2; }
+  .migration-email-actions span { flex-basis: 100%; }
+}
+
 .migration-reconciliation-entry { margin: .75rem 0; }
 .migration-reconciliation { margin-top: .75rem; border: 1px solid #cbded8; border-radius: .65rem; padding: 1rem; background: #fff; }
 .migration-reconciliation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
