@@ -95,6 +95,169 @@ test('두 브라우저의 실제 공동 편집이 중복 초기화 없이 합쳐
   } finally { await Promise.all(contexts.map(context => context.close())); }
 });
 
+test('공동 편집의 다른 문서 속성은 서로 보존하고 제목을 다르게 바꾸면 충돌을 알린다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  test.setTimeout(75_000);
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [first, peer] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(first, fixture.document), open(peer, fixture.document)]);
+    await Promise.all([synced(first), synced(peer)]);
+    const title = (page: Page) => page.getByRole('textbox', { name: '문서 제목', exact: true });
+    const save = (page: Page) => page.getByRole('button', { name: '속성 저장', exact: true });
+    const path = `/api/documents/${fixture.document.id}`;
+    const saves = (page: Page) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'PATCH');
+    const firstWrites: unknown[] = [];
+    first.on('request', request => {
+      if (new URL(request.url()).pathname === path && request.method() === 'PATCH') firstWrites.push(request.postDataJSON());
+    });
+
+    const draftTitle = `${fixture.document.title} 제목 초안`;
+    const draftLabel = '새 문서 라벨 초안';
+    await title(first).fill(draftTitle);
+    await first.getByRole('textbox', { name: '문서 라벨', exact: true }).fill(draftLabel);
+    await first.getByRole('button', { name: '라벨 추가', exact: true }).click();
+    const details = peer.getByRole('complementary', { name: '문서 상세 정보', exact: true });
+    await details.getByRole('button', { name: '연결', exact: true }).click();
+    await details.getByRole('combobox', { name: '작성 상태', exact: true }).selectOption('published');
+    const [peerSave] = await Promise.all([saves(peer), save(peer).click()]);
+    expect(peerSave.status()).toBe(200);
+    await append(peer, ' 동료의 본문 편집');
+    await synced(peer);
+    await expect(first.locator('.docs-live-prose')).toContainText('동료의 본문 편집');
+    await expect(first.locator('.docs-status-pill')).toHaveText('공유 표시');
+    await expect(first.locator('.docs-conflict')).toHaveCount(0);
+    await expect(title(first)).toHaveValue(draftTitle);
+    await expect(first.getByRole('button', { name: `라벨 삭제: ${draftLabel}`, exact: true })).toBeVisible();
+    const reviewed = await canonical(fixture);
+    expect(reviewed).toMatchObject({ title: fixture.document.title, status: 'published', plainText: `${fixture.initialText} 동료의 본문 편집` });
+    expect(firstWrites).toEqual([]);
+
+    const [merged] = await Promise.all([saves(first), save(first).click()]);
+    expect(merged.status(), await merged.text()).toBe(200);
+    expect(firstWrites).toHaveLength(1);
+    expect(firstWrites[0]).toMatchObject({ expectedVersion: reviewed.version, title: draftTitle, labels: [draftLabel] });
+    expect(firstWrites[0]).not.toHaveProperty('content');
+    expect(await canonical(fixture)).toMatchObject({ version: reviewed.version + 1, title: draftTitle, labels: [draftLabel],
+      status: reviewed.status, content: reviewed.content, plainText: reviewed.plainText });
+    await expect(first.locator('.docs-save-state')).toHaveText('동기화됨');
+    await expect(title(peer)).toHaveValue(draftTitle);
+
+    const localTitle = `${draftTitle} 내 새 제목`, peerTitle = `${draftTitle} 동료가 저장한 제목`;
+    await title(first).fill(localTitle);
+    await title(peer).fill(peerTitle);
+    const [overlap] = await Promise.all([saves(peer), save(peer).click()]);
+    expect(overlap.status(), await overlap.text()).toBe(200);
+    await expect(first.locator('.docs-conflict')).toBeVisible();
+    await expect(title(first)).toHaveValue(localTitle);
+    await first.getByRole('button', { name: '서버 최신본 보기', exact: true }).click();
+    await expect(first.locator('.docs-latest-preview')).toContainText(peerTitle);
+    expect(firstWrites).toHaveLength(1);
+    const savedPeerTitle = await canonical(fixture);
+    expect(savedPeerTitle).toMatchObject({ title: peerTitle, labels: [draftLabel], status: reviewed.status, plainText: reviewed.plainText });
+
+    const choice = first.getByRole('group', { name: '제목', exact: true });
+    const keepMine = choice.getByRole('radio', { name: /내 편집/ });
+    const useServer = choice.getByRole('radio', { name: /서버 저장값/ });
+    const continueEditing = first.getByRole('button', { name: '선택한 내용으로 편집 계속', exact: true });
+    await expect(choice).toContainText(localTitle);
+    await expect(choice).toContainText(peerTitle);
+    await expect(keepMine).not.toBeChecked();
+    await expect(useServer).not.toBeChecked();
+    await expect(continueEditing).toBeDisabled();
+    await expect(save(first)).toBeDisabled();
+    await first.keyboard.press('Control+s');
+    await keepMine.check();
+    await continueEditing.click();
+    await expect(first.locator('.docs-conflict')).toHaveCount(0);
+    await expect(title(first)).toHaveValue(localTitle);
+    await expect(save(first)).toBeEnabled();
+    expect(firstWrites).toHaveLength(1);
+    expect(await canonical(fixture)).toEqual(savedPeerTitle);
+
+    const [resolved] = await Promise.all([saves(first), save(first).click()]);
+    expect(resolved.status(), await resolved.text()).toBe(200);
+    expect(firstWrites).toHaveLength(2);
+    expect(firstWrites[1]).toMatchObject({ expectedVersion: savedPeerTitle.version, title: localTitle });
+    expect(firstWrites[1]).not.toHaveProperty('content');
+    expect(await canonical(fixture)).toMatchObject({ version: savedPeerTitle.version + 1, title: localTitle,
+      labels: [draftLabel], status: reviewed.status, content: reviewed.content, plainText: reviewed.plainText });
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
+test('늦은 문서 저장 응답 뒤에도 이어서 입력한 라벨과 동료의 이후 변경을 보존한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  test.setTimeout(75_000);
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } })));
+  let releaseResponse = () => {};
+  const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [first, peer] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(first, fixture.document), open(peer, fixture.document)]);
+    await Promise.all([synced(first), synced(peer)]);
+    const title = (page: Page) => page.getByRole('textbox', { name: '문서 제목', exact: true });
+    const save = (page: Page) => page.getByRole('button', { name: '속성 저장', exact: true });
+    const path = `/api/documents/${fixture.document.id}`;
+    const saves = (page: Page) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'PATCH');
+    let observeCommit = () => {};
+    const commitObserved = new Promise<void>(resolve => { observeCommit = resolve; });
+    let held = false;
+    await first.route(url => url.pathname === path, async route => {
+      if (held || route.request().method() !== 'PATCH') { await route.continue(); return; }
+      held = true;
+      const response = await route.fetch();
+      observeCommit();
+      await responseGate;
+      await route.fulfill({ response });
+    });
+
+    const submittedTitle = `${fixture.document.title} 먼저 저장한 제목`;
+    const followUpLabel = '응답을 기다리며 추가한 라벨';
+    await title(first).fill(submittedTitle);
+    await save(first).click();
+    await commitObserved;
+    await expect(first.locator('.docs-save-state')).toHaveText('저장 중');
+    await expect(title(peer)).toHaveValue(submittedTitle);
+    await first.getByRole('textbox', { name: '문서 라벨', exact: true }).fill(followUpLabel);
+    await first.getByRole('button', { name: '라벨 추가', exact: true }).click();
+
+    const details = peer.getByRole('complementary', { name: '문서 상세 정보', exact: true });
+    await details.getByRole('button', { name: '연결', exact: true }).click();
+    await details.getByRole('combobox', { name: '작성 상태', exact: true }).selectOption('published');
+    const [peerSave] = await Promise.all([saves(peer), save(peer).click()]);
+    expect(peerSave.status()).toBe(200);
+    await append(peer, ' 응답을 기다리는 사이 저장된 본문');
+    await synced(peer);
+    await expect(first.locator('.docs-live-prose')).toContainText('응답을 기다리는 사이 저장된 본문');
+    const latest = await canonical(fixture);
+    expect(latest).toMatchObject({ title: submittedTitle, status: 'published' });
+
+    const oldReceipt = saves(first);
+    releaseResponse();
+    const response = await oldReceipt;
+    expect(response.status()).toBe(200);
+    expect(((await response.json()) as DocPage).version).toBeLessThan(latest.version);
+    await expect(first.locator('.docs-conflict')).toHaveCount(0);
+    await expect(title(first)).toHaveValue(submittedTitle);
+    await expect(first.locator('.docs-status-pill')).toHaveText('공유 표시');
+    await expect(first.getByRole('button', { name: `라벨 삭제: ${followUpLabel}`, exact: true })).toBeVisible();
+    await expect(save(first)).toBeEnabled();
+    expect(await canonical(fixture)).toEqual(latest);
+
+    const [remaining] = await Promise.all([saves(first), save(first).click()]);
+    expect(remaining.status(), await remaining.text()).toBe(200);
+    expect(remaining.request().postDataJSON()).toMatchObject({ expectedVersion: latest.version, labels: [followUpLabel] });
+    expect(remaining.request().postDataJSON()).not.toHaveProperty('content');
+    expect(await canonical(fixture)).toMatchObject({ version: latest.version + 1, title: submittedTitle,
+      labels: [followUpLabel], status: latest.status, content: latest.content, plainText: latest.plainText });
+  } finally {
+    releaseResponse();
+    await Promise.all(contexts.map(context => context.close()));
+  }
+});
+
 test('공동 편집에서 다른 사람의 커서와 선택 영역이 같은 글을 따라가고 본문에는 저장되지 않는다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
   await enable(fixture);
   const [firstActor, secondActor] = fixture.actorIds;

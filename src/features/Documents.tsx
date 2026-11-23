@@ -26,6 +26,8 @@ import { SourceOrigins } from './SourceOrigins';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
+import { DocumentMetadataReview } from './DocumentMetadataReview';
+import { documentMetadata, documentTitleForSave, reconcileDocumentMetadata, reapplyDocumentMetadataEdits, sameLabels, sameMetadata, type DocumentMetadata, type DocumentMetadataChoices, type DocumentMetadataField } from './document-metadata-draft';
 import { DocumentMarkdownImport, type MarkdownImportPreview } from './DocumentMarkdownImport';
 import { confirmMarkdownArchiveClose, DocumentMarkdownArchiveImport, type ArchiveImportNavigation } from './DocumentMarkdownArchiveImport';
 import { DocumentOfflineExport, type DocumentOfflineExportScope } from './DocumentOfflineExport';
@@ -79,14 +81,17 @@ type Props = FeatureProps & {
 };
 type DocumentAction = { kind: 'create'; source: FollowUpSource } | { kind: 'link'; source: DecisionLinkSource }
   | { kind: 'comment'; source: SelectionCommentSource; initialDraft: CommentDraft };
-type DocumentMetadata = Pick<DocPage, 'title' | 'status' | 'parentId'> & { labels: string[] };
 type Draft = DocumentMetadata & {
   id: string; content: RichContent; plainText: string;
   expectedVersion: number;
   dirty: boolean; editSequence: number;
   bodyDirty?: boolean;
   baseMetadata?: DocumentMetadata;
+  baseProjectId?: string | null;
 };
+type DocumentConflict = 'generic' | { document: DocPage; fields: DocumentMetadataField[]; parentContextChanged: boolean } | null;
+type ObservedDocument = { document: DocPage; live: boolean };
+type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type CommentFilter = 'all' | 'open' | 'resolved';
 const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
@@ -113,19 +118,31 @@ type CommentContext = { actorId: string; documentId: string };
 type MarkdownCreation = { actorId: string; body: string; documentId?: string };
 type TeamTemplateCreation = MarkdownCreation & { projectId: string | null };
 type TemplateManagerContext = { projectId: string | null; source?: Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> };
-const documentMetadata = (page: Pick<DocPage, 'title' | 'status' | 'parentId' | 'labels'>): DocumentMetadata => ({
-  title: page.title, status: page.status, parentId: page.parentId, labels: page.labels ?? [],
-});
-const sameLabels = (left: string[], right: string[]) => left.length === right.length && left.every((label, index) => label === right[index]);
-const sameMetadata = (left: DocumentMetadata, right: DocumentMetadata) => left.title === right.title && left.status === right.status
-  && left.parentId === right.parentId && sameLabels(left.labels, right.labels);
 const draftFromPage = (page: DocPage): Draft => {
   const metadata = documentMetadata(page);
   return {
     id: page.id, content: page.content, plainText: page.plainText, expectedVersion: page.version,
-    dirty: false, editSequence: 0, bodyDirty: false, ...metadata, baseMetadata: metadata,
+    dirty: false, editSequence: 0, bodyDirty: false, ...metadata, baseMetadata: metadata, baseProjectId: page.projectId,
   };
 };
+const sameBody = (left: RichContent, right: RichContent) => left === right || JSON.stringify(left) === JSON.stringify(right);
+function draftAfterSave(captured: Draft, current: Draft, saved: DocPage, live: boolean): Draft {
+  const next = draftFromPage(saved);
+  const savedMetadata = documentMetadata(saved);
+  const metadata = reapplyDocumentMetadataEdits(captured, current, savedMetadata);
+  const bodyDirty = !live && Boolean(current.bodyDirty) && !sameBody(captured.content, current.content);
+  return {
+    ...next, ...metadata, editSequence: current.editSequence, bodyDirty,
+    ...(live || bodyDirty ? { content: current.content, plainText: current.plainText } : {}),
+    dirty: bodyDirty || !sameMetadata(metadata, savedMetadata),
+  };
+}
+function metadataReviewKey(draft: Draft, review: Exclude<DocumentConflict, string | null>) {
+  const saved = documentMetadata(review.document);
+  return JSON.stringify([draft.id, review.document.projectId, review.parentContextChanged,
+    review.fields.map(field => [field, draft[field], saved[field]])]);
+}
+const METADATA_FIELD_LABELS = { title: '제목', status: '작성 상태', parentId: '상위 문서', labels: '라벨' } satisfies Record<DocumentMetadataField, string>;
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정 또는 문서 속성 편집을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
 const COMMENT_EDIT_DISCARD_MESSAGE = '작성 중인 댓글 수정 내용을 버리고 이동할까요? 다른 편집과 새 댓글 초안은 임시로 보관합니다.';
@@ -157,8 +174,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const savingRef = useRef(false);
-  const [conflict, setConflict] = useState(false);
   const [showLatest, setShowLatest] = useState(false);
+  const [conflict, setConflictState] = useState<DocumentConflict>(null);
+  const conflictRef = useRef<DocumentConflict>(null);
+  const setConflict = useCallback((value: DocumentConflict) => {
+    conflictRef.current = value;
+    setConflictState(value);
+    if (!value) setShowLatest(false);
+  }, []);
+  const documentSave = useRef<DocumentSave | null>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
+  const manualEditorRef = useRef<Editor | null>(null);
   const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
   const [moveDocumentId, setMoveDocumentId] = useState<string | null>(null);
   const closeMove = useCallback(() => setMoveDocumentId(null), []);
@@ -329,6 +355,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const archivedLiveRecoveryRef = useRef(false);
 
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
+  const selectedPageId = selectedPage?.id;
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
   const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
   const copyOpen = Boolean(selectedPage && selectedPage.id === copyDocumentId);
@@ -336,9 +363,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
+  const manualSession = activeSession?.enabled === false;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
   const liveDocument = liveState?.document;
-  const latestPage = selectedPage && liveDocument?.id === selectedPage.id && liveDocument.version > selectedPage.version ? liveDocument : selectedPage;
+  const remoteDocument = liveMode ? liveDocument : activeSession?.document;
+  const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
   const liveLocationChanged = latestPage !== selectedPage &&
     (latestPage?.projectId !== selectedPage?.projectId || latestPage?.parentId !== selectedPage?.parentId);
   const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
@@ -392,14 +421,65 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     rememberComment(value);
   }, [rememberComment]);
 
+  const storeDraft = useCallback((next: Draft, syncManualBody = false) => {
+    const old = draftRef.current;
+    draftRef.current = next;
+    setDraft(next);
+    rememberDraft(next);
+    if (syncManualBody && old && !sameBody(old.content, next.content)) {
+      manualEditorRef.current?.commands.setContent(next.content, { emitUpdate: false });
+    }
+  }, [rememberDraft]);
+
+  const reconcileDraft = useCallback(({ document, live }: ObservedDocument, choices?: DocumentMetadataChoices) => {
+    const current = draftRef.current;
+    if (!current || current.id !== document.id || actorRef.current !== activeActorRef.current || current.expectedVersion >= document.version) return;
+    const reviewed = conflictRef.current;
+    if (typeof reviewed === 'object' && reviewed && reviewed.document.version > document.version) return;
+    if (current.bodyDirty || (current.dirty && !current.baseMetadata)) {
+      setConflict('generic');
+      return;
+    }
+    const saved = documentMetadata(document);
+    const parentContextChanged = current.baseProjectId !== document.projectId;
+    const { metadata, conflicts } = current.dirty && current.baseMetadata
+      ? reconcileDocumentMetadata(current.baseMetadata, current, saved, { choices, parentContextChanged })
+      : { metadata: saved, conflicts: [] };
+    if (conflicts.length) {
+      setConflict({ document, fields: conflicts, parentContextChanged });
+      return;
+    }
+    const next = {
+      ...draftFromPage(document), ...metadata, editSequence: current.editSequence,
+      ...(live ? { content: current.content, plainText: current.plainText } : {}),
+      dirty: !sameMetadata(metadata, saved),
+    };
+    storeDraft(next, !live);
+    setConflict(null);
+  }, [setConflict, storeDraft]);
+
+  const observeDocument = useCallback((observed: ObservedDocument) => {
+    const { document, live } = observed;
+    if (actorRef.current !== activeActorRef.current || draftRef.current?.id !== document.id || (!live && listDrafts.current.size)) return;
+    const pending = documentSave.current;
+    if (pending?.documentId === document.id && pending.actorId === actorRef.current) {
+      // Process the HTTP receipt before treating a broadcast as a peer edit.
+      if (!pending.observed || pending.observed.document.version < document.version) pending.observed = observed;
+      return;
+    }
+    reconcileDraft(observed);
+  }, [reconcileDraft]);
+
   const updateDraft = useCallback((changes: Partial<Draft>) => {
     const previous = draftRef.current;
     if (!previous) return;
     const next = { ...previous, ...changes, dirty: true, bodyDirty: previous.bodyDirty || 'content' in changes, editSequence: previous.editSequence + 1 };
-    draftRef.current = next;
-    setDraft(next);
-    rememberDraft(next);
-  }, [rememberDraft]);
+    storeDraft(next);
+    const review = conflictRef.current;
+    if (review && review !== 'generic') {
+      observeDocument({ document: review.document, live: Boolean(sessionRef.current?.enabled) });
+    }
+  }, [observeDocument, storeDraft]);
 
   const receiveLiveEditor = useCallback((instance: Editor | null) => setLiveEditor(instance), []);
   const receiveLiveState = useCallback((state: CollaborationView | null) => { liveStateRef.current = state; setLiveState(state); }, []);
@@ -411,16 +491,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (next.dirty) rememberDraft(next);
   }, [rememberDraft]);
   const receiveLiveDocument = useCallback((document: DocPage) => {
-    const current = draftRef.current;
-    if (!current || current.id !== document.id || current.expectedVersion > document.version) return;
-    const metadata = documentMetadata(document);
-    const baseUnchanged = current.baseMetadata && sameMetadata(current.baseMetadata, metadata);
-    const ownMatches = sameMetadata(current, metadata);
-    if (current.dirty && !baseUnchanged && !ownMatches) { setConflict(true); return; }
-    const next = current.dirty ? { ...current, expectedVersion: document.version } : { ...current, ...metadata, baseMetadata: metadata, expectedVersion: document.version };
-    draftRef.current = next; setDraft(next);
-    if (next.dirty) rememberDraft(next);
-  }, [rememberDraft]);
+    observeDocument({ document, live: true });
+  }, [observeDocument]);
 
   const updateSlash = useCallback((instance: Editor) => {
     const { $from, empty } = instance.state.selection;
@@ -449,6 +521,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     },
     onSelectionUpdate: updateEditorSelection,
   });
+  manualEditorRef.current = manualEditor;
   const editor = liveMode ? liveEditor : manualEditor;
   const canFind = Boolean(editor && !editor.isDestroyed && draft?.id && draft.id === selectedPage?.id && (!liveMode || liveState?.ready));
   const findOpen = canFind && findScope === documentScope;
@@ -486,9 +559,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const receiveDisabledSession = useCallback((current: CollaborationSession) => {
     const previous = draftRef.current;
     if (!previous || previous.id !== current.document.id) return;
+    // A replaced collaborative document has no comparable metadata baseline.
     const next = { ...draftFromPage(current.document), ...(previous.dirty ? {
       ...documentMetadata(previous),
-      expectedVersion: previous.expectedVersion, baseMetadata: previous.baseMetadata,
+      expectedVersion: previous.expectedVersion, baseMetadata: undefined, baseProjectId: undefined,
       editSequence: previous.editSequence, dirty: true,
     } : {}) };
     draftRef.current = next; setDraft(next); rememberDraft(next);
@@ -496,28 +570,30 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     sessionRef.current = current; setSession(current);
     archivedLiveRecoveryRef.current = false; setArchivedLiveRecovery(false);
     manualRecoveryRef.current = false; setManualRecovery(false);
-    setConflict(Boolean(next.dirty));
+    setConflict(next.dirty ? 'generic' : null);
     void refresh().catch(() => {});
-  }, [manualEditor, rememberDraft, refresh]);
+  }, [manualEditor, rememberDraft, refresh, setConflict]);
 
   useEffect(() => {
-    if (!selectedPage) return;
+    if (!selectedPageId) return;
     let active = true;
     sessionRef.current = null; setSession(null); setSessionError('');
     manualRecoveryRef.current = false; setManualRecovery(false);
     archivedLiveRecoveryRef.current = false; setArchivedLiveRecovery(false);
     const check = async () => {
       try {
-        const current = await api<CollaborationSession>(`/documents/${selectedPage.id}/collaboration`);
+        const current = await api<CollaborationSession>(`/documents/${selectedPageId}/collaboration`);
         if (!active) return;
         if (sessionRef.current?.enabled && !current.enabled) return;
+        if (sessionRef.current?.document.id === current.document.id && sessionRef.current.document.version > current.document.version) return;
         sessionRef.current = current; setSession(current); setSessionError('');
         const archive = !current.enabled && hasPendingCollaboration(actorId, current.document.id);
         archivedLiveRecoveryRef.current = archive; setArchivedLiveRecovery(archive);
         const cached = draftRef.current;
-        if (current.enabled && cached?.id === selectedPage.id && cached.bodyDirty) {
+        if (current.enabled && cached?.id === selectedPageId && cached.bodyDirty) {
           manualRecoveryRef.current = true; setManualRecovery(true);
         }
+        if (!current.enabled && !archive) observeDocument({ document: current.document, live: false });
       } catch (cause) { if (active) setSessionError(cause instanceof Error ? cause.message : '공동 편집 상태를 확인하지 못했습니다.'); }
     };
     void check();
@@ -525,9 +601,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     // never document writes. Once live, the WebSocket owns synchronization.
     const timer = setInterval(() => { if (!sessionRef.current?.enabled) void check(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [selectedPage?.id, actorId]);
+  }, [selectedPageId, actorId, observeDocument]);
 
-  useEffect(() => { manualEditor?.setEditable(Boolean(activeSession && !activeSession.enabled) && !manualRecovery && !archivedLiveRecovery, false); }, [manualEditor, activeSession?.enabled, Boolean(activeSession), manualRecovery, archivedLiveRecovery]);
+  useEffect(() => { manualEditor?.setEditable(manualSession && !manualRecovery && !archivedLiveRecovery, false); }, [manualEditor, manualSession, manualRecovery, archivedLiveRecovery]);
   useEffect(() => { if (activeSession?.enabled && draft?.bodyDirty) { manualRecoveryRef.current = true; setManualRecovery(true); } }, [activeSession?.enabled, draft?.id, draft?.bodyDirty]);
 
   useEffect(() => {
@@ -538,13 +614,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         rememberDraft(old);
         draftRef.current = null;
         setDraft(null);
+        setConflict(null);
       }
       return;
     }
     const sameActor = actorRef.current === actorId;
-    if (old?.id === selectedPage.id && (old.dirty || listDrafts.current.size) && sameActor) return;
-    if (old?.id === selectedPage.id && sameActor && old.expectedVersion > selectedPage.version) return;
-    if (liveMode && old?.id === selectedPage.id && sameActor) { receiveLiveDocument(selectedPage); return; }
+    if (old?.id === selectedPage.id && sameActor) {
+      if (manualSession && !archivedLiveRecovery) observeDocument({ document: selectedPage, live: false });
+      return;
+    }
     if (old && (old.id !== selectedPage.id || !sameActor)) rememberDraft(old);
     actorRef.current = actorId;
     let next = draftFromPage(selectedPage);
@@ -559,7 +637,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           };
           next = {
             ...candidate, labels, baseMetadata: baseMetadata ?? (candidate.expectedVersion === selectedPage.version ? next.baseMetadata : undefined),
-            bodyDirty: candidate.bodyDirty ?? JSON.stringify(candidate.content) !== JSON.stringify(selectedPage.content),
+            baseProjectId: candidate.baseProjectId === undefined && candidate.expectedVersion === selectedPage.version ? selectedPage.projectId : candidate.baseProjectId,
+            bodyDirty: candidate.bodyDirty ?? !sameBody(candidate.content, selectedPage.content),
           };
         }
       }
@@ -567,14 +646,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     draftRef.current = next;
     setDraft(next);
     manualEditor.commands.setContent(next.content, { emitUpdate: false });
-    setConflict(next.dirty && next.expectedVersion !== selectedPage.version);
+    setConflict(next.dirty && next.expectedVersion !== selectedPage.version ? 'generic' : null);
     setShowLatest(false);
     setReferenceSelection(null);
     setIssueBlockSelection(null);
     closeAnnotation();
     setSlashQuery(null);
     setInsertKind(null);
-  }, [selectedPage?.id, selectedPage?.version, actorId, manualEditor, rememberDraft, liveMode, receiveLiveDocument, closeAnnotation]); // Deliberately preserve the local buffer on snapshot refresh.
+  }, [selectedPage, actorId, manualEditor, rememberDraft, manualSession, archivedLiveRecovery, observeDocument, setConflict, closeAnnotation]);
 
   useEffect(() => {
     if (!archiveImport && !selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
@@ -646,13 +725,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (teamCreation && !creating && !teamCreationRejected) createSubmit.current?.focus({ preventScroll: true });
   }, [creating, teamCreation, teamCreationRejected]);
 
-  const saveDraft = useCallback(async (status?: DocPage['status']) => {
+  const saveDraft = useCallback(async () => {
     const captured = draftRef.current;
-    if (!captured || savingRef.current || (!captured.dirty && (!status || status === captured.status))) return;
+    if (!captured?.dirty || savingRef.current || actorRef.current !== activeActorRef.current) return;
+    if (conflictRef.current && conflictRef.current !== 'generic') { setShowLatest(true); return; }
     if (archivedLiveRecoveryRef.current) { notify('보관한 공동 편집을 먼저 복구하거나 최신 문서를 열어주세요.', 'error'); return; }
     const collaborative = sessionRef.current?.enabled && sessionRef.current.document.id === captured.id;
     if (collaborative && (manualRecoveryRef.current || liveStateRef.current?.phase !== 'connected' || liveStateRef.current?.pending)) { notify('공동 편집 연결과 본문 동기화를 먼저 확인해주세요.', 'error'); return; }
     const capturedActor = actorRef.current;
+    const pending: DocumentSave = { actorId: capturedActor, documentId: captured.id };
+    documentSave.current = pending;
     savingRef.current = true;
     setSaving(true);
     try {
@@ -664,28 +746,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           notify('공동 편집이 시작된 문서입니다. 보관한 편집을 확인한 후 이어서 작업해주세요.', 'error');
           return;
         }
+        observeDocument({ document: latest.document, live: false });
       }
+      const base = captured.baseMetadata;
       const result = await api<DocPage>(`/documents/${captured.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': capturedActor }, body: JSON.stringify({
-        expectedVersion: captured.expectedVersion, title: captured.title.trim() || '제목 없는 문서',
+        expectedVersion: captured.expectedVersion,
+        ...(!base || documentTitleForSave(captured.title) !== documentTitleForSave(base.title) ? { title: documentTitleForSave(captured.title) } : {}),
+        ...(!base || !sameLabels(captured.labels, base.labels) ? { labels: captured.labels } : {}),
+        ...(!base || captured.status !== base.status ? { status: captured.status } : {}),
+        ...(!base || captured.parentId !== base.parentId ? { parentId: captured.parentId } : {}),
         ...(!collaborative && captured.bodyDirty ? { content: captured.content, plainText: captured.plainText, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION } : {}),
-        ...(!captured.baseMetadata || !sameLabels(captured.labels, captured.baseMetadata.labels) ? { labels: captured.labels } : {}),
-        status: status || captured.status, parentId: captured.parentId,
       }) });
       const current = draftRef.current;
       if (current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
-        const latest = collaborative && liveStateRef.current?.document.id === captured.id && liveStateRef.current.document.version > result.version ? liveStateRef.current.document : result;
-        const savedMetadata = documentMetadata(result);
-        const newerMetadata = !sameMetadata(documentMetadata(latest), savedMetadata);
-        const editedAgain = current.editSequence !== captured.editSequence;
-        const next = !editedAgain ? { ...draftFromPage(latest), ...(collaborative ? { content: current.content, plainText: current.plainText } : {}) } : {
-          ...current, expectedVersion: newerMetadata ? result.version : latest.version,
-          baseMetadata: savedMetadata,
-          ...(status && current.status === captured.status ? { status } : {}),
-        };
-        draftRef.current = next;
-        setDraft(next);
-        rememberDraft(next, capturedActor);
-        setConflict(Boolean(editedAgain && newerMetadata));
+        storeDraft(draftAfterSave(captured, current, result, Boolean(collaborative)), !collaborative);
+        setConflict(null);
       } else {
         // Reconcile only the request owner's cached buffer. A response for a
         // different actor/document must never change the current editor/cache.
@@ -693,21 +768,27 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           const key = cacheKey(capturedActor, captured.id);
           const stored = localStorage.getItem(key);
           const cached = stored ? JSON.parse(stored) as Draft : null;
-          if (cached?.id === captured.id && cached.expectedVersion === captured.expectedVersion) {
-            if (cached.editSequence === captured.editSequence) localStorage.removeItem(key);
-            else localStorage.setItem(key, JSON.stringify({ ...cached, expectedVersion: result.version, baseMetadata: documentMetadata(result) }));
+          if (cached?.id === captured.id && cached.expectedVersion === captured.expectedVersion && cached.editSequence >= captured.editSequence) {
+            const next = draftAfterSave(captured, cached, result, Boolean(collaborative));
+            if (next.dirty) localStorage.setItem(key, JSON.stringify(next));
+            else localStorage.removeItem(key);
           }
         } catch { setStorageProblem(true); }
       }
       await refresh();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        if (draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) setConflict(true);
+        if (draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) setConflict('generic');
         notify('다른 변경사항이 있어 저장하지 않았습니다. 내 편집은 임시 보관되어 있어요.', 'error');
         await refresh().catch(() => {});
       } else notify(error instanceof Error ? error.message : '문서를 저장하지 못했습니다.', 'error');
-    } finally { savingRef.current = false; setSaving(false); }
-  }, [notify, refresh, rememberDraft]);
+    } finally {
+      documentSave.current = null;
+      if (pending.observed && capturedActor === activeActorRef.current) observeDocument(pending.observed);
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }, [notify, observeDocument, refresh, setConflict, storeDraft]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1168,11 +1249,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         const next = draftFromPage(result); draftRef.current = next; setDraft(next); rememberDraft(next, capturedActor);
         if (sessionRef.current?.enabled) setLiveReload(value => value + 1);
         else manualEditor?.commands.setContent(next.content, { emitUpdate: false });
-        setReferenceSelection(null); setIssueBlockSelection(null); setConflict(false);
+        setReferenceSelection(null); setIssueBlockSelection(null); setConflict(null);
       }
       await refresh(); notify('이전 내용을 새 버전으로 복구했습니다.', 'success');
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) { if (actorRef.current === capturedActor && activeActorRef.current === capturedActor && draftRef.current?.id === captured.id) setConflict(true); await refresh().catch(() => {}); }
+      if (error instanceof ApiError && error.status === 409) { if (actorRef.current === capturedActor && activeActorRef.current === capturedActor && draftRef.current?.id === captured.id) setConflict('generic'); await refresh().catch(() => {}); }
       notify(error instanceof Error ? error.message : '복구하지 못했습니다.', 'error');
     } finally { savingRef.current = false; setSaving(false); setRestoring(false); editor?.setEditable(true, false); }
   }
@@ -1253,14 +1334,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function discardLocal() {
     if (!selectedPage || !window.confirm('저장하지 않은 편집을 버리고 서버에 저장된 내용을 열까요?')) return;
-    const candidate = liveStateRef.current?.document || sessionRef.current?.document;
-    const latest = candidate?.id === selectedPage.id && candidate.version >= selectedPage.version ? candidate : selectedPage;
+    const latest = latestPage ?? selectedPage;
     const current = draftRef.current;
     const next = { ...draftFromPage(latest), ...(sessionRef.current?.enabled && !manualRecoveryRef.current && current ? { content: current.content, plainText: current.plainText } : {}) };
     draftRef.current = next; setDraft(next); rememberDraft(next);
     if (!sessionRef.current?.enabled || manualRecoveryRef.current) manualEditor?.commands.setContent(next.content, { emitUpdate: false });
     manualRecoveryRef.current = false; setManualRecovery(false);
-    setConflict(false); setShowLatest(false);
+    setConflict(null);
   }
 
   async function enableCollaboration() {
@@ -1434,7 +1514,31 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const descendants = new Set<string>();
   const collectDescendants = (id: string) => { for (const child of data.documents.filter(page => page.parentId === id)) if (!descendants.has(child.id)) { descendants.add(child.id); collectDescendants(child.id); } };
   if (draft) collectDescendants(draft.id);
-  const parentOptions = data.documents.filter(page => page.id !== draft?.id && !descendants.has(page.id) && page.projectId === selectedPage?.projectId);
+  const parentOptions = data.documents.filter(page => page.id !== draft?.id && !descendants.has(page.id) && page.projectId === latestPage?.projectId);
+  const metadataReview = conflict && conflict !== 'generic' ? conflict : null;
+  const previewDocument = metadataReview?.document ?? latestPage;
+  const reviewKey = draft && metadataReview ? metadataReviewKey(draft, metadataReview) : null;
+  function formatMetadata(field: DocumentMetadataField, value: DocumentMetadata) {
+    switch (field) {
+      case 'title': return documentTitleForSave(value.title);
+      case 'status': return value.status === 'published' ? '공유 표시' : '초안';
+      case 'parentId': return value.parentId ? data.documents.find(page => page.id === value.parentId)?.title ?? value.parentId : '최상위 문서';
+      case 'labels': return value.labels.join(', ') || '라벨 없음';
+    }
+  }
+  function resolveMetadata(choices: DocumentMetadataChoices) {
+    const current = draftRef.current;
+    const latest = conflictRef.current;
+    if (savingRef.current || actorRef.current !== actorId || activeActorRef.current !== actorId || !current
+      || !latest || latest === 'generic' || current.id !== selectedDocumentId || metadataReviewKey(current, latest) !== reviewKey) return;
+    if (listDrafts.current.size && !liveMode) {
+      notify('문서 목록 설정을 적용하거나 취소한 뒤 속성을 정리해 주세요.', 'error');
+      return;
+    }
+    if (choices.parentId === 'local' && (latest.parentContextChanged || current.parentId && !parentOptions.some(page => page.id === current.parentId))) return;
+    reconcileDraft({ document: latest.document, live: liveMode }, choices);
+    if (!conflictRef.current) titleInput.current?.focus({ preventScroll: true });
+  }
   const tree = (pages: DocPage[], parentId: string | null = null, level = 0, visited = new Set<string>()): React.ReactNode => pages
     .filter(page => filtersActive ? level === 0 : (page.parentId === parentId || (parentId === null && !pages.some(other => other.id === page.parentId))))
     .map(page => {
@@ -1454,7 +1558,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
   const canRequestPublication = Boolean(draft && !draft.dirty && !saving && !bodyReadOnly &&
     (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
-  const selectionDocument = liveMode ? liveState?.document : selectedPage;
+  const selectionDocument = liveMode ? liveState?.document : latestPage;
   let selectionUnavailable: string | null = null;
   if (draft?.bodyDirty) selectionUnavailable = '선택한 내용을 사용하려면 변경한 본문을 먼저 저장해 주세요.';
   else if (liveMode && (liveState?.phase !== 'connected' || liveState.pending)) {
@@ -1496,18 +1600,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     reselectedCommentDraft.current = { actorId, documentId, draft: value };
     try { localStorage.setItem(selectionCommentCacheKey(actorId, documentId), encodeCommentDraft(value)); } catch { setStorageProblem(true); }
 
-    const current = draftRef.current;
-    if (!liveMode && !manualRecovery && current?.id === documentId && selectedPage?.id === documentId
-      && current.dirty && !current.bodyDirty && current.expectedVersion < selectedPage.version) {
-      const base = current.baseMetadata;
-      if (base && sameMetadata(base, documentMetadata(selectedPage))) {
-        const next = { ...current, content: selectedPage.content, plainText: selectedPage.plainText, expectedVersion: selectedPage.version };
-        draftRef.current = next;
-        setDraft(next);
-        rememberDraft(next);
-        manualEditor?.commands.setContent(next.content, { emitUpdate: false });
-        setConflict(false);
-      } else setConflict(true);
+    if (!liveMode && !manualRecovery && latestPage?.id === documentId) {
+      observeDocument({ document: latestPage, live: false });
     }
     closeDocumentAction(false);
     requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
@@ -1622,23 +1716,30 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <ListOrdered size={16} aria-hidden="true" />
               </button>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
-              <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
+              <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || Boolean(metadataReview) || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
             </div>
           </div>
 
-          {conflict && !manualRecovery && <div className="docs-notice docs-conflict" role="alert"><strong>다른 변경사항이 있어요.</strong><span>내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.</span><div><button onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
-          {showLatest && latestPage && <div className="docs-latest-preview"><div><strong>서버 버전 {latestPage.version} · {latestPage.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
-            {Boolean(draft.labels.length || latestPage.labels?.length) && <p className="docs-latest-labels">{latestPage.labels?.length ? <>라벨 · {latestPage.labels.join(', ')}</> : '라벨 없음'}</p>}
-            <pre>{latestPage.plainText || contentText(latestPage.content)}</pre>
+          {conflict && !manualRecovery && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
+          {showLatest && previewDocument && <div className="docs-latest-preview"><div><strong>서버 버전 {previewDocument.version} · {previewDocument.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
+            {Boolean(draft.labels.length || previewDocument.labels?.length) && <p className="docs-latest-labels">{previewDocument.labels?.length ? <>라벨 · {previewDocument.labels.join(', ')}</> : '라벨 없음'}</p>}
+            <pre>{previewDocument.plainText || contentText(previewDocument.content)}</pre>
           </div>}
+          {showLatest && metadataReview && !manualRecovery && <DocumentMetadataReview key={reviewKey} disabled={saving || restoring}
+            items={metadataReview.fields.map(field => ({
+              field, label: METADATA_FIELD_LABELS[field], local: formatMetadata(field, draft),
+              saved: formatMetadata(field, documentMetadata(metadataReview.document)),
+              localAllowed: field !== 'parentId' || (!metadataReview.parentContextChanged
+                && (!draft.parentId || parentOptions.some(page => page.id === draft.parentId))),
+            }))} onResolve={resolveMetadata} />}
           {storageProblem && <div className="docs-notice" role="alert">브라우저 임시 저장 공간이 부족합니다. 이동하기 전에 저장하거나 JSON으로 내보내주세요.</div>}
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
           {manualRecovery && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
 
           <div className="docs-paper-scroll">
             <div className="docs-paper">
-              <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime(selectedPage.updatedAt)}</span></div>
-              <input className="docs-title-input" disabled={restoring} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
+              <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime((latestPage ?? selectedPage).updatedAt)}</span></div>
+              <input ref={titleInput} className="docs-title-input" disabled={restoring} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
               <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || '#78849a' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
               <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring}
                 onChange={labels => updateDraft({ labels })} onFilter={onChangeDocumentLabel} />

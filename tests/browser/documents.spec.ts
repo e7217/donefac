@@ -116,6 +116,69 @@ test('문서 편집·댓글이 저장되고 이전 내용 복구는 새 버전�
   expect(errors).toEqual([]);
 });
 
+test('수동 문서의 제목 초안은 다른 사용자가 저장한 본문·상태와 함께 보존된다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  const { users } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const peer = users.find(user => user.id !== document.authorId);
+  expect(peer).toBeDefined();
+  const path = `/api/documents/${document.id}`;
+  const peerHeaders = { 'X-Actor-Id': peer!.id };
+  const browserWrites: unknown[] = [];
+  page.on('request', request => {
+    if (request.url().endsWith(path) && request.method() === 'PATCH') browserWrites.push(request.postDataJSON());
+  });
+
+  await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), document.authorId);
+  await openDocument(page, document);
+  await expect(page.getByRole('button', { name: '공동 편집 시작', exact: true })).toBeVisible();
+  const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+  const save = page.getByRole('button', { name: '저장', exact: true });
+  const localTitle = `${document.title} 내 제목`;
+  const peerBody = '다른 작업자가 새로 저장한 본문입니다.';
+  await title.fill(localTitle);
+
+  const remote = await requests.patch(path, {
+    headers: peerHeaders,
+    data: { expectedVersion: document.version, content: richParagraph(peerBody), status: 'published' },
+  });
+  expect(remote.status()).toBe(200);
+  const remoteDocument = await remote.json() as DocPage;
+  await expect(page.locator('.docs-prose')).toHaveText(peerBody);
+  await expect(page.locator('.docs-status-pill')).toHaveText('공유 표시');
+  await expect(title).toHaveValue(localTitle);
+  await expect(page.locator('.docs-conflict')).toHaveCount(0);
+
+  const saving = page.waitForResponse(response => response.url().endsWith(path) && response.request().method() === 'PATCH');
+  await save.click();
+  const response = await saving;
+  expect(response.status()).toBe(200);
+  const saved = await response.json() as DocPage;
+  expect(saved).toMatchObject({ title: localTitle, plainText: peerBody, status: 'published' });
+  expect(browserWrites).toEqual([{ expectedVersion: remoteDocument.version, title: localTitle }]);
+  await expect(save).toBeDisabled();
+
+  await title.fill(`${document.title} 두 번째 내 제목`);
+  const peerTitle = `${document.title} 다른 작업자 제목`;
+  const renamed = await requests.patch(path, { headers: peerHeaders, data: { expectedVersion: saved.version, title: peerTitle } });
+  expect(renamed.status()).toBe(200);
+  const renamedDocument = await renamed.json() as DocPage;
+  await page.getByRole('button', { name: '서버 최신본 보기', exact: true }).click();
+  const review = page.getByRole('form', { name: '문서 속성 충돌 검토', exact: true });
+  const savedTitle = review.getByRole('radio', { name: '서버 저장값', exact: true });
+  await expect(savedTitle).toHaveAccessibleDescription(peerTitle);
+  await savedTitle.check();
+  await review.getByRole('button', { name: '선택한 내용으로 편집 계속', exact: true }).click();
+  await expect(review).toHaveCount(0);
+  await expect(title).toHaveValue(peerTitle);
+  await expect(save).toBeDisabled();
+  await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+  const snapshot = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  expect(snapshot.documents.find(value => value.id === document.id)).toMatchObject({
+    version: renamedDocument.version, title: peerTitle, plainText: peerBody, status: 'published',
+  });
+  expect(browserWrites).toHaveLength(1);
+});
+
 test('문서의 미저장 편집은 새로고침과 409 충돌에도 유지되고 사본으로 보관된다', async ({ page, syntheticDocument }) => {
   const { document, requests } = syntheticDocument;
   await openDocument(page, document);
