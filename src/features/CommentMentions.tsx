@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useEffect, useId, useImperativeHandle, useRef, useState, type ComponentPropsWithoutRef, type Ref } from 'react';
+import { commentWebLinkRanges } from '../../shared/comment-web-links';
 import { MAX_COMMENT_MENTIONS, type Comment, type CommentMention, type User } from '../../shared/types';
 import './comment-mentions.css';
 
@@ -245,10 +246,20 @@ export function CommentMentionInput({ draft, onChange, users, textareaRef, disab
   </div>;
 }
 
-export function CommentMentionText({ comment }: { comment: Pick<Comment, 'body' | 'mentions'> }) {
-  const mentions = readDraftMentions(comment.mentions, comment.body);
-  return <>{mentions.map(({ userId, from, to }, index) => <Fragment key={from}>
-    {comment.body.slice(mentions[index - 1]?.to ?? 0, from)}
-    <span className="comment-mention-text" data-mention-user-id={userId}>{comment.body.slice(from, to)}</span>
-  </Fragment>)}{comment.body.slice(mentions.at(-1)?.to ?? 0)}</>;
+export function CommentBodyText({ comment }: { comment: Pick<Comment, 'body' | 'mentions' | 'resourceType'> }) {
+  const { body, resourceType } = comment;
+  const mentions = readDraftMentions(comment.mentions, body);
+  // Scan the whole body so an overlapping mention leaves the entire URL as text.
+  const links = resourceType === 'issue' ? commentWebLinkRanges(body).filter(link =>
+    !mentions.some(mention => mention.from < link.to && link.from < mention.to)) : [];
+  const ranges = [...mentions, ...links].sort((left, right) => left.from - right.from);
+  return <>{ranges.map((range, index) => {
+    const label = body.slice(range.from, range.to);
+    return <Fragment key={range.from}>
+      {body.slice(ranges[index - 1]?.to ?? 0, range.from)}
+      {'userId' in range
+        ? <span className="comment-mention-text" data-mention-user-id={range.userId}>{label}</span>
+        : <a className="comment-web-link" href={range.href} target="_blank" rel="noopener noreferrer">{label}</a>}
+    </Fragment>;
+  })}{body.slice(ranges.at(-1)?.to ?? 0)}</>;
 }

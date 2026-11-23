@@ -58,3 +58,15 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.comment-web-link {
+  color: var(--accent-hover);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: .16em;
+}
+
+.comment-web-link:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}

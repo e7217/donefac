@@ -23,6 +23,49 @@ const notices=(plan:ReturnType<typeof buildMigrationPlan>)=>new Set(plan.preview
 const adfStatus = (label: string) => ({ type: 'status', attrs: { text: label, color: 'yellow' } });
 const storageStatus = (label: string) => `<ac:structured-macro ac:name="status"><ac:parameter ac:name="title">${label}</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter></ac:structured-macro>`;
 
+test('new Jira comments keep web links in the plain body and leave source records and other products untouched', () => {
+  const url = 'https://ci.example.test/artifacts?artifact=release.';
+  const issueUrl = 'https://jira.example.test/jira/browse/OLD-2';
+  const wikiUrl = 'https://wiki.example.test/wiki/x/y?source=export&filter=all';
+  const jiraPackage = jira();
+  const template = jiraPackage.dataset.records.find(row => row.id === 'comment:jc')!;
+  const wikiText = `[CI 결과|${url}] [${url}] [Jira 업무|${issueUrl}] [위험|javascript:alert(1)]`;
+  const htmlText = `<p>원본 위키 <a href="${wikiUrl.replace('&', '&amp;')}"><strong>배포</strong> 절차</a></p>`;
+  const unsupportedHtml = `<script><a href="${url}">지원하지 않는 구조</a></script>`;
+  const oversizedExpansion = `${'x'.repeat(19_970)} [결과|${url}]`;
+  template.textFormat = 'jira-wiki';
+  template.text = wikiText;
+  jiraPackage.dataset.records.push(
+    { ...template, id: 'comment:rss', sourceId: 'rss', text: htmlText, textFormat: 'plain', metadata: { bodyFormat: 'search-rendered-html' } },
+    { ...template, id: 'comment:rss-unsupported', sourceId: 'rss-unsupported', text: unsupportedHtml, textFormat: 'plain', metadata: { bodyFormat: 'search-rendered-html' } },
+    { ...template, id: 'comment:large', sourceId: 'large', text: oversizedExpansion },
+    { ...template, id: 'comment:bare', sourceId: 'bare', text: url },
+  );
+  const wikiPackage = confluence();
+  const wikiComment = wikiPackage.dataset.records.find(row => row.id === 'comment:wc')!;
+  wikiComment.textFormat = 'confluence-storage';
+  wikiComment.text = `<p><a href="${url}">위키 댓글 링크</a></p>`;
+  const packages = [jiraPackage, wikiPackage];
+  const before = structuredClone(packages);
+  const plan = buildMigrationPlan(input(packages));
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const comment = (sourceId: string) => {
+    const archived = plan.sourceRecords.find(row => row.record.kind === 'comment' && row.record.sourceId === sourceId)!;
+    return { archived: archived.record.text, comment: plan.comments.find(row => row.id === archived.targetId) };
+  };
+  assert.equal(comment('jc').comment?.body, `CI 결과 <${url}> <${url}> Jira 업무 <${issueUrl}> 위험 (javascript:alert(1))`);
+  assert.equal(comment('rss').comment?.body, `원본 위키 배포 절차 <${wikiUrl}>`);
+  assert.equal(comment('rss-unsupported').comment?.body, unsupportedHtml);
+  assert.equal(comment('large').comment?.body, `${'x'.repeat(19_970)} 결과`);
+  assert.equal(comment('bare').comment?.body, url);
+  assert.equal(comment('wc').comment?.body, '위키 댓글 링크');
+  assert.equal(comment('jc').archived, wikiText);
+  assert.equal(comment('rss').archived, htmlText);
+  assert.equal(comment('large').archived, oversizedExpansion);
+  assert.ok(plan.preview.requiredAcknowledgements.includes('JIRA_COMMENT_LINKS_ARCHIVED'));
+  assert.deepEqual(packages, before);
+});
+
 test('options are stable opaque IDs scoped by package and include an explicit editable default configuration',()=>{
   const packages=[jira(),confluence()],a=buildMigrationOptions(packages),b=buildMigrationOptions([...packages].reverse());assert.deepEqual(a.statuses.map(item=>item.id),b.statuses.map(item=>item.id));assert.ok(a.statuses.every(item=>!item.id.includes(item.label)));assert.equal(a.containers[0].issueCount,2);assert.equal(a.containers[1].documentCount,1);assert.equal(a.defaultConfiguration.timezone,'UTC');assert.equal(a.defaultConfiguration.datePolicy,'block');assert.ok(Object.values(a.defaultConfiguration.users).every(value=>value===null));assert.equal(a.defaultConfiguration.fields[a.fields.find(field=>field.sourceValue==='flag')!.id],'checkbox');assert.equal(buildMigrationOptions([pkg('other','jira',[issue('1')])]).statuses[0].id===a.statuses[0].id,false);
 });
@@ -254,9 +297,13 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
 
   const newComment = comment('200', '300', {
     references: [{ kind: 'issue', sourceId: 'OLD-1', relation: 'commentOn' }], textFormat: 'adf',
-    text: JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [adfStatus('진행 중')] }] }),
+    text: JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [
+      adfStatus('진행 중'), { type: 'text', text: ' ' },
+      { type: 'text', text: '업데이트', marks: [{ type: 'link', attrs: { href: 'https://ci.example.test/report' } }, { type: 'strong' }] },
+      { type: 'text', text: ' 기록', marks: [{ type: 'link', attrs: { href: 'https://ci.example.test/report' } }] },
+    ] }] }),
   });
-  const newWorklog = worklog('500');
+  const newWorklog = worklog('500', '300', { textFormat: 'jira-wiki', text: '[원본 작업 메모|https://ci.example.test/notes]' });
   const rows = [identity, retained, restricted, newComment, newWorklog, comment('201'), worklog('501'),
     comment('csv:300:comment:2'), worklog('300:0'), comment('202', '300', { metadata: { internal: true } }),
     comment('203', '300', { metadata: { visibility: [], properties: [{ key: 'sd.public.comment', value: { internal: true } }] } }),
@@ -275,7 +322,7 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
   assert.equal(added.preview.counts.newJiraComments, 1);
   assert.equal(added.preview.counts.newJiraWorklogs, 1);
   assert.deepEqual(added.comments.map(({ resourceId, authorId, createdAt, body }) => ({ resourceId, authorId, createdAt, body })),
-    [{ resourceId: first.id, authorId: actor.id, createdAt: created, body: '[상태: 진행 중]' }]);
+    [{ resourceId: first.id, authorId: actor.id, createdAt: created, body: '[상태: 진행 중] 업데이트 기록 <https://ci.example.test/report>' }]);
   assert.equal(added.worklogs[0].issueId, first.id);
   assert.equal(added.worklogs[0].issueKey, first.key);
   assert.equal(added.worklogs[0].durationSeconds, 61);
@@ -285,6 +332,7 @@ test('Jira history append verifies owner aliases, preserves stable source IDs, a
   assert.deepEqual(supplemental.map(row => row.record.sourceId).sort(), ['200', 'worklog:500']);
   assert.ok(supplemental.every(row => row.ownerType === 'issue' && row.ownerId === first.id && row.targetProjectId === project.id));
   assert.equal(supplemental.find(row => row.record.kind === 'comment')?.targetId, added.comments[0].id);
+  assert.equal(supplemental.find(row => row.record.kind === 'comment')?.record.text, newComment.text);
   assert.equal(supplemental.find(row => row.record.kind === 'history')?.id, added.worklogs[0].sourceRecordId);
   assert.equal(added.sourceRecords.filter(row => row.record.sourceId === '200' && row.targetType === null).length, 1);
   assert.equal(plan([initial], false).preview.canApply, false);

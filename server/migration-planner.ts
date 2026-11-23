@@ -2953,6 +2953,27 @@ class Planner{
     for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
     return result;
   }
+
+  private projectJiraComment(entry: Entry) {
+    const row = entry.row;
+    const options = { resolveReference: (request: MigrationReferenceInput) => this.resolve(entry, request), legacyAnnotations: true };
+    const rendered = row.textFormat === 'plain' && row.metadata.bodyFormat === 'search-rendered-html' && /<a(?=\s)[^<>]*?\shref\s*=/iu.test(row.text);
+    // Rendered search XML was previously stored as plain text. Keep its original limit calculation.
+    if (rendered && row.text.replace(/\r\n?/gu, '\n').length > 20_000) return convertLegacyContent(row, options);
+    const source = rendered ? { ...row, textFormat: 'confluence-storage' as const } : row;
+    const projected = convertLegacyContent(source, { ...options, preserveCommentWebLinks: true });
+    const unsupported = projected.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK' ||
+      (rendered && item.code === 'UNSUPPORTED_CONTENT'));
+    if (projected.plainText.length <= 20_000 && !unsupported) {
+      return projected;
+    }
+    const previous = convertLegacyContent(row, options);
+    if (previous.plainText.trim() && previous.plainText.length <= 20_000 &&
+        !previous.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK')) {
+      this.notice('JIRA_COMMENT_LINKS_ARCHIVED', '댓글 링크를 안전하게 표시할 수 없거나 본문 한도를 초과해 기존 표시 본문을 사용합니다. 원래 링크는 원본 보관함에 남습니다.', 'warning', entry, true);
+    }
+    return previous;
+  }
   private parentBinding(entry: Entry, parentId: string): Binding | undefined {
     if (entry.row.kind === 'page' && this.input.appendPages) {
       const parent = this.confluencePage(entry, { sourceId: parentId });
@@ -3020,7 +3041,11 @@ class Planner{
           this.notice('COMMENT_OWNER_MISSING', '댓글의 현재 업무·문서 소유자를 찾을 수 없습니다.', 'error', entry);
           continue;
         }
-        const body = this.converted(entry, { legacyAnnotations: true }).plainText;
+        const jiraComment = owner.type === 'issue' && entry.pkg.dataset.source.product === 'jira' ? this.projectJiraComment(entry) : null;
+        for (const diagnostic of jiraComment?.diagnostics ?? []) {
+          this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
+        }
+        const body = jiraComment?.plainText ?? this.converted(entry, { legacyAnnotations: true }).plainText;
         if (!body.trim() || body.length > 20000) this.notice('COMMENT_BODY_LIMIT', '댓글이 비어 있거나 현재20000자 제한을 넘습니다.', 'error', entry);
         if (!['plain', 'none'].includes(entry.row.textFormat)) {
           this.notice('COMMENT_FORMAT_PLAIN_TEXT', '댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.', 'warning', entry, true);
@@ -3531,7 +3556,7 @@ class Planner{
       const { row } = entry;
       if (kind === 'comment') {
         const createdAt = sourceTimestamp(row.createdAt, this.configuration.timezone);
-        const converted = convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), legacyAnnotations: true });
+        const converted = this.projectJiraComment(entry);
         if (!createdAt || !converted.plainText.trim() || converted.plainText.length > 20_000 ||
             converted.diagnostics.some(diagnostic => diagnostic.severity === 'error')) {
           rawOnly++;

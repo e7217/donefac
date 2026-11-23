@@ -6,7 +6,7 @@ import type { Comment, CommentEditResult, CommentEditSnapshot, FeatureProps, Use
 import { api, ApiError } from '../lib/api';
 import { newRequestId } from '../lib/request-id';
 import { COMMENT_LIST_CHANGED } from './CommentTrashButton';
-import { CommentMentionInput, CommentMentionText, commentDraftPayload, sameCommentDraft, type CommentDraft } from './CommentMentions';
+import { CommentBodyText, CommentMentionInput, commentDraftPayload, sameCommentDraft, type CommentDraft } from './CommentMentions';
 import './comment-edit.css';
 
 type Attempt = ReturnType<typeof commentDraftPayload> & { requestId: string; editToken: string };
@@ -194,7 +194,7 @@ export function CommentEditedMark({ comment }: { comment: Comment }) {
 
 export function CommentEditBody({ comment, editing, users }: { comment: Comment; editing: CommentEditing; users: readonly User[] }) {
   const editor = editing.current?.base.id === comment.id ? editing.current : null;
-  return editor ? <CommentEditForm editor={editor} editing={editing} users={users} /> : <p><CommentMentionText comment={comment} /></p>;
+  return editor ? <CommentEditForm editor={editor} editing={editing} users={users} /> : <p><CommentBodyText comment={comment} /></p>;
 }
 
 function CommentEditForm({ editor, editing, users }: { editor: Editor; editing: CommentEditing; users: readonly User[] }) {
@@ -218,7 +218,7 @@ function CommentEditForm({ editor, editing, users }: { editor: Editor; editing: 
       event.stopPropagation();
       editing.close();
     }}>
-    {editor.reviewed && <div className="comment-edit-latest"><strong>현재 {label}</strong><p><CommentMentionText comment={editor.base} /></p></div>}
+    {editor.reviewed && <div className="comment-edit-latest"><strong>현재 {label}</strong><p><CommentBodyText comment={editor.base} /></p></div>}
     <label htmlFor={uid}>수정할 {label}</label>
     <CommentMentionInput id={uid} textareaRef={input} className="field" draft={editor.draft} onChange={editing.change}
       users={users} rows={4} required readOnly={pending || Boolean(editor.attempt) || !editor.editToken} />

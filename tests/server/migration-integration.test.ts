@@ -726,8 +726,10 @@ test('Jira history append preserves local and deleted records and restores exact
   const expectedComments = await readComments();
   const expectedTimes = await readWorklogs();
 
+  const addedLink = 'https://ci.example.test/project/jobs/310?artifact=report.';
+  const addedSourceBody = `[추가할 원본 댓글|${addedLink}]`;
   const delta = await upload('jira-history-delta', 'Jira에서 바꾼 제목', [
-    comment('300', '삭제된 원본 댓글'), comment('301', '기존 원본 댓글 변경'), comment('310', '추가할 원본 댓글'),
+    comment('300', '삭제된 원본 댓글'), comment('301', '기존 원본 댓글 변경'), comment('310', addedSourceBody),
     comment(undefined, '안정적인 ID가 없는 원본 댓글'), { ...comment('311', '팀 제한 원본 댓글'), visibility: {},
       properties: [{ key: 'sd.public.comment', value: { internal: true } }] },
     { ...comment('312', '작성자가 없는 원본 댓글'), author: null },
@@ -770,7 +772,7 @@ test('Jira history append preserves local and deleted records and restores exact
   assert.equal((await f.apply(stale)).status, 409);
   assert.deepEqual(await ticket(), edit.data);
   const comments = await readComments();
-  const addedComment = comments.find(row => row.body === '추가할 원본 댓글')!;
+  const addedComment = comments.find(row => row.body === `추가할 원본 댓글 <${addedLink}>`)!;
   assert.equal(addedComment.authorId, 'user-jun');
   assert.deepEqual(comments.filter(row => row.id !== addedComment.id), expectedComments);
   const times = await readWorklogs();
@@ -786,14 +788,16 @@ test('Jira history append preserves local and deleted records and restores exact
   const backup = (await f.call<Backup>('/export')).data;
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.sourceRecords.filter(row => row.jiraHistoryAppend).map(row => row.record.sourceId).sort(), ['310', 'worklog:410']);
+  assert.equal(backup.sourceRecords.find(row => row.jiraHistoryAppend && row.targetId === addedComment.id)?.record.text, addedSourceBody);
   assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 43 } })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
   assert.deepEqual(await readComments(), comments);
   assert.deepEqual((await readWorklogs()).entries.map(row => row.id), times.entries.map(row => row.id));
   assert.equal((await f.preview(config)).canApply, false);
 
+  const sparseLink = 'https://gitlab.example.test/team/repo/-/merge_requests/320';
   const sparseXml = '<entity-engine-xml><Action id="320" issue="100" author="source-author" type="comment" ' +
-    'created="2020-08-03T00:00:00Z" body="티켓 객체가 빠진 추가 댓글"/>' +
+    `created="2020-08-03T00:00:00Z" body="[티켓 객체가 빠진 추가 댓글|${sparseLink}]"/>` +
     '<Worklog id="420" issue="100" author="source-author" startdate="2020-08-03T00:00:00Z" timeworked="97" body="티켓 객체가 빠진 작업 시간"/>' +
     '</entity-engine-xml>';
   const sparse = await f.upload(Buffer.from(sparseXml), 'jira-sparse-history.xml', 'jira', source);
@@ -802,6 +806,7 @@ test('Jira history append preserves local and deleted records and restores exact
   assert.equal(sparsePlan.counts.newJiraComments, 1);
   assert.equal(sparsePlan.counts.newJiraWorklogs, 1);
   assert.equal((await f.apply(sparsePlan)).status, 201);
+  assert.ok((await readComments()).some(row => row.body === `티켓 객체가 빠진 추가 댓글 <${sparseLink}>`));
   assert.equal((await readWorklogs()).entries.find(row => row.note === '티켓 객체가 빠진 작업 시간')?.durationSeconds, 97);
 });
 

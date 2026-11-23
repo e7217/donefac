@@ -1,8 +1,9 @@
 import { XMLParser } from 'fast-xml-parser';
 import { isCalendarDate } from '../shared/calendar.js';
+import { commentWebUrl } from '../shared/comment-web-links.js';
 import { parseConfluenceJiraList } from '../shared/confluence-jira-list.js';
 import {
-  isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
+  documentPlainText, isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
   type CalloutVariant, type StatusBadgeTone,
 } from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
@@ -33,6 +34,7 @@ export interface MigrationContentContext {
   resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
   // Text-only fields and older migration checkpoints used explicit annotation labels.
   legacyAnnotations?: boolean;
+  preserveCommentWebLinks?: boolean;
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
   legacyDocumentLabelList?: boolean;
@@ -63,6 +65,39 @@ const adfPanelVariants = new Map<string, CalloutVariant>([
 type Mark = NonNullable<RichContent['marks']>[number];
 const text = (value: string, marks?: Mark[]): RichContent[] => value ? [{ type: 'text', text: value, ...(marks?.length ? { marks } : {}) }] : [];
 const paragraph = (content: RichContent[] = []): RichContent => ({ type: 'paragraph', content });
+
+function commentLinkText(nodes: RichContent[], url: string): RichContent[] {
+  const label = nodes.map(documentPlainText).join('');
+  if (!label.trim() || commentWebUrl(label) === url) {
+    const leading = label.slice(0, label.length - label.trimStart().length);
+    const trailing = label.trim() ? label.slice(label.trimEnd().length) : '';
+    return text(`${leading}<${url}>${trailing}`);
+  }
+  return [...nodes, ...text(` <${url}>`)];
+}
+
+/** A visually single ADF link can be split across differently styled text nodes. */
+function materializeCommentWebLinks(node: RichContent): RichContent {
+  if (!node.content) return node;
+  const content: RichContent[] = [];
+  let run: RichContent[] = [];
+  let target: string | undefined;
+  const flush = () => {
+    if (target) content.push(...commentLinkText(run, target));
+    run = [];
+  };
+  for (const child of node.content) {
+    const href = child.type === 'text' ? child.marks?.find(mark => mark.type === 'link')?.attrs?.href : undefined;
+    const url = typeof href === 'string' ? commentWebUrl(href) : undefined;
+    if (url !== target) flush();
+    target = url;
+    if (url) run.push(child);
+    else content.push(materializeCommentWebLinks(child));
+  }
+  flush();
+  return { ...node, content };
+}
+
 const inline = (node: RichContent) => node.type === 'text' || node.type === 'hardBreak' || node.type === 'statusBadge';
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown) => typeof value === 'string' ? value : typeof value === 'number' ? String(value) : '';
@@ -254,6 +289,8 @@ class Converter {
     const safe = this.safeUrl(url);
     if (!safe) { this.warn('UNSAFE_URL', '안전하지 않은 URL은 실행 가능한 링크로 만들지 않고 텍스트로 보존했습니다.'); return [...label, ...text(` (${url})`)]; }
     const special = label.some(node => node.type !== 'text' || node.marks?.some(mark => mark.type === 'code'));
+    const commentUrl = this.context.preserveCommentWebLinks && commentWebUrl(safe);
+    if (commentUrl && (special || !label.length)) return commentLinkText(label, commentUrl);
     if (special) this.warn('LINK_TARGET_SHOWN_AS_TEXT', '코드·이미지 등 링크를 직접 적용할 수 없는 내용 뒤에 원본 링크 주소를 텍스트로 남겼습니다.');
     const marked = label.map(node => node.type === 'text' && !node.marks?.some(mark => mark.type === 'code') ? { ...node, marks: [...(node.marks || []).filter(mark => mark.type !== 'link'), { type: 'link', attrs: { href: safe } }] } : node);
     return special ? [...marked, ...text(` (${url})`)] : marked;
@@ -320,6 +357,7 @@ class Converter {
   headingLevel(value: unknown): number { const level = Number(value || 1); if (![1, 2, 3].includes(level)) this.warn('HEADING_LEVEL_NORMALIZED', '편집기가 지원하는 제목 1~3단계로 정규화했습니다.'); return Math.max(1, Math.min(3, Number.isFinite(level) ? level : 1)); }
   urlReference(url: string): MigrationReferenceInput | null {
     const address = url.trim();
+    if (this.context.preserveCommentWebLinks && commentWebUrl(address)) return null;
     if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(address)) return { kind: 'issue', url };
     if (/[?&]pageId=|(?:^|\/)(?:display|spaces)\//.test(address)) return { kind: 'page', url };
     if (/(?:^|\/)x\/[A-Za-z0-9_-]{1,11}\/*$/u.test(address.split(/[?#]/u, 1)[0])) {
@@ -1058,6 +1096,7 @@ export function convertLegacyContent(record: LegacyRecord, context: MigrationCon
   try {
     if (typeof record.text !== 'string' || Buffer.byteLength(record.text) > MAX_SOURCE_BYTES) throw new ConversionLimit('원본 본문이 변환 크기 한도를 초과했습니다.');
     content = { type: 'doc', content: converter.convert(record) };
+    if (context.preserveCommentWebLinks) content = materializeCommentWebLinks(content);
     converter.verifyLocalSectionLinks(content);
     let count = 0; const stack = [{ node: content, depth: 0 }];
     while (stack.length) { const { node, depth } = stack.pop()!; converter.tick(depth); if (++count > MAX_NODES) throw new ConversionLimit('변환 문서 노드 수를 초과했습니다.'); for (const child of node.content || []) stack.push({ node: child, depth: depth + 1 }); }
