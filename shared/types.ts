@@ -294,6 +294,7 @@ export interface MigrationIdentityOption extends MigrationValueOption { email:st
 export interface MigrationFieldOption extends MigrationValueOption {
   suggestedKind: CustomFieldKind | 'archive';
   projectedDate?: 'startDate' | 'endDate';
+  requiredKind?: CustomFieldKind;
 }
 export interface MigrationAppendTarget {
   projectId: string; key: string; name: string; instanceKey: string; sourceProjectId: string;

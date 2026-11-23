@@ -22,6 +22,8 @@ import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceField
 import { jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
+import { JIRA_COMPONENTS_FIELD_ID, JIRA_RAW_COMPONENTS_FIELD_ID } from './legacy-import-jira-components.js';
+import { buildJiraComponentOptions } from './migration-jira-component-options.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
@@ -102,9 +104,10 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
       }
       if (customField(row)) {
         const projectedDate = projectedSources.get(row.sourceId);
+        const jiraComponents = pkg.dataset.source.product === 'jira' && row.sourceId === JIRA_COMPONENTS_FIELD_ID;
         fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
           sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : suggestedKind(row),
-          ...(projectedDate ? { projectedDate } : {}) });
+          ...(projectedDate ? { projectedDate } : {}), ...(jiraComponents ? { requiredKind: 'multi_select' } : {}) });
       }
     }
     for(const[sourceProjectId,count]of containerRows){const row=index.get(`project:${sourceProjectId}`),name=row?.title||(sourceProjectId==='__unassigned__'?'원본 프로젝트 미지정':sourceProjectId);containers.push({id:optionId(pkg.summary.id,'container',sourceProjectId),packageId:pkg.summary.id,sourceProjectId,name,proposedKey:proposedKey(string(row?.metadata.key||row?.metadata.pkey||row?.metadata.spaceKey)||sourceProjectId,pkg.summary.id+sourceProjectId),...count});}
@@ -843,6 +846,11 @@ class Planner{
         continue;
       }
       const sourceFieldId = option.sourceValue;
+      const projection = option.requiredKind && this.sourceEntry(entry, 'field', sourceFieldId);
+      if (option.requiredKind && (field.kind !== option.requiredKind || !projection || this.skip(projection))) {
+        unavailable(field.name);
+        continue;
+      }
       const raw = jiraCustomRawField(entry.row, sourceFieldId, true)!;
       const before = Object.hasOwn(currentValues, fieldId) ? currentValues[fieldId] : undefined;
       const value = this.convertField(entry, sourceFieldId, field, raw, { timezone: this.configuration.timezone,
@@ -1653,7 +1661,15 @@ class Planner{
     if (!config.appendTo && !config.appendPagesTo) {
       for(const option of this.options.statuses)if(!categories.includes(config.statuses[option.id]))this.notice('STATUS_MAPPING_REQUIRED',`원본 상태의 분류를 선택해 주세요: ${option.label}`,'error');
       for(const option of this.options.issueTypes)if(!Object.hasOwn(config.issueTypes,option.id)||config.issueTypes[option.id]!==null&&!ISSUE_TYPES.includes(config.issueTypes[option.id] as typeof ISSUE_TYPES[number]))this.notice('TYPE_MAPPING_REQUIRED',`원본 유형을 기존 유형 또는 새 유형에 매핑해 주세요: ${option.label}`,'error');
-      for(const option of this.options.fields)if(config.fields[option.id]!=='archive'&&!fieldKinds.includes(config.fields[option.id] as CustomFieldKind))this.notice('FIELD_MAPPING_REQUIRED',`원본 필드의 처리 방식을 선택해 주세요: ${option.label}`,'error');
+      for (const option of this.options.fields) {
+        const kind = config.fields[option.id] ?? (option.requiredKind ? 'archive' : undefined);
+        if (kind === 'archive') continue;
+        if (!kind || !fieldKinds.includes(kind)) {
+          this.notice('FIELD_MAPPING_REQUIRED', `원본 필드의 처리 방식을 선택해 주세요: ${option.label}`, 'error');
+        } else if (option.requiredKind && kind !== option.requiredKind) {
+          this.notice('JIRA_COMPONENT_FIELD_KIND', 'Jira 컴포넌트는 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error');
+        }
+      }
       const projectConfigs=new Map<string,MigrationConfiguration['projects'][number]>();for(const mapping of config.projects){if(projectConfigs.has(mapping.containerId)||!this.options.containers.some(container=>container.id===mapping.containerId))this.notice('PROJECT_MAPPING_INVALID','프로젝트 매핑이 중복되거나 원본 컨테이너가 없습니다.','error');projectConfigs.set(mapping.containerId,mapping);}
       const activeContainers=new Set(this.entries.filter(entry=>!this.excluded.has(entry.key)&&(entry.row.kind==='issue'||entry.row.kind==='page')).map(entry=>optionId(entry.pkg.summary.id,'container',entry.container)));const grouped=new Map<string,Project>();for(const container of this.options.containers){const active=activeContainers.has(container.id);if(!active)continue;const mapping=projectConfigs.get(container.id);if(!mapping){this.notice('PROJECT_MAPPING_REQUIRED',`새 프로젝트를 지정해 주세요: ${container.name}`,'error');continue;}const key=string(mapping.key).trim().toUpperCase(),name=string(mapping.name).trim();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(key)||!name||name.length>100){this.notice('PROJECT_MAPPING_INVALID','프로젝트 키는2~12자 영문·숫자, 이름은1~100자여야 합니다.','error');continue;}if(this.input.existingProjectKeys.some(existing=>existing.toUpperCase()===key)){this.notice('PROJECT_KEY_CONFLICT',`기존 프로젝트 키와 충돌합니다: ${key}`,'error');continue;}let project=grouped.get(key);if(project&&project.name!==name){this.notice('PROJECT_NAME_CONFLICT',`같은 프로젝트 키 ${key}에 서로 다른 이름을 지정했습니다.`,'error');continue;}if(!project){project={id:randomUUID(),key,name,description:'기존 도구에서 이관한 프로젝트',color:'#668899',createdAt:this.input.now};grouped.set(key,project);this.result.projects.push(project);}this.projectsByContainer.set(container.id,project);}
     }
@@ -1761,6 +1777,7 @@ class Planner{
     for(const project of this.result.projects){this.schemas.set(project.id,{...defaultIssueSchema(project.id,this.input.now),issueTypes:[],fields:[]});this.workflows.set(project.id,{...defaultWorkflow(project.id,this.input.now),statuses:[],transitions:[],fieldRules:[]});}
     const append = this.input.append;
     const mapping = this.configuration.appendTo;
+    if (!append) this.createJiraComponentFields();
     const issueNumbers=new Map<string,number>();
     const excludedLabels = this.excludedConfluencePageLabels();
     if (append) {
@@ -1830,7 +1847,7 @@ class Planner{
         const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:this.priority(sourceField(row,'priority')),assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
         if (reporterId !== undefined) issue.reporterId = reporterId;
         if (mapping) this.mapAppendFields(entry, issue, schema, mapping.fields);
-        else for(const option of new Set(Object.keys(fieldMap(row)).map(name=>this.fieldOptions.get(entry.pkg.summary.id)?.get(name)).filter((option):option is MigrationOptions['fields'][number]=>!!option))){const sourceDefinition=this.sourceEntry(entry,'field',option.sourceValue)?.row;if(!sourceDefinition)continue;const fields=fieldMap(row),raw=Object.hasOwn(fields,option.sourceValue)?fields[option.sourceValue]:fields[option.sourceValue.replace(/^csv:/,'')];if(raw===undefined)continue;const kind=this.configuration.fields[option.id];if(kind==='archive'){this.noticeArchivedCustomField(entry, option);continue;}const fieldId=`f_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,option.sourceValue).slice(0,24)}`;let definition=schema.fields.find(field=>field.id===fieldId);if(definition&&definition.kind!==kind)this.notice('FIELD_MAPPING_CONFLICT','같은 원본 필드를 다른 자료형으로 매핑했습니다.','error',entry);if(!definition){definition={id:fieldId,name:option.label,description:sourceDefinition.text.slice(0,20000),kind:kind as CustomFieldKind,required:false,issueTypes:[],options:[],archived:false};if(kind==='select'||kind==='multi_select')definition.options=(this.sourceOptions.get(entry.pkg.summary.id)?.get(option.sourceValue)||[]).map(row=>({id:`o_${hash(fieldId,string(row.metadata.originalId)||row.sourceId).slice(0,24)}`,name:row.title,archived:['Y','true','1'].includes(string(row.metadata.disabled))}));schema.fields.push(definition);}issue.customFields![fieldId]=this.convertField(entry,option.sourceValue,definition,raw);}
+        else this.mapNewIssueFields(entry, issue, schema);
         if(row.textFormat!=='plain'&&row.textFormat!=='none')this.notice('ISSUE_DESCRIPTION_PLAIN_TEXT','업무 설명은 현재 일반 텍스트로 변환합니다. 원래 서식·본문은 원본 보관함에 유지합니다.','warning',entry,true);
       }
     }
@@ -1917,6 +1934,108 @@ class Planner{
       transitions: transitions.map(({ from, to }) => ({ from, to })) });
     this.notice('JIRA_WORKFLOW_REVIEW_REQUIRED', '검토한 시작 상태와 허용 전이를 적용합니다. Jira의 유형별 전이 조건·검증기·후처리는 별도 검토가 필요합니다.', 'warning', undefined, true);
   }
+  private createJiraComponentFields(): void {
+    const catalogs = new Map<ProjectIssueSchema, Map<string, {
+      instance: string; label: string; description: string; choices: { id: string; name: string; scope: string }[];
+    }>>();
+    const numericOwners = new Map<string, string>();
+    for (const entry of this.entries) {
+      const { pkg, row } = entry;
+      if (pkg.dataset.source.product !== 'jira' || row.kind !== 'option' || row.containerId !== JIRA_COMPONENTS_FIELD_ID ||
+          this.jiraComponentOptionExcluded(entry)) continue;
+      const option = this.fieldOptions.get(pkg.summary.id)?.get(JIRA_COMPONENTS_FIELD_ID);
+      const definition = this.sourceEntry(entry, 'field', JIRA_COMPONENTS_FIELD_ID);
+      if (!option || !definition || this.skip(definition) || this.configuration.fields[option.id] !== 'multi_select') continue;
+      const rawId = string(row.metadata.originalId);
+      if (!rawId) continue;
+      const instance = pkg.dataset.source.instanceKey;
+      const fieldId = `f_${hash('jira', instance, JIRA_COMPONENTS_FIELD_ID).slice(0,24)}`;
+      for (const reference of row.references) {
+        if (reference.kind !== 'project' || reference.relation !== 'project') continue;
+        const project = this.projectsByContainer.get(optionId(pkg.summary.id, 'container', reference.sourceId));
+        const schema = project && this.schemas.get(project.id);
+        if (!schema) continue;
+        const source = this.sourceEntry(entry, 'project', reference.sourceId)?.row;
+        const scope = string(source?.metadata.key || source?.metadata.pkey) || source?.title || reference.sourceId;
+        const identity = string(source?.metadata.id) || reference.sourceId;
+        if (/^[1-9]\d*$/.test(identity)) {
+          const key = JSON.stringify([instance, rawId]);
+          const previous = numericOwners.get(key);
+          if (previous && previous !== identity) {
+            this.notice('JIRA_COMPONENT_OWNER_CONFLICT', '같은 Jira 컴포넌트 ID의 원본 프로젝트가 패키지마다 다릅니다. 원본을 다시 확인하거나 값을 보관해 주세요.', 'error', entry);
+            continue;
+          }
+          numericOwners.set(key, identity);
+        }
+        let projectCatalogs = catalogs.get(schema);
+        if (!projectCatalogs) catalogs.set(schema, projectCatalogs = new Map());
+        let catalog = projectCatalogs.get(fieldId);
+        if (!catalog) projectCatalogs.set(fieldId, catalog = {
+          instance, label: option.label, description: definition.row.text.slice(0, 20000), choices: [],
+        });
+        catalog.choices.push({ id: `o_${hash(fieldId, rawId).slice(0,24)}`, name: row.title, scope });
+      }
+    }
+    for (const [schema, grouped] of catalogs) {
+      for (const [id, { instance, label, description, choices }] of grouped) {
+        const name = grouped.size === 1 ? label : `${label} · ${instance.slice(0, 70).toWellFormed()} · ${id.slice(-8)}`;
+        schema.fields.push({ id, name, description, kind: 'multi_select', required: false, issueTypes: [],
+          options: buildJiraComponentOptions(choices), archived: false });
+      }
+    }
+  }
+
+  private jiraComponentOptionExcluded(entry: Entry): boolean {
+    return this.skip(entry) || entry.row.references.some(ref => {
+      if (ref.kind !== 'option' || ref.relation !== 'sourceDefinition') return false;
+      const definition = this.sourceEntry(entry, 'option', ref.sourceId);
+      return Boolean(definition && this.skip(definition));
+    });
+  }
+
+  private jiraComponentMembershipExcluded(issue: Entry, sourceId: string): boolean {
+    return issue.row.references.some(ref => {
+      if (ref.kind !== 'relation' || ref.relation !== 'jiraComponentMembership') return false;
+      const membership = this.sourceEntry(issue, 'relation', ref.sourceId);
+      return Boolean(membership && this.skip(membership) && membership.row.references.some(target =>
+        target.kind === 'option' && target.relation === 'target' && target.sourceId === `${JIRA_RAW_COMPONENTS_FIELD_ID}:${sourceId}`));
+    });
+  }
+
+  private mapNewIssueFields(entry: Entry, issue: Issue, schema: ProjectIssueSchema): void {
+    for (const option of this.jiraCustomSourceOptions(entry)) {
+      const source = this.sourceEntry(entry, 'field', option.sourceValue);
+      if (!source) continue;
+      const kind = this.configuration.fields[option.id];
+      if (!kind || kind === 'archive' || option.requiredKind && this.skip(source)) {
+        this.noticeArchivedCustomField(entry, option);
+        continue;
+      }
+      const fieldId = `f_${hash(entry.pkg.dataset.source.product, entry.pkg.dataset.source.instanceKey, option.sourceValue).slice(0,24)}`;
+      let definition = schema.fields.find(field => field.id === fieldId);
+      if (definition && definition.kind !== kind) {
+        this.notice('FIELD_MAPPING_CONFLICT', '같은 원본 필드를 다른 자료형으로 매핑했습니다.', 'error', entry);
+        continue;
+      }
+      if (!definition) {
+        if (option.requiredKind) {
+          this.notice('JIRA_COMPONENT_CATALOG_MISSING', '이 업무의 Jira 컴포넌트 선택지를 확인할 수 없습니다. 적용할 원본 범위와 제외 항목을 확인해 주세요.', 'error', entry);
+          continue;
+        }
+        definition = { id: fieldId, name: option.label, description: source.row.text.slice(0, 20000), kind,
+          required: false, issueTypes: [], options: [], archived: false };
+        if (kind === 'select' || kind === 'multi_select') {
+          definition.options = (this.sourceOptions.get(entry.pkg.summary.id)?.get(option.sourceValue) ?? []).map(row => ({
+            id: `o_${hash(fieldId, string(row.metadata.originalId) || row.sourceId).slice(0,24)}`, name: row.title,
+            archived: ['Y', 'true', '1'].includes(string(row.metadata.disabled)),
+          }));
+        }
+        schema.fields.push(definition);
+      }
+      issue.customFields![fieldId] = this.convertField(entry, option.sourceValue, definition, jiraCustomRawField(entry.row, option.sourceValue));
+    }
+  }
+
   private mapAppendFields(entry: Entry, issue: Issue, schema: ProjectIssueSchema, fieldMappings: Record<string, string | null>): void {
     const fields = fieldMap(entry.row);
     const options = this.fieldOptions.get(entry.pkg.summary.id);
@@ -1928,13 +2047,17 @@ class Planner{
       const raw = Object.hasOwn(fields, option.sourceValue) ? fields[option.sourceValue] : fields[option.sourceValue.replace(/^csv:/, '')];
       if (raw === undefined) continue;
       const fieldId = fieldMappings[option.id];
-      if (fieldId === null || fieldId === undefined && option.projectedDate) {
+      if (fieldId === null || fieldId === undefined && (option.projectedDate || option.requiredKind)) {
         this.noticeArchivedCustomField(entry, option);
         continue;
       }
       const field = schema.fields.find(value => value.id === fieldId);
       if (!field || field.archived || !fieldApplies(field, issue.type)) {
         this.notice('APPEND_FIELD_REQUIRED', `원본 필드 '${option.label}'를 적용할 활성 필드를 선택하거나 원문에 보관해 주세요.`, 'error', entry);
+        continue;
+      }
+      if (option.requiredKind && field.kind !== option.requiredKind) {
+        this.notice('JIRA_COMPONENT_FIELD_KIND', 'Jira 컴포넌트는 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error', entry);
         continue;
       }
       if (Object.hasOwn(issue.customFields!, field.id)) {
@@ -2012,13 +2135,18 @@ class Planner{
       const objectValue = object(raw), id = string(objectValue.id || objectValue.value || objectValue.name || raw);
       if (!id) return null;
       const direct = this.sourceEntry(entry, 'option', id)?.row;
-      const original = direct?.containerId === sourceId ? direct : this.sourceEntry(entry, 'option', `${sourceId}:${id}`)?.row;
+      const optionEntry = this.sourceEntry(entry, 'option', direct?.containerId === sourceId ? id : `${sourceId}:${id}`);
+      const original = optionEntry?.row;
       const label = string(objectValue.value || objectValue.name) || original?.title || id;
       const optionId = `o_${hash(definition.id,id).slice(0,24)}`;
       if (refresh?.originalMapping === 'generated') return optionId;
+      const jiraComponent = sourceId === JIRA_COMPONENTS_FIELD_ID;
+      if (jiraComponent && !refresh?.originalMapping && (!optionEntry ||
+          this.jiraComponentOptionExcluded(optionEntry) || this.jiraComponentMembershipExcluded(entry, id))) return bad();
       if (this.input.append) {
         const keyed = definition.options.filter(option => option.id === id || option.id === optionId);
-        const matches = keyed.length || refresh?.originalMapping === 'existing' ? keyed : definition.options.filter(option => option.name === label);
+        const matches = keyed.length || refresh?.originalMapping === 'existing' ? keyed : definition.options.filter(option =>
+          option.name === label && (!jiraComponent || !/^o_[a-f0-9]{24}$/.test(option.id)));
         if (matches.length !== 1) return bad();
         const { archived, id: matchedId } = matches[0];
         if (archived && !refresh?.originalMapping) {
@@ -2027,6 +2155,7 @@ class Planner{
         }
         return matches[0].id;
       }
+      if (jiraComponent) return definition.options.some(option => option.id === optionId) ? optionId : bad();
       if (label.length > 120) return bad();
       if (!definition.options.some(option => option.id === optionId)) definition.options.push({id:optionId,name:label,archived:false});
       if (definition.options.length > 200 || new Set(definition.options.map(option => option.name)).size !== definition.options.length) return bad();
@@ -3224,7 +3353,19 @@ class Planner{
       }
     }
     if (queue.length !== incoming.size) this.notice('DOCUMENT_INCLUDE_CYCLE', '이관할 문서 포함 관계에 순환이 있습니다. 원본을 제외하거나 매핑을 검토해 주세요.', 'error');
-    for(const schema of this.result.issueSchemas)for(const field of schema.fields)if((field.kind==='select'||field.kind==='multi_select')&&(!field.options.some(option=>!option.archived)||field.options.length>200||field.options.some(option=>!option.name.trim()||option.name.length>120)||new Set(field.options.map(option=>option.name)).size!==field.options.length))this.notice('FIELD_OPTIONS_INVALID',`선택형 필드 '${field.name}'의 활성 선택지·이름·개수 제한을 확인해 주세요.`,'error');
+    for (const schema of this.result.issueSchemas) {
+      if (new Set(schema.fields.map(field => field.name.trim())).size !== schema.fields.length) {
+        this.notice('FIELD_NAME_CONFLICT', '대상 프로젝트의 필드 이름이 중복됩니다. 원본 필드 매핑을 확인해 주세요.', 'error');
+      }
+      for (const field of schema.fields) {
+        if (field.kind !== 'select' && field.kind !== 'multi_select') continue;
+        if (!field.options.some(option => !option.archived) || field.options.length > 200 ||
+            field.options.some(option => !option.name.trim() || option.name.length > 120) ||
+            new Set(field.options.map(option => option.name)).size !== field.options.length) {
+          this.notice('FIELD_OPTIONS_INVALID', `선택형 필드 '${field.name}'의 활성 선택지·이름·개수 제한을 확인해 주세요.`, 'error');
+        }
+      }
+    }
   }
   createWorklogs():void {
     const included = new Set<string>();

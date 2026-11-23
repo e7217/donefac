@@ -5,6 +5,7 @@ import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKin
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
 import { JiraActivityPages, type JiraActivityKind } from './legacy-import-jira-activity-pages.js';
+import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-import-jira-components.js';
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
@@ -323,6 +324,7 @@ class Context{
       if (item.kind === 'issue' && item.parentId) item.parentId = issueKeys.get(item.parentId) || item.parentId;
     }
     this.applyIssueParents(issueKeys);
+    projectJiraComponents(this.dataset);
     const validated = emptyDataset(this.dataset.source);
     for (const item of this.dataset.records) addRecord(validated, item);
     this.dataset.records = validated.records;
@@ -454,6 +456,8 @@ function csvRows(source:string,delimiter:string):string[][]{
 function parseCsv(context:Context,path:string,source:string):void{
   const first=source.split(/\r?\n/,1)[0],delimiter=['\t',';',','].sort((a,b)=>first.split(b).length-first.split(a).length)[0],rows=csvRows(source.replace(/^\uFEFF/,''),delimiter),headers=rows.shift()?.map(value=>value.trim())||[];if(!headers.some(header=>/^(?:Issue key|Issue id|Key)$/i.test(header))){context.warn('CSV_ISSUE_IDENTIFIER_MISSING','Jira CSV의 Issue key/Issue id 열을 찾지 못했습니다.',null,path,'error');return;}
   const customHeaders = [...new Set(headers.filter(name => /^Custom field\s*\(/i.test(name)))];
+  const componentColumns = headers.flatMap((name, index) => /^Component\/s$/i.test(name) ? [index] : []);
+  const projectColumns = headers.filter(name => /^(?:Project id|Project key)$/i.test(name)).map(name => name.toLowerCase());
   const customFieldIds = customHeaders.map(name => `csv:${name}`);
   const reporterColumns = headers.flatMap((name, index) => /^Reporter$/i.test(name) ? [index] : []);
   const parentIdColumns = headers.flatMap((name, index) => /^Parent id$/i.test(name) ? [index] : []);
@@ -471,6 +475,11 @@ function parseCsv(context:Context,path:string,source:string):void{
     if (dateColumns.filter(column => column.role === role).length > 1) context.scheduleDates.reject(role, path);
   }
   for(let rowIndex=0;rowIndex<rows.length;rowIndex++){const row=rows[rowIndex];if(row.every(value=>!value))continue;if(row.length!==headers.length)context.warn('CSV_COLUMN_COUNT_MISMATCH','CSV 행의 열 개수가 헤더와 다릅니다.',null,`${path}:${rowIndex+2}`,'error');const get=(...names:string[])=>row[headers.findIndex(header=>names.some(name=>header.toLowerCase()===name.toLowerCase()))]||'',key=get('Issue key','Key'),id=get('Issue id')||key||`csv:${path}:${rowIndex+2}`,projectId=get('Project id','Project key')||key.replace(/-\d+$/,'');if(projectId)context.ensure('project',projectId,{title:get('Project name')||get('Project key')||projectId,metadata:{key:get('Project key')||key.replace(/-\d+$/,'')}});const authorId=context.identity(get('Creator','Reporter')),assignee=context.identity(get('Assignee')),parent=get('Parent id','Parent');const metadata:Record<string,LegacyValue>={key,dialect:'search-csv',fields:{},jiraSnapshotFields:[...new Set(headers.map(header=>csvSnapshotFields.get(header.toLowerCase())).filter(field=>field!==undefined))]};const item=context.put('issue',id,{title:get('Summary'),containerId:projectId||null,parentId:parent||null,authorId,createdAt:context.date(get('Created'),`issue:${id}`),updatedAt:context.date(get('Updated'),`issue:${id}`),text:get('Description'),textFormat:'jira-wiki',metadata,references:[...ref('project',projectId,'project'),...ref('identity',authorId,'creatorOrReporter'),...ref('identity',assignee,'assignee'),...ref('issue',parent,'parent')]});const fields=item.metadata.fields as Record<string,LegacyValue>;
+    if (componentColumns.some(column => row[column] !== undefined && row[column] !== '')) {
+      const explicitProjectId = get('Project id');
+      if (row.length !== headers.length || new Set(projectColumns).size !== projectColumns.length ||
+          explicitProjectId && !/^[1-9][0-9]{0,19}$/.test(explicitProjectId)) item.metadata.jiraComponentCsvAmbiguous = true;
+    }
     if (row.length === headers.length && reporterColumns.length === 1) {
       recordJiraReporter(item, reporterIdentity(context, row[reporterColumns[0]]));
     }
@@ -696,6 +705,9 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (child(node,'description')) jiraSnapshotFields.push('description');
     if (assignee && (assigneeId || !text(assignee))) jiraSnapshotFields.push('assigneeId');
     const item=context.put('issue',id,{title:get('summary')||get('title'),containerId:projectId||null,parentId:parentId||null,authorId,createdAt:context.date(get('created'),`issue:${id}`),updatedAt:context.date(get('updated'),`issue:${id}`),text:get('description'),textFormat:'plain',metadata:{key,dialect:'rss-search-xml',descriptionFormat:'search-rendered-html',originalUrl:context.url(get('link')),jiraSnapshotFields,fields},references:[...ref('project',projectId,'project'),...ref('identity',authorId,'reporter'),...ref('identity',assigneeId,'assignee'),...ref('issue',parentId,'parent')]});
+    if (children(node, 'component').some(component => component.children.length) || children(node, 'project').length > 1) {
+      item.metadata.jiraComponentRssAmbiguous = true;
+    }
     if (reporters.length === 1 && !reporter.children.length) {
       if (reporterAccount) recordJiraReporter(item, reporterIdentity(context, reporterAccount));
       else if (!text(reporter).trim() && !Object.keys(reporter.attributes).length) recordJiraReporter(item, null);
@@ -747,6 +759,9 @@ function adminXmlScalar(node: LegacyXmlNode, name: string): string | null | unde
   if (elements.length > 1 || element && (element.children.length || Object.keys(element.attributes).length || Object.hasOwn(node.attributes, name))) return null;
   return element?.text ?? node.attributes[name];
 }
+function adminXmlScalarCandidates(node: LegacyXmlNode, name: string): string[] {
+  return [node.attributes[name], ...children(node, name).map(value => text(value))].filter(value => value !== undefined);
+}
 function adminXmlDateValue(node: LegacyXmlNode, value: ObjectValue): unknown {
   const dateNodes = children(node, 'datevalue'), [date] = dateNodes;
   if (dateNodes.length > 1 || date && (date.children.length || Object.hasOwn(node.attributes,'datevalue')) ||
@@ -762,7 +777,10 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   for(const{ name,value:v }of values)if(['User','OSUser','CwdUser'].includes(name)){const username=str(v.userName||v.name||v.lowerUserName),id=appUsers.get(username.toLowerCase())||str(v.userKey)||username||str(v.id);context.ensure('identity',id,{title:str(v.displayName||v.fullName)||username||id,createdAt:context.date(v.createdDate),updatedAt:context.date(v.updatedDate),metadata:{...selected(v,['id','userName','name','lowerUserName','displayName','fullName','emailAddress','email','active']),identityIncomplete:false}});}
   for(const[username,id]of appUsers)context.ensure('identity',id,{title:username||id,metadata:{key:id,name:username,identityIncomplete:true}});
   const resolveActor=(value:unknown):string|null=>{const original=str(value);return context.identity(appUsers.get(original.toLowerCase())||original);};
-  for(const{name,value:v}of values){if(name==='Project')context.put('project',v.id||v.key||v.pkey,{title:str(v.name),text:str(v.description),textFormat:'plain',authorId:resolveActor(v.lead),metadata:{...selected(v,['key','pkey','projecttype','assigneetype']),url:context.url(v.url)}});
+  for(const{name,value:v,node}of values){if(name==='Project'){
+    const project = context.put('project',v.id||v.key||v.pkey,{title:str(v.name),text:str(v.description),textFormat:'plain',authorId:resolveActor(v.lead),metadata:{...selected(v,['key','pkey','projecttype','assigneetype']),url:context.url(v.url)}});
+    if (['id', 'key', 'pkey'].some(attribute => adminXmlScalar(node, attribute) === null)) project.metadata.jiraComponentProjectAmbiguous = true;
+  }
     else if (name==='CustomField') {
       const field = context.put('field',v.id,{title:str(v.name)||str(v.cfname),text:str(v.description),textFormat:'plain',metadata:selected(v,['customfieldtypekey','customfieldsearcherkey','fieldtype','cfname'])});
       const role = jiraScheduleDateRole(field.title);
@@ -783,6 +801,9 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (Object.hasOwn(v,'assignee')) jiraSnapshotFields.push('assigneeId');
     const reporter = resolveActor(v.reporter);
     const item = context.put('issue',id,{title:str(v.summary),containerId:projectId||null,parentId:parent||null,authorId:creator,createdAt:context.date(v.created,`issue:${id}`),updatedAt:context.date(v.updated,`issue:${id}`),text:str(v.description),textFormat:'jira-wiki',metadata:{key,fields,jiraSnapshotFields},references:[...ref('project',projectId,'project'),...ref('identity',creator,'creator'),...ref('identity',resolveActor(v.assignee),'assignee'),...ref('identity',reporter,'reporter'),...ref('issue',parent,'parent'),...['issuetype','status','priority','resolution'].flatMap(name=>ref('option',v[name]?`builtin:${name}:${str(v[name])}`:'',name))]});
+    if (adminXmlScalar(node, 'id') !== id || adminXmlScalar(node, 'project') !== projectId) {
+      item.metadata.jiraComponentProjectAmbiguous = true;
+    }
     const reporterElements = children(node, 'reporter');
     if (Number(Object.hasOwn(node.attributes, 'reporter')) + reporterElements.length === 1 &&
         !reporterElements.some(element => element.children.length) && typeof v.reporter === 'string') {
@@ -860,13 +881,42 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
         description: str(v.description), source: v }, path);
       else context.warn('JIRA_VERSION_ID_MISSING', 'Jira 버전의 원본 ID를 확인할 수 없어 릴리스 변환을 보류합니다.', null, path);
     }
-    else if (name === 'Component') {handled.add(name);const fieldId='builtin:components';context.field(fieldId,name,'jira-builtin');context.ensure('option',`${fieldId}:${str(v.id)}`,{title:str(v.cname||v.name)||str(v.id),containerId:fieldId,text:str(v.description),textFormat:'plain',metadata:selected(v,['id','project','released','archived','startdate','releasedate']),references:[...ref('field',fieldId,'field'),...ref('project',v.project,'project')]});}
+    else if (name === 'Component') {
+      handled.add(name);
+      const fieldId = JIRA_RAW_COMPONENTS_FIELD_ID;
+      const title = str(v.cname || v.name);
+      context.field(fieldId, name, 'jira-builtin');
+      const option = context.ensure('option', `${fieldId}:${str(v.id)}`, {
+        title: title || str(v.id), containerId: fieldId, text: str(v.description), textFormat: 'plain',
+        metadata: selected(v, ['id', 'project', 'cname', 'name', 'released', 'archived', 'startdate', 'releasedate']),
+        references: [...ref('field', fieldId, 'field'), ...ref('project', v.project, 'project')],
+      })!;
+      if (['id', 'project', 'cname', 'name'].some(attribute => adminXmlScalar(node, attribute) === null) ||
+          !title.trim() || v.cname && v.name && v.cname !== v.name ||
+          option.metadata.project !== str(v.project) || option.title !== title) option.metadata.jiraComponentDefinitionAmbiguous = true;
+    }
     else if (name === 'NodeAssociation') {
       handled.add(name);
       const destination=str(v.sinkNodeId||v.destNodeId), source=str(v.sourceNodeId), kind=str(v.sinkNodeEntity||v.destNodeEntity);
       const isVersion = kind === 'Version' || kind === 'ProjectVersion';
-      context.put('relation',`association:${source}:${kind}:${destination}:${str(v.associationType)}`,{title:str(v.associationType)||'항목 연결',metadata:selected(v,['sourceNodeEntity','sinkNodeEntity','destNodeEntity','associationType']),references:[...ref('issue',source,'source'),...ref('option',kind==='Component'?`builtin:components:${destination}`:isVersion?versionOptionId(destination):destination,'target')]});
+      const relation = context.put('relation',`association:${source}:${kind}:${destination}:${str(v.associationType)}`,{title:str(v.associationType)||'항목 연결',metadata:selected(v,['sourceNodeEntity','sinkNodeEntity','destNodeEntity','associationType']),references:[...ref('issue',source,'source'),...ref('option',kind==='Component'?`${JIRA_RAW_COMPONENTS_FIELD_ID}:${destination}`:isVersion?versionOptionId(destination):destination,'target')]});
       const issue = context.byId.get(`issue:${source}`);
+      const componentClaim = adminXmlScalarCandidates(node, 'associationType').includes('IssueComponent');
+      if (componentClaim || v.sinkNodeEntity === 'Component' || v.destNodeEntity === 'Component') {
+        const attributes = ['sourceNodeId', 'sourceNodeEntity', 'sinkNodeId', 'sinkNodeEntity', 'destNodeId', 'destNodeEntity', 'associationType'];
+        Object.assign(relation.metadata, selected(v, attributes));
+        if (attributes.some(attribute => adminXmlScalar(node, attribute) === null) ||
+            v.sinkNodeId && v.destNodeId && v.sinkNodeId !== v.destNodeId ||
+            v.sinkNodeEntity && v.destNodeEntity && v.sinkNodeEntity !== v.destNodeEntity) {
+          relation.metadata.jiraComponentAssociationAmbiguous = true;
+          if (componentClaim && adminXmlScalarCandidates(node, 'sourceNodeEntity').includes('Issue')) {
+            for (const candidate of adminXmlScalarCandidates(node, 'sourceNodeId')) {
+              const affected = context.byId.get(`issue:${candidate}`);
+              if (affected) affected.metadata.jiraComponentAssociationAmbiguous = true;
+            }
+          }
+        }
+      }
       if (issue && v.associationType === 'IssueFixVersion') {
         const id = versionIdentifier(destination);
         const unambiguousTarget = (!v.sinkNodeId || !v.destNodeId || v.sinkNodeId === v.destNodeId) &&

@@ -848,6 +848,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 미리보기의 `issueRefresh[].customFields`는 현재 필드 이름·현재 값·원본 값·반영 여부를 반환한다. `updatedCustomFields`와 `conflictingCustomFields`에서 반영하고 보존할 필드 수를 확인한다. 같은 티켓의 기본 필드 및 사용자 정의 필드는 하나의 검증된 편집으로 저장된다. 형식 43 자체 백업은 기본 필드와 독립적으로 다음 비교에 사용할 사용자 정의 필드의 기준을 보존한다.
 
+확인한 Jira 컴포넌트가 있는 패키지는 `GET /api/migrations/options`의 `fields`에 `sourceValue: "jira:components"`를 포함한다. 새 프로젝트 매핑은 기본값인 `multi_select`를 사용하거나 `archive`를 선택한다. 기존 프로젝트에는 활성 여러 선택 필드를 지정한다. 이관한 선택지는 같은 Jira 인스턴스의 컴포넌트 ID를 유지하고, CSV 이름은 원본 프로젝트 범위에서 대조한다. REST `fields.components: []`는 이전 이관 기준이 있는 필드의 비우기를 검토하는 근거다. 생략 또는 확인 불가 상태에서는 현재 값을 보존한다. [Jira Data Center 컴포넌트 API](https://developer.atlassian.com/server/jira/platform/rest/v11002/api-group-component/)
+
 ### 기존 Jira 업무에 댓글과 작업 시간 추가
 
 `appendTo.refreshHistory: true`를 지정하면 같은 원본 인스턴스와 프로젝트의 기존 티켓에 새 댓글과 작업 시간 기록을 추가한다. 안정적인 원본 ID, 이전 이관으로 증명되는 대상, 팀원 작성자 매핑과 실제 시각을 확인한다. 작업 시간은 초 단위 원본과 작업일을 유지한다. 이전에 저장한 기록의 원본 ID는 팀에서 기록을 삭제한 뒤에도 중복 방지에 사용한다.

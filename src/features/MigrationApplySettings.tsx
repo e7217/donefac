@@ -434,7 +434,7 @@ function ActorMigration(props: MigrationApplyProps) {
           <MigrationJiraWorkflowEditor options={options} configuration={configuration} onChange={changeJiraWorkflows} />
         </MappingSection>}
         <MappingSection title="업무 유형 매핑"><Paged title="업무 유형 매핑" items={options.issueTypes} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`유형 매핑 ${item.label}`} value={configuration.issueTypes[item.id] ?? ''} onChange={event => mapValue('issueTypes', item.id, event.target.value || null)}><option value="">원본 유형을 새 유형으로 생성</option>{ISSUE_TYPES.map(type => <option value={type} key={type}>{type}</option>)}</select></MappingRow>} /></MappingSection>
-        <MappingSection title="사용자 정의 속성 매핑"><p>선택한 원본 속성을 업무 양식에 추가할 수 있습니다. 변환할 값이 선택한 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={sourceMappingDetail(item)}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).map(([id, label]) => <option key={id} value={id}>{id === 'archive' && item.projectedDate ? '일정과 원본 기록에 반영' : label}</option>)}</select></MappingRow>} /></MappingSection>
+        <MappingSection title="사용자 정의 속성 매핑"><p>선택한 원본 속성을 업무 양식에 추가할 수 있습니다. 변환할 값이 선택한 종류와 맞지 않으면 미리보기에서 알립니다.</p><Paged title="속성 매핑" items={options.fields} label={item => item.label} render={item => <MappingRow label={item.label} detail={sourceMappingDetail(item)}><select className="field" aria-label={`속성 매핑 ${item.label}`} value={configuration.fields[item.id] || 'archive'} onChange={event => mapValue('fields', item.id, event.target.value as CustomFieldKind | 'archive')}>{Object.entries(fieldLabels).filter(([id]) => !item.requiredKind || id === item.requiredKind || id === 'archive').map(([id, label]) => <option key={id} value={id}>{id === 'archive' && item.projectedDate ? '일정과 원본 기록에 반영' : label}</option>)}</select></MappingRow>} /></MappingSection>
         </>}
         <MappingSection title="원본 주소와 제외 항목">
           <p>패키지별 원본 사이트 주소를 입력할 수 있습니다. 별도 설치 경로가 있는 서버는 그 경로까지 입력하세요.</p>
@@ -807,7 +807,7 @@ function AppendMappings({ options, target, value, onChange }: {
 }
 
 function AppendMappingSection({ title, label, options, choices, value, emptyLabel, onChange }: {
-  title: string; label: string; options: (MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>)[]; choices: MappingChoice[]; value: Record<string, string | null>;
+  title: string; label: string; options: (MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate' | 'requiredKind'>)[]; choices: MappingChoice[]; value: Record<string, string | null>;
   emptyLabel: string; onChange: (optionId: string, targetId: string) => void;
 }) {
   if (!options.length) return null;
@@ -815,7 +815,8 @@ function AppendMappingSection({ title, label, options, choices, value, emptyLabe
     <MappingRow label={option.label} detail={sourceMappingDetail(option)}>
       <select className="field" aria-label={`${label} ${option.label}`} value={value[option.id] || ''} onChange={event => onChange(option.id, event.target.value)}>
         <option value="">{option.projectedDate ? '일정과 원본 기록에 반영' : emptyLabel}</option>
-        {choices.map(choice => <option value={choice.id} key={choice.id}>{choice.label}{choice.detail ? ` · ${choice.detail}` : ''}</option>)}
+        {choices.filter(choice => !option.requiredKind || choice.detail === fieldLabels[option.requiredKind])
+          .map(choice => <option value={choice.id} key={choice.id}>{choice.label}{choice.detail ? ` · ${choice.detail}` : ''}</option>)}
       </select>
     </MappingRow>} /></MappingSection>;
 }

@@ -7,6 +7,7 @@ import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
+import { projectJiraComponents } from './legacy-import-jira-components.js';
 import { buildMigrationOptions } from './migration-planner.js';
 import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
 import { hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
@@ -28,7 +29,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 9;
+const conversionVersion = 10;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -109,7 +110,7 @@ export class MigrationService {
     const recordJson = optionsOnly ? "json_set(json,'$.text','')" : 'json';
     const records = this.store.db.prepare(`SELECT ${recordJson} AS json FROM legacy_records WHERE package_id=? ORDER BY rowid`);
     const diagnostics = this.store.db.prepare('SELECT json FROM legacy_diagnostics WHERE package_id=? ORDER BY rowid');
-    return details.map(({ summary, unsupported }) => ({
+    const packages = details.map(({ summary, unsupported }) => ({
       summary,
       dataset: {
         source: summary.source,
@@ -118,6 +119,11 @@ export class MigrationService {
         unsupported,
       },
     }));
+    for (const { dataset } of packages) projectJiraComponents(dataset);
+    if (packages.reduce((sum, item) => sum + item.dataset.records.length, 0) > 100000) {
+      fail(413, '한 번에 원본 객체 100000개까지 이관할 수 있습니다.');
+    }
+    return packages;
   }
   private sourceInstance(packages: MigrationPackage[], product: LegacySource['product']): string | undefined {
     const key = packages[0]?.summary.source.instanceKey;

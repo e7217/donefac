@@ -389,6 +389,10 @@ Confluence 체크리스트는 항목 순서와 완료 여부를 편집 가능한
 
 Jira 날짜 선택 필드의 이름을 `Start date` 또는 `End date`로 확인하면 티켓과 간트가 공유하는 시작일·종료일에 넣는다. 관리자 XML과 검색 XML은 필드 유형을, REST JSON은 필드 이름과 스키마를, CSV는 정확한 사용자 정의 열 제목을 확인한다. 원본 필드와 ID를 보존하고 견본에서 변환된 기간을 확인할 수 있다. 표준 날짜가 있으면 먼저 사용하며, 일정 필드 정의나 값이 여러 개이면 원본을 보관하고 검토 진단을 표시한다. 변경분의 생략된 날짜는 유지하며 REST의 명시적 빈 값이나 완전한 CSV의 빈 열을 지우기로 검토한다. [Jira REST 날짜 선택 필드](https://developer.atlassian.com/server/jira/platform/about-the-jira-server-rest-apis/)
 
+Jira 컴포넌트는 프로젝트의 **Jira 컴포넌트** 여러 선택 필드로 옮긴다. 관리자 XML의 업무 연결, REST·검색 XML의 컴포넌트 ID와 프로젝트 범위를 확인한다. CSV의 반복 컴포넌트 열은 확인한 같은 프로젝트 안에서 이름별 선택지로 옮긴다. 같은 이름의 다른 ID는 구분하고, 업무에 붙은 컴포넌트를 모두 보존한다. 티켓 양식·업무 필터·필드 집계에서 값을 쓴다. 원본 관계와 확인할 수 없는 값은 이관 기록에 보관한다. [Jira 컴포넌트 관계](https://support.atlassian.com/jira/kb/sql-query-to-get-issue-components-from-jira-database/) · [Jira CSV 컴포넌트 열](https://confluence.atlassian.com/adminjiraserver/importing-data-from-csv-938847533.html)
+
+추가 이관은 기존 여러 선택 필드와 확인한 선택지를 사용한다. 기존 업무의 변경분은 마지막 반영값과 현재 값을 비교해 팀 편집을 보존한다. REST의 명시적 빈 배열을 비우기로 검토하며 생략되거나 근거가 모호한 값은 현재 값과 원본 기록을 보존한다. 선택지가 대상에 없으면 업무 양식에서 먼저 확인하고 새 미리보기를 만든다.
+
 프로젝트의 Jira 버전 정의를 릴리스 계획으로 만들고, 확인한 수정 버전 ID로 새 티켓을 연결한다. 출시일은 계획 목표일에 표시한다. 확정된 수정 버전이 여러 개이면 적용 미리보기에서 대표 릴리스 하나를 선택하거나 미지정으로 검토한다. 모든 원본 수정·영향 버전 관계는 이관 기록에서 확인할 수 있다. 추가 이관은 같은 인스턴스의 버전 ID와 대상 프로젝트를 사용해 기존 계획을 찾고, 팀이 바꾼 이름·날짜·상태를 이어서 사용한다. 원본 후보가 범위나 이름 제약에 걸리면 진단을 표시한다. [Jira 수정·영향 버전의 원본 관계](https://support.atlassian.com/jira/kb/query-jira-issues-by-fix-version-database/)
 
 Jira 관리자의 스프린트 테이블과 확인된 업무 필드, Agile REST의 현재·종료 스프린트, 유형을 확인한 기존 Sprint 문자열에서 스프린트 ID·상태·기간·업무 연결을 읽는다. 선택한 업무가 속한 프로젝트마다 사이클을 만든다. 현재 후보가 하나로 확인되면 연결하고, 현재 후보를 하나로 정할 수 없으면 미리보기에서 대표 사이클을 검토한다. Agile 원본에서 현재 스프린트가 비어 있으면 과거 연결을 원본으로 보관한다. 보드에 같은 이름의 스프린트가 있으면 원본 ID를 이름에 표시해 구분한다. 추가 이관은 같은 사이클을 재사용하며 기존 업무와 팀이 편집한 계획을 유지한다. [Jira 스프린트 상태](https://support.atlassian.com/jira/kb/determining-sprint-status-from-the-database/) · [Jira Sprint 필드 형식](https://developer.atlassian.com/cloud/jira/software/rest/intro/#sprint-custom-field)

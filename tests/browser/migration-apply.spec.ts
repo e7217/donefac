@@ -137,6 +137,7 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
     });
     expect(forbidden.status(), await forbidden.text()).toBe(422);
 
+    await expect(settings.getByRole('button', { name: '이관 원본·영수증 새로고침', exact: true })).toBeEnabled();
     await page.goto(`/#/${projectId}/issues`);
     await page.getByRole('button', { name: '보드', exact: true }).click();
     const board = page.getByRole('region', { name: '업무 보드', exact: true });
