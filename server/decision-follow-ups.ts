@@ -4,9 +4,11 @@ import { issueDeadline } from '../shared/my-work.js';
 import type { DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource,
   DocPage, DocRevision, Project, ProjectWorkflow, ResourceLink, RichContent, User } from '../shared/types.js';
 import { statusMeta } from '../shared/workflow-helpers.js';
+import { matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../shared/workspace-search.js';
 import { buildDecisionFollowUpDraftContent } from './decision-follow-up-draft-content.js';
 import type { DocumentCreationService } from './document-creation.js';
 import { DocumentFollowUpError, validateDocumentDecisionSource } from './document-follow-up.js';
+import { readIssueSearchAliases } from './issue-search-aliases.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 20;
@@ -173,6 +175,9 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
       conditions.push('i.assignee_id=?');
       params.push(filters.assigneeId);
     }
+    const eligible = `FROM issues i JOIN resource_links l ON l.issue_id=i.id JOIN documents d ON d.id=l.document_id
+      JOIN revisions r ON r.id=json_extract(l.json,'$.documentSource.revisionId') AND r.document_id=d.id
+      WHERE ${conditions.join(' AND ')}`;
     const rows = store.db.prepare(`SELECT l.id AS linkId, i.id AS issueId, i.project_id AS issueProjectId,
       json_extract(i.json,'$.key') AS issueKey, json_extract(i.json,'$.title') AS issueTitle,
       json_extract(i.json,'$.status') AS issueStatus, i.assignee_id AS assigneeId,
@@ -180,12 +185,13 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
       d.id AS documentId, d.project_id AS documentProjectId, json_extract(d.json,'$.title') AS documentTitle,
       r.id AS revisionId, json_extract(r.json,'$.version') AS version, json_extract(r.json,'$.title') AS sourceTitle,
       json_extract(r.json,'$.createdAt') AS createdAt, json_extract(l.json,'$.documentSource.from') AS sourceFrom,
-      json_extract(l.json,'$.documentSource.to') AS sourceTo
-      FROM issues i JOIN resource_links l ON l.issue_id=i.id JOIN documents d ON d.id=l.document_id
-      JOIN revisions r ON r.id=json_extract(l.json,'$.documentSource.revisionId') AND r.document_id=d.id
-      WHERE ${conditions.join(' AND ')}`);
+      json_extract(l.json,'$.documentSource.to') AS sourceTo ${eligible}`);
     const workflows = new Map<string, ProjectWorkflow>();
     const items: DecisionFollowUpItem[] = [];
+    const keyQuery = normalizeWorkspaceSearchKey(filters.searchTerm);
+    const owners = keyQuery ? store.db.prepare(`SELECT DISTINCT i.id, json_extract(i.json,'$.key') AS key ${eligible}`)
+      .all(...params) as { id: string; key: string }[] : [];
+    const aliasData = { issueAliases: owners.length ? readIssueSearchAliases(store, owners) : undefined };
     for (const value of rows.iterate(...params)) {
       const row = value as unknown as Row;
       if (!Number.isSafeInteger(row.version) || row.version < 1 || !Number.isFinite(Date.parse(row.createdAt)) ||
@@ -201,7 +207,9 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
       const closed = status.category === 'done' || status.category === 'cancelled';
       if ((filters.status === 'open' && closed) || (filters.status === 'closed' && !closed)) continue;
       if (filters.query && ![row.issueKey, row.issueTitle, row.sourceTitle, row.documentTitle]
-        .some(value => typeof value === 'string' && searchable(value).includes(filters.query))) continue;
+        .some(value => typeof value === 'string' && searchable(value).includes(filters.query)) &&
+        !(keyQuery && normalizeWorkspaceSearchKey(row.issueKey).includes(keyQuery)) &&
+        !matchingIssueSearchAliases(aliasData, row.issueId, keyQuery).length) continue;
       const deadline = issueDeadline(row);
       items.push({
         linkId: row.linkId,

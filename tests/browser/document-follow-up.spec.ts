@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
-import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentFollowUpResult, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentFollowUpResult, DocumentIssueLinkResult, Issue,
+  LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
   const response = await request.get('/api/workspace');
@@ -56,6 +57,97 @@ async function selectFirstParagraph(editor: Locator, from: number, to: number) {
     selection.addRange(range);
   }, { from, to });
 }
+
+test('360px 문서에서 원래 Jira 키로 업무에 결정 근거를 붙이고 팀 보고서에서 찾는다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const projectKey = `DF${suffix}`;
+  const createProject = await request.post('/api/projects', { data: { key: projectKey, name: `현재 프로젝트 ${suffix}` } });
+  expect(createProject.status(), await createProject.text()).toBe(201);
+  const project = await createProject.json() as Project;
+  const createIssue = await request.post('/api/issues', { data: { projectId: project.id, title: `현재 번호가 같은 업무 ${suffix}` } });
+  expect(createIssue.status(), await createIssue.text()).toBe(201);
+  const current = await createIssue.json() as Issue;
+  const importedTitle = `이관한 검토 업무 ${suffix}`;
+  const csv = ['Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type',
+    `100,${current.key},${projectKey},${importedTitle},2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task`].join('\r\n');
+  const stageQuery = new URLSearchParams({ filename: `decision-jira-${suffix}.csv`, product: 'jira', instanceKey: `decision-${suffix}` });
+  const stage = await request.post(`/api/legacy-import/packages?${stageQuery}`, {
+    headers: { 'Content-Type': 'application/octet-stream' }, data: Buffer.from(csv),
+  });
+  expect(stage.status(), await stage.text()).toBe(201);
+  const pkg = await stage.json() as LegacyPackageSummary;
+  const quote = '실사용 전 팀 문서와 티켓 이관을 검토한다.';
+  let source: DocPage | undefined;
+  try {
+    const options = await request.get(`/api/migrations/options?packageId=${pkg.id}`);
+    expect(options.ok(), await options.text()).toBeTruthy();
+    const { defaultConfiguration } = await options.json() as MigrationOptions;
+    const configuration = { ...defaultConfiguration, projects: defaultConfiguration.projects.map(value => ({
+      ...value, key: `${projectKey}I`, name: `이관한 프로젝트 ${suffix}`,
+    })) };
+    const previewResponse = await request.post('/api/migrations/preview', { data: { configuration } });
+    expect(previewResponse.status(), await previewResponse.text()).toBe(201);
+    const preview = await previewResponse.json() as MigrationPreview;
+    expect(preview.canApply, JSON.stringify(preview.notices)).toBe(true);
+    const applied = await request.post(`/api/migrations/previews/${preview.id}/apply`, { data: {
+      expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements,
+    } });
+    expect(applied.status(), await applied.text()).toBe(201);
+    const { import: { projectIds: [importedProjectId] } } = await applied.json() as MigrationApplyResult;
+    const imported = (await workspace(request)).issues.find(issue => issue.projectId === importedProjectId && issue.title === importedTitle)!;
+    expect(imported).toBeDefined();
+    const documentTitle = `이관 검토 회의 ${suffix}`;
+    source = await createDecision(request, project.id, documentTitle, {
+      type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: quote }] }],
+    });
+
+    await openDecision(page, source, project.id);
+    await selectFirstParagraph(page.locator('.docs-prose'), 0, quote.length);
+    await page.getByRole('button', { name: '선택한 본문을 기존 업무에 연결', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    const projectFilter = dialog.getByRole('combobox', { name: '프로젝트', exact: true });
+    await dialog.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(current.key.toLowerCase());
+    const target = dialog.getByRole('radio', { name: `${imported.key} ${imported.title}`, exact: true });
+    await expect(target).toHaveCount(0);
+    await projectFilter.selectOption('');
+    const candidates = dialog.getByRole('radio');
+    await expect(candidates).toHaveCount(2);
+    await expect(candidates.first()).toHaveAccessibleName(`${current.key} ${current.title}`);
+    await expect(dialog.getByText(`Jira 원래 키 ${current.key}`, { exact: true })).toBeVisible();
+    await projectFilter.selectOption(importedProjectId);
+    await expect(candidates).toHaveCount(1);
+    await target.check();
+    const sourcePath = `/api/documents/${source.id}/decision-links`;
+    const response = page.waitForResponse(value => new URL(value.url()).pathname === sourcePath && value.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+    const saved = await response;
+    expect(saved.status(), await saved.text()).toBe(201);
+    expect((await saved.json() as DocumentIssueLinkResult).issue.id).toBe(imported.id);
+    await expect(dialog).toHaveCount(0);
+
+    await page.goto(`/#/${project.id}/reports/decision-follow-ups`);
+    const report = page.getByRole('tabpanel', { name: '결정 후속 업무', exact: true });
+    await report.getByRole('combobox', { name: '결정 후속 업무 프로젝트', exact: true }).selectOption('team');
+    await report.getByRole('searchbox', { name: '결정 후속 업무 검색', exact: true }).fill(current.key.toLowerCase());
+    await report.getByRole('button', { name: '조건 적용', exact: true }).click();
+    const row = report.getByRole('article', { name: `${imported.key} 결정 후속 업무`, exact: true });
+    await expect(row).toContainText(documentTitle);
+    await expect(row).toContainText(`Jira 원래 키 ${current.key}`);
+    await row.getByRole('button', { name: `${imported.key} 결정 근거 열기`, exact: true }).click();
+    await expect(row.locator('[data-document-excerpt-start]')).toHaveText(quote);
+    await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('q')).toBe(current.key.toLowerCase());
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  } finally {
+    if (source) await cleanupDecision(request, source.id, importedTitle);
+    else {
+      const imported = (await workspace(request)).issues.find(issue => issue.title === importedTitle);
+      if (imported) await request.delete(`/api/issues/${imported.id}`);
+    }
+    await request.delete(`/api/issues/${current.id}`);
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
 
 test('360px 문서에서 후속 업무 응답을 잃어도 같은 요청으로 확인하고 초안을 유지한다', async ({ page, request }) => {
   test.setTimeout(65_000);

@@ -1,4 +1,4 @@
-import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type PlanningItem, type Priority, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
+import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
@@ -200,6 +200,15 @@ export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: Issu
     case 'running_pipeline': return Boolean(summary?.runningPipelines);
     case 'no_activity': return !summary?.activityCount;
   }
+}
+
+export function createTeamIssueSearchMatcher(query?: string) {
+  const terms = (query ?? '').trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+  return (data: WorkspaceSnapshot, issue: Issue, project: Pick<Project, 'key' | 'name'> | undefined, statusLabel: string) => {
+    if (!terms.length) return true;
+    const text = `${project?.key ?? ''} ${project?.name ?? ''} ${statusLabel} ${issueSearchText(data, issue)}`.toLocaleLowerCase();
+    return terms.every(term => text.includes(term));
+  };
 }
 
 function matchesReporterFilter(filter: IssueViewReporterFilter, reporterId: Issue['reporterId']): boolean {

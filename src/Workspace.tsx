@@ -102,6 +102,10 @@ const validViews: View[] = ['overview','issues','backlog','gantt','planning','re
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
 const emptyTeamGanttScheduleFilters: TeamGanttScheduleFilters = {};
+function readTeamIssueQuery(value?: string | null) {
+  return value?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200) || undefined;
+}
+
 function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
   if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
 }
@@ -119,6 +123,8 @@ function routeHash(route: WorkspaceRoute) {
     const filters = route.ganttScheduleFilters;
     if (filters?.assigneeId !== undefined) query.set('ganttAssignee', filters.assigneeId ?? '');
     if (filters?.unscheduledOnly) query.set('ganttUnscheduled', '1');
+    if (filters?.query) query.set('ganttQ', filters.query);
+    if (filters?.gitlab) query.set('ganttGitlab', filters.gitlab);
   }
   if (route.issueId) query.set('issue', route.issueId);
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
@@ -206,7 +212,8 @@ type IssueReview = {
   focusDirection?: IssueReviewDirection;
 };
 function sameTeamGanttScheduleFilters(a?: TeamGanttScheduleFilters, b?: TeamGanttScheduleFilters): boolean {
-  return a?.assigneeId === b?.assigneeId && Boolean(a?.unscheduledOnly) === Boolean(b?.unscheduledOnly);
+  return a?.assigneeId === b?.assigneeId && Boolean(a?.unscheduledOnly) === Boolean(b?.unscheduledOnly) &&
+    a?.query === b?.query && a?.gitlab === b?.gitlab;
 }
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
@@ -263,10 +270,13 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedGanttProject = parameters.get('ganttProject');
   const ganttProject = ganttScope && snapshot.projects.some(project => project.id === requestedGanttProject) ? requestedGanttProject : null;
   const requestedGanttAssignee = parameters.get('ganttAssignee');
+  const requestedGanttGitlab = parameters.get('ganttGitlab');
   const ganttScheduleFilters: TeamGanttScheduleFilters | undefined = ganttScope ? {
     assigneeId: requestedGanttAssignee === '' ? null : requestedGanttAssignee !== null &&
       snapshot.users.some(user => user.id === requestedGanttAssignee) ? requestedGanttAssignee : undefined,
     unscheduledOnly: parameters.get('ganttUnscheduled') === '1',
+    query: readTeamIssueQuery(parameters.get('ganttQ')),
+    gitlab: isIssueViewGitlabFilter(requestedGanttGitlab) ? requestedGanttGitlab : undefined,
   } : undefined;
   const requestedIssue = parameters.get('issue');
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
@@ -336,12 +346,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   } : undefined;
   const boardProject = parameters.get('boardProject');
   const boardMember = parameters.get('boardMember');
-  const boardQuery = parameters.get('boardQuery')?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  const boardQuery = readTeamIssueQuery(parameters.get('boardQuery'));
   const boardGitlab = parameters.get('boardGitlab');
   const teamBoardFilters: TeamBoardFilters | undefined = view === 'teamboard' ? {
     projectId: snapshot.projects.some(project => project.id === boardProject) ? boardProject ?? undefined : undefined,
     memberId: boardMember === '' ? null : snapshot.users.some(user => user.id === boardMember) ? boardMember : undefined,
-    query: boardQuery || undefined,
+    query: boardQuery,
     gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
@@ -633,6 +643,14 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     return requestRoute({ projectId, view: 'gantt', documentId: null, issueId: null, ganttScope: 'team' });
   };
+  const openTeamGanttFromBoard = () => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'teamboard' || current.issueId) return;
+    const filters = current.teamBoardFilters;
+    requestRoute({ projectId: current.projectId, view: 'gantt', documentId: null, issueId: null, ganttScope: 'team',
+      ganttProject: filters?.projectId ?? null,
+      ganttScheduleFilters: { assigneeId: filters?.memberId, query: filters?.query, gitlab: filters?.gitlab } });
+  };
   const changeTeamGanttProject = (id: string | null) => {
     const current = acceptedRouteRef.current;
     if (current?.view !== 'gantt' || current.ganttScope !== 'team' ||
@@ -647,8 +665,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (current?.view !== 'gantt' || current.ganttScope !== 'team' || current.issueId ||
       (typeof filters.assigneeId === 'string' && !dataRef.current?.users.some(user => user.id === filters.assigneeId))) return false;
     // The chart has already confirmed any drafts this filter would hide.
-    if (!sameTeamGanttScheduleFilters(current.ganttScheduleFilters, filters)) {
-      writeRoute({ ...current, ganttScheduleFilters: filters }, routeIndexRef.current + 1, 'push');
+    const previous = current.ganttScheduleFilters;
+    const next = { ...filters, query: readTeamIssueQuery(filters.query) };
+    if (!sameTeamGanttScheduleFilters(previous, next)) {
+      const scopeChanged = previous?.assigneeId !== next.assigneeId || Boolean(previous?.unscheduledOnly) !== Boolean(next.unscheduledOnly) || previous?.gitlab !== next.gitlab;
+      writeRoute({ ...current, ganttScheduleFilters: next }, routeIndexRef.current + (scopeChanged ? 1 : 0), scopeChanged ? 'push' : 'replace');
     }
     return true;
   };
@@ -965,7 +986,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}/>
         </Suspense>}
         {teamBoard && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>전체 프로젝트 보드를 불러오는 중입니다.</p></div>}>
-          <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenBoardIssue={openIssue}
+          <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenGantt={openTeamGanttFromBoard} onOpenBoardIssue={openIssue}
             onOpenIssueForReview={openIssueForReview}
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}

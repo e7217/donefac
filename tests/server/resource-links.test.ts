@@ -9,7 +9,10 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentNodes } from '../../shared/document-references.js';
-import type { ApiKeyCreated, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision, DocumentIssueLinkResult, Issue, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
+import type { ApiKeyCreated, DecisionFollowUpDraftResult, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision,
+  DocumentIssueLinkResult, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectWorkflow,
+  ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const project = 'project-neo';
 const outsideProject = 'project-team';
@@ -62,7 +65,7 @@ async function fixture(t: TestContext) {
     });
     return link;
   }
-  return { call, key, issue, document, connect, cite, directory };
+  return { base, call, key, issue, document, connect, cite, directory };
 }
 
 test('resource-link reads expose only active pairs whose endpoints are both allowed', async t => {
@@ -261,6 +264,65 @@ test('project decision follow-ups read the frozen source with current ticket met
   await f.call(`/trash/${deletedIssue.trashEntryId}/restore`, 200, 'POST');
   assert.deepEqual(await f.call<DecisionFollowUpSource>(sourcePath(ownLink)), { linkId: ownLink.id, documentId: own.id, source: expectedSource });
   assert.equal((await page({ status: 'all' })).total, 3);
+});
+
+test('decision follow-ups find original Jira and moved keys within scope and validate an alias-filtered draft', async t => {
+  const f = await fixture(t);
+  const sourceKey = 'HIST-17';
+  const stageQuery = new URLSearchParams({ filename: 'decision-report.csv', product: 'jira', instanceKey: 'decision-report' });
+  const stage = await fetch(`${f.base}/legacy-import/packages?${stageQuery}`, {
+    method: 'POST', headers: { 'X-Actor-Id': spoofedActor, 'Content-Type': 'application/octet-stream' },
+    body: ['Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type',
+      `17,${sourceKey},HIST,이관 후 검토,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task`].join('\r\n'),
+  });
+  const stagingResponse = await stage.text();
+  assert.equal(stage.status, 201, stagingResponse);
+  const pkg = JSON.parse(stagingResponse) as LegacyPackageSummary;
+  const options = await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`);
+  const configuration = { ...options.defaultConfiguration, projects: options.defaultConfiguration.projects.map(value => ({
+    ...value, key: 'ADOPT', name: '이관한 프로젝트',
+  })) };
+  const preview = await f.call<MigrationPreview>('/migrations/preview', 201, 'POST', { configuration });
+  assert.ok(preview.canApply, JSON.stringify(preview.notices));
+  const { import: { projectIds: [importedProject] } } = await f.call<MigrationApplyResult>(`/migrations/previews/${preview.id}/apply`, 201, 'POST', {
+    expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements,
+  });
+  const snapshot = await f.call<WorkspaceSnapshot>('/workspace');
+  const imported = snapshot.issues.find(value => value.projectId === importedProject && value.title === '이관 후 검토')!;
+  assert.ok(imported);
+  assert.notEqual(imported.key, sourceKey);
+  const quote = '팀 검토에 반영할 결정';
+  const allowedDocument = await f.document('팀 결정 문서', importedProject, paragraph(quote));
+  const outsideDocument = await f.document('다른 프로젝트의 결정 문서', outsideProject, paragraph(quote));
+  const selected = await f.cite(imported, allowedDocument, quote);
+  const hidden = await f.cite(imported, outsideDocument, quote);
+  const scoped = await f.key('read', [importedProject]);
+  const team = '/decision-follow-ups';
+  const projectReport = `/projects/${importedProject}/decision-follow-ups`;
+  const query = new URLSearchParams({ q: ' ｈｉｓｔ－１７ ' });
+  const projectPage = await f.call<DecisionFollowUpPage>(`${projectReport}?${query}`);
+  assert.deepEqual(new Set(projectPage.items.map(item => item.linkId)), new Set([selected.id, hidden.id]));
+  const scopedTeam = await f.call<DecisionFollowUpPage>(`/v1${team}?${query}`, 200, 'GET', undefined, scoped);
+  assert.deepEqual([scopedTeam.total, scopedTeam.items.map(item => item.linkId)], [1, [selected.id]]);
+  const scopedProject = await f.call<DecisionFollowUpPage>(`/v1${projectReport}?${query}`, 200, 'GET', undefined, scoped);
+  assert.deepEqual(scopedProject.items, scopedTeam.items);
+  const draft = await f.call<DecisionFollowUpDraftResult>(`${projectReport}/meeting-draft`, 201, 'POST', {
+    requestId: randomUUID(), revision: projectPage.revision, q: 'ｈｉｓｔ－１７',
+    title: '이전 업무 키로 검토할 회의 초안', destinationProjectId: importedProject,
+  });
+  assert.ok(draft.document.plainText.includes(quote));
+  assert.ok(draft.document.plainText.includes(imported.key));
+
+  const starting = await f.issue('프로젝트를 옮길 검토 업무');
+  const movePath = `/issues/${starting.id}/project-move`;
+  const move: IssueProjectMoveInput = { expectedVersion: starting.version, projectId: outsideProject, includeConnected: false, mappings: [] };
+  const plan = await f.call<IssueProjectMovePreview>(`${movePath}/preview`, 200, 'POST', move);
+  assert.ok(plan.token, JSON.stringify(plan.blockers));
+  const { issues: [moved] } = await f.call<IssueProjectMoveResult>(`${movePath}/apply`, 200, 'POST', { ...move, token: plan.token });
+  assert.notEqual(moved.key, starting.key);
+  const movedLink = await f.cite(moved, outsideDocument, quote);
+  const movedPage = await f.call<DecisionFollowUpPage>(`${team}?${new URLSearchParams({ q: starting.key.toLowerCase() })}`);
+  assert.deepEqual(movedPage.items.map(item => [item.linkId, item.issue.key]), [[movedLink.id, moved.key]]);
 });
 
 test('decision follow-up pages use deadline priority and stable link ordering at the page boundary', async t => {

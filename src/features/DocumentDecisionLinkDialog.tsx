@@ -3,6 +3,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link2, X } from 'lucide-react';
 import type { DocPage, DocumentIssueLinkResult, DocumentSourceSelection, FeatureProps } from '../../shared/types';
+import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
@@ -36,18 +37,25 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
 
   const matches = useMemo(() => {
     const search = query.trim().toLocaleLowerCase();
-    return data.issues.filter(issue => (!project || issue.projectId === project)
-      && (!search || `${issue.key} ${issue.title}`.toLocaleLowerCase().includes(search)))
-      .sort((a, b) => {
-        const score = (issue: typeof a) => Number(issue.key.toLocaleLowerCase() === search || issue.title.toLocaleLowerCase() === search);
-        return score(b) - score(a) || a.key.localeCompare(b.key, undefined, { numeric: true });
-      });
-  }, [data.issues, project, query]);
+    const keyQuery = normalizeWorkspaceSearchKey(query);
+    return data.issues.flatMap(issue => {
+      if (project && issue.projectId !== project) return [];
+      const aliases = matchingIssueSearchAliases(data, issue.id, keyQuery);
+      const currentKey = normalizeWorkspaceSearchKey(issue.key);
+      if (search && !`${issue.key} ${issue.title}`.toLocaleLowerCase().includes(search) &&
+          !(keyQuery && currentKey.includes(keyQuery)) && !aliases.length) return [];
+      const exact = currentKey === keyQuery ? 2 : Number(issue.title.toLocaleLowerCase() === search ||
+        aliases.some(alias => normalizeWorkspaceSearchKey(alias.key) === keyQuery));
+      return [{ issue, aliases, exact }];
+    }).sort((a, b) => b.exact - a.exact || a.issue.key.localeCompare(b.issue.key, undefined, { numeric: true }));
+  }, [data, project, query]);
   const selected = data.issues.find(issue => issue.id === selectedId);
   const issueError = issueConflict?.issueId === selectedId ? issueConflict.message : '';
   const displayedError = error || issueError;
   const choices = matches.slice(0, RESULTS_LIMIT);
-  if (selected && !choices.some(issue => issue.id === selected.id)) choices.unshift(selected);
+  if (selected && !choices.some(({ issue }) => issue.id === selected.id)) {
+    choices.unshift(matches.find(({ issue }) => issue.id === selected.id) ?? { issue: selected, aliases: [], exact: 0 });
+  }
   const linked = new Map(data.resourceLinks.filter(link => link.documentId === source.id).map(link => [link.issueId, link]));
   const projects = new Map(data.projects.map(value => [value.id, value.name]));
 
@@ -163,18 +171,19 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
             <option value="">모든 프로젝트</option>
             {data.projects.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}
           </select></label>
-          <label>업무 키 또는 제목 검색<input ref={searchInput} className="field" value={query} onChange={event => setQuery(event.target.value)} /></label>
+          <label>업무 키 또는 제목 검색<input ref={searchInput} className="field" placeholder="현재·이전 업무 키 또는 제목" value={query} onChange={event => setQuery(event.target.value)} /></label>
         </div>
         <fieldset className="document-decision-link-results">
           <legend>연결할 업무</legend>
           {choices.length ? <div className="document-decision-link-choices">
-            {choices.map(issue => {
+            {choices.map(({ issue, aliases }) => {
               const link = linked.get(issue.id);
               return <label key={issue.id} className={`document-decision-link-choice${selectedId === issue.id ? ' is-selected' : ''}`}>
                 <input type="radio" name="decision-link-issue" aria-label={`${issue.key} ${issue.title}`} checked={selectedId === issue.id}
                   onChange={() => { setSelectedId(issue.id); setError(''); }} />
                 <span><span className="document-decision-link-key">{issue.key}</span> {issue.title}
                   <small>{projects.get(issue.projectId)}{link && (link.documentSource ? ' · 결정 근거 연결됨' : ' · 문서 연결됨')}</small>
+                  {aliases.length > 0 && <small>{aliases.map(issueSearchAliasLabel).join(' · ')}</small>}
                 </span>
               </label>;
             })}

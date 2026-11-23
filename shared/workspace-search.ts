@@ -42,7 +42,7 @@ function readableText(value: string): string {
   return value.toWellFormed().normalize('NFKC').replace(/[\p{Cc}\s]+/gu, ' ').trim();
 }
 
-function searchKey(value: string): string {
+export function normalizeWorkspaceSearchKey(value: string): string {
   return readableText(value).toLowerCase();
 }
 
@@ -87,7 +87,7 @@ export function issueSearchAliases(data: IssueAliasData, issueId: string): reado
 
 export function matchingIssueSearchAliases(data: IssueAliasData, issueId: string, normalizedQuery: string): IssueSearchAlias[] {
   if (!normalizedQuery) return [];
-  return issueSearchAliases(data, issueId).filter(alias => searchKey(alias.key).includes(normalizedQuery));
+  return issueSearchAliases(data, issueId).filter(alias => normalizeWorkspaceSearchKey(alias.key).includes(normalizedQuery));
 }
 
 export function issueSearchAliasLabel(alias: IssueSearchAlias): string {
@@ -95,8 +95,8 @@ export function issueSearchAliasLabel(alias: IssueSearchAlias): string {
 }
 
 function issueKeyMatchRank(issue: Issue, query: string, aliases: readonly IssueSearchAlias[]): 0 | 1 | null {
-  if (searchKey(issue.key) === query) return 0;
-  return aliases.some(alias => searchKey(alias.key) === query) ? 1 : null;
+  if (normalizeWorkspaceSearchKey(issue.key) === query) return 0;
+  return aliases.some(alias => normalizeWorkspaceSearchKey(alias.key) === query) ? 1 : null;
 }
 
 export function searchQuickIssues(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): IssueSearchMatch[] {
@@ -172,8 +172,8 @@ export function workspaceSearchLabels(data: WorkspaceSnapshot, scope: string): {
 function rankMatch(query: string, title: string, labels: readonly string[], searchableBody: () => string, partialAlias = false): number | null {
   if (!query || title === query) return 3;
   if (title.includes(query)) return 4;
-  if (labels.some(label => searchKey(label).includes(query))) return 5;
-  return partialAlias || searchKey(searchableBody()).includes(query) ? 6 : null;
+  if (labels.some(label => normalizeWorkspaceSearchKey(label).includes(query))) return 5;
+  return partialAlias || normalizeWorkspaceSearchKey(searchableBody()).includes(query) ? 6 : null;
 }
 
 function originalOffset(text: string, foldedIndex: number): number {
@@ -264,7 +264,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
 } {
   const input = normalizeWorkspaceSearchInput(filters.query);
   const originalAddress = workspaceAtlassianSearchAddress(input);
-  const query = httpUrlStart.test(input) ? input.toLowerCase() : searchKey(input);
+  const query = httpUrlStart.test(input) ? input.toLowerCase() : normalizeWorkspaceSearchKey(input);
   const label = normalizeDocumentLabelKey(filters.label);
   if ((!query && !label) || (filters.label && !label)) return { items: [], total: 0, page: 1, pageCount: 1 };
 
@@ -275,7 +275,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
     const gitlabMatches = originalAddress ? null : matchingGitlabSearchLinks(data.gitlabLinks, filters.query);
     for (const issue of data.issues) {
       if (!scopeMatches(issue.projectId, filters.scope)) continue;
-      const title = searchKey(issue.title);
+      const title = normalizeWorkspaceSearchKey(issue.title);
       if (originalAddress) {
         if (original?.issueIds.has(issue.id)) matches.push({ kind: 'issue', value: issue, title, rank: 0, matchedAliases: [] });
         continue;
@@ -293,7 +293,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       if (!scopeMatches(document.projectId, filters.scope)) continue;
       const labels = document.labels ?? [];
       if (label && !labels.some(value => normalizeDocumentLabelKey(value) === label)) continue;
-      const title = searchKey(document.title);
+      const title = normalizeWorkspaceSearchKey(document.title);
       if (originalAddress) {
         if (original?.documentIds.has(document.id)) matches.push({ kind: 'document', value: document, title, rank: 0 });
         continue;
@@ -301,7 +301,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       const space = document.projectId === null ? '팀 공통' : spaces.get(document.projectId) ?? '';
       const rank = rankMatch(query, title, labels, () => `${document.plainText} ${space}`);
       if (rank !== null) matches.push({ kind: 'document', value: document, title, rank,
-        bodyOnly: rank === 6 && !searchKey(space).includes(query) });
+        bodyOnly: rank === 6 && !normalizeWorkspaceSearchKey(space).includes(query) });
     }
   }
 
@@ -317,7 +317,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
     if (item.kind === 'issue') return { kind: 'issue', issue: item.value, excerpt: excerptOf(item.value.description, query),
       ...(item.matchedAliases.length ? { matchedAliases: item.matchedAliases } : {}),
       ...(item.matchedGitlab ? { matchedGitlab: item.matchedGitlab } : {}) };
-    const section = item.bodyOnly ? documentSearchSection(item.value, value => searchKey(value).includes(query)) : undefined;
+    const section = item.bodyOnly ? documentSearchSection(item.value, value => normalizeWorkspaceSearchKey(value).includes(query)) : undefined;
     return { kind: 'document', document: item.value, parentTitles: ancestorTitles(item.value, documentsById),
       excerpt: excerptOf(section?.text ?? item.value.plainText, query), ...(section ? { sectionId: section.sectionId } : {}) };
   });

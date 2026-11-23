@@ -1,11 +1,10 @@
 'use client';
 
-import { ArrowRightLeft, Link2, ListChecks, RefreshCw, Search } from 'lucide-react';
+import { ArrowRightLeft, Link2, ListChecks, RefreshCw, Search, SquareChartGantt } from 'lucide-react';
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { ISSUE_BULK_EDIT_LIMIT, isIssueViewGitlabFilter, STATUS, type FeatureProps, type Issue, type StatusCategory, type TeamBoardFilters, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
-import { issueSearchText } from '../../shared/issue-schema';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
-import { matchesGitlabFilter, orderProjectIssues } from '../../shared/issue-view';
+import { createTeamIssueSearchMatcher, matchesGitlabFilter, orderProjectIssues } from '../../shared/issue-view';
 import { allowedNextStatuses, projectWorkflow, statusMeta, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import { dateLabel } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
@@ -19,6 +18,7 @@ import './team-board.css';
 type Props = FeatureProps & {
   filters: TeamBoardFilters;
   onFiltersChange: (filters: TeamBoardFilters) => void;
+  onOpenGantt: () => void;
   onOpenBoardIssue: (id: string, trigger: { opener: HTMLElement; fallback: HTMLElement | null }) => void;
   onOpenIssueForReview?: OpenIssueForReview;
   refreshBoard: WorkspaceRefresh;
@@ -41,7 +41,7 @@ function destinations(data: WorkspaceSnapshot, issue: Issue, category?: StatusCa
 }
 
 export default function TeamBoard(props: Props) {
-  const { data, filters, onFiltersChange, onOpenBoardIssue, onOpenIssueForReview, refresh, notify, refreshBoard, issueOverlayOpen } = props;
+  const { data, filters, onFiltersChange, onOpenGantt, onOpenBoardIssue, onOpenIssueForReview, refresh, notify, refreshBoard, issueOverlayOpen } = props;
   const heading = useId();
   const board = useRef<HTMLDivElement>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
@@ -69,17 +69,14 @@ export default function TeamBoard(props: Props) {
       else scoped.set(issue.projectId, [issue]);
     }
     const orders = new Map(data.issueOrders?.map(order => [order.projectId, order]));
-    const query = (filters.query ?? '').trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+    const matchSearch = createTeamIssueSearchMatcher(filters.query);
     for (const project of data.projects) {
       const projectIssues = scoped.get(project.id);
       if (!projectIssues?.length) continue;
       const statuses = new Map(projectWorkflow(data, project.id).statuses.map(status => [status.id, status]));
       for (const issue of orderProjectIssues(projectIssues, orders.get(project.id))) {
         const status = statuses.get(issue.status) ?? statusMeta(data, project.id, issue.status);
-        if (query.length) {
-          const text = `${project.key} ${project.name} ${status.label} ${issueSearchText(data, issue)}`.toLocaleLowerCase();
-          if (!query.every(term => text.includes(term))) continue;
-        }
+        if (!matchSearch(data, issue, project, status.label)) continue;
         groups.get(status.category)?.push({ issue, status, projectKey: project.key, projectName: project.name });
       }
     }
@@ -214,6 +211,9 @@ export default function TeamBoard(props: Props) {
         </button>
         <button type="button" className="btn" aria-disabled={refreshPaused || requestMode !== null} aria-busy={requestMode === 'manual'} onClick={manualRefresh}>
           <RefreshCw size={16} className={requestMode === 'manual' ? 'spin' : undefined} aria-hidden="true" />팀 보드 새로고침
+        </button>
+        <button type="button" className="btn" disabled={bulk.locked || Boolean(editing) || dragging || issueOverlayOpen} onClick={onOpenGantt}>
+          <SquareChartGantt size={16} aria-hidden="true" />현재 조건으로 간트 열기
         </button>
         <button type="button" className="btn" onClick={() => void copyLink()}><Link2 size={16} aria-hidden="true" />보드 링크 복사</button>
       </div>

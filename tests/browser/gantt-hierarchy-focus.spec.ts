@@ -398,7 +398,7 @@ test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하�
     await expect(assignee).toHaveValue(`member:${f.actor.id}`);
     await expect(unscheduled).toBeChecked();
     await expect(g.search).toHaveValue(`${f.prefix} 선택한 팀 업무`);
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === `${hash}&${new URLSearchParams({ ganttQ: `${f.prefix} 선택한 팀 업무` })}`);
     await g.select(parent).check();
     await dependencyTrigger.click();
     await expect(dependency).toBeVisible();

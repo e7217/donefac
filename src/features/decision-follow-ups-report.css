@@ -59,6 +59,7 @@
 }
 
 .decision-follow-up-issue:hover { color: #11675e; }
+.decision-follow-up-aliases { margin: -0.35rem 0 0.6rem; font-size: 0.8rem; overflow-wrap: anywhere; color: #526c65; }
 .decision-follow-up-issue:focus-visible,
 .decision-follow-up-document-link:focus-visible,
 .decision-follow-ups-results h3:focus-visible { outline: 2px solid #177c72; outline-offset: 3px; }

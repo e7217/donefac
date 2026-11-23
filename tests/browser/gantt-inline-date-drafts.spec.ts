@@ -501,7 +501,8 @@ test('전체 프로젝트 간트에서 날짜 초안을 같은 행의 연결 편
     await expect(start).toHaveValue(date(24));
     await expect(end).toHaveValue(date(27));
     await expect(button(chart.row(anchor), `${anchor.key} 날짜 저장`)).toHaveCount(0);
-    await expect(page).toHaveURL(new RegExp(`/gantt\\?scope=team$`));
+    const teamFilters = new URLSearchParams({ scope: 'team', ganttQ: data.prefix });
+    await expect(page).toHaveURL(url => url.hash === `#/${data.first.id}/gantt?${teamFilters}`);
     const after = await workspace(request);
     expect(after.issues.find(issue => issue.id === anchor.id)).toEqual(applied.updated[0]);
     expect(after.issues.find(issue => issue.id === otherProject.id)).toEqual(otherProject);

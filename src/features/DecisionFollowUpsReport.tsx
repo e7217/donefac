@@ -3,6 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { BookOpen, ChevronRight, FileText, RefreshCw, Search } from 'lucide-react';
 import type { DecisionFollowUpDraftRequest, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, FeatureProps } from '../../shared/types';
+import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { api } from '../lib/api';
 import {
   decisionFollowUpQuery, MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH, sameDecisionFollowUpScope, type DecisionFollowUpScope,
@@ -82,6 +83,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
 
   const current = result && sameDecisionFollowUpScope(result.scope, scope) ? result : null;
   const page = current?.page;
+  const issueKeyQuery = normalizeWorkspaceSearchKey(scope.q);
   const loading = current?.loading ?? true;
   const openingTarget = opening !== null && sameDecisionFollowUpScope(opening.scope, scope) ? opening.target : null;
   const projectSelection = options.projectId === undefined ? 'current' : options.projectId === null ? 'team' : `project:${options.projectId}`;
@@ -133,7 +135,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
       </header>
       <div className="decision-follow-ups-controls">
         <label>검색
-          <input type="search" className="field" aria-label="결정 후속 업무 검색" placeholder="업무 키, 제목, 문서 제목"
+          <input type="search" className="field" aria-label="결정 후속 업무 검색" placeholder="현재·이전 업무 키, 제목, 문서 제목"
             maxLength={MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH} value={options.q}
             onChange={event => setOptions({ ...options, q: event.target.value })} />
         </label>
@@ -179,7 +181,8 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
       </header>
       {page.items.length ? <ul className="decision-follow-ups-list" aria-label="결정 후속 업무 목록">
         {page.items.map(item => <li key={item.linkId}><DecisionFollowUpCard key={`${item.source.revisionId}:${item.source.from}:${item.source.to}`}
-          item={item} data={data} reportProjectId={projectId} showIssueProject={scope.projectId !== undefined} openingTarget={openingTarget} open={openTarget} /></li>)}
+          item={item} data={data} issueKeyQuery={issueKeyQuery} reportProjectId={projectId} showIssueProject={scope.projectId !== undefined}
+          openingTarget={openingTarget} open={openTarget} /></li>)}
       </ul> : <p className="card decision-follow-ups-empty">{page.total && page.offset ? '이 페이지에 표시할 결정 근거가 없습니다.' : '조건에 맞는 결정 후속 업무가 없습니다.'}</p>}
       {(page.total > page.limit || page.offset > 0) && <nav className="reports-pagination" aria-label="결정 후속 업무 페이지">
         <span>{page.items.length ? `${numberLabel(page.offset + 1)}–${numberLabel(page.offset + page.items.length)} / ` : ''}{numberLabel(page.total)}건</span>
@@ -238,9 +241,10 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
     </>} />;
 }
 
-function DecisionFollowUpCard({ item, data, reportProjectId, showIssueProject, openingTarget, open }: {
+function DecisionFollowUpCard({ item, data, issueKeyQuery, reportProjectId, showIssueProject, openingTarget, open }: {
   item: DecisionFollowUpItem;
   data: Props['data'];
+  issueKeyQuery: string;
   reportProjectId: string;
   showIssueProject: boolean;
   openingTarget: Target | null;
@@ -257,6 +261,7 @@ function DecisionFollowUpCard({ item, data, reportProjectId, showIssueProject, o
     return value.source;
   }, [documentId, from, linkId, path, revisionId, to]);
   const assignee = data.users.find(user => user.id === issue.assigneeId);
+  const aliases = matchingIssueSearchAliases(data, issue.id, issueKeyQuery);
   const issueProject = showIssueProject ? data.projects.find(project => project.id === issue.projectId) : undefined;
   const documentProject = data.projects.find(project => project.id === document.projectId);
   const documentSpace = document.projectId === null ? '팀 공통 문서' : documentProject?.name ?? '프로젝트 정보 없음';
@@ -268,6 +273,7 @@ function DecisionFollowUpCard({ item, data, reportProjectId, showIssueProject, o
       onClick={event => { if (!openingTarget) void open('issue', issue.id, event.currentTarget); }}>
       <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><ChevronRight size={15} aria-hidden="true" />
     </button></h4>
+    {aliases.length > 0 && <p className="decision-follow-up-aliases">{aliases.map(issueSearchAliasLabel).join(' · ')}</p>}
     <dl className="decision-follow-up-details" data-show-issue-project={showIssueProject || undefined}>
       {showIssueProject && <div><dt>업무 프로젝트</dt><dd data-decision-issue-project={issue.projectId}>{issueProject?.name ?? '프로젝트 정보 없음'}</dd></div>}
       <div><dt>상태</dt><dd><i style={{ backgroundColor: issue.statusColor }} aria-hidden="true" />{issue.statusLabel}</dd></div>

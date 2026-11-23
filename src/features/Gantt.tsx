@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -20,7 +20,8 @@ import type { OpenIssueForReview } from '../lib/issue-review';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
-import { createIssueViewMatcher, issuePriorityLabelFilterLabels } from '../../shared/issue-view';
+import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
+import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
@@ -238,8 +239,11 @@ function ProjectGantt(props: GanttProps) {
     focusIssueId, focusDateEndpoint, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus, onLocateIssueDate } = props;
   const teamAssigneeId = allProjects ? teamScheduleFilters?.assigneeId : undefined;
   const teamUnscheduledOnly = allProjects && teamScheduleFilters?.unscheduledOnly === true;
-  const teamScheduleFilterActive = teamAssigneeId !== undefined || teamUnscheduledOnly;
-  const teamFocusScope = allProjects ? JSON.stringify([teamProjectFilter, teamAssigneeId !== undefined, teamAssigneeId, teamUnscheduledOnly]) : null;
+  const teamGitlabFilter = allProjects ? teamScheduleFilters?.gitlab : undefined;
+  const teamQuery = allProjects ? teamScheduleFilters?.query ?? '' : '';
+  const teamScheduleFilterActive = teamAssigneeId !== undefined || teamUnscheduledOnly || Boolean(teamGitlabFilter || teamQuery.trim());
+  const teamFocusScope = allProjects
+    ? JSON.stringify([teamProjectFilter, teamAssigneeId !== undefined, teamAssigneeId, teamUnscheduledOnly, teamGitlabFilter, teamQuery]) : null;
   const focusedIssue = focusIssueId ? data.issues.find(issue => issue.id === focusIssueId && (allProjects || issue.projectId === projectId)) : undefined;
   const focusedDate = (focusDateEndpoint && focusedIssue?.[focusDateEndpoint]) || focusedIssue?.startDate || focusedIssue?.endDate;
   const focusRequest = focusIssueId ? JSON.stringify([focusIssueId, focusDateEndpoint ?? null, issueFocusActivation]) : null;
@@ -251,7 +255,8 @@ function ProjectGantt(props: GanttProps) {
   const [linkedOnly, setLinkedOnly] = useState(false);
   const [planAssignment, setPlanAssignment] = useState<PlanAssignmentInput | null>(null);
   const [planShift, setPlanShift] = useState<PlanningItem | null>(null);
-  const [query, setQuery] = useState('');
+  const [projectQuery, setProjectQuery] = useState('');
+  const query = allProjects ? teamQuery : projectQuery;
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scheduleFocus, setScheduleFocus] = useState<ScheduleFocus | null>(null);
@@ -305,7 +310,7 @@ function ProjectGantt(props: GanttProps) {
     }
     if (focusedIssue) {
       if (!focusDateEndpoint) {
-        setQuery('');
+        if (!allProjects) setProjectQuery('');
         setHideDone(false);
         setLinkedOnly(false);
       }
@@ -703,6 +708,7 @@ function ProjectGantt(props: GanttProps) {
     notify(`과부하를 줄이는 ${result.updated.length}개 업무의 일정을 적용했습니다.`);
   }
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
+  const teamGitlabSummaries = useMemo(() => allProjects ? summarizeIssueGitlabLinks(data.gitlabLinks) : null, [allProjects, data.gitlabLinks]);
   const teamBlockerChoices = findTeamBlockerChoices(data, projectsById);
   const projectIssues = useMemo(() => {
     if (!allProjects) return data.issues.filter(issue => issue.projectId === projectId);
@@ -759,17 +765,17 @@ function ProjectGantt(props: GanttProps) {
   const planningScope = planningExpanded && linkedOnly ? selectedPlan : undefined;
   const planningRows = planningExpanded && !scheduleFocus ? projectPlans.filter(item => planningScope ? item.id === planningScope.id : item.status !== 'archived' || item.id === selectedPlanningId) : [];
   const planStats = useMemo(() => planMembershipStats(projectPlans, projectIssues), [projectPlans, projectIssues]);
-  function matchesTeamScheduleFilters(issue: Issue, filters = allProjects ? teamScheduleFilters : undefined) {
-    return (filters?.assigneeId === undefined || (issue.assigneeId ?? null) === filters.assigneeId) &&
-      (!filters?.unscheduledOnly || !issue.startDate || !issue.endDate);
-  }
   function locallyVisibleIssues(text: string, hideTerminal: boolean, scope?: PlanningItem, candidates = scopedIssues,
     scheduleFilters = allProjects ? teamScheduleFilters : undefined) {
-    const search = text.toLowerCase();
+    const teamSearch = allProjects && text.trim() ? createTeamIssueSearchMatcher(text) : null;
+    const projectSearch = allProjects ? '' : text.toLowerCase();
     return candidates.filter(issue => (!scope || issue[planningFields(scope.kind).idField] === scope.id) &&
       (!hideTerminal || !isTerminalStatus(data, issue.projectId, issue.status)) &&
-      matchesTeamScheduleFilters(issue, scheduleFilters) &&
-      (!search || issueSearchText(data, issue).toLowerCase().includes(search)));
+      (scheduleFilters?.assigneeId === undefined || (issue.assigneeId ?? null) === scheduleFilters.assigneeId) &&
+      (!scheduleFilters?.unscheduledOnly || !issue.startDate || !issue.endDate) &&
+      (!scheduleFilters?.gitlab || matchesGitlabFilter(scheduleFilters.gitlab, teamGitlabSummaries?.get(issue.id))) &&
+      (!teamSearch || teamSearch(data, issue, projectsById.get(issue.projectId), statusMeta(data, issue.projectId, issue.status).label)) &&
+      (!projectSearch || issueSearchText(data, issue).toLowerCase().includes(projectSearch)));
   }
   function sharedViewRows(rows: Issue[]) {
     if (sharedViewUnavailable) return [];
@@ -888,7 +894,7 @@ function ProjectGantt(props: GanttProps) {
   const chartZoom = datePicker ? 'day' : zoom;
   const dayWidth = chartZoom === 'day' ? 32 : chartZoom === 'week' ? 15 : 6;
   const timelineWidth = range.days * dayWidth;
-  const viewportContext = JSON.stringify([projectId, allProjects, chartProjectFilter, teamAssigneeId, teamUnscheduledOnly, ganttViewId, focusRequest, windowStart, chartZoom,
+  const viewportContext = JSON.stringify([projectId, allProjects, teamFocusScope, ganttViewId, focusRequest, windowStart, chartZoom,
     selectedPlanningId, planningExpanded, linkedOnly, selectedBaselineId, scheduleFocus?.kind, scheduleFocus?.issueId]);
   useLayoutEffect(() => {
     viewport.current = { data, context: viewportContext, start: rangeStart, dayWidth };
@@ -1041,6 +1047,7 @@ function ProjectGantt(props: GanttProps) {
       if (filteredProject) filters.push(`프로젝트 · ${filteredProject.key} ${filteredProject.name}`);
       if (teamAssigneeId !== undefined) filters.push(`담당자 · ${teamAssigneeId === null ? '미배정'
         : data.users.find(user => user.id === teamAssigneeId)?.name ?? '현재 팀원 없음'}`);
+      if (teamGitlabFilter) filters.push(ISSUE_GITLAB_FILTER_LABELS[teamGitlabFilter]);
       if (teamUnscheduledOnly) filters.push('일정 미정만');
       if (query) filters.push(`업무 검색 · ${query}`);
       if (hideDone) filters.push('완료 업무 숨기기');
@@ -1078,8 +1085,13 @@ function ProjectGantt(props: GanttProps) {
     return (!hidesDatePickerDraft && ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6)))) || canLeave();
   }
   function changeVisibility(nextQuery: string, nextHideDone: boolean) {
+    if (allProjects && nextQuery !== query) {
+      changeTeamScheduleFilters({ ...teamScheduleFilters, query: nextQuery || undefined });
+      return;
+    }
     if (!canHideRows(chartRows(nextQuery, nextHideDone, planningScope).rows)) return;
-    setQuery(nextQuery); setHideDone(nextHideDone);
+    if (!allProjects) setProjectQuery(nextQuery);
+    setHideDone(nextHideDone);
   }
   function changeTeamProjectFilter(id: string | null) {
     if (pasteScope) return;
@@ -1095,9 +1107,10 @@ function ProjectGantt(props: GanttProps) {
     event.currentTarget.focus({ preventScroll: true });
   }
   function changeTeamScheduleFilters(filters: TeamGanttScheduleFilters) {
+    if (pasteScope) return;
     const origin = teamFilterOrigin.current;
     teamFilterOrigin.current = null;
-    const accepted = canHideRows(chartRows(query, hideDone, planningScope, scopedIssues, filters).rows) && onChangeTeamScheduleFilters?.(filters);
+    const accepted = canHideRows(chartRows(filters.query ?? '', hideDone, planningScope, scopedIssues, filters).rows) && onChangeTeamScheduleFilters?.(filters);
     if (!accepted && origin?.isConnected) origin.focus({ preventScroll: true });
   }
   function focusAfterCompletingMissingRows(updated: readonly Issue[], origin = document.activeElement) {
@@ -1859,11 +1872,11 @@ function ProjectGantt(props: GanttProps) {
       {onChangeTeamScheduleFilters && <>
         <label>담당자 필터
           <select className="field" value={teamAssigneeId === null ? 'unassigned' : teamAssigneeId === undefined ? '' : `member:${teamAssigneeId}`}
-            disabled={busy || Boolean(scheduleFocus)} data-gantt-focus-control="" onPointerDown={focusTeamFilterSelect}
+            disabled={busy || Boolean(scheduleFocus || pasteScope)} data-gantt-focus-control="" onPointerDown={focusTeamFilterSelect}
             onBlur={() => { teamFilterOrigin.current = null; }} onChange={event => {
               const value = event.currentTarget.value;
               const assigneeId = value === 'unassigned' ? null : value ? value.slice('member:'.length) : undefined;
-              changeTeamScheduleFilters({ assigneeId, unscheduledOnly: teamUnscheduledOnly || undefined });
+              changeTeamScheduleFilters({ ...teamScheduleFilters, assigneeId });
             }}>
             <option value="">전체 담당자</option>
             <option value="unassigned">미배정</option>
@@ -1872,9 +1885,20 @@ function ProjectGantt(props: GanttProps) {
             {data.users.map(user => <option key={user.id} value={`member:${user.id}`}>{user.name}</option>)}
           </select>
         </label>
+        <label>GitLab 조건
+          <select className="field" value={teamGitlabFilter ?? ''} disabled={busy || Boolean(scheduleFocus || pasteScope)}
+            data-gantt-focus-control="" onPointerDown={focusTeamFilterSelect} onBlur={() => { teamFilterOrigin.current = null; }}
+            onChange={event => {
+              const value = event.currentTarget.value;
+              changeTeamScheduleFilters({ ...teamScheduleFilters, gitlab: isIssueViewGitlabFilter(value) ? value : undefined });
+            }}>
+            <option value="">GitLab 전체</option>
+            {Object.entries(ISSUE_GITLAB_FILTER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
         <label className="gantt-checkbox-label gantt-team-unscheduled" onPointerDown={keepInlineDateFocus}>
-          <input ref={teamUnscheduledFilter} type="checkbox" checked={teamUnscheduledOnly} disabled={busy || Boolean(scheduleFocus)}
-            data-gantt-focus-control="" onChange={event => changeTeamScheduleFilters({ assigneeId: teamAssigneeId, unscheduledOnly: event.currentTarget.checked || undefined })} />일정 미정만
+          <input ref={teamUnscheduledFilter} type="checkbox" checked={teamUnscheduledOnly} disabled={busy || Boolean(scheduleFocus || pasteScope)}
+            data-gantt-focus-control="" onChange={event => changeTeamScheduleFilters({ ...teamScheduleFilters, unscheduledOnly: event.currentTarget.checked || undefined })} />일정 미정만
         </label>
       </>}
       {filteredProject && onOpenProjectGantt && <button className="btn btn-ghost" type="button" disabled={busy}
@@ -1917,7 +1941,16 @@ function ProjectGantt(props: GanttProps) {
         if (onClearIssueFocus()) scrollRef.current?.focus({ preventScroll: true });
       }}>업무 위치 해제</button>}
     </div>}
-    <div className="issue-toolbar gantt-toolbar"><div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(e.target.value, hideDone)} /></div><label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(scheduleFocus)} onChange={e => changeVisibility(query, e.target.checked)} />완료 업무 숨기기</label><div className="gantt-toolbar-spacer" /><button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button><div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) => <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div>
+    <div className="issue-toolbar gantt-toolbar">
+      <div className="issue-search"><Search size={15} /><input placeholder="업무 검색" aria-label="간트 업무 검색" value={query}
+        maxLength={allProjects ? 200 : undefined} disabled={busy || Boolean(scheduleFocus || (allProjects && pasteScope))}
+        onChange={event => changeVisibility(event.currentTarget.value, hideDone)} /></div>
+      <label className="gantt-checkbox-label"><input type="checkbox" checked={hideDone} disabled={busy || Boolean(scheduleFocus)}
+        onChange={event => changeVisibility(query, event.currentTarget.checked)} />완료 업무 숨기기</label>
+      <div className="gantt-toolbar-spacer" />
+      <button className="btn" onClick={goToToday}><CalendarDays size={14} /> 오늘</button>
+      <div className="issue-view-switch gantt-zoom">{([['day', '일'], ['week', '주'], ['month', '월']] as const).map(([key, label]) =>
+        <button key={key} className={chartZoom === key ? 'active' : ''} disabled={Boolean(activeDatePicker)} onClick={() => setZoom(key)}>{label}</button>)}</div>
       <button ref={selectionShiftTrigger} className="btn" type="button" onClick={() => toggleShiftForm('selection')}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={!selectedIssues.length || busy || Boolean(activeDatePicker)}
         aria-expanded={shiftMode === 'selection'} aria-controls={shiftMode === 'selection' ? 'gantt-shift-form' : undefined}>
@@ -2059,10 +2092,11 @@ function ProjectGantt(props: GanttProps) {
         notify(`${issue.key} 업무를 간트에 추가했습니다. 새 업무는 현재 공유 보기의 범위 밖에 있습니다.`);
       } else if (chartProjectFilter && issue.projectId !== chartProjectFilter) {
         notify(`${issue.key} 업무를 추가했습니다. 프로젝트 필터를 바꾸면 간트에 표시됩니다.`);
-      } else if (!matchesTeamScheduleFilters(issue)) {
-        notify(`${issue.key} 업무를 추가했습니다. 현재 담당자·일정 필터의 범위 밖에 있습니다.`);
+      } else if (allProjects && !locallyVisibleIssues(query, false, undefined, [issue]).length) {
+        notify(`${issue.key} 업무를 추가했습니다. 현재 간트 필터의 범위 밖에 있습니다.`);
       } else {
-        setQuery(''); setHideDone(false);
+        if (!allProjects) setProjectQuery('');
+        setHideDone(false);
         if (planningScope && issue[planningFields(planningScope.kind).idField] !== planningScope.id) setLinkedOnly(false);
         notify(`${issue.key} 업무를 간트에 추가했습니다.`);
       }

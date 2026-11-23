@@ -287,7 +287,8 @@ test('360px 전체 프로젝트 간트에서 두 프로젝트의 선택 날짜�
     const second = await fixture.create(`${prefix} 다른 프로젝트`, { startDate: date(3), endDate: date(6), dueDate: date(18) }, secondProject.id);
     const unselected = await fixture.create(`${prefix} 선택하지 않은 업무`, { startDate: date(2), endDate: date(8), dueDate: date(16) }, secondProject.id);
     const original = [first, second, unselected].map(values);
-    const originalHash = `#/${firstProject.id}/gantt?scope=team`;
+    const teamFilters = { scope: 'team', ganttQ: prefix };
+    const teamRoute = `#/${firstProject.id}/gantt`;
     const { chart, search, selected, open, dialog } = await openChart(page, firstProject.id, prefix, true);
     await page.getByLabel('간트 표시 시작일', { exact: true }).fill(date(1));
     await expect(open).toBeDisabled();
@@ -350,7 +351,7 @@ test('360px 전체 프로젝트 간트에서 두 프로젝트의 선택 날짜�
     expect(attempts).toEqual([{ previewId: preview.previewId }, { previewId: preview.previewId }]);
     await expect(dialog).toHaveCount(0);
     await expect(page.getByText('프로젝트 2개에서 업무 2개의 날짜를 변경했습니다.', { exact: true })).toBeVisible();
-    await expect(page).toHaveURL(url => url.hash === originalHash);
+    await expect(page).toHaveURL(url => url.hash === `${teamRoute}?${new URLSearchParams(teamFilters)}`);
     await expect(search).toHaveValue(prefix);
     expect(await fixture.stored()).toEqual(applied);
     for (const issue of [first, second]) {
@@ -367,7 +368,7 @@ test('360px 전체 프로젝트 간트에서 두 프로젝트의 선택 날짜�
       ...[first, second].map(issue => ({ ...values(issue), version: issue.version + 2 })), values(unselected),
     ]);
     await page.getByRole('combobox', { name: '프로젝트 필터', exact: true }).selectOption(secondProject.id);
-    await expect(page).toHaveURL(url => url.hash === `${originalHash}&ganttProject=${secondProject.id}`);
+    await expect(page).toHaveURL(url => url.hash === `${teamRoute}?${new URLSearchParams({ scope: 'team', ganttProject: secondProject.id, ganttQ: prefix })}`);
     await expect(chart.getByLabel(`${first.key} 종료일`, { exact: true })).toHaveCount(0);
     await expect(chart.getByLabel(`${second.key} 종료일`, { exact: true })).toHaveValue(second.endDate!);
     await expect(search).toHaveValue(prefix);

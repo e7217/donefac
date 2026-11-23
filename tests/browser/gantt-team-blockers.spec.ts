@@ -9,6 +9,7 @@ const button = (within: Locator | Page, name: string) => within.getByRole('butto
 const blockerPanel = (page: Page) => page.getByRole('region', { name: title, exact: true });
 const issueButton = (panel: Locator, issue: Issue) => button(panel, `${issue.key} 업무 열기`);
 const gantt = (project: Project) => `#/${project.id}/gantt?scope=team`;
+const ganttSearch = (hash: string, query: string) => `${hash}&${new URLSearchParams({ ganttQ: query })}`;
 const row = (page: Page, issue: Issue) => page.getByRole('region', { name: '간트 차트', exact: true }).locator(`[data-issue-id="${issue.id}"]`);
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
@@ -114,7 +115,7 @@ test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되�
     expect(committed).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
     await expect(panel).toContainText(f.first.name);
     await expect(panel).toContainText(f.second.name);
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
     const saved = (await teamBlockers(request)).filter(item => item.sourceIssueId === source.id && item.targetIssueId === target.id);
     expect(saved.map(item => item.id)).toEqual([committed!.id]);
     expect(await f.schedule()).toEqual(before);
@@ -166,7 +167,7 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
         const [path, query] = url.hash.split('?');
         const params = new URLSearchParams(query);
         return path === `#/${f.second.id}/gantt` && params.get('scope') === 'team' && params.get('ganttProject') === f.second.id &&
-          params.get('focusIssue') === issue.id && params.get('focusDate') === 'startDate';
+          params.get('ganttQ') === f.prefix && params.get('focusIssue') === issue.id && params.get('focusDate') === 'startDate';
       });
       const start = row(page, issue).getByLabel(`${issue.key} 시작일`, { exact: true });
       await expect(start).toBeFocused();
@@ -185,7 +186,7 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
         await expect(start).toHaveValue('');
       }
       await button(page, '업무 위치 해제').click();
-      await expect(page).toHaveURL(url => url.hash === hash);
+      await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
     }
     await expect(row(page, source)).toHaveCount(0);
 
@@ -193,7 +194,7 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
     const details = page.getByRole('dialog', { name: source.title, exact: true });
     const relations = details.getByRole('region', { name: '업무 관계', exact: true });
     await expect(details).toBeVisible();
-    await expect(page).toHaveURL(url => url.hash === `${hash}&issue=${source.id}`);
+    await expect(page).toHaveURL(url => url.hash === `${ganttSearch(hash, f.prefix)}&issue=${source.id}`);
     await expect(relations.getByText('이 업무가 차단함', { exact: true })).toBeVisible();
     await expect(button(relations, `${target.key} 일정 연결 검토`)).toHaveCount(0);
     const relationUrl = `${relationsPath(source)}/${activeRelation.id}`;
@@ -207,7 +208,7 @@ test('360px 팀 간트에서 필터 밖 차단 업무를 열고 관계 변경을
     await expect(relations.getByText('관련 업무', { exact: true })).toBeVisible();
     await button(details, '업무 상세 닫기').click();
     await expect(details).toHaveCount(0);
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
     await expect(panel.getByText('현재 보기에 활성 차단 관계가 없습니다.', { exact: true })).toBeVisible();
     await expect(issueButton(panel, source)).toHaveCount(0);
     await expect(issueButton(panel, target)).toHaveCount(0);
@@ -322,7 +323,7 @@ test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업�
     expect(issued).toEqual([previewPath, applyPath]);
     await expect(dialog).toHaveCount(0);
     await expect(reviewAction).toBeFocused();
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
     await expect(search).toHaveValue(f.prefix);
     const committed = await f.schedule();
     expect(committed).toEqual({ dates: { ...before.dates,
@@ -478,7 +479,7 @@ test('360px에서 선행 날짜를 편집하고 동시 수정 확인 후 모든 
     await button(page, '되돌리기').click();
     await json(await undo);
     expect(await f.schedule()).toEqual(afterEdit);
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
   } finally { await f.close(); }
 });
 
@@ -564,7 +565,7 @@ test('360px 팀 간트에서 날짜 초안을 프로젝트 간 일정 검토에 
     expect((await teamBlockers(request)).find(item => item.id === handoff.id)).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id });
     await expect(sourceEnd).toHaveValue(source.endDate!);
     await expect(search).toHaveValue(f.prefix);
-    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, f.prefix));
 
     const restoredSource = (await workspace(request)).issues.find(issue => issue.id === source.id)!;
     await sourceEnd.fill(nextEnd);

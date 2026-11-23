@@ -921,6 +921,8 @@ export interface TeamBoardFilters {
 export interface TeamGanttScheduleFilters {
   assigneeId?: string | null;
   unscheduledOnly?: boolean;
+  query?: string;
+  gitlab?: IssueViewGitlabFilter;
 }
 export type TeamOverviewCounts = Record<TeamOverviewIssueMetric, number>;
 export interface TeamOverviewProject extends TeamOverviewCounts { projectId: string }

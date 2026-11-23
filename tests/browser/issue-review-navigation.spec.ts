@@ -250,7 +250,7 @@ test('360px에서 보드 열과 전체 프로젝트 간트의 표시 순서 및 
     await expectPosition(drawer(page, second), 3, 2);
     await button(drawer(page, second), '업무 상세 닫기').click();
     await expect(ganttOpener).toBeFocused();
-    await expect.poll(() => hash(page)).toBe(gantt);
+    await expect.poll(() => hash(page)).toBe(`${gantt}&${new URLSearchParams({ ganttQ: f.prefix })}`);
     await expect(search).toHaveValue(f.prefix);
     expect(await elementIds(ganttRows)).toEqual(rendered.map(issue => issue.id));
   } finally { await f.close(); }

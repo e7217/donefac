@@ -298,13 +298,14 @@ test('전체 프로젝트 간트는 연결마다 프로젝트 달력으로 충�
     await expect(finding.getByText(tuesday, { exact: true })).toBeVisible();
     await button(finding, label).click();
 
-    const focusedRoute = `${route(data.first)}?scope=team&focusIssue=${secondSuccessor.id}&focusDate=startDate`;
+    const filterParams = { scope: 'team', ganttQ: secondPredecessor.title };
+    const focusedRoute = `${route(data.first)}?${new URLSearchParams({ ...filterParams, focusIssue: secondSuccessor.id, focusDate: 'startDate' })}`;
     await expect(page).toHaveURL(url => url.hash === focusedRoute);
     const start = row(page, secondSuccessor).getByLabel(`${secondSuccessor.key} 시작일`, { exact: true });
     await expect(start).toBeFocused();
     await expect(start).toHaveValue(monday);
     await button(page, '업무 위치 해제').click();
-    await expect(page).toHaveURL(url => url.hash === `${route(data.first)}?scope=team`);
+    await expect(page).toHaveURL(url => url.hash === `${route(data.first)}?${new URLSearchParams(filterParams)}`);
     await expect(search).toHaveValue(secondPredecessor.title);
     await expect(row(page, secondSuccessor)).toHaveCount(0);
   } finally {

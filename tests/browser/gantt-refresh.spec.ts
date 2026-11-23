@@ -112,7 +112,7 @@ test('전체 프로젝트 간트에서 원격 달력, 연결, 날짜를 갱신�
     await expect(dateField(page, successor, '시작일')).toHaveValue(monday);
 
     const assertView = async () => {
-      await expect(page).toHaveURL(url => url.hash === hash);
+      await expect(page).toHaveURL(url => url.hash === `${hash}&${new URLSearchParams({ ganttQ: f.prefix })}`);
       await expect(page.getByRole('combobox', { name: '프로젝트 필터', exact: true })).toHaveValue(f.second.id);
       await expect(page.getByLabel('간트 표시 시작일', { exact: true })).toHaveValue(windowStart);
       await expect(week).toHaveClass(/\bactive\b/);

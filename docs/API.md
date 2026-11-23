@@ -445,7 +445,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 ## 프로젝트 결정 후속 업무
 
-`GET /api/projects/:id/decision-follow-ups`와 `/api/v1`의 같은 경로는 결정 근거가 연결된 현재 티켓을 프로젝트 기준으로 읽는다. `status`는 `open`(기본값), `closed`, `all` 중 하나다. `assigneeId`에는 팀원 ID 또는 `unassigned`를 쓴다. `q`는 최대 160 UTF-16 코드 단위의 검색어로 현재 업무 키·제목과 현재·고정 문서 제목을 대소문자 없이 비교한다. `offset`은 기본 0이며 정수 0~1,000,000을 받는다.
+`GET /api/projects/:id/decision-follow-ups`와 `/api/v1`의 같은 경로는 결정 근거가 연결된 현재 티켓을 프로젝트 기준으로 읽는다. `status`는 `open`(기본값), `closed`, `all` 중 하나다. `assigneeId`에는 팀원 ID 또는 `unassigned`를 쓴다. `q`는 최대 160 UTF-16 코드 단위의 검색어로 현재 업무 키·제목, Jira 원래 키, 프로젝트 이동 전 업무 키와 현재·고정 문서 제목을 대소문자 없이 비교한다. 이전 키로 검색해도 행의 업무에는 현재 키를 반환한다. `offset`은 기본 0이며 정수 0~1,000,000을 받는다.
 
 `{projectId,generatedAt,revision,total,offset,limit,items}`에 조건을 통과한 연결을 20건씩 반환한다. `generatedAt`은 조회 시각이며 `revision`은 적용한 조건과 현재 페이지의 조회 버전이다. 목표 마감일 또는 계획 종료일이 이른 업무를 먼저 보여준다. 날짜가 없는 업무는 뒤에 두고 같은 날짜에서는 원문 저장 시각 내림차순, 연결 ID 오름차순으로 정렬한다. 각 행에는 `linkId`, 현재 `issue`와 `document`, 고정 `source`의 버전 ID·버전·당시 제목·시각·선택 위치를 제공한다. 휴지통에서 업무나 문서를 복원하면 현재 활성 연결을 다시 조회할 수 있다.
 
