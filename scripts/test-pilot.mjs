@@ -778,6 +778,36 @@ async function runStandardPilot() {
     assert.deepEqual(members.issues.map(item => item.id), [routedIssue.id]);
   };
   await verifyFieldBreakdown(pilot.url);
+  const pastePath = `/projects/${parallelProjectId}/issues/paste`;
+  const pasteText = [
+    ['제목', '임시 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격'],
+    ['파일럿 신규 연결 검토', 'review', '2027-04-06', '2027-04-06', `new:prep,${routedIssue.key}`, 'FS,SS', '0,-1'],
+    ['파일럿 신규 연결 준비', 'prep', '2027-04-05', '2027-04-05', '', '', ''],
+  ].map(row => row.join('\t')).join('\n');
+  const pastePreview = await (await call(pilot.url, `${pastePath}-preview`, { method: 'POST', body: { text: pasteText } })).json();
+  assert.ok(pastePreview.previewId);
+  assert.deepEqual(pastePreview.errors, []);
+  assert.deepEqual(pastePreview.rows[0].predecessors.map(link => [link.predecessor.kind, link.type, link.lagDays]),
+    [['new', 'FS', 0], ['existing', 'SS', -1]]);
+  assert.equal(pastePreview.rows[0].predecessors[0].predecessor.line, 3);
+  assert.ok(pastePreview.rows[0].predecessors[1].warning);
+  const pasteBody = { previewId: pastePreview.previewId };
+  const linkedPaste = await (await call(pilot.url, `${pastePath}-apply`, { method: 'POST', status: 201, body: pasteBody })).json();
+  const [pastedReview, pastedPrep] = linkedPaste.issues;
+  assert.deepEqual(linkedPaste.issues.map(item => item.title), pastePreview.rows.map(item => item.title));
+  assert.equal(Number(pastedPrep.key.split('-').at(-1)), Number(pastedReview.key.split('-').at(-1)) + 1);
+  assert.deepEqual(linkedPaste.dependencies.map(link => [link.predecessorId, link.successorId, link.type, link.lagDays]),
+    [[pastedPrep.id, pastedReview.id, 'FS', 0], [routedIssue.id, pastedReview.id, 'SS', -1]]);
+  const verifyLinkedPaste = async url => {
+    const replay = await (await call(url, `${pastePath}-apply`, { method: 'POST', body: pasteBody })).json();
+    assert.deepEqual(replay, { ...linkedPaste, duplicate: true });
+    const live = await (await call(url, '/workspace')).json();
+    assert.deepEqual(new Set(live.dependencies.filter(link => link.successorId === pastedReview.id).map(link => link.id)),
+      new Set(linkedPaste.dependencies.map(link => link.id)));
+    assert.deepEqual(live.issues.filter(item => item.id === pastedReview.id || item.id === pastedPrep.id).map(item => [item.startDate, item.endDate]),
+      [[pastedReview.startDate, pastedReview.endDate], [pastedPrep.startDate, pastedPrep.endDate]]);
+  };
+  await verifyLinkedPaste(pilot.url);
   const assignmentRuns = await (await call(pilot.url, runsPath)).json();
   assert.equal(assignmentRuns.total, 1);
   assert.equal(assignmentRuns.items[0].issueId, routedIssue.id);
@@ -1021,6 +1051,7 @@ async function runStandardPilot() {
   const restoredRouting = (await (await call(copy.url, '/workspace')).json()).issues.find(item => item.id === routedIssue.id);
   assert.deepEqual(restoredRouting.customFields, routedIssue.customFields);
   await verifyFieldBreakdown(copy.url);
+  await verifyLinkedPaste(copy.url);
   await verifyDecisionDraft(copy.url);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});

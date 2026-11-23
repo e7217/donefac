@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  Issue, IssuePastePreview, IssuePasteResult, ProjectIssueOrder, ProjectWorkflow, WebhookEndpointCreated, WorkspaceSnapshot,
+  Dependency, Issue, IssuePastePreview, IssuePasteResult, ProjectIssueOrder, ProjectWorkflow, WebhookEndpointCreated, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -68,6 +68,10 @@ async function fixture(t: TestContext) {
 }
 
 const basic = '제목\n합성 업무 A\n합성 업무 B';
+const linkedSheet = (rows: string[][]) => [
+  ['제목', '임시 키', '선행 업무', '연결 유형', '근무일 간격', '시작일', '종료일', '담당자'],
+  ...rows,
+].map(row => row.join('\t')).join('\n');
 
 test('issue paste reviews ordinary fields without side effects and applies the same actor-bound batch once', async t => {
   const { request, preview, apply, counts, enableOutbox, restart } = await fixture(t);
@@ -207,4 +211,148 @@ test('issue paste rejects expired previews and clears pre-replacement IDs during
   const { result: workspace } = await request<WorkspaceSnapshot>('/workspace');
   const created = workspace.issues.filter(issue => issue.title.startsWith('합성 업무 '));
   assert.deepEqual(created.map(issue => issue.id), saved.issues.map(issue => issue.id));
+});
+
+test('issue paste resolves forward and existing predecessors and replays the exact created links across restart', async t => {
+  const { request, preview, apply, counts, restart } = await fixture(t);
+  const { result: existing } = await request<Issue>('/issues', 'POST', {
+    projectId, title: '이미 등록한 설계 준비', startDate: '2026-11-20', endDate: '2026-11-20',
+  }, 201);
+  const before = counts();
+  const { result: prior } = await request<WorkspaceSnapshot>('/workspace');
+  const proposal = await preview(linkedSheet([
+    ['통합 배포', 'release', `${existing.key},new:design`, 'FS,SS', '0,-1', '2026-11-23', '2026-11-25', assigneeId],
+    ['통합 설계', 'design', '', '', '', '2026-11-24', '2026-11-26', assigneeId],
+    ['통합 검토', 'review', 'new:release', '', '', '', '2026-11-27', assigneeId],
+  ]));
+  assert.ok(proposal.previewId);
+  assert.deepEqual(proposal.errors, []);
+  assert.deepEqual(proposal.rows.map(row => [row.line, row.temporaryKey]), [[2, 'release'], [3, 'design'], [4, 'review']]);
+  assert.deepEqual(proposal.rows[0].predecessors?.map(({ predecessor, type, lagDays }) => ({ predecessor, type, lagDays })), [
+    { predecessor: { kind: 'existing', issueId: existing.id, key: existing.key, title: existing.title }, type: 'FS', lagDays: 0 },
+    { predecessor: { kind: 'new', line: 3, temporaryKey: 'design', title: '통합 설계' }, type: 'SS', lagDays: -1 },
+  ]);
+  assert.match(proposal.rows[2].predecessors?.[0]?.warning ?? '', /시작일/u);
+  assert.deepEqual(counts(), before);
+  assert.deepEqual((await request<WorkspaceSnapshot>('/workspace')).result.dependencies, prior.dependencies);
+
+  await restart();
+  const responses = await Promise.all([apply(proposal.previewId, [200, 201]), apply(proposal.previewId, [200, 201])]);
+  const created = responses.find(response => response.status === 201)?.result;
+  const duplicate = responses.find(response => response.status === 200)?.result;
+  assert.ok(created && duplicate && created.dependencies);
+  assert.deepEqual(duplicate, { ...created, duplicate: true });
+  const [release, design, review] = created.issues;
+  assert.deepEqual(created.issues.map(issue => [issue.title, issue.key, issue.reporterId, issue.assigneeId]), [
+    ['통합 배포', `NEO-${before[0]}`, actorId, assigneeId],
+    ['통합 설계', `NEO-${before[0] + 1}`, actorId, assigneeId],
+    ['통합 검토', `NEO-${before[0] + 2}`, actorId, assigneeId],
+  ]);
+  const { result: workspace } = await request<WorkspaceSnapshot>('/workspace');
+  const createdLinkIds = new Set(created.dependencies.map(link => link.id));
+  const links = workspace.dependencies.filter(link => createdLinkIds.has(link.id));
+  assert.deepEqual(links, created.dependencies);
+  assert.deepEqual(links.map(({ predecessorId, successorId, type, lagDays, version }) => [predecessorId, successorId, type, lagDays, version]), [
+    [existing.id, release.id, 'FS', 0, 1],
+    [design.id, release.id, 'SS', -1, 1],
+    [release.id, review.id, 'FS', 0, 1],
+  ]);
+  assert.equal(review.startDate, null);
+  const linkActivities = workspace.activities.filter(activity => [release.id, design.id, review.id].includes(activity.resourceId) &&
+    activity.action === '선행 업무 연결');
+  assert.deepEqual(new Set(linkActivities.map(activity => [activity.resourceId, activity.detail].join(':'))),
+    new Set([`${release.id}:${existing.key}`, `${release.id}:${design.key}`, `${review.id}:${release.key}`]));
+  assert.equal(linkActivities.length, 3);
+  assert.ok(linkActivities.every(activity => activity.actorId === actorId));
+
+  const [removed, edited] = links;
+  await request(`/dependencies/${removed.id}?expectedVersion=${removed.version}`, 'DELETE');
+  const { result: updated } = await request<Dependency>(`/dependencies/${edited.id}`, 'PATCH', {
+    expectedVersion: edited.version, type: 'SF', lagDays: 3,
+  });
+  assert.equal(updated.type, 'SF');
+  assert.equal(updated.lagDays, 3);
+  await restart();
+  assert.deepEqual((await apply(proposal.previewId, 200)).result, duplicate);
+  const { result: afterReplay } = await request<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(afterReplay.dependencies.filter(link => createdLinkIds.has(link.id)), [updated, links[2]]);
+});
+
+test('linked issue paste rejects invalid graphs and guards the existing predecessor and calendar at apply', async t => {
+  const { request, preview, apply, counts } = await fixture(t);
+  const { result: existing } = await request<Issue>('/issues', 'POST', {
+    projectId, title: '수정할 실제 선행 업무', startDate: '2026-11-20', endDate: '2026-11-20',
+  }, 201);
+  const { result: foreign } = await request<Issue>('/issues', 'POST', { projectId: 'project-team', title: '다른 프로젝트 선행 업무' }, 201);
+  const before = counts();
+  const invalidSheets = [
+    { name: 'cycle', rows: [['순환 A', 'a', 'new:b', '', '', '', '', ''], ['순환 B', 'b', 'new:a', '', '', '', '', '']] },
+    { name: 'foreign', rows: [['다른 프로젝트를 가리킴', 'a', foreign.key, '', '', '', '', '']] },
+    { name: 'missing local reference', rows: [['없는 행을 가리킴', 'a', 'new:unknown', '', '', '', '', '']] },
+    { name: 'duplicate edge', rows: [['같은 업무를 두 번 가리킴', 'a', `${existing.key},${existing.key}`, '', '', '', '', '']] },
+  ];
+  for (const { name, rows } of invalidSheets) {
+    const rejected = await preview(linkedSheet(rows));
+    assert.equal(rejected.previewId, null, name);
+    assert.ok(rejected.errors.some(error => error.line === 2 || (name === 'cycle' && error.line === 3)), name);
+    if (name === 'cycle') assert.match(rejected.errors.map(error => error.message).join('\n'), /순환/u);
+  }
+  assert.deepEqual(counts(), before);
+
+  const text = linkedSheet([
+    ['검토 이후 변경을 확인할 업무', 'a', existing.key, '', '', '2026-11-24', '2026-11-26', assigneeId],
+  ]);
+  const reviewed = await preview(text);
+  assert.ok(reviewed.previewId);
+  await request(`/issues/${existing.id}`, 'PATCH', { expectedVersion: existing.version, endDate: '2026-11-24' });
+  const afterIssue = counts();
+  assert.equal((await apply<Conflict>(reviewed.previewId, 409)).result.details.reason, 'stale_preview');
+  assert.deepEqual(counts(), afterIssue);
+
+  const reviewAfterIssue = await preview(text);
+  assert.ok(reviewAfterIssue.previewId);
+  const calendarPath = `/projects/${projectId}/calendar`;
+  const { result: calendar } = await request<WorkCalendar>(calendarPath);
+  await request(calendarPath, 'PATCH', { expectedVersion: calendar.version, name: '변경한 작업 달력' });
+  const afterCalendar = counts();
+  assert.equal((await apply<Conflict>(reviewAfterIssue.previewId, 409)).result.details.reason, 'stale_preview');
+  assert.deepEqual(counts(), afterCalendar);
+});
+
+test('a late dependency write failure rolls back created issues, links, sequence and effects before retry', async t => {
+  const { request, preview, apply, database, counts, enableOutbox } = await fixture(t);
+  const { result: existing } = await request<Issue>('/issues', 'POST', { projectId, title: '원자적 저장의 선행 업무' }, 201);
+  await enableOutbox();
+  const before = counts();
+  const { result: prior } = await request<WorkspaceSnapshot>('/workspace');
+  const reviewed = await preview(linkedSheet([
+    ['의존성 검증 첫째', 'a', `${existing.key},new:b`, 'FS,FF', '0,-1', '', '', assigneeId],
+    ['의존성 검증 둘째', 'b', '', '', '', '', '', assigneeId],
+  ]));
+  assert.ok(reviewed.previewId);
+  const receipt = () => database.prepare('SELECT json, expires_at FROM issue_paste_requests WHERE id=?').get(reviewed.previewId);
+  const priorReceipt = receipt();
+  database.exec(`CREATE TRIGGER fail_last_issue_paste_dependency BEFORE INSERT ON dependencies
+    WHEN (SELECT COUNT(*) FROM dependencies) > ${prior.dependencies.length} BEGIN
+      SELECT RAISE(ABORT,'synthetic final dependency failure');
+    END`);
+  try {
+    await apply(reviewed.previewId, 500);
+    assert.deepEqual(counts(), before);
+    const { result: afterFailure } = await request<WorkspaceSnapshot>('/workspace');
+    assert.deepEqual(afterFailure.dependencies, prior.dependencies);
+    assert.deepEqual(afterFailure.issues, prior.issues);
+    assert.deepEqual(receipt(), priorReceipt);
+  } finally {
+    database.exec('DROP TRIGGER fail_last_issue_paste_dependency');
+  }
+
+  const { result: created } = await apply(reviewed.previewId);
+  assert.deepEqual(created.issues.map(issue => issue.key), [`NEO-${before[0]}`, `NEO-${before[0] + 1}`]);
+  assert.equal(created.dependencies?.length, 2);
+  const committed = counts();
+  assert.deepEqual((await apply(reviewed.previewId, 200)).result, { ...created, duplicate: true });
+  assert.deepEqual(counts(), committed);
+  const { result: after } = await request<WorkspaceSnapshot>('/workspace');
+  assert.equal(after.dependencies.length, prior.dependencies.length + 2);
 });

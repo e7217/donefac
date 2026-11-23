@@ -14,6 +14,16 @@ function dateAt(offset: number) {
   return date.toISOString().slice(0, 10);
 }
 
+async function purgeIssues(request: APIRequestContext, issues: Issue[]) {
+  for (const issue of issues) {
+    const deleted = await request.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`);
+    if (deleted.ok()) {
+      const { trashEntryId } = await deleted.json() as { trashEntryId?: string };
+      if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+    }
+  }
+}
+
 test('360px 프로젝트 목록에서 붙여넣기 응답과 목록 조회가 실패해도 일정이 있는 업무를 한 번만 만든다', async ({ page, request }) => {
   test.setTimeout(75_000);
   await page.setViewportSize({ width: 360, height: 820 });
@@ -161,12 +171,103 @@ test('360px 프로젝트 목록에서 붙여넣기 응답과 목록 조회가 �
       await expect(chart.getByLabel(`${issue.key} 종료일`, { exact: true })).toHaveValue(issue.endDate!);
     }
   } finally {
-    for (const issue of await storedIssues()) {
-      const deleted = await request.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`);
-      if (deleted.ok()) {
-        const { trashEntryId } = await deleted.json() as { trashEntryId?: string };
-        if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
-      }
+    await purgeIssues(request, await storedIssues());
+  }
+});
+
+test('360px에서 업무와 기존·신규 선행 연결을 함께 검토하고 저장 응답 유실 후 간트에서 확인한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project] } = await workspace(request);
+  const prefix = `연결 붙여넣기 검사 ${randomUUID().slice(0, 8)}`;
+  const release = { title: `${prefix} 배포`, startDate: dateAt(9), endDate: dateAt(11) };
+  const design = { title: `${prefix} 설계`, startDate: dateAt(3), endDate: dateAt(5) };
+  const storedIssues = async () => (await workspace(request)).issues.filter(issue => issue.title.startsWith(prefix));
+
+  try {
+    const existingResponse = await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${prefix} 준비`, startDate: dateAt(1), endDate: dateAt(2),
+    } });
+    expect(existingResponse.status(), await existingResponse.text()).toBe(201);
+    const existing = await existingResponse.json() as Issue;
+    const pastePath = `/api/projects/${project.id}/issues`;
+    const sheet = [
+      ['제목', '임시 키', '선행 업무', '연결 유형', '근무일 간격', '시작일', '종료일'],
+      [release.title, 'release', `${existing.key},new:design`, 'FS,FF', '0,-1', release.startDate, release.endDate],
+      [design.title, 'design', '', '', '', design.startDate, design.endDate],
+    ].map(row => row.join('\t')).join('\n');
+
+    await page.goto(`/#/${project.id}/issues`, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: '업무 붙여넣기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '업무 붙여넣기', exact: true });
+    const input = dialog.getByRole('textbox', { name: '붙여넣을 업무', exact: true });
+    await input.fill(sheet);
+    const waitingForPreview = page.waitForResponse(response => new URL(response.url()).pathname === `${pastePath}/paste-preview`
+      && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '미리보기', exact: true }).click();
+    const reviewed = await waitingForPreview;
+    expect(reviewed.status(), await reviewed.text()).toBe(200);
+    const { previewId, errors } = await reviewed.json() as IssuePastePreview;
+    expect(previewId).toBeTruthy();
+    expect(errors).toEqual([]);
+    const review = dialog.getByRole('region', { name: '새 업무 미리보기', exact: true });
+    const list = review.getByRole('list', { name: '2행 선행 업무 연결', exact: true });
+    await expect(list).toContainText(existing.key);
+    await expect(list).toContainText(existing.title);
+    await expect(list).toContainText('new:design');
+    await expect(list).toContainText(design.title);
+    await expect(list).toContainText('FF');
+    await expect(list).toContainText('-1근무일');
+    expect(await storedIssues()).toEqual([existing]);
+
+    const applyPath = `${pastePath}/paste-apply`;
+    const attempts: string[] = [];
+    let committed: IssuePasteResult | undefined;
+    await page.route(`**${applyPath}`, async route => {
+      const { previewId: postedPreviewId } = route.request().postDataJSON() as { previewId: string };
+      attempts.push(postedPreviewId);
+      if (attempts.length !== 1) return route.continue();
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(201);
+      committed = await response.json() as IssuePasteResult;
+      await route.abort('failed');
+    });
+
+    await dialog.getByRole('button', { name: '업무 2개와 선후행 연결 2개 만들기', exact: true }).click();
+    const retry = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeEnabled();
+    expect(committed?.issues).toMatchObject([release, design]);
+    const persisted = committed;
+    expect(persisted?.dependencies).toHaveLength(2);
+    const waitingForReplay = page.waitForResponse(response => new URL(response.url()).pathname === applyPath
+      && response.request().method() === 'POST');
+    await retry.click();
+    const replay = await waitingForReplay;
+    expect(replay.status(), await replay.text()).toBe(200);
+    expect(await replay.json()).toEqual({ ...persisted, duplicate: true });
+    await expect(dialog).toHaveCount(0);
+    expect(attempts).toEqual([previewId, previewId]);
+
+    const [released, designed] = persisted!.issues;
+    const after = await workspace(request);
+    const links = after.dependencies.filter(link => link.successorId === released.id);
+    expect(links).toEqual(persisted!.dependencies);
+    expect(links.map(({ predecessorId, type, lagDays }) => [predecessorId, type, lagDays])).toEqual([
+      [existing.id, 'FS', 0], [designed.id, 'FF', -1],
+    ]);
+    expect(after.issues.filter(issue => issue.title.startsWith(prefix))).toHaveLength(3);
+
+    await page.goto(`/#/${project.id}/gantt`, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(prefix);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(chart.getByLabel(`${released.key} 시작일`, { exact: true })).toHaveValue(release.startDate);
+    await expect(chart.getByLabel(`${designed.key} 종료일`, { exact: true })).toHaveValue(design.endDate);
+    for (const link of links) {
+      const edge = chart.locator(`[data-dependency-id="${link.id}"]`);
+      await expect(edge).toBeVisible();
+      await expect(edge).toHaveAttribute('data-dependency-type', link.type);
     }
+  } finally {
+    await purgeIssues(request, await storedIssues());
   }
 });

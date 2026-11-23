@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ISSUE_PASTE_MAX_BYTES, ISSUE_PASTE_MAX_ROWS, parseIssuePaste } from '../../server/issue-paste-parser.js';
+import { ISSUE_PASTE_MAX_BYTES, ISSUE_PASTE_MAX_LINKS, ISSUE_PASTE_MAX_ROWS, normalizeIssuePasteKey, parseIssuePaste } from '../../server/issue-paste-parser.js';
 
 test('issue paste reads Korean Excel TSV, retaining quoted multiline descriptions and physical lines', () => {
   const header = ['제목', '설명', '유형', '상태', '우선순위', '담당자', '시작일', '종료일', '목표 마감일', '라벨'];
@@ -136,4 +136,113 @@ test('issue paste limits UTF-8 bytes and nonblank records separately', () => {
   assert.deepEqual(exceeded.rows, []);
   assert.equal(exceeded.errors[0].line, 202);
   assert.match(exceeded.errors[0].message, /100행/);
+});
+
+test('issue paste parses forward references and multiple predecessor rules while retaining each created row', () => {
+  const result = parseIssuePaste([
+    '제목\t임시 키\t선행 업무\t연결 유형\t근무일 간격',
+    '출시\tRelease\tnew:설계, team-21,NEW:REVIEW\tff,,ss\t+1,,-2',
+    '설계\t설계\t\t\t',
+    '검토\tReview\tTEAM-22, new:설계\tsf\t3650',
+  ].join('\n'));
+  assert.deepEqual(result, {
+    rows: [
+      { line: 2, title: '출시', localKey: 'Release', dependencies: [
+        { predecessor: { kind: 'new', localKey: '설계' }, type: 'FF', lagDays: 1 },
+        { predecessor: { kind: 'existing', key: 'team-21' }, type: 'FS', lagDays: 0 },
+        { predecessor: { kind: 'new', localKey: 'REVIEW' }, type: 'SS', lagDays: -2 },
+      ] },
+      { line: 3, title: '설계', localKey: '설계' },
+      { line: 4, title: '검토', localKey: 'Review', dependencies: [
+        { predecessor: { kind: 'existing', key: 'TEAM-22' }, type: 'SF', lagDays: 3650 },
+        { predecessor: { kind: 'new', localKey: '설계' }, type: 'SF', lagDays: 3650 },
+      ] },
+    ],
+    errors: [],
+  });
+});
+
+test('issue paste accepts quoted CSV predecessor lists and NFC-equivalent batch names', () => {
+  const result = parseIssuePaste([
+    'title,temp_key,predecessors,dependency types,lag days',
+    '후행,,"new:CAFE\u0301, TEAM-9",,"-3650, -0"',
+    '선행,Café,,,',
+  ].join('\n'));
+  assert.deepEqual(result, {
+    rows: [
+      { line: 2, title: '후행', dependencies: [
+        { predecessor: { kind: 'new', localKey: 'CAFÉ' }, type: 'FS', lagDays: -3650 },
+        { predecessor: { kind: 'existing', key: 'TEAM-9' }, type: 'FS', lagDays: 0 },
+      ] },
+      { line: 3, title: '선행', localKey: 'Café' },
+    ],
+    errors: [],
+  });
+  assert.equal(normalizeIssuePasteKey('Cafe\u0301'), normalizeIssuePasteKey('CAFÉ'));
+});
+
+test('issue paste rejects malformed and duplicate declarations and link cell values at physical lines', () => {
+  const result = parseIssuePaste([
+    '제목\t임시 키\t선행 업무\t연결 유형\t근무일 간격',
+    '첫 선언\tPlan\t\t\t',
+    '\t\t\t\t',
+    '이름 충돌\tplan\t\t\t',
+    '잘못된 임시 키\tnew:계획\t\t\t',
+    '선행 누락\t\t\tFS\t',
+    '빈 선행\t\tTEAM-1,\t\t',
+    '중복 선행\t\tnew:plan, NEW:PLAN\t\t',
+    '개수 불일치\t\tTEAM-1,TEAM-2,TEAM-3\tFS,SS\t0,1',
+    '연결 해제 불가\t\tTEAM-1\t-\t',
+    '간격 범위\t\tTEAM-1\tFS\t3651',
+    '잘못된 새 선행\t\tnew:_plan\t\t',
+    '기존 연결 중복\t\tTEAM-1, team-1\t\t',
+  ].join('\n'));
+  assert.deepEqual(result.rows, [{ line: 2, title: '첫 선언', localKey: 'Plan' }]);
+  assert.deepEqual(result.errors.map(error => error.line), [4, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13]);
+  assert.match(result.errors[0].message, /2번째 줄과 중복/);
+  assert.match(result.errors[1].message, /임시 키/);
+  assert.match(result.errors[2].message, /선행 업무를 지정/);
+  assert.match(result.errors[3].message, /2번째/);
+  assert.match(result.errors[4].message, /중복/);
+  assert.match(result.errors[5].message, /연결 유형.*개수/);
+  assert.match(result.errors[6].message, /근무일 간격.*개수/);
+  assert.match(result.errors[7].message, /FS, SS, FF, SF/);
+  assert.match(result.errors[8].message, /-3650~3650/);
+  assert.match(result.errors[9].message, /new:.*임시 키/);
+  assert.match(result.errors[10].message, /중복/);
+});
+
+test('issue paste identifies missing, self and cyclic local references using the relevant physical lines', () => {
+  const result = parseIssuePaste([
+    '제목\t임시 키\t선행 업무',
+    '일부 없는 업무\t\tnew:누락,TEAM-77,new:d',
+    '본인\tSelf\tnew:self',
+    '작업 A\tA\tnew:b',
+    '작업 B\tB\tnew:c',
+    '작업 C\tC\tnew:a',
+    '별개 업무\tD\tnew:a',
+    '없는 업무\t\tnew:다른누락',
+  ].join('\n'));
+  assert.deepEqual(result.errors.map(error => error.line), [2, 3, 6, 8]);
+  assert.match(result.errors[0].message, /누락.*찾을 수 없/);
+  assert.match(result.errors[1].message, /자기 자신/);
+  assert.match(result.errors[2].message, /순환 관계/);
+  assert.match(result.errors[3].message, /다른누락.*찾을 수 없/);
+  assert.deepEqual(result.rows[0].dependencies, [
+    { predecessor: { kind: 'existing', key: 'TEAM-77' }, type: 'FS', lagDays: 0 },
+    { predecessor: { kind: 'new', localKey: 'd' }, type: 'FS', lagDays: 0 },
+  ]);
+  assert.deepEqual(result.rows.at(-1), { line: 8, title: '없는 업무' });
+});
+
+test('issue paste bounds the combined number of declared predecessor links', () => {
+  const keys = Array.from({ length: ISSUE_PASTE_MAX_LINKS }, (_, index) => `TEAM-${index + 1}`).join(',');
+  const boundary = `제목\t선행 업무\n일정\t${keys}`;
+  const valid = parseIssuePaste(boundary);
+  assert.deepEqual(valid.errors, []);
+  assert.equal(valid.rows[0].dependencies?.length, ISSUE_PASTE_MAX_LINKS);
+  const exceeded = parseIssuePaste(`${boundary}\n다른 일정\tTEAM-1`);
+  assert.deepEqual(exceeded.rows, []);
+  assert.equal(exceeded.errors[0].line, 3);
+  assert.match(exceeded.errors[0].message, /1,000개/);
 });

@@ -73,6 +73,7 @@
 
 .issue-paste-review h3 { margin: 0 0 10px; font-size: .875rem; }
 .issue-paste-review ul { margin: 4px 0 0; padding-inline-start: 18px; }
+.issue-paste-link-count { margin: -4px 0 8px; color: #436956; font-size: .8125rem; }
 .issue-paste-rows { display: grid; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
 .issue-paste-rows > li { min-width: 0; padding: 10px 12px; border: 1px solid #e2ebe4; border-radius: 8px; }
 .issue-paste-rows h4 { margin: 0 0 8px; font-size: .875rem; }
@@ -80,6 +81,20 @@
 .issue-paste-rows dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 12px; margin: 0; font-size: .8125rem; }
 .issue-paste-rows dt { color: #567065; font-size: .75rem; }
 .issue-paste-rows dd { margin: 0; }
+.issue-paste-review .issue-paste-predecessors {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid #e2ebe4;
+  list-style: none;
+  font-size: .8125rem;
+}
+.issue-paste-predecessors li { overflow-wrap: anywhere; }
+.issue-paste-predecessors p { margin: 0; }
+.issue-paste-predecessors p + p { margin-top: 2px; }
+.issue-paste-predecessors small { margin-inline-start: 6px; color: #567065; }
+.issue-paste-warning { color: #73451b; }
 .issue-paste-rows details { margin-top: 8px; }
 .issue-paste-rows details p { margin: 4px 0 0; white-space: pre-wrap; font-size: .8125rem; }
 

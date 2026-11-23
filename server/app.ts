@@ -1505,6 +1505,7 @@ export function createApp(options: {
   const issuePaste = new IssuePasteService(store, {
     schema: projectId => issueSchemas.get(projectId),
     workflow: projectId => workflows.get(projectId),
+    calendar: projectId => calendars.get(projectId),
     prepare: prepareIssueCreation,
     validationMessage(error) {
       return error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
@@ -1517,7 +1518,8 @@ export function createApp(options: {
   });
   app.post('/api/projects/:projectId/issues/paste-apply', (req, res) => {
     const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
-    const result = issuePaste.apply(scope, req.body.previewId, issue => commitIssueCreation(scope.actorId, issue));
+    const result = issuePaste.apply(scope, req.body.previewId, issue => commitIssueCreation(scope.actorId, issue),
+      (dependency, batch) => saveNewDependency(req, dependency, batch));
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.post('/api/issues',(req,res)=>{

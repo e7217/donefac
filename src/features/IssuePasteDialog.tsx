@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { PRIORITY, type FeatureProps, type IssuePastePreview, type IssuePasteResult, type Project } from '../../shared/types';
+import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
+import {
+  PRIORITY, type FeatureProps, type IssuePasteDependencyPreview, type IssuePastePreview, type IssuePasteResult, type Project,
+} from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import './issue-paste.css';
@@ -11,10 +14,42 @@ type Pending = 'preview' | 'apply';
 type Recovery = { kind: 'request' } | { kind: 'refresh'; receipt: IssuePasteResult } | { kind: 'unavailable' };
 
 const example = [
-  ['제목', '설명', '시작일', '종료일', '목표 마감일', '라벨'],
-  ['요구사항 검토', '팀 피드백 정리', '2027-01-12', '2027-01-15', '2027-01-19', '검토,문서'],
-  ['검토 결과 공유', '', '', '', '2027-01-20', '문서'],
+  ['임시 키', '제목', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격'],
+  ['review', '요구사항 검토', '2027-01-12', '2027-01-15', '', '', ''],
+  ['', '검토 결과 공유', '2027-01-18', '2027-01-19', 'new:review', 'FS', '0'],
 ].map(cells => cells.join('\t')).join('\n');
+
+function issueAndLinkCounts(issues: number, links: number) {
+  return links ? `업무 ${issues}개와 선후행 연결 ${links}개` : `업무 ${issues}개`;
+}
+
+function matchesReviewedLinks(review: IssuePastePreview, result: IssuePasteResult, expectedCount: number): boolean {
+  if (!expectedCount) return result.dependencies === undefined || (Array.isArray(result.dependencies) && !result.dependencies.length);
+  if (!Array.isArray(result.dependencies) || result.dependencies.length !== expectedCount) return false;
+  const issuesByLine = new Map(review.rows.map((row, index) => [row.line, result.issues[index].id]));
+  const edge = (predecessorId: string | undefined, successorId: string | undefined, type: string, lagDays: number) =>
+    JSON.stringify([predecessorId, successorId, type, lagDays]);
+  const expected = new Set(review.rows.flatMap(row => (row.predecessors ?? []).map(({ predecessor, type, lagDays }) => {
+    const predecessorId = predecessor.kind === 'existing' ? predecessor.issueId : issuesByLine.get(predecessor.line);
+    return edge(predecessorId, issuesByLine.get(row.line), type, lagDays);
+  })));
+  const seenIds = new Set<string>();
+  return expected.size === expectedCount && result.dependencies.every(dependency => {
+    if (!dependency || typeof dependency.id !== 'string' || !dependency.id || seenIds.has(dependency.id)) return false;
+    seenIds.add(dependency.id);
+    return expected.delete(edge(dependency.predecessorId, dependency.successorId, dependency.type, dependency.lagDays));
+  });
+}
+
+function PredecessorPreview({ line, predecessors }: { line: number; predecessors: IssuePasteDependencyPreview[] }) {
+  return <ul className="issue-paste-predecessors" aria-label={`${line}행 선행 업무 연결`}>
+    {predecessors.map(({ predecessor, type, lagDays, warning }) => <li key={predecessor.kind === 'new' ? `new:${predecessor.line}` : predecessor.issueId}>
+      <p><strong>{predecessor.title}</strong><small>{predecessor.kind === 'new' ? `new:${predecessor.temporaryKey} · ${predecessor.line}행` : predecessor.key}</small></p>
+      <p>{type} · {DEPENDENCY_LABELS[type]} · {lagDays > 0 ? '+' : ''}{lagDays}근무일</p>
+      {warning && <p className="issue-paste-warning"><strong>일정 경고</strong> · {warning}</p>}
+    </li>)}
+  </ul>;
+}
 
 function allowDiscard(text: string, recovery: Recovery | null, prompt: string) {
   if (recovery?.kind === 'request') return window.confirm(`업무가 이미 생성됐을 수 있습니다. 목록에서 결과를 확인할 수 있습니다. ${prompt}`);
@@ -38,6 +73,7 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
   const [error, setError] = useState('');
   const locked = Boolean(pending || recovery);
   const canApply = Boolean(review?.previewId && review.rows.length && !review.errors.length);
+  const linkCount = review?.rows.reduce((count, row) => count + (row.predecessors?.length ?? 0), 0) ?? 0;
   const route = `/projects/${encodeURIComponent(project.id)}/issues`;
 
   useEffect(() => {
@@ -147,7 +183,8 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
         try {
           const result = await send<IssuePasteResult>('paste-apply', { previewId }, signal);
           if (typeof result?.duplicate !== 'boolean' || !Array.isArray(result.issues) || result.issues.length !== review.rows.length
-            || !result.issues.every(issue => issue?.projectId === project.id && typeof issue.key === 'string')) {
+            || !result.issues.every(issue => issue?.projectId === project.id && typeof issue.id === 'string' && typeof issue.key === 'string')
+            || !matchesReviewedLinks(review, result, linkCount)) {
             throw new Error('업무 생성 응답을 해석하지 못했습니다.');
           }
           receipt = result;
@@ -184,13 +221,13 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
       } catch {
         if (!signal.aborted) {
           setRecovery({ kind: 'refresh', receipt });
-          setError(`업무 ${receipt.issues.length}개를 만들었습니다. 최신 목록을 불러오지 못했습니다. 결과를 다시 확인해 주세요.`);
+          setError(`${issueAndLinkCounts(receipt.issues.length, receipt.dependencies?.length ?? 0)}를 만들었습니다. 최신 목록을 불러오지 못했습니다. 결과를 다시 확인해 주세요.`);
         }
         return;
       }
       if (signal.aborted) return;
       onClose();
-      notify(`업무 ${receipt.issues.length}개를 만들었습니다.`);
+      notify(`${issueAndLinkCounts(receipt.issues.length, receipt.dependencies?.length ?? 0)}를 만들었습니다.`);
     });
   }
 
@@ -198,7 +235,7 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
     onCancel={event => { event.preventDefault(); close(); }}>
     <header>
       <h2 id={titleId}>업무 붙여넣기</h2>
-      <p><strong>{project.key} · {project.name}</strong>에 표의 행마다 새 업무를 만듭니다. 기존 업무 일정은 간트에서 붙여넣을 수 있습니다.</p>
+      <p><strong>{project.key} · {project.name}</strong>에 표의 행마다 새 업무를 만들고 선행 업무를 연결할 수 있습니다.</p>
     </header>
     <div className="issue-paste-content">
       <form className="issue-paste-form" onSubmit={preview}>
@@ -210,7 +247,9 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
           <details>
             <summary>TSV 예시</summary>
             <pre tabIndex={0} aria-label="업무 붙여넣기 예시">{example}</pre>
-            <p>유형, 상태, 우선순위, 담당자 열도 추가할 수 있습니다. 담당자는 이름이나 이메일로 지정하고, 여러 라벨은 쉼표로 구분하세요.</p>
+            <p>같은 표에서 만들 업무는 <code>new:review</code>처럼 임시 키 앞에 <code>new:</code>를 붙이세요. 이미 저장된 업무는 현재 프로젝트의 업무 키로 연결하고, 선행 업무가 여럿이면 쉼표로 구분하세요.</p>
+            <p>연결 유형은 FS, SS, FF, SF를 씁니다. 유형과 근무일 간격은 모두에 적용할 값 하나를 적거나, 선행 업무 순서대로 쉼표로 구분하세요. 비워두면 FS와 0근무일을 사용합니다.</p>
+            <p>설명, 유형, 상태, 우선순위, 담당자, 목표 마감일, 라벨 열도 추가할 수 있습니다. 담당자는 이름이나 이메일을 입력하고 라벨은 쉼표로 구분하세요. CSV에서 쉼표가 들어간 셀은 큰따옴표로 감싸세요.</p>
             <button type="button" className="btn btn-ghost" disabled={locked || Boolean(text)} onClick={() => { changeInput(example); input.current?.focus(); }}>예시 넣기</button>
           </details>
           <button type="submit" className="btn" disabled={locked || !text.trim()}>미리보기</button>
@@ -220,6 +259,7 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
       {error && <p role="alert" className="issue-form-error issue-paste-message" ref={errorNotice} tabIndex={-1}>{error}</p>}
       {review && <section className="issue-paste-review" aria-label="새 업무 미리보기">
         <h3 ref={reviewHeading} tabIndex={-1}>미리보기 · 업무 {review.rows.length}개</h3>
+        {linkCount > 0 && <p className="issue-paste-link-count">선후행 연결 {linkCount}개</p>}
         {!!review.errors.length && <div className="issue-form-error" role="alert">
           <strong>업무를 만들려면 입력 오류 {review.errors.length}건을 수정하세요.</strong>
           <ul>{review.errors.map(({ line, message }, index) => <li key={index}>{line !== null && `${line}행 · `}{message}</li>)}</ul>
@@ -235,7 +275,9 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
             <div><dt>종료일</dt><dd>{row.endDate ?? '미정'}</dd></div>
             <div><dt>목표 마감일</dt><dd>{row.dueDate ?? '미정'}</dd></div>
             {!!row.labels.length && <div><dt>라벨</dt><dd>{row.labels.join(', ')}</dd></div>}
+            {row.temporaryKey && <div><dt>임시 키</dt><dd>{row.temporaryKey}</dd></div>}
           </dl>
+          {row.predecessors?.length ? <PredecessorPreview line={row.line} predecessors={row.predecessors} /> : null}
           {row.description && <details><summary>설명</summary><p>{row.description}</p></details>}
         </li>)}</ol>}
       </section>}
@@ -244,8 +286,8 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
       <button type="button" className="btn btn-ghost" disabled={Boolean(pending)} onClick={close}>닫기</button>
       {recovery && recovery.kind !== 'unavailable' ? <button type="button" className="btn btn-primary" ref={retryButton}
         disabled={Boolean(pending)} onClick={apply}>적용 결과 다시 확인</button>
-        : !recovery && Boolean(review?.rows.length) && <button type="button" className="btn btn-primary"
-          disabled={Boolean(pending) || !canApply} onClick={apply}>업무 {review?.rows.length}개 만들기</button>}
+        : !recovery && review?.rows.length ? <button type="button" className="btn btn-primary"
+          disabled={Boolean(pending) || !canApply} onClick={apply}>{issueAndLinkCounts(review.rows.length, linkCount)} 만들기</button> : null}
     </footer>
   </dialog>;
 }
